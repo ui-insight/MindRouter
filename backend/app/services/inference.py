@@ -1040,25 +1040,7 @@ class InferenceService:
         # Convert OpenAI format to Ollama format when backend is not Ollama
         if backend.engine != BackendEngine.OLLAMA:
             thinking_enabled = request.think if request.think is not None else True
-            raw_msg = data.get("choices", [{}])[0].get("message", {}) if data.get("choices") else {}
-            logger.info(
-                "ollama_proxy_debug",
-                backend_engine=str(backend.engine),
-                thinking_enabled=thinking_enabled,
-                request_think=request.think,
-                raw_msg_keys=str(list(raw_msg.keys())),
-                raw_msg=str(raw_msg)[:500],
-                raw_content=str(raw_msg.get("content"))[:100],
-                raw_reasoning=str(raw_msg.get("reasoning_content"))[:100],
-            )
             data = self._openai_response_to_ollama(data, thinking_enabled=thinking_enabled)
-            logger.info(
-                "ollama_proxy_result",
-                result_content=str(data.get("message", {}).get("content"))[:100],
-                result_thinking=str(data.get("message", {}).get("thinking"))[:100] if data.get("message", {}).get("thinking") else "none",
-            )
-        else:
-            logger.info("ollama_proxy_debug", backend_engine="OLLAMA", note="direct_ollama_backend")
 
         return data
 
@@ -1072,7 +1054,7 @@ class InferenceService:
         if choices:
             msg = choices[0].get("message", {})
             content = msg.get("content") or ""
-            reasoning = msg.get("reasoning_content")
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning")
 
             # vLLM/Qwen3.5 bug: when thinking is disabled the model may
             # put all output into reasoning_content with content empty.
@@ -1181,7 +1163,7 @@ class InferenceService:
         finish = choices[0].get("finish_reason")
 
         content = delta.get("content", "")
-        reasoning = delta.get("reasoning_content")
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
 
         # vLLM/Qwen3.5 bug: when thinking is disabled the model may
         # put all output into reasoning_content with content empty.
