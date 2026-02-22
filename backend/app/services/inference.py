@@ -1040,13 +1040,16 @@ class InferenceService:
         # Convert OpenAI format to Ollama format when backend is not Ollama
         if backend.engine != BackendEngine.OLLAMA:
             thinking_enabled = request.think if request.think is not None else True
+            raw_msg = data.get("choices", [{}])[0].get("message", {}) if data.get("choices") else {}
             logger.info(
                 "ollama_proxy_debug",
                 backend_engine=str(backend.engine),
                 thinking_enabled=thinking_enabled,
                 request_think=request.think,
-                raw_content=str(data.get("choices", [{}])[0].get("message", {}).get("content"))[:100] if data.get("choices") else "no_choices",
-                raw_reasoning=str(data.get("choices", [{}])[0].get("message", {}).get("reasoning_content"))[:100] if data.get("choices") else "no_choices",
+                raw_msg_keys=str(list(raw_msg.keys())),
+                raw_msg=str(raw_msg)[:500],
+                raw_content=str(raw_msg.get("content"))[:100],
+                raw_reasoning=str(raw_msg.get("reasoning_content"))[:100],
             )
             data = self._openai_response_to_ollama(data, thinking_enabled=thinking_enabled)
             logger.info(
