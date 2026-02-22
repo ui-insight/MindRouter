@@ -106,7 +106,10 @@ class AnthropicInTranslator:
             if fmt and fmt.get("type") == "json_schema":
                 response_format = ResponseFormat(
                     type=ResponseFormatType.JSON_SCHEMA,
-                    json_schema=fmt.get("json_schema"),
+                    json_schema={
+                        "name": fmt.get("name", "response"),
+                        "schema": fmt.get("schema"),
+                    },
                 )
 
         # Handle thinking mode

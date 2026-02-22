@@ -242,7 +242,8 @@ class TestAnthropicInTranslator:
             "output_config": {
                 "format": {
                     "type": "json_schema",
-                    "json_schema": schema,
+                    "name": "person",
+                    "schema": schema,
                 },
             },
             "messages": [{"role": "user", "content": "Give me JSON"}],
@@ -252,7 +253,10 @@ class TestAnthropicInTranslator:
 
         assert result.response_format is not None
         assert result.response_format.type == ResponseFormatType.JSON_SCHEMA
-        assert result.response_format.json_schema == schema
+        assert result.response_format.json_schema == {
+            "name": "person",
+            "schema": schema,
+        }
 
     def test_multi_turn_conversation(self):
         """Test multi-turn conversation with user and assistant messages."""

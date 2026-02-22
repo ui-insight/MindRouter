@@ -14,6 +14,7 @@
 | `run e2e tests`       | `make test-e2e`    | E2E chat subsystem tests                             |
 | `run smoke tests`     | `make test-smoke`  | API smoke test against live deployment               |
 | `run stress tests`    | `make test-stress` | Multi-user load/stress test                          |
+| `run matrix tests`  | `make test-matrix` | Structured output matrix tests (all API styles)    |
 | `run accessibility tests` | `make test-a11y` | WCAG 2.1 accessibility tests (subset of unit)      |
 | `run sidecar tests`   | `make test-sidecar`| GPU sidecar agent tests                              |
 | `run all tests`       | `make test-all`    | Unit + integration + E2E + smoke + sidecar tests     |
@@ -64,6 +65,7 @@
 |------|----------------|
 | `backend/app/tests/integration/test_live_backends.py` | Full translation pipeline against real Ollama (phi4:14b) and vLLM (gpt-oss-120b) backends — streaming and non-streaming chat |
 | `backend/app/tests/integration/test_rag_pipeline.py` | RAG pipeline: embedding, reranking, scoring endpoints through MindRouter2 proxy, end-to-end RAG test |
+| `backend/app/tests/integration/test_structured_output_matrix.py` | Structured output matrix: all combos of API style (OpenAI/Ollama/Anthropic) × format (text/json_object/json_schema) × thinking mode × streaming across model categories |
 
 ---
 
