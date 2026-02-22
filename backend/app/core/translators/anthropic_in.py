@@ -166,9 +166,17 @@ class AnthropicInTranslator:
             choice = choices[0]
             message = choice.get("message", {})
             content_text = message.get("content") or ""
+            reasoning_text = message.get("reasoning_content") or ""
             finish_reason = AnthropicInTranslator._map_finish_reason(
                 choice.get("finish_reason", "stop")
             )
+
+            # Add thinking block if there's reasoning content
+            if reasoning_text:
+                content_blocks.append({
+                    "type": "thinking",
+                    "thinking": reasoning_text,
+                })
 
             # Add text block if there's text content
             if content_text:

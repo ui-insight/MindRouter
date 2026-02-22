@@ -270,8 +270,12 @@ def _collect_openai_stream(response: httpx.Response) -> str:
 
 
 def _collect_ollama_stream(response: httpx.Response) -> str:
-    """Collect content from Ollama NDJSON stream."""
+    """Collect content from Ollama NDJSON stream.
+
+    Falls back to thinking field when content is empty.
+    """
     content_parts = []
+    thinking_parts = []
     for line in response.iter_lines():
         if not line:
             continue
@@ -280,16 +284,26 @@ def _collect_ollama_stream(response: httpx.Response) -> str:
             msg = chunk.get("message", {})
             if msg.get("content"):
                 content_parts.append(msg["content"])
+            if msg.get("thinking"):
+                thinking_parts.append(msg["thinking"])
             if chunk.get("done"):
                 break
         except json.JSONDecodeError:
             continue
-    return "".join(content_parts)
+    content = "".join(content_parts)
+    if not content:
+        content = "".join(thinking_parts)
+    return content
 
 
 def _collect_anthropic_stream(response: httpx.Response) -> str:
-    """Collect content from Anthropic event stream."""
+    """Collect content from Anthropic event stream.
+
+    Falls back to thinking_delta content when text_delta is empty
+    (thinking models with constrained output).
+    """
     content_parts = []
+    thinking_parts = []
     for line in response.iter_lines():
         if not line:
             continue
@@ -302,11 +316,16 @@ def _collect_anthropic_stream(response: httpx.Response) -> str:
                     delta = data.get("delta", {})
                     if delta.get("text"):
                         content_parts.append(delta["text"])
+                    if delta.get("thinking"):
+                        thinking_parts.append(delta["thinking"])
                 elif event_type == "message_stop":
                     break
             except json.JSONDecodeError:
                 continue
-    return "".join(content_parts)
+    content = "".join(content_parts)
+    if not content:
+        content = "".join(thinking_parts)
+    return content
 
 
 STREAM_COLLECTORS = {
@@ -337,16 +356,31 @@ def _extract_openai_content(data: dict) -> str:
 
 
 def _extract_ollama_content(data: dict) -> str:
-    """Extract content from Ollama response JSON."""
-    return data.get("message", {}).get("content", "") or ""
+    """Extract content from Ollama response JSON.
+
+    Falls back to thinking field when content is empty.
+    """
+    msg = data.get("message", {})
+    content = msg.get("content", "") or ""
+    if not content:
+        content = msg.get("thinking", "") or ""
+    return content
 
 
 def _extract_anthropic_content(data: dict) -> str:
-    """Extract content from Anthropic response JSON."""
+    """Extract content from Anthropic response JSON.
+
+    Falls back to thinking block content when text is empty
+    (thinking models with constrained output).
+    """
+    text = ""
+    thinking = ""
     for block in data.get("content", []):
-        if block.get("type") == "text":
-            return block.get("text", "")
-    return ""
+        if block.get("type") == "text" and block.get("text"):
+            text = block["text"]
+        elif block.get("type") == "thinking" and block.get("thinking"):
+            thinking = block["thinking"]
+    return text or thinking
 
 
 CONTENT_EXTRACTORS = {

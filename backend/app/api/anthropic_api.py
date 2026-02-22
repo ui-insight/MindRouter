@@ -154,6 +154,7 @@ async def _stream_anthropic_events(
 
     output_tokens = 0
     content_block_index = 0
+    thinking_block_started = False
     text_block_started = False
     finished = False
     # Track active tool blocks: tool_call_index → content_block_index
@@ -195,12 +196,38 @@ async def _stream_anthropic_events(
             choice = choices[0]
             delta = choice.get("delta", {})
             content = delta.get("content")
+            reasoning_content = delta.get("reasoning_content")
             tool_calls = delta.get("tool_calls")
             finish_reason = choice.get("finish_reason")
+
+            # Handle reasoning/thinking content
+            if reasoning_content:
+                if not thinking_block_started:
+                    yield fmt("content_block_start", {
+                        "type": "content_block_start",
+                        "index": content_block_index,
+                        "content_block": {"type": "thinking", "thinking": ""},
+                    })
+                    thinking_block_started = True
+
+                yield fmt("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": content_block_index,
+                    "delta": {"type": "thinking_delta", "thinking": reasoning_content},
+                })
 
             # Handle text content
             if content:
                 if not text_block_started:
+                    # Close thinking block if it was open
+                    if thinking_block_started:
+                        yield fmt("content_block_stop", {
+                            "type": "content_block_stop",
+                            "index": content_block_index,
+                        })
+                        content_block_index += 1
+                        thinking_block_started = False
+
                     yield fmt("content_block_start", {
                         "type": "content_block_start",
                         "index": content_block_index,

@@ -1054,6 +1054,10 @@ class InferenceService:
                 "role": msg.get("role", "assistant"),
                 "content": msg.get("content") or "",
             }
+            # Pass through thinking/reasoning content
+            reasoning = msg.get("reasoning_content")
+            if reasoning:
+                message["thinking"] = reasoning
             finish_reason = choices[0].get("finish_reason", "stop")
 
             # Pass through tool_calls, converting arguments string → dict
@@ -1147,6 +1151,11 @@ class InferenceService:
             "role": delta.get("role", "assistant"),
             "content": delta.get("content", ""),
         }
+
+        # Pass through thinking/reasoning content
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            message["thinking"] = reasoning
 
         # Pass through tool_calls, converting arguments string → dict
         if "tool_calls" in delta and delta["tool_calls"]:
