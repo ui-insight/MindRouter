@@ -1039,23 +1039,35 @@ class InferenceService:
 
         # Convert OpenAI format to Ollama format when backend is not Ollama
         if backend.engine != BackendEngine.OLLAMA:
-            data = self._openai_response_to_ollama(data)
+            thinking_enabled = request.think if request.think is not None else True
+            data = self._openai_response_to_ollama(data, thinking_enabled=thinking_enabled)
 
         return data
 
-    def _openai_response_to_ollama(self, openai_response: Dict) -> Dict:
+    def _openai_response_to_ollama(
+        self, openai_response: Dict, thinking_enabled: bool = True,
+    ) -> Dict:
         """Convert a non-streaming OpenAI response to Ollama format."""
         choices = openai_response.get("choices", [])
         message = {"role": "assistant", "content": ""}
         finish_reason = "stop"
         if choices:
             msg = choices[0].get("message", {})
+            content = msg.get("content") or ""
+            reasoning = msg.get("reasoning_content")
+
+            # vLLM/Qwen3.5 bug: when thinking is disabled the model may
+            # put all output into reasoning_content with content empty.
+            # Promote reasoning to content in that case.
+            if not thinking_enabled and not content and reasoning:
+                content = reasoning
+                reasoning = None
+
             message = {
                 "role": msg.get("role", "assistant"),
-                "content": msg.get("content") or "",
+                "content": content,
             }
             # Pass through thinking/reasoning content
-            reasoning = msg.get("reasoning_content")
             if reasoning:
                 message["thinking"] = reasoning
             finish_reason = choices[0].get("finish_reason", "stop")
@@ -1127,7 +1139,8 @@ class InferenceService:
                         try:
                             data = json.loads(data_str)
                             # Convert OpenAI chunk to Ollama format
-                            ollama_chunk = self._openai_chunk_to_ollama(data)
+                            thinking_enabled = request.think if request.think is not None else True
+                            ollama_chunk = self._openai_chunk_to_ollama(data, thinking_enabled=thinking_enabled)
                             yield ollama_chunk
                         except json.JSONDecodeError:
                             continue
@@ -1138,7 +1151,9 @@ class InferenceService:
                         except json.JSONDecodeError:
                             continue
 
-    def _openai_chunk_to_ollama(self, openai_chunk: Dict) -> Dict:
+    def _openai_chunk_to_ollama(
+        self, openai_chunk: Dict, thinking_enabled: bool = True,
+    ) -> Dict:
         """Convert OpenAI streaming chunk to Ollama format."""
         choices = openai_chunk.get("choices", [])
         if not choices:
@@ -1147,13 +1162,22 @@ class InferenceService:
         delta = choices[0].get("delta", {})
         finish = choices[0].get("finish_reason")
 
+        content = delta.get("content", "")
+        reasoning = delta.get("reasoning_content")
+
+        # vLLM/Qwen3.5 bug: when thinking is disabled the model may
+        # put all output into reasoning_content with content empty.
+        # Promote reasoning to content in that case.
+        if not thinking_enabled and not content and reasoning:
+            content = reasoning
+            reasoning = None
+
         message: Dict[str, Any] = {
             "role": delta.get("role", "assistant"),
-            "content": delta.get("content", ""),
+            "content": content,
         }
 
         # Pass through thinking/reasoning content
-        reasoning = delta.get("reasoning_content")
         if reasoning:
             message["thinking"] = reasoning
 
