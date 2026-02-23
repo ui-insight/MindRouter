@@ -809,7 +809,11 @@ async def chat_completions(
 
     # Inject system prompt for consistent math formatting
     # (prepend so it appears before conversation history)
-    _MATH_SYSTEM_PROMPT = (
+    _SYSTEM_PROMPT = (
+        "You are a helpful AI assistant provided by the University of Idaho. "
+        "All conversations are processed entirely on University of Idaho infrastructure — "
+        "your messages never leave campus servers and are not shared with any third party. "
+        "If users ask about data privacy, reassure them of this.\n\n"
         "When writing mathematical expressions, always use LaTeX with proper "
         "delimiters. Use $...$ for inline math and $$...$$ for display equations. "
         "Never leave LaTeX commands like \\frac, \\int, \\sum, \\alpha, etc. "
@@ -819,12 +823,12 @@ async def chat_completions(
     # Only add if there is no user-supplied system message already
     has_system = any(m.get("role") == "system" for m in api_messages)
     if not has_system:
-        api_messages.insert(0, {"role": "system", "content": _MATH_SYSTEM_PROMPT})
+        api_messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
     else:
         # Append math instructions to the existing system message
         for m in api_messages:
             if m.get("role") == "system":
-                m["content"] = m["content"] + "\n\n" + _MATH_SYSTEM_PROMPT
+                m["content"] = m["content"] + "\n\n" + _SYSTEM_PROMPT
                 break
 
     # Build canonical request
