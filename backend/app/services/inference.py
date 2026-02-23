@@ -81,6 +81,11 @@ class InferenceService:
                     write=10.0,
                     pool=10.0,
                 ),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=40,
+                    keepalive_expiry=30,
+                ),
             )
         return self._http_client
 
