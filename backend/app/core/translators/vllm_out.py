@@ -579,7 +579,11 @@ class VLLMOutTranslator:
         if canonical.response_format.type == ResponseFormatType.JSON_SCHEMA:
             result: Dict[str, Any] = {"type": "json_schema"}
             if canonical.response_format.json_schema:
-                result["json_schema"] = canonical.response_format.json_schema
+                js = dict(canonical.response_format.json_schema)
+                # vLLM/OpenAI requires a "name" field in json_schema
+                if "name" not in js:
+                    js["name"] = "response"
+                result["json_schema"] = js
             return result
 
         return {"type": "text"}
