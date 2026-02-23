@@ -162,13 +162,19 @@ class CircuitBreakerState:
         """Circuit is open (rejecting requests) if open_until is in the future."""
         if self.circuit_open_until is None:
             return False
-        return datetime.now(timezone.utc) < self.circuit_open_until
+        open_until = self.circuit_open_until
+        if open_until.tzinfo is None:
+            open_until = open_until.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) < open_until
 
     @property
     def is_half_open(self) -> bool:
         """Circuit is half-open (allowing a probe) if open_until has passed."""
         if self.circuit_open_until is None:
             return False
-        return datetime.now(timezone.utc) >= self.circuit_open_until
+        open_until = self.circuit_open_until
+        if open_until.tzinfo is None:
+            open_until = open_until.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= open_until
 
 
