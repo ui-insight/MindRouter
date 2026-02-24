@@ -79,6 +79,35 @@
                 </div>
             </div>
 
+            {% set unhealthy_backends = [] %}
+            {% for b in backends if b.status.value not in ['healthy', 'disabled'] %}
+                {% if unhealthy_backends.append(b) %}{% endif %}
+            {% endfor %}
+            {% set offline_nodes = [] %}
+            {% for n in nodes if n.status.value != 'online' %}
+                {% if offline_nodes.append(n) %}{% endif %}
+            {% endfor %}
+            {% if unhealthy_backends or offline_nodes %}
+            <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-3 fs-4"></i>
+                <div>
+                    <strong>Health Issues Detected</strong>
+                    {% if unhealthy_backends %}
+                    <div class="mt-1">
+                        <a href="/admin/backends" class="alert-link">{{ unhealthy_backends|length }} backend{{ 's' if unhealthy_backends|length > 1 }} unhealthy</a>:
+                        {{ unhealthy_backends|map(attribute='name')|join(', ') }}
+                    </div>
+                    {% endif %}
+                    {% if offline_nodes %}
+                    <div class="mt-1">
+                        <a href="/admin/nodes" class="alert-link">{{ offline_nodes|length }} node{{ 's' if offline_nodes|length > 1 }} offline</a>:
+                        {{ offline_nodes|map(attribute='name')|join(', ') }}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
             <div class="row">
                 <div class="col-md-8">
                     <div class="card mb-4">

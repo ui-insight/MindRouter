@@ -491,6 +491,9 @@ async def admin_dashboard(
     registry = get_registry()
     backends = await registry.get_all_backends()
 
+    # Get nodes
+    nodes = await crud.get_all_nodes(db)
+
     # Get pending requests
     pending_requests = await crud.get_pending_quota_requests(db)
 
@@ -504,6 +507,7 @@ async def admin_dashboard(
             "request": request,
             "user": user,
             "backends": backends,
+            "nodes": nodes,
             "pending_requests": pending_requests,
             "scheduler_stats": scheduler_stats,
             "is_force_offline": registry.is_force_offline,
