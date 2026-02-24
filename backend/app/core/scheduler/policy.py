@@ -303,6 +303,22 @@ class SchedulerPolicy:
         """Wait until backend capacity becomes available."""
         return await self.router.wait_for_capacity(timeout)
 
+    def register_waiter(self, job: Job) -> None:
+        """Register a job as waiting for capacity."""
+        self.router.register_waiter(job)
+
+    def unregister_waiter(self, job: Job) -> None:
+        """Remove a job from the waiter set."""
+        self.router.unregister_waiter(job)
+
+    def is_highest_priority_waiter(self, job: Job) -> bool:
+        """Check if job has the highest priority among waiters for its model."""
+        return self.router.is_highest_priority_waiter(job)
+
+    async def recompute_priority(self, job: Job, role: str = "", weight: float = 1.0) -> None:
+        """Recompute and update a job's priority using current fair-share state."""
+        job.priority = await self.router.fair_share.compute_priority(job, role=role, weight=weight)
+
     async def cancel_job(self, request_id: str) -> bool:
         """Cancel a queued job."""
         return await self.router.cancel_job(request_id)

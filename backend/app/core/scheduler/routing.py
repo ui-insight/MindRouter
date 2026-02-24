@@ -15,6 +15,7 @@
 """Backend routing - ties together queue, fair-share, and scoring."""
 
 import asyncio
+from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
 from backend.app.core.scheduler.queue import Job, RequestQueue
@@ -69,6 +70,9 @@ class BackendRouter:
 
         # Condition notified when a job completes/fails, so waiters can retry routing
         self._capacity_condition = asyncio.Condition()
+
+        # Track jobs waiting for capacity, keyed by model
+        self._waiting_jobs: Dict[str, Dict[str, Job]] = defaultdict(dict)
 
         # Background task handle
         self._cleanup_task: Optional[asyncio.Task] = None
@@ -317,6 +321,30 @@ class BackendRouter:
             return True
         except asyncio.TimeoutError:
             return False
+
+    def register_waiter(self, job: Job) -> None:
+        """Register a job as waiting for capacity on its model."""
+        self._waiting_jobs[job.model][job.request_id] = job
+
+    def unregister_waiter(self, job: Job) -> None:
+        """Remove a job from the waiter set."""
+        waiters = self._waiting_jobs.get(job.model)
+        if waiters:
+            waiters.pop(job.request_id, None)
+            if not waiters:
+                del self._waiting_jobs[job.model]
+
+    def is_highest_priority_waiter(self, job: Job) -> bool:
+        """Return True if job has the highest priority among waiters for its model.
+
+        Higher numeric priority = higher priority.  Ties return True so
+        equal-priority jobs proceed on a first-come-first-served basis.
+        """
+        waiters = self._waiting_jobs.get(job.model)
+        if not waiters:
+            return True
+        max_priority = max(w.priority for w in waiters.values())
+        return job.priority >= max_priority
 
     async def cancel_job(self, request_id: str) -> bool:
         """Cancel a queued job."""

@@ -547,15 +547,16 @@ class InferenceService:
         gpu_utilizations = await self._registry.get_gpu_utilizations()
         latency_emas = await self._latency_tracker.get_all_latencies()
 
+        # Compute user weight (needed for submit and priority recomputation)
+        user_weight = 1.0
+        if hasattr(user, 'group') and user.group:
+            user_weight = float(user.group.scheduler_weight)
+        sched_quota = await crud.get_user_quota(self.db, user.id)
+        if sched_quota and sched_quota.weight_override:
+            user_weight = float(sched_quota.weight_override)
+
         # Submit to scheduler (only on first attempt — not on retries)
         if not exclude_backend_ids:
-            # Get weight from group (with quota weight_override taking precedence)
-            user_weight = 1.0
-            if hasattr(user, 'group') and user.group:
-                user_weight = float(user.group.scheduler_weight)
-            sched_quota = await crud.get_user_quota(self.db, user.id)
-            if sched_quota and sched_quota.weight_override:
-                user_weight = float(sched_quota.weight_override)
             await self._scheduler.submit_job(job, user_role=user.role.value, user_weight=user_weight)
 
         # Retry loop: wait for capacity instead of immediately 503-ing
@@ -563,6 +564,7 @@ class InferenceService:
         route_timeout = max_wait if max_wait is not None else self._settings.backend_request_timeout / 2
         deadline = time.monotonic() + route_timeout
         last_reason = ""
+        waiter_registered = False
 
         while True:
             try:
@@ -572,10 +574,14 @@ class InferenceService:
                     latency_emas=latency_emas,
                 )
             except Exception:
+                if waiter_registered:
+                    self._scheduler.unregister_waiter(job)
                 await self._scheduler.cancel_job(job.request_id)
                 raise
 
             if decision.success:
+                if waiter_registered:
+                    self._scheduler.unregister_waiter(job)
                 return decision.backend, backend_models.get(decision.backend.id, [])
 
             last_reason = decision.reason
@@ -591,15 +597,23 @@ class InferenceService:
                 capacity_issue = "No backends available" in last_reason
 
             if not capacity_issue:
+                if waiter_registered:
+                    self._scheduler.unregister_waiter(job)
                 await self._scheduler.cancel_job(job.request_id)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail=f"No suitable backend: {last_reason}",
                 )
 
+            # Register as waiter on first capacity failure
+            if not waiter_registered:
+                self._scheduler.register_waiter(job)
+                waiter_registered = True
+
             # Check deadline
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                self._scheduler.unregister_waiter(job)
                 await self._scheduler.cancel_job(job.request_id)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -610,6 +624,17 @@ class InferenceService:
             wait_time = min(5.0, remaining)
             await self._scheduler.wait_for_capacity(wait_time)
 
+            # Recompute priority with current fair-share state
+            await self._scheduler.recompute_priority(
+                job, role=user.role.value, weight=user_weight,
+            )
+
+            # Priority gate: only the highest-priority waiter for this model
+            # proceeds to route_job(); lower-priority waiters yield briefly.
+            if not self._scheduler.is_highest_priority_waiter(job):
+                await asyncio.sleep(0.1)
+                continue
+
             # Refresh backend state for next attempt
             backends = await self._registry.get_backends_with_model(
                 job.model, modality
@@ -617,6 +642,7 @@ class InferenceService:
             if not backends:
                 backends = await self._registry.get_healthy_backends()
             if not backends:
+                self._scheduler.unregister_waiter(job)
                 await self._scheduler.cancel_job(job.request_id)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
