@@ -18,6 +18,7 @@
                 {% elif success == 'updated' %}Backend updated successfully.
                 {% elif success == 'disabled' %}Backend disabled.
                 {% elif success == 'enabled' %}Backend enabled.
+                {% elif success == 'draining' %}Backend is now draining. It will auto-disable when in-flight requests finish.
                 {% elif success == 'refreshed' %}Backend capabilities refreshed.
                 {% elif success == 'removed' %}Backend removed successfully.
                 {% else %}Operation completed successfully.{% endif %}
@@ -107,7 +108,7 @@
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <span>
                         <strong>{{ item.backend.name }}</strong>
-                        <span class="badge {% if item.backend.status.value == 'healthy' %}bg-success{% elif item.backend.status.value == 'unhealthy' %}bg-danger{% elif item.backend.status.value == 'disabled' %}bg-warning text-dark{% else %}bg-secondary{% endif %} ms-2">
+                        <span class="badge {% if item.backend.status.value == 'healthy' %}bg-success{% elif item.backend.status.value == 'unhealthy' %}bg-danger{% elif item.backend.status.value == 'disabled' %}bg-warning text-dark{% elif item.backend.status.value == 'draining' %}bg-info text-dark{% else %}bg-secondary{% endif %} ms-2">
                             {{ item.backend.status.value }}
                         </span>
                         <span class="badge bg-info ms-1">{{ item.backend.engine.value }}</span>
@@ -124,13 +125,27 @@
                                 <i class="bi bi-arrow-clockwise"></i> Refresh
                             </button>
                         </form>
-                        {% if item.backend.status.value == 'disabled' %}
+                        {% if item.backend.status.value == 'draining' %}
+                        <button class="btn btn-sm btn-info" disabled title="Backend is draining">
+                            <i class="bi bi-hourglass-split"></i> Draining...
+                        </button>
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/disable" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-warning" title="Force disable (skip drain)">
+                                <i class="bi bi-pause-circle"></i> Force Disable
+                            </button>
+                        </form>
+                        {% elif item.backend.status.value == 'disabled' %}
                         <form method="POST" action="/admin/backends/{{ item.backend.id }}/enable" class="d-inline">
                             <button type="submit" class="btn btn-sm btn-outline-success" title="Enable backend">
                                 <i class="bi bi-play-circle"></i> Enable
                             </button>
                         </form>
                         {% else %}
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/drain" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-info" title="Drain backend (graceful offline)">
+                                <i class="bi bi-hourglass-split"></i> Drain
+                            </button>
+                        </form>
                         <form method="POST" action="/admin/backends/{{ item.backend.id }}/disable" class="d-inline">
                             <button type="submit" class="btn btn-sm btn-outline-warning" title="Disable backend">
                                 <i class="bi bi-pause-circle"></i> Disable

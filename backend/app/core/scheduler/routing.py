@@ -269,6 +269,13 @@ class BackendRouter:
                 self._backend_queue_depths[backend_id] = max(
                     0, self._backend_queue_depths[backend_id] - 1
                 )
+                depth = self._backend_queue_depths[backend_id]
+            else:
+                depth = 0
+
+        # Auto-complete drain when queue depth hits 0
+        if depth == 0:
+            await self._try_complete_drain(backend_id)
 
         # Wake any requests waiting for capacity
         async with self._capacity_condition:
@@ -296,6 +303,13 @@ class BackendRouter:
                 self._backend_queue_depths[backend_id] = max(
                     0, self._backend_queue_depths[backend_id] - 1
                 )
+                depth = self._backend_queue_depths[backend_id]
+            else:
+                depth = 0
+
+        # Auto-complete drain when queue depth hits 0
+        if depth == 0:
+            await self._try_complete_drain(backend_id)
 
         # Wake any requests waiting for capacity
         async with self._capacity_condition:
@@ -306,6 +320,15 @@ class BackendRouter:
             request_id=job.request_id,
             backend_id=backend_id,
         )
+
+    async def _try_complete_drain(self, backend_id: int) -> None:
+        """If the backend is draining and its queue is empty, transition to DISABLED."""
+        try:
+            from backend.app.core.telemetry.registry import get_registry
+            registry = get_registry()
+            await registry.complete_drain(backend_id)
+        except Exception as e:
+            logger.debug("drain_complete_check_error", backend_id=backend_id, error=str(e))
 
     async def wait_for_capacity(self, timeout: float = 5.0) -> bool:
         """

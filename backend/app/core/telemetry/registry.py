@@ -321,6 +321,32 @@ class BackendRegistry:
             )
             return backend is not None
 
+    async def drain_backend(self, backend_id: int) -> bool:
+        """Start draining a backend — stops new requests while in-flight finish."""
+        async with get_async_db_context() as db:
+            backend = await crud.update_backend_status(
+                db=db,
+                backend_id=backend_id,
+                status=BackendStatus.DRAINING,
+            )
+        if backend:
+            logger.info("backend_drain_started", backend_id=backend_id)
+        return backend is not None
+
+    async def complete_drain(self, backend_id: int) -> bool:
+        """Auto-transition a draining backend to DISABLED when queue depth hits 0."""
+        async with get_async_db_context() as db:
+            backend = await crud.get_backend_by_id(db, backend_id)
+            if not backend or backend.status != BackendStatus.DRAINING:
+                return False
+            await crud.update_backend_status(
+                db=db,
+                backend_id=backend_id,
+                status=BackendStatus.DISABLED,
+            )
+        logger.info("backend_drain_complete", backend_id=backend_id)
+        return True
+
     async def remove_backend(self, backend_id: int) -> bool:
         """Remove a backend entirely (unregister)."""
         async with self._lock:
@@ -865,11 +891,17 @@ class BackendRegistry:
             # Update database
             async with get_async_db_context() as db:
                 if health.is_healthy:
-                    await crud.update_backend_status(
-                        db=db,
-                        backend_id=backend_id,
-                        status=BackendStatus.HEALTHY,
-                    )
+                    # Don't overwrite admin-set statuses (DISABLED, DRAINING)
+                    current = await crud.get_backend_by_id(db, backend_id)
+                    if current and current.status not in (
+                        BackendStatus.DISABLED,
+                        BackendStatus.DRAINING,
+                    ):
+                        await crud.update_backend_status(
+                            db=db,
+                            backend_id=backend_id,
+                            status=BackendStatus.HEALTHY,
+                        )
 
                     # If circuit was open/half-open, close it on successful health check
                     cb = self._circuit_breakers.get(backend_id)
@@ -937,10 +969,15 @@ class BackendRegistry:
                     backend.supports_structured_output = caps.supports_structured_output
                     backend.version = caps.engine_version
 
-                    if caps.is_healthy:
-                        backend.status = BackendStatus.HEALTHY
-                    else:
-                        backend.status = BackendStatus.UNHEALTHY
+                    # Don't overwrite admin-set statuses (DISABLED, DRAINING)
+                    if backend.status not in (
+                        BackendStatus.DISABLED,
+                        BackendStatus.DRAINING,
+                    ):
+                        if caps.is_healthy:
+                            backend.status = BackendStatus.HEALTHY
+                        else:
+                            backend.status = BackendStatus.UNHEALTHY
 
                     await db.flush()
 

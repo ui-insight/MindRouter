@@ -1388,6 +1388,26 @@ async def disable_backend(
     return RedirectResponse(url="/admin/backends?success=disabled", status_code=302)
 
 
+@dashboard_router.post("/admin/backends/{backend_id}/drain")
+async def drain_backend(
+    request: Request,
+    backend_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Start draining a backend (stop new requests, let in-flight finish)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    registry = get_registry()
+    await registry.drain_backend(backend_id)
+    return RedirectResponse(url="/admin/backends?success=draining", status_code=302)
+
+
 @dashboard_router.post("/admin/backends/{backend_id}/enable")
 async def enable_backend(
     request: Request,

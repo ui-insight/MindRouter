@@ -69,6 +69,7 @@ class BackendStatus(str, PyEnum):
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
     DISABLED = "disabled"
+    DRAINING = "draining"
     UNKNOWN = "unknown"
 
 
