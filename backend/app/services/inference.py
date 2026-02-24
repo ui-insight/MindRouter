@@ -937,7 +937,15 @@ class InferenceService:
                 thinking_enabled=thinking_enabled,
             )
 
-        return canonical.model_dump(exclude_none=True, by_alias=True)
+        result = canonical.model_dump(exclude_none=True, by_alias=True)
+
+        # OpenAI spec requires "content" in message even when null
+        for choice in result.get("choices", []):
+            msg = choice.get("message")
+            if msg is not None and "content" not in msg:
+                msg["content"] = None
+
+        return result
 
     async def _proxy_stream_request(
         self,

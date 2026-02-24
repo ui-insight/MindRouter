@@ -210,7 +210,7 @@ class TestMobileMediaQuery:
 
     def test_model_select_narrower(self, media_block):
         assert "max-width" in media_block
-        assert "180px" in media_block
+        assert "140px" in media_block
 
     def test_sidebar_header_compact(self, media_block):
         assert ".sidebar-header" in media_block
