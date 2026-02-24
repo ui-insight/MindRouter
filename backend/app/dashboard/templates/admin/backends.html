@@ -282,7 +282,7 @@
                             {% if item.telemetry %}
                             <dl class="row small">
                                 <dt class="col-6">GPU Util:</dt>
-                                <dd class="col-6">{{ '%.1f'|format(item.telemetry.gpu_utilization) if item.telemetry.gpu_utilization else 'N/A' }}%</dd>
+                                <dd class="col-6">{{ '%.1f'|format(item.telemetry.gpu_utilization) if item.telemetry.gpu_utilization is not none else 'N/A' }}%</dd>
                                 <dt class="col-6">Active:</dt>
                                 <dd class="col-6">{{ item.telemetry.active_requests }}</dd>
                                 <dt class="col-6">Loaded Models:</dt>
