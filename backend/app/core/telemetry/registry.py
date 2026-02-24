@@ -835,7 +835,20 @@ class BackendRegistry:
 
     async def _poll_loop(self) -> None:
         """Background polling loop with adaptive intervals for troubled backends."""
-        last_full_poll = 0.0
+        # Fast startup polls — run 2 immediate full polls so backends/nodes
+        # are marked healthy within seconds of a restart instead of waiting
+        # for the normal 30-second cycle.
+        for i in range(2):
+            try:
+                logger.info("startup_fast_poll", attempt=i + 1, total=2)
+                await self._poll_all_backends()
+            except Exception as e:
+                logger.warning("startup_fast_poll_error", attempt=i + 1, error=str(e))
+            if i == 0:
+                await asyncio.sleep(5)
+
+        import time as _time
+        last_full_poll = _time.monotonic()
         while True:
             try:
                 now = datetime.now(timezone.utc)
