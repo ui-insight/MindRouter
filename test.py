@@ -204,8 +204,10 @@ def test_openai(client: httpx.Client, cfg: argparse.Namespace):
         })
         body = r.json()
         if r.status_code == 200 and "choices" in body and "usage" in body:
-            content = body["choices"][0]["message"]["content"][:60]
-            record("pass", name, f"response={content!r}")
+            content = body["choices"][0]["message"].get("content") or ""
+            reasoning = body["choices"][0]["message"].get("reasoning_content") or ""
+            display = content[:60] if content else f"[reasoning] {reasoning[:50]}"
+            record("pass", name, f"response={display!r}")
         else:
             record("fail", name, f"status={r.status_code} body={r.text[:200]}")
     except Exception as e:
