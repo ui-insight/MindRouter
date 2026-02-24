@@ -19,6 +19,8 @@ Interactive API docs are also available at `/docs` (Swagger UI) and `/redoc` (Re
 - **Node/Backend Architecture**: Separate physical GPU nodes from inference endpoints — one sidecar poll per node, GPU-to-backend assignment
 - **GPU Sidecar Agent**: Lightweight per-node agent for real-time GPU metrics (utilization, memory, temperature, power)
 - **Real-Time Telemetry**: GPU/memory/utilization monitoring per node and per backend
+- **Drain Mode**: Gracefully take backends offline — stop new requests while in-flight requests finish, then auto-disable
+- **Health Alerts**: Admin dashboard shows a prominent warning banner when any backend is unhealthy or any node is offline
 - **Full Audit Logging**: All prompts, responses, and artifacts stored for review
 - **Dual Dashboards**: Public status + authenticated user/admin interfaces
 
@@ -261,6 +263,21 @@ curl -X POST http://localhost:8000/api/admin/backends/register \
 
 Backends without a `node_id` still work as standalone endpoints (no GPU telemetry).
 
+### Concurrency Alignment
+
+The `max_concurrent` value registered in MindRouter **must match** the concurrency limit configured on the inference engine itself:
+
+| Engine | Engine Setting | MindRouter Setting |
+|--------|---------------|-------------------|
+| vLLM | `--max-num-seqs N` | `"max_concurrent": N` |
+| Ollama | `OLLAMA_NUM_PARALLEL=N` | `"max_concurrent": N` |
+
+**Why this matters**: MindRouter uses `max_concurrent` to decide how many requests to route to a backend. If MindRouter thinks a backend can handle 8 concurrent requests but vLLM is configured with `--max-num-seqs 4`, the extra requests queue silently inside vLLM. MindRouter can't see this hidden queue, so it keeps routing requests there instead of spreading load to other backends. The result is uneven load distribution and unpredictable latency — the fair-share scheduler is effectively bypassed for those excess requests.
+
+### Context Length (num_ctx)
+
+When a model has a `context_length` configured (discovered automatically or set via `context_length_override` in the admin UI), MindRouter automatically injects `num_ctx` into Ollama backend requests. This ensures Ollama allocates the correct KV cache size for the model rather than falling back to its default (typically 2048 tokens).
+
 ## Development
 
 ### Local Setup
@@ -352,6 +369,7 @@ make docker-down  # Stop docker compose stack
 | POST | `/api/admin/backends/register` | Register new backend |
 | POST | `/admin/backends/{id}/disable` | Disable backend |
 | POST | `/admin/backends/{id}/enable` | Enable backend |
+| POST | `/admin/backends/{id}/drain` | Drain backend (graceful offline) |
 | POST | `/admin/backends/{id}/refresh` | Refresh capabilities |
 | GET | `/api/admin/telemetry/overview` | Cluster telemetry overview |
 | GET | `/api/admin/telemetry/nodes/{id}/history` | Node GPU history |
@@ -462,9 +480,9 @@ Then build and run:
 
 ```bash
 # Build a specific release tag
-docker build -t mindrouter-sidecar:v0.11.0 \
+docker build -t mindrouter-sidecar:v0.18.0 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.11.0:sidecar
+  https://github.com/sheneman/mindrouter2.git#v0.18.0:sidecar
 
 # Or build latest from master
 docker build -t mindrouter-sidecar:latest \
@@ -477,22 +495,22 @@ docker run -d --name gpu-sidecar \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.11.0
+  mindrouter-sidecar:v0.18.0
 ```
 
 To upgrade an existing sidecar to a new version:
 
 ```bash
-docker build -t mindrouter-sidecar:v0.11.0 \
+docker build -t mindrouter-sidecar:v0.18.0 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.11.0:sidecar
+  https://github.com/sheneman/mindrouter2.git#v0.18.0:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.11.0
+  mindrouter-sidecar:v0.18.0
 ```
 
 Then configure nginx to proxy external port 8007 to the container:

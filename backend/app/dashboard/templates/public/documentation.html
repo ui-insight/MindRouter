@@ -702,8 +702,8 @@ message = client.messages.create(
                         <tr><th>Page</th><th>URL</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>Overview</td><td><code>/admin</code></td><td>System metrics overview with pending request badges</td></tr>
-                        <tr><td>Backends</td><td><code>/admin/backends</code></td><td>Backend health, models, enable/disable controls</td></tr>
+                        <tr><td>Overview</td><td><code>/admin</code></td><td>System metrics overview, health alert banner for unhealthy backends/offline nodes, pending request badges</td></tr>
+                        <tr><td>Backends</td><td><code>/admin/backends</code></td><td>Backend health, models, enable/disable/drain controls</td></tr>
                         <tr><td>Nodes</td><td><code>/admin/nodes</code></td><td>GPU node management, sidecar status, hardware specs</td></tr>
                         <tr><td>GPU Metrics</td><td><code>/admin/metrics</code></td><td>Real-time GPU utilization, memory, temperature, power charts with time range controls</td></tr>
                         <tr><td>Users</td><td><code>/admin/users</code></td><td>User accounts with search, group filter, and pagination</td></tr>
@@ -866,12 +866,38 @@ message = client.messages.create(
     "gpu_indices": [0, 1]
   }'</code></pre>
 
-                <h3>Enable/Disable/Refresh</h3>
+                <h3>Enable/Disable/Drain/Refresh</h3>
                 <ul>
                     <li><strong>Disable</strong> a backend to take it out of rotation without deleting it: <code>POST /api/admin/backends/{id}/disable</code></li>
                     <li><strong>Enable</strong> to bring it back: <code>POST /api/admin/backends/{id}/enable</code></li>
+                    <li><strong>Drain</strong> for graceful offline maintenance: <code>POST /api/admin/backends/{id}/drain</code></li>
                     <li><strong>Refresh</strong> to force re-discovery of models and capabilities: <code>POST /api/admin/backends/{id}/refresh</code></li>
                 </ul>
+
+                <h3>Drain Mode</h3>
+                <p><strong>Drain mode</strong> provides graceful backend shutdown for maintenance. When a backend is set to draining:</p>
+                <ol>
+                    <li>The scheduler stops routing <strong>new</strong> requests to the backend.</li>
+                    <li>All <strong>in-flight</strong> requests are allowed to complete normally.</li>
+                    <li>When the backend's queue depth reaches 0, it automatically transitions to <strong>disabled</strong>.</li>
+                </ol>
+                <p>This avoids abruptly killing active requests when you need to restart an inference engine, upgrade models, or perform node maintenance. Use it before upgrading vLLM, restarting Ollama, or taking a GPU node offline.</p>
+
+                <h3>Concurrency Alignment</h3>
+                <p>The <code>max_concurrent</code> value registered in MindRouter <strong>must match</strong> the concurrency limit on the inference engine:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Engine</th><th>Engine Setting</th><th>MindRouter Setting</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>vLLM</td><td><code>--max-num-seqs N</code></td><td><code>"max_concurrent": N</code></td></tr>
+                        <tr><td>Ollama</td><td><code>OLLAMA_NUM_PARALLEL=N</code></td><td><code>"max_concurrent": N</code></td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Why this matters:</strong> MindRouter uses <code>max_concurrent</code> to decide how many requests to route to a backend. If MindRouter thinks a backend can handle 8 concurrent requests but vLLM is configured with <code>--max-num-seqs 4</code>, the extra requests queue silently inside vLLM. MindRouter cannot see this hidden queue, so it continues routing requests there instead of spreading load to other backends. The result is uneven load distribution and unpredictable latency &mdash; the fair-share scheduler is effectively bypassed for those excess requests.</p>
+
+                <h3>Context Length (num_ctx)</h3>
+                <p>When a model has a <code>context_length</code> configured (discovered automatically or set via <code>context_length_override</code> in the admin UI), MindRouter automatically injects <code>num_ctx</code> into Ollama backend requests. This ensures Ollama allocates the correct KV cache size for the model rather than falling back to its default (typically 2048 tokens). vLLM backends handle context length natively and do not need this injection.</p>
             </section>
 
             <hr>
@@ -1029,6 +1055,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                 <h3>Health Polling</h3>
                 <p>The Backend Registry runs an adaptive polling loop:</p>
                 <ul>
+                    <li><strong>Startup fast polls:</strong> On container start, two immediate full poll cycles run (with a 5-second gap) so backends and nodes are marked healthy within seconds of a restart instead of waiting for the normal 30-second cycle.</li>
                     <li><strong>Normal interval:</strong> 30 seconds (configurable via <code>BACKEND_POLL_INTERVAL</code>)</li>
                     <li><strong>Fast interval:</strong> 10 seconds after a backend becomes unhealthy (configurable)</li>
                     <li><strong>Fast duration:</strong> 120 seconds before returning to normal polling</li>
@@ -1038,6 +1065,9 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     <li>Poll sidecar agents (one per physical node) for GPU snapshots</li>
                     <li>Poll each backend adapter for health, models, and engine-specific telemetry</li>
                 </ol>
+
+                <h3>Health Alerts</h3>
+                <p>The admin dashboard (<code>/admin</code>) displays a prominent warning banner when any backend is unhealthy/unknown or any node is offline/unknown. The alert includes counts and names of affected items with direct links to the backends or nodes management pages. Intentionally <strong>disabled</strong> backends are excluded from the alert &mdash; only unexpected health issues are flagged.</p>
 
                 <h3>Circuit Breaker</h3>
                 <p>Per-backend circuit breaker protects against cascading failures:</p>
@@ -1406,9 +1436,9 @@ python3 -c "import secrets; print('SIDECAR_SECRET_KEY=' + secrets.token_hex(32))
 sudo chmod 600 /etc/mindrouter/sidecar.env</code></pre>
 
                 <h4>Build a specific version</h4>
-<pre><code>docker build -t mindrouter-sidecar:v0.11.0 \
+<pre><code>docker build -t mindrouter-sidecar:v0.18.0 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.11.0:sidecar</code></pre>
+  https://github.com/sheneman/mindrouter2.git#v0.18.0:sidecar</code></pre>
 
                 <h4>Build latest from master</h4>
 <pre><code>docker build -t mindrouter-sidecar:latest \
@@ -1422,19 +1452,19 @@ docker run -d --name gpu-sidecar \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.11.0</code></pre>
+  mindrouter-sidecar:v0.18.0</code></pre>
 
                 <h4>Upgrade to a new version</h4>
-<pre><code>docker build -t mindrouter-sidecar:v0.11.0 \
+<pre><code>docker build -t mindrouter-sidecar:v0.18.0 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.11.0:sidecar
+  https://github.com/sheneman/mindrouter2.git#v0.18.0:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.11.0</code></pre>
+  mindrouter-sidecar:v0.18.0</code></pre>
 
                 <p>In production, bind the sidecar to localhost only (as shown above) and use an nginx reverse proxy on port 8007 to handle external traffic.
                    The env file at <code>/etc/mindrouter/sidecar.env</code> persists the secret key across upgrades — generate it once per node and it's reused automatically.</p>
