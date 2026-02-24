@@ -322,16 +322,33 @@ class BackendRegistry:
             return backend is not None
 
     async def drain_backend(self, backend_id: int) -> bool:
-        """Start draining a backend — stops new requests while in-flight finish."""
+        """Start draining a backend — stops new requests while in-flight finish.
+
+        If no requests are in-flight, immediately transitions to DISABLED.
+        """
         async with get_async_db_context() as db:
             backend = await crud.update_backend_status(
                 db=db,
                 backend_id=backend_id,
                 status=BackendStatus.DRAINING,
             )
-        if backend:
-            logger.info("backend_drain_started", backend_id=backend_id)
-        return backend is not None
+        if not backend:
+            return False
+
+        logger.info("backend_drain_started", backend_id=backend_id)
+
+        # If queue depth is already 0, complete drain immediately
+        try:
+            from backend.app.core.scheduler.policy import get_scheduler
+            scheduler = get_scheduler()
+            async with scheduler.router._lock:
+                depth = scheduler.router._backend_queue_depths.get(backend_id, 0)
+            if depth == 0:
+                await self.complete_drain(backend_id)
+        except Exception as e:
+            logger.debug("drain_immediate_check_error", backend_id=backend_id, error=str(e))
+
+        return True
 
     async def complete_drain(self, backend_id: int) -> bool:
         """Auto-transition a draining backend to DISABLED when queue depth hits 0."""
