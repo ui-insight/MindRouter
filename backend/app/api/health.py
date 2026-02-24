@@ -160,6 +160,16 @@ async def cluster_status() -> Dict[str, Any]:
         all_backends = []
         healthy_backends = []
 
+    # Collect model names from healthy backends
+    models = set()
+    for backend in healthy_backends:
+        try:
+            backend_models = await registry.get_backend_models(backend.id)
+            for m in backend_models:
+                models.add(m.name)
+        except Exception:
+            pass
+
     return {
         "service": settings.app_name,
         "version": settings.app_version,
@@ -168,6 +178,7 @@ async def cluster_status() -> Dict[str, Any]:
             "total": len(all_backends),
             "healthy": len(healthy_backends),
         },
+        "models": sorted(models),
         "queue": scheduler_stats.get("queue", {}),
         "fair_share": {
             "total_users": scheduler_stats.get("fair_share", {}).get("total_users", 0),

@@ -984,26 +984,21 @@ response = client.chat.completions.create(
     // Auto-refresh cluster stats and model list every 30 seconds
     async function refreshDashboard() {
         try {
-            const [statusRes, modelsRes] = await Promise.all([
-                fetch('/status'),
-                fetch('/chat/api/models'),
-            ]);
+            const statusRes = await fetch('/status');
             if (statusRes.ok) {
                 const status = await statusRes.json();
                 const backendsEl = document.getElementById('stat-backends');
                 const queueEl = document.getElementById('stat-queue');
                 if (backendsEl) backendsEl.textContent = status.backends.healthy + ' / ' + status.backends.total;
                 if (queueEl) queueEl.textContent = status.queue.total || 0;
-            }
-            if (modelsRes.ok) {
-                const data = await modelsRes.json();
+
                 const countEl = document.getElementById('stat-models-count');
                 const gridEl = document.getElementById('models-grid');
-                if (countEl) countEl.textContent = data.models ? data.models.length : 0;
-                if (gridEl && data.models && data.models.length) {
+                if (countEl) countEl.textContent = status.models ? status.models.length : 0;
+                if (gridEl && status.models && status.models.length) {
                     var html = '<div class="row">';
-                    data.models.forEach(function(m) {
-                        html += '<div class="col-md-4 mb-2"><span class="badge bg-secondary"><i class="bi bi-box"></i> ' + m.id + '</span></div>';
+                    status.models.forEach(function(name) {
+                        html += '<div class="col-md-4 mb-2"><span class="badge bg-secondary"><i class="bi bi-box"></i> ' + name + '</span></div>';
                     });
                     html += '</div>';
                     gridEl.innerHTML = html;
