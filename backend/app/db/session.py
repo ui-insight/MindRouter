@@ -86,6 +86,7 @@ async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
     session = AsyncSessionLocal()
     try:
         yield session
+        await session.commit()
     except asyncio.CancelledError:
         # Shield rollback from further cancellation so the connection
         # is properly returned to the pool instead of being leaked.
