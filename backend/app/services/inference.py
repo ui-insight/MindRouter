@@ -694,7 +694,7 @@ class InferenceService:
             # First attempt waits normally for capacity; retries fail fast.
             retry_wait = None if attempt == 0 else 0
             try:
-                backend, _models = await self._route_request(
+                backend, models = await self._route_request(
                     job, user, modality,
                     exclude_backend_ids=tried_backends or None,
                     max_wait=retry_wait,
@@ -706,7 +706,7 @@ class InferenceService:
                 if tried_backends:
                     tried_backends.clear()
                     try:
-                        backend, _models = await self._route_request(
+                        backend, models = await self._route_request(
                             job, user, modality, max_wait=retry_wait,
                         )
                     except HTTPException:
@@ -714,6 +714,16 @@ class InferenceService:
                         break
                 else:
                     raise
+
+            # Inject num_ctx for Ollama backends from model config
+            if backend.engine == BackendEngine.OLLAMA and models:
+                for m in models:
+                    if m.context_length:
+                        if request.backend_options is None:
+                            request.backend_options = {}
+                        request.backend_options.setdefault("num_ctx", m.context_length)
+                        break
+
             tried_backends.add(backend.id)
             start_time = time.monotonic()
 
