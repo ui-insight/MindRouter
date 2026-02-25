@@ -11,6 +11,8 @@ logger = get_logger(__name__)
 _redis = None
 _available = False
 
+INFLIGHT_KEY = "streaming:inflight_tokens"
+
 
 async def init_redis() -> None:
     """Initialize the Redis connection. No-op if redis_url is not configured."""
@@ -29,6 +31,8 @@ async def init_redis() -> None:
         )
         await _redis.ping()
         _available = True
+        # Reset inflight streaming counter on startup (clears orphans from crashes)
+        await _redis.set(INFLIGHT_KEY, 0)
         logger.info("redis_connected", url=settings.redis_url)
     except Exception:
         logger.exception("redis_connect_failed")
@@ -118,3 +122,37 @@ async def get_all_token_keys() -> dict[int, int]:
     except Exception:
         logger.exception("redis_scan_tokens_failed")
     return result
+
+
+async def incr_inflight_tokens(amount: int) -> Optional[int]:
+    """Atomically increment the inflight streaming token counter."""
+    if not _available or not _redis or amount <= 0:
+        return None
+    try:
+        return await _redis.incrby(INFLIGHT_KEY, amount)
+    except Exception:
+        logger.exception("redis_incr_inflight_failed")
+        return None
+
+
+async def decr_inflight_tokens(amount: int) -> Optional[int]:
+    """Atomically decrement the inflight streaming token counter."""
+    if not _available or not _redis or amount <= 0:
+        return None
+    try:
+        return await _redis.decrby(INFLIGHT_KEY, amount)
+    except Exception:
+        logger.exception("redis_decr_inflight_failed")
+        return None
+
+
+async def get_inflight_tokens() -> int:
+    """Get current inflight streaming token estimate. Returns 0 if unavailable."""
+    if not _available or not _redis:
+        return 0
+    try:
+        val = await _redis.get(INFLIGHT_KEY)
+        return max(0, int(val)) if val is not None else 0
+    except Exception:
+        logger.exception("redis_get_inflight_failed")
+        return 0

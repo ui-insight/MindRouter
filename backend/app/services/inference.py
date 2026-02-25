@@ -24,6 +24,7 @@ import httpx
 from fastapi import HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.redis_client import incr_inflight_tokens, decr_inflight_tokens
 from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
     CanonicalChatResponse,
@@ -173,6 +174,8 @@ class InferenceService:
             chunk_count = 0
             routed_backend = None
             last_finish_reason = None
+            inflight_chars = 0
+            inflight_total_tokens = 0
 
             async for chunk, backend in self._proxy_stream_with_retry(
                 request, job, user, proxy_fn="_proxy_stream_request"
@@ -188,8 +191,24 @@ class InferenceService:
                 for choice in chunk.choices:
                     if choice.delta.content:
                         full_content += choice.delta.content
+                        inflight_chars += len(choice.delta.content)
                     if choice.finish_reason:
                         last_finish_reason = choice.finish_reason
+
+                # Flush estimated tokens to Redis every 10 chunks
+                if chunk_count % 10 == 0 and inflight_chars > 0:
+                    estimated = inflight_chars // 4
+                    if estimated > 0:
+                        await incr_inflight_tokens(estimated)
+                        inflight_total_tokens += estimated
+                        inflight_chars -= estimated * 4
+
+            # Flush remaining chars
+            if inflight_chars > 0:
+                estimated = inflight_chars // 4
+                if estimated > 0:
+                    await incr_inflight_tokens(estimated)
+                    inflight_total_tokens += estimated
 
             # Send done signal
             yield b"data: [DONE]\n\n"
@@ -201,7 +220,14 @@ class InferenceService:
                     finish_reason=last_finish_reason,
                 )
 
+            # Decrement inflight counter now that request is complete
+            if inflight_total_tokens > 0:
+                await decr_inflight_tokens(inflight_total_tokens)
+
         except Exception as e:
+            # Clean up inflight counter on error
+            if inflight_total_tokens > 0:
+                await decr_inflight_tokens(inflight_total_tokens)
             backend_id = routed_backend.id if routed_backend else None
             await self._fail_request(db_request, backend_id, str(e), job)
             raise
@@ -377,6 +403,8 @@ class InferenceService:
             full_content = ""
             chunk_count = 0
             routed_backend = None
+            inflight_chars = 0
+            inflight_total_tokens = 0
 
             async for chunk_data, backend in self._proxy_stream_with_retry(
                 request, job, user, proxy_fn="_proxy_ollama_stream"
@@ -386,14 +414,38 @@ class InferenceService:
                 chunk_count += 1
 
                 if "message" in chunk_data:
-                    full_content += chunk_data["message"].get("content", "")
+                    content = chunk_data["message"].get("content", "")
+                    full_content += content
+                    inflight_chars += len(content)
+
+                # Flush estimated tokens to Redis every 10 chunks
+                if chunk_count % 10 == 0 and inflight_chars > 0:
+                    estimated = inflight_chars // 4
+                    if estimated > 0:
+                        await incr_inflight_tokens(estimated)
+                        inflight_total_tokens += estimated
+                        inflight_chars -= estimated * 4
+
+            # Flush remaining chars
+            if inflight_chars > 0:
+                estimated = inflight_chars // 4
+                if estimated > 0:
+                    await incr_inflight_tokens(estimated)
+                    inflight_total_tokens += estimated
 
             if routed_backend:
                 await self._complete_streaming_request(
                     db_request, routed_backend.id, full_content, chunk_count, job
                 )
 
+            # Decrement inflight counter now that request is complete
+            if inflight_total_tokens > 0:
+                await decr_inflight_tokens(inflight_total_tokens)
+
         except Exception as e:
+            # Clean up inflight counter on error
+            if inflight_total_tokens > 0:
+                await decr_inflight_tokens(inflight_total_tokens)
             backend_id = routed_backend.id if routed_backend else None
             await self._fail_request(db_request, backend_id, str(e), job)
             raise

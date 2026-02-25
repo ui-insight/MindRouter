@@ -27,6 +27,7 @@ from prometheus_client import (
 )
 from sqlalchemy import and_, func, select
 
+from backend.app.core import redis_client
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db.models import Request as DBRequest, RequestStatus
@@ -216,7 +217,10 @@ async def cluster_throughput() -> Dict[str, Any]:
         total_tokens = 0
         request_count = 0
 
-    tokens_per_second = round(total_tokens / window_seconds, 1)
+    # Add inflight streaming tokens to the total
+    inflight_tokens = await redis_client.get_inflight_tokens()
+    combined_tokens = total_tokens + inflight_tokens
+    tokens_per_second = round(combined_tokens / window_seconds, 1)
 
     # Get active request count from scheduler
     try:
@@ -231,4 +235,5 @@ async def cluster_throughput() -> Dict[str, Any]:
         "requests_per_minute": request_count,
         "active_requests": active_requests,
         "total_tokens_last_5s": total_tokens,
+        "inflight_tokens": inflight_tokens,
     }
