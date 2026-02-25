@@ -422,6 +422,10 @@ class InferenceService:
         # Convert chat format (message) to generate format (response)
         msg = result.pop("message", {})
         result["response"] = msg.get("content", "")
+        # Preserve thinking/reasoning in generate response
+        thinking = msg.get("thinking") or msg.get("reasoning") or msg.get("reasoning_content")
+        if thinking:
+            result["thinking"] = thinking
         return result
 
     async def ollama_embedding(
