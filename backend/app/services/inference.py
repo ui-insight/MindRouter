@@ -192,6 +192,8 @@ class InferenceService:
                     if choice.delta.content:
                         full_content += choice.delta.content
                         inflight_chars += len(choice.delta.content)
+                    if choice.delta.reasoning:
+                        inflight_chars += len(choice.delta.reasoning)
                     if choice.finish_reason:
                         last_finish_reason = choice.finish_reason
 
@@ -417,6 +419,9 @@ class InferenceService:
                     content = chunk_data["message"].get("content", "")
                     full_content += content
                     inflight_chars += len(content)
+                    thinking = chunk_data["message"].get("thinking", "")
+                    if thinking:
+                        inflight_chars += len(thinking)
 
                 # Flush estimated tokens to Redis every 10 chunks
                 if chunk_count % 10 == 0 and inflight_chars > 0:
