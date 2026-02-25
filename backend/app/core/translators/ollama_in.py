@@ -141,6 +141,9 @@ class OllamaInTranslator:
         if system:
             prompt = f"{system}\n\n{prompt}"
 
+        # Handle Ollama format field (same as chat path)
+        response_format = OllamaInTranslator._translate_format(data.get("format"))
+
         # Known option keys that map to canonical fields
         _KNOWN_OPTION_KEYS = {
             "temperature", "top_p", "num_predict", "stop",
@@ -168,6 +171,7 @@ class OllamaInTranslator:
             repeat_penalty=options.get("repeat_penalty"),
             min_p=options.get("min_p"),
             backend_options=backend_options,
+            response_format=response_format,
         )
 
     @staticmethod

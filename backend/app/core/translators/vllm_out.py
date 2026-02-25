@@ -574,7 +574,16 @@ class VLLMOutTranslator:
             return {"type": "text"}
 
         if canonical.response_format.type == ResponseFormatType.JSON_OBJECT:
-            return {"type": "json_object"}
+            # vLLM nightly rejects bare {"type": "json_object"} — it requires an
+            # actual schema.  Promote to a permissive json_schema so the model is
+            # constrained to produce valid JSON without a specific structure.
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "json_response",
+                    "schema": {"type": "object"},
+                },
+            }
 
         if canonical.response_format.type == ResponseFormatType.JSON_SCHEMA:
             result: Dict[str, Any] = {"type": "json_schema"}
