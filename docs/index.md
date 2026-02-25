@@ -249,6 +249,54 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
 ```
 
+**Thinking/Reasoning Mode:**
+
+MindRouter supports multiple formats for controlling thinking/reasoning on models that support it (qwen3.5, qwen3, gpt-oss):
+
+```json
+// gpt-oss: control reasoning depth via reasoning_effort
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [{"role": "user", "content": "Solve this step by step"}],
+  "reasoning_effort": "high",
+  "max_completion_tokens": 8192
+}
+
+// Qwen-style: toggle thinking on/off
+{
+  "model": "qwen/qwen3.5-400b",
+  "messages": [{"role": "user", "content": "Explain quantum computing"}],
+  "chat_template_kwargs": {"enable_thinking": true},
+  "max_completion_tokens": 8192
+}
+
+// Also accepted: thinking object (OpenAI/Anthropic style)
+{
+  "model": "qwen/qwen3.5-400b",
+  "thinking": {"type": "disabled"},
+  "messages": [...]
+}
+```
+
+When thinking is enabled, the response includes a `reasoning_content` field alongside `content`:
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "The answer is 42.",
+      "reasoning_content": "Let me work through this step by step..."
+    }
+  }]
+}
+```
+
+> **Important:** Thinking models can consume large numbers of output tokens for reasoning. Use `max_completion_tokens` (or `max_tokens`) to set an adequate budget -- 4096-8192 is recommended for qwen3.5-400b with thinking enabled. Without a limit, the model may use up to the full context window (131K tokens) on reasoning.
+
+**Output Token Limits:**
+
+MindRouter accepts both `max_completion_tokens` (preferred, current OpenAI standard) and `max_tokens` (legacy). If both are provided, `max_completion_tokens` takes priority.
+
 **Structured Output (JSON Mode):**
 ```json
 {
@@ -376,6 +424,41 @@ curl -X POST http://localhost:8000/api/chat \
 
 > **Note:** Ollama defaults to `stream: true`. Set `"stream": false` explicitly for non-streaming responses.
 
+**Thinking/Reasoning Mode (Ollama):**
+
+For Ollama endpoints, use the `think` field at the top level:
+
+```json
+// Qwen-style: boolean toggle
+{
+  "model": "qwen3-32k:32b",
+  "messages": [{"role": "user", "content": "Solve this step by step"}],
+  "think": true,
+  "stream": false
+}
+
+// gpt-oss: string effort level ("low", "medium", "high")
+{
+  "model": "gpt-oss-32k:120b",
+  "messages": [{"role": "user", "content": "Explain quantum entanglement"}],
+  "think": "high",
+  "stream": false
+}
+```
+
+When thinking is enabled, the response includes a `thinking` field in the message:
+```json
+{
+  "message": {
+    "role": "assistant",
+    "content": "The answer is 42.",
+    "thinking": "Let me reason through this..."
+  }
+}
+```
+
+> **Note:** For `/api/generate`, thinking content appears as a top-level `thinking` field alongside `response`.
+
 #### Ollama Generate
 
 ```bash
@@ -462,9 +545,9 @@ message = client.messages.create(
 - System prompts (string or content block array)
 - Multimodal inputs (base64 and URL images)
 - Tool calling -- `tools` with `input_schema`, `tool_choice` (`auto`/`any`/`tool`), `tool_use`/`tool_result` content blocks, streaming tool use with `input_json_delta`
-- Thinking/reasoning mode (`thinking.type`: `enabled`, `adaptive`, `disabled`)
+- Thinking/reasoning mode (`thinking.type`: `enabled`, `adaptive`, `disabled`; set `budget_tokens` to control reasoning token allocation)
 - Structured output via `output_config.format` with `type: "json_schema"`
-- Parameters: `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream`
+- Parameters: `max_tokens` (required), `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream`
 - `metadata.user_id` mapping
 
 > **Note:** This is inbound-only -- there are no Anthropic backends. Requests are translated to canonical format and routed to Ollama/vLLM backends like any other request.
@@ -777,7 +860,7 @@ Anthropic Request ──→ AnthropicInTranslator ──→ CanonicalChatRequest
 
 The canonical internal representation (`backend/app/core/canonical_schemas.py`) includes:
 
-- **CanonicalChatRequest** -- model, messages, temperature, top_p, max_tokens, stream, tools, tool_choice, response_format, etc.
+- **CanonicalChatRequest** -- model, messages, temperature, top_p, max_tokens, stream, tools, tool_choice, response_format, think (`Union[bool, str]`), reasoning_effort, etc.
 - **CanonicalMessage** -- role (system/user/assistant/tool), content (text or multimodal content blocks, nullable), tool_calls, tool_call_id
 - **ContentBlock** -- TextContent, ImageUrlContent, or ImageBase64Content
 - **CanonicalToolCall** / **CanonicalFunctionCall** -- tool call with id, function name, and arguments (JSON string)
@@ -789,7 +872,7 @@ The canonical internal representation (`backend/app/core/canonical_schemas.py`) 
 
 | Concept | OpenAI Format | Ollama Format | Anthropic Format | Canonical |
 |---------|---------------|---------------|------------------|-----------|
-| Max tokens | `max_tokens` | `options.num_predict` | `max_tokens` (required) | `max_tokens` |
+| Max tokens | `max_completion_tokens` or `max_tokens` | `options.num_predict` | `max_tokens` (required) | `max_tokens` |
 | Streaming default | `false` | `true` | `false` | -- |
 | System prompt | `messages` with `role: system` | `messages` with `role: system` | Top-level `system` field | `CanonicalMessage(role=SYSTEM)` |
 | JSON mode | `response_format: {"type": "json_object"}` | `format: "json"` | -- | `response_format.type = JSON_OBJECT` |
@@ -801,7 +884,7 @@ The canonical internal representation (`backend/app/core/canonical_schemas.py`) 
 | Tool choice | `tool_choice` | -- | `tool_choice` (`auto`/`any`/`tool`) | `tool_choice` |
 | Tool calls | `tool_calls` (JSON string args) | `tool_calls` (dict args) | `tool_use` content blocks | `CanonicalToolCall` (JSON string args) |
 | Tool results | `role: "tool"` + `tool_call_id` | -- | `tool_result` content blocks | `CanonicalMessage(role=TOOL, tool_call_id)` |
-| Thinking mode | -- | -- | `thinking.type` (enabled/adaptive/disabled) | `think` (bool) |
+| Thinking mode | `think` (bool), `thinking.type`, `chat_template_kwargs`, `reasoning_effort` | `think` (bool or `"low"`/`"medium"`/`"high"`) | `thinking.type` (enabled/adaptive/disabled) | `think` (`Union[bool, str]`) |
 | User ID | `user` | -- | `metadata.user_id` | `user` |
 | Stream format | SSE (`data: {...}`) | NDJSON | SSE (Anthropic events) | `CanonicalStreamChunk` |
 

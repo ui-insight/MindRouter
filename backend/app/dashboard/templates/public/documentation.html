@@ -309,6 +309,31 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
   -H "Content-Type: application/json" \
   -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'</code></pre>
 
+                <p><strong>Thinking/Reasoning Mode:</strong></p>
+                <p>MindRouter supports multiple formats for controlling thinking/reasoning on models that support it (qwen3.5, qwen3, gpt-oss):</p>
+                <pre><code>// gpt-oss: control reasoning depth
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [{"role": "user", "content": "Solve this step by step"}],
+  "reasoning_effort": "high",
+  "max_completion_tokens": 8192
+}
+
+// Qwen-style: toggle thinking on/off
+{
+  "model": "qwen/qwen3.5-400b",
+  "messages": [{"role": "user", "content": "Explain quantum computing"}],
+  "chat_template_kwargs": {"enable_thinking": true},
+  "max_completion_tokens": 8192
+}</code></pre>
+                <p>When thinking is enabled, the response includes <code>reasoning_content</code> alongside <code>content</code>.</p>
+                <div class="alert alert-warning">
+                    <strong>Important:</strong> Thinking models can consume large numbers of output tokens for reasoning. Use <code>max_completion_tokens</code> (or <code>max_tokens</code>) to set an adequate budget &mdash; 4096&ndash;8192 is recommended for qwen3.5-400b with thinking enabled.
+                </div>
+
+                <p><strong>Output Token Limits:</strong></p>
+                <p>MindRouter accepts both <code>max_completion_tokens</code> (preferred, current OpenAI standard) and <code>max_tokens</code> (legacy). If both are provided, <code>max_completion_tokens</code> takes priority.</p>
+
                 <p><strong>Structured Output (JSON Mode):</strong></p>
                 <pre><code>{
   "model": "llama3.2",
@@ -442,6 +467,15 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
     "stream": false
   }'</code></pre>
                 <p><strong>Note:</strong> Ollama defaults to <code>stream: true</code>. Set <code>"stream": false</code> explicitly for non-streaming responses.</p>
+
+                <p><strong>Thinking/Reasoning Mode (Ollama):</strong></p>
+                <p>Use the <code>think</code> field at the top level:</p>
+                <pre><code>// Qwen-style: boolean toggle
+{"model": "qwen3-32k:32b", "messages": [...], "think": true, "stream": false}
+
+// gpt-oss: string effort level
+{"model": "gpt-oss-32k:120b", "messages": [...], "think": "high", "stream": false}</code></pre>
+                <p>The response includes a <code>thinking</code> field in the message. For <code>/api/generate</code>, thinking content appears as a top-level <code>thinking</code> field alongside <code>response</code>.</p>
 
                 <h4>Ollama Generate</h4>
                 <pre><code>curl -X POST http://localhost:8000/api/generate \
@@ -953,7 +987,7 @@ Anthropic Request --&gt; AnthropicInTranslator --&gt; CanonicalChatRequest
                 <h3>Canonical Schemas</h3>
                 <p>The canonical internal representation (<code>backend/app/core/canonical_schemas.py</code>) includes:</p>
                 <ul>
-                    <li><strong>CanonicalChatRequest</strong> &mdash; model, messages, temperature, top_p, max_tokens, stream, tools, tool_choice, response_format, etc.</li>
+                    <li><strong>CanonicalChatRequest</strong> &mdash; model, messages, temperature, top_p, max_tokens, stream, tools, tool_choice, response_format, think (bool or string), reasoning_effort, etc.</li>
                     <li><strong>CanonicalMessage</strong> &mdash; role (system/user/assistant/tool), content (text or multimodal content blocks, nullable), tool_calls, tool_call_id</li>
                     <li><strong>ContentBlock</strong> &mdash; TextContent, ImageUrlContent, or ImageBase64Content</li>
                     <li><strong>CanonicalToolCall</strong> / <strong>CanonicalFunctionCall</strong> &mdash; tool call with id, function name, and arguments (JSON string)</li>
@@ -968,7 +1002,7 @@ Anthropic Request --&gt; AnthropicInTranslator --&gt; CanonicalChatRequest
                         <tr><th>Concept</th><th>OpenAI</th><th>Ollama</th><th>Anthropic</th><th>Canonical</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>Max tokens</td><td><code>max_tokens</code></td><td><code>options.num_predict</code></td><td><code>max_tokens</code> (required)</td><td><code>max_tokens</code></td></tr>
+                        <tr><td>Max tokens</td><td><code>max_completion_tokens</code> or <code>max_tokens</code></td><td><code>options.num_predict</code></td><td><code>max_tokens</code> (required)</td><td><code>max_tokens</code></td></tr>
                         <tr><td>Stream default</td><td><code>false</code></td><td><code>true</code></td><td><code>false</code></td><td>&mdash;</td></tr>
                         <tr><td>System prompt</td><td><code>messages</code> with <code>role: system</code></td><td><code>messages</code> with <code>role: system</code></td><td>Top-level <code>system</code> field</td><td><code>CanonicalMessage(role=SYSTEM)</code></td></tr>
                         <tr><td>Stop sequences</td><td><code>stop</code></td><td><code>options.stop</code></td><td><code>stop_sequences</code></td><td><code>stop</code></td></tr>
@@ -979,7 +1013,7 @@ Anthropic Request --&gt; AnthropicInTranslator --&gt; CanonicalChatRequest
                         <tr><td>Tool choice</td><td><code>tool_choice</code></td><td>&mdash;</td><td><code>tool_choice</code> (<code>auto</code>/<code>any</code>/<code>tool</code>)</td><td><code>tool_choice</code></td></tr>
                         <tr><td>Tool calls</td><td><code>tool_calls</code> (JSON string args)</td><td><code>tool_calls</code> (dict args)</td><td><code>tool_use</code> content blocks</td><td><code>CanonicalToolCall</code> (JSON string args)</td></tr>
                         <tr><td>Tool results</td><td><code>role: "tool"</code> + <code>tool_call_id</code></td><td>&mdash;</td><td><code>tool_result</code> content blocks</td><td><code>CanonicalMessage(role=TOOL, tool_call_id)</code></td></tr>
-                        <tr><td>Thinking mode</td><td>&mdash;</td><td>&mdash;</td><td><code>thinking.type</code></td><td><code>think</code> (bool)</td></tr>
+                        <tr><td>Thinking mode</td><td><code>think</code>, <code>thinking.type</code>, <code>chat_template_kwargs</code>, <code>reasoning_effort</code></td><td><code>think</code> (bool or <code>"low"</code>/<code>"medium"</code>/<code>"high"</code>)</td><td><code>thinking.type</code> (enabled/disabled)</td><td><code>think</code> (bool or string)</td></tr>
                         <tr><td>User ID</td><td><code>user</code></td><td>&mdash;</td><td><code>metadata.user_id</code></td><td><code>user</code></td></tr>
                         <tr><td>Stream format</td><td>SSE (<code>data: {...}</code>)</td><td>NDJSON</td><td>SSE (Anthropic events)</td><td><code>CanonicalStreamChunk</code></td></tr>
                     </tbody>
