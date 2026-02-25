@@ -28,11 +28,11 @@
                     <h2 class="card-subtitle mb-2 text-muted h6">Token Usage</h2>
                     {% if quota %}
                     {% if group_budget == 0 %}
-                    <p class="card-title h3 mb-1">{{ "{:,}".format(tokens_used_display) }} / Unlimited</p>
+                    <p class="card-title h3 mb-1"><span id="token-usage-top">{{ "{:,}".format(tokens_used_display) }}</span> / Unlimited</p>
                     {% else %}
-                    <p class="card-title h3 mb-1">{{ "{:,}".format(tokens_used_display) }} / {{ "{:,}".format(group_budget) }}</p>
+                    <p class="card-title h3 mb-1"><span id="token-usage-top">{{ "{:,}".format(tokens_used_display) }}</span> / {{ "{:,}".format(group_budget) }}</p>
                     <div class="progress" style="height: 6px;">
-                        <div class="progress-bar {% if usage_percent >= 90 %}bg-danger{% elif usage_percent >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_percent }}%" aria-valuenow="{{ usage_percent }}" aria-valuemin="0" aria-valuemax="100" aria-label="Token usage"></div>
+                        <div id="token-progress-bar" class="progress-bar {% if usage_percent >= 90 %}bg-danger{% elif usage_percent >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_percent }}%" aria-valuenow="{{ usage_percent }}" aria-valuemin="0" aria-valuemax="100" aria-label="Token usage"></div>
                     </div>
                     {% endif %}
                     {% else %}
@@ -147,7 +147,7 @@
                         <dt class="col-6">Budget:</dt>
                         <dd class="col-6">{% if group_budget == 0 %}Unlimited{% else %}{{ "{:,}".format(group_budget) }} tokens{% endif %}</dd>
                         <dt class="col-6">Used:</dt>
-                        <dd class="col-6">{{ "{:,}".format(tokens_used_display) }} tokens</dd>
+                        <dd class="col-6"><span id="token-usage-detail">{{ "{:,}".format(tokens_used_display) }}</span> tokens</dd>
                         <dt class="col-6">RPM Limit:</dt>
                         <dd class="col-6">{{ quota.rpm_limit }} req/min</dd>
                         <dt class="col-6">Max Concurrent:</dt>
@@ -228,4 +228,38 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+{% if quota %}
+<script>
+(function() {
+    const topEl = document.getElementById('token-usage-top');
+    const detailEl = document.getElementById('token-usage-detail');
+    const barEl = document.getElementById('token-progress-bar');
+    const budget = {{ group_budget }};
+
+    function fmt(n) { return n.toLocaleString(); }
+
+    async function poll() {
+        try {
+            const resp = await fetch('/dashboard/api/token-usage');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const used = data.tokens_used || 0;
+            if (topEl) topEl.textContent = fmt(used);
+            if (detailEl) detailEl.textContent = fmt(used);
+            if (barEl && budget > 0) {
+                const pct = Math.min(100, used / budget * 100);
+                barEl.style.width = pct + '%';
+                barEl.setAttribute('aria-valuenow', pct.toFixed(0));
+                barEl.className = 'progress-bar ' + (pct >= 90 ? 'bg-danger' : pct >= 70 ? 'bg-warning' : 'bg-success');
+            }
+        } catch (e) { /* silent */ }
+    }
+
+    setInterval(poll, 1000);
+})();
+</script>
+{% endif %}
 {% endblock %}

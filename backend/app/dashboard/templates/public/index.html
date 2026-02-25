@@ -791,7 +791,7 @@ response = client.chat.completions.create(
     }
 
     fetchThroughput();
-    setInterval(fetchThroughput, 5000);
+    setInterval(fetchThroughput, 1000);
 
     // --- Drawing helpers ---
     function drawEdge(edge, alpha) {

@@ -387,6 +387,36 @@ async def user_dashboard(
     )
 
 
+@dashboard_router.get("/dashboard/api/token-usage")
+async def dashboard_token_usage(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Return current token usage for the logged-in user (live polling endpoint)."""
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    effective_id = await get_effective_user_id(request, db)
+    user = await crud.get_user_by_id(db, effective_id)
+    if not user:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    quota = await crud.get_user_quota(db, effective_id)
+    if not quota:
+        return JSONResponse({"tokens_used": 0, "budget": 0})
+
+    from backend.app.core.redis_client import get_tokens as redis_get_tokens, is_available as redis_is_available
+    if redis_is_available():
+        redis_val = await redis_get_tokens(effective_id)
+        tokens_used = redis_val if redis_val is not None else quota.tokens_used
+    else:
+        tokens_used = quota.tokens_used
+
+    group_budget = user.group.token_budget if user.group else 0
+    return JSONResponse({"tokens_used": tokens_used, "budget": group_budget})
+
+
 @dashboard_router.post("/dashboard/change-password")
 async def change_password(
     request: Request,
