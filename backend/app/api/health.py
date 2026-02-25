@@ -191,9 +191,9 @@ async def cluster_throughput() -> Dict[str, Any]:
     """
     Public endpoint: cluster-wide token throughput.
 
-    Returns tokens/second computed from completed requests in the last 20 seconds.
+    Returns tokens/second computed from completed requests in the last 10 seconds.
     """
-    window_seconds = 20
+    window_seconds = 10
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
 
     try:
