@@ -172,6 +172,7 @@ class OllamaInTranslator:
             min_p=options.get("min_p"),
             backend_options=backend_options,
             response_format=response_format,
+            think=data.get("think"),
         )
 
     @staticmethod

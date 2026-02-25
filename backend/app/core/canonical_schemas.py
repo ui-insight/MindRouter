@@ -238,6 +238,9 @@ class CanonicalCompletionRequest(BaseModel):
     # Structured output
     response_format: Optional[ResponseFormat] = None
 
+    # Thinking mode
+    think: Optional[bool] = None
+
     # MindRouter metadata
     request_id: Optional[str] = None
     user_id: Optional[int] = None
@@ -262,6 +265,7 @@ class CanonicalCompletionRequest(BaseModel):
             min_p=self.min_p,
             backend_options=self.backend_options,
             response_format=self.response_format,
+            think=self.think,
             n=self.n,
             request_id=self.request_id,
             user_id=self.user_id,

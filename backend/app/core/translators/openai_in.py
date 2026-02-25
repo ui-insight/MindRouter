@@ -89,7 +89,7 @@ class OpenAIInTranslator:
             response_format=response_format,
             n=data.get("n", 1),
             user=data.get("user"),
-            think=data.get("think"),
+            think=OpenAIInTranslator._resolve_think(data),
             reasoning_effort=data.get("reasoning_effort"),
         )
 
@@ -273,3 +273,32 @@ class OpenAIInTranslator:
             )
 
         return ResponseFormat(type=ResponseFormatType.TEXT)
+
+    @staticmethod
+    def _resolve_think(data: Dict[str, Any]) -> Optional[bool]:
+        """Resolve thinking/think from multiple possible input formats.
+
+        Accepts:
+        - think: true/false (Ollama/MindRouter native)
+        - thinking: {"type": "enabled"/"disabled"} (OpenAI/Anthropic style)
+        - chat_template_kwargs: {"enable_thinking": true/false} (vLLM native)
+        """
+        # Direct think field takes priority
+        if "think" in data:
+            return data["think"]
+
+        # OpenAI/Anthropic-style thinking object
+        thinking = data.get("thinking")
+        if isinstance(thinking, dict):
+            thinking_type = thinking.get("type")
+            if thinking_type in ("enabled", "adaptive"):
+                return True
+            elif thinking_type == "disabled":
+                return False
+
+        # vLLM-native chat_template_kwargs
+        ctk = data.get("chat_template_kwargs")
+        if isinstance(ctk, dict) and "enable_thinking" in ctk:
+            return ctk["enable_thinking"]
+
+        return None
