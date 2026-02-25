@@ -275,11 +275,11 @@ class OpenAIInTranslator:
         return ResponseFormat(type=ResponseFormatType.TEXT)
 
     @staticmethod
-    def _resolve_think(data: Dict[str, Any]) -> Optional[bool]:
+    def _resolve_think(data: Dict[str, Any]) -> Optional[Union[bool, str]]:
         """Resolve thinking/think from multiple possible input formats.
 
         Accepts:
-        - think: true/false (Ollama/MindRouter native)
+        - think: true/false/"low"/"medium"/"high" (Ollama/MindRouter native)
         - thinking: {"type": "enabled"/"disabled"} (OpenAI/Anthropic style)
         - chat_template_kwargs: {"enable_thinking": true/false} (vLLM native)
         """

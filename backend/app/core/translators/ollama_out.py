@@ -109,6 +109,10 @@ class OllamaOutTranslator:
         if options:
             payload["options"] = options
 
+        # Thinking mode goes at top level, NOT inside options
+        if canonical.think is not None:
+            payload["think"] = canonical.think
+
         return payload
 
     @staticmethod

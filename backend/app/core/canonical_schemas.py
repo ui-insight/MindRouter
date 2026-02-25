@@ -167,7 +167,7 @@ class CanonicalChatRequest(BaseModel):
     min_p: Optional[float] = Field(default=None, ge=0, le=1)
 
     # Reasoning mode
-    think: Optional[bool] = None  # Toggle thinking on/off (Ollama, Qwen)
+    think: Optional[Union[bool, str]] = None  # bool for Qwen; "low"/"medium"/"high" for GPT-OSS
     reasoning_effort: Optional[str] = None  # "low", "medium", "high" (GPT-OSS)
 
     # Opaque backend-specific options (e.g. Ollama mirostat, tfs_z, num_ctx)
@@ -239,7 +239,7 @@ class CanonicalCompletionRequest(BaseModel):
     response_format: Optional[ResponseFormat] = None
 
     # Thinking mode
-    think: Optional[bool] = None
+    think: Optional[Union[bool, str]] = None  # bool for Qwen; "low"/"medium"/"high" for GPT-OSS
 
     # MindRouter metadata
     request_id: Optional[str] = None

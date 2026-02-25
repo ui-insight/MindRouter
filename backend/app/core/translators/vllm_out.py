@@ -97,7 +97,12 @@ class VLLMOutTranslator:
         if canonical.reasoning_effort is not None:
             payload["reasoning_effort"] = canonical.reasoning_effort
         if canonical.think is not None:
-            payload["chat_template_kwargs"] = {"enable_thinking": canonical.think}
+            if isinstance(canonical.think, str):
+                # GPT-OSS string effort ("low"/"medium"/"high") → vLLM reasoning_effort
+                payload["reasoning_effort"] = canonical.think
+            else:
+                # Qwen-style boolean → vLLM chat_template_kwargs
+                payload["chat_template_kwargs"] = {"enable_thinking": canonical.think}
         if canonical.n != 1:
             payload["n"] = canonical.n
         if canonical.user:
