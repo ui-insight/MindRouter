@@ -28,9 +28,9 @@
                     <h2 class="card-subtitle mb-2 text-muted h6">Token Usage</h2>
                     {% if quota %}
                     {% if group_budget == 0 %}
-                    <p class="card-title h3 mb-1">{{ "{:,}".format(quota.tokens_used) }} / Unlimited</p>
+                    <p class="card-title h3 mb-1">{{ "{:,}".format(tokens_used_display) }} / Unlimited</p>
                     {% else %}
-                    <p class="card-title h3 mb-1">{{ "{:,}".format(quota.tokens_used) }} / {{ "{:,}".format(group_budget) }}</p>
+                    <p class="card-title h3 mb-1">{{ "{:,}".format(tokens_used_display) }} / {{ "{:,}".format(group_budget) }}</p>
                     <div class="progress" style="height: 6px;">
                         <div class="progress-bar {% if usage_percent >= 90 %}bg-danger{% elif usage_percent >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_percent }}%" aria-valuenow="{{ usage_percent }}" aria-valuemin="0" aria-valuemax="100" aria-label="Token usage"></div>
                     </div>
@@ -147,7 +147,7 @@
                         <dt class="col-6">Budget:</dt>
                         <dd class="col-6">{% if group_budget == 0 %}Unlimited{% else %}{{ "{:,}".format(group_budget) }} tokens{% endif %}</dd>
                         <dt class="col-6">Used:</dt>
-                        <dd class="col-6">{{ "{:,}".format(quota.tokens_used) }} tokens</dd>
+                        <dd class="col-6">{{ "{:,}".format(tokens_used_display) }} tokens</dd>
                         <dt class="col-6">RPM Limit:</dt>
                         <dd class="col-6">{{ quota.rpm_limit }} req/min</dd>
                         <dt class="col-6">Max Concurrent:</dt>

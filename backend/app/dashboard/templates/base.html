@@ -75,6 +75,15 @@
         </div>
     </nav>
 
+    {% if masquerade_user %}
+    <div class="bg-warning text-dark text-center py-2 fw-bold" style="position: sticky; top: 0; z-index: 1050;">
+        Viewing as {{ masquerade_user.username }} ({{ masquerade_user.email }})
+        <form method="post" action="/admin/masquerade/stop" class="d-inline ms-3">
+            <button type="submit" class="btn btn-sm btn-dark">Stop Masquerading</button>
+        </form>
+    </div>
+    {% endif %}
+
     <main id="main-content">
         {% block content %}{% endblock %}
     </main>

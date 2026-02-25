@@ -35,7 +35,7 @@ from backend.app.db import crud
 from backend.app.db import chat_crud
 from backend.app.db.models import ApiKey, User
 from backend.app.db.session import get_async_db, get_async_db_context
-from backend.app.dashboard.routes import get_session_user_id
+from backend.app.dashboard.routes import get_effective_user_id, get_session_user_id, get_masquerade_user_id
 from backend.app.logging_config import get_logger
 from backend.app.services.inference import InferenceService
 from backend.app.settings import get_settings
@@ -284,16 +284,19 @@ async def chat_page(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Serve the chat interface."""
-    user_id = get_session_user_id(request)
-    if not user_id:
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
         return RedirectResponse(url="/login", status_code=302)
 
-    user = await crud.get_user_by_id(db, user_id)
+    effective_id = await get_effective_user_id(request, db)
+    user = await crud.get_user_by_id(db, effective_id)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
 
+    masquerade_user = user if effective_id != real_user_id else None
+
     # Check if user has an API key
-    api_keys = await crud.get_user_api_keys(db, user_id, include_revoked=False)
+    api_keys = await crud.get_user_api_keys(db, effective_id, include_revoked=False)
     has_api_key = len(api_keys) > 0
 
     return templates.TemplateResponse(
@@ -302,6 +305,7 @@ async def chat_page(
             "request": request,
             "user": user,
             "has_api_key": has_api_key,
+            "masquerade_user": masquerade_user,
         },
     )
 
@@ -376,10 +380,11 @@ async def list_conversations(
     db: AsyncSession = Depends(get_async_db),
 ):
     """List user's conversations."""
-    user_id = get_session_user_id(request)
-    if not user_id:
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
+    user_id = await get_effective_user_id(request, db)
     convs = await chat_crud.get_user_conversations(db, user_id)
     return JSONResponse({
         "conversations": [
@@ -427,10 +432,11 @@ async def get_conversation(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Get a conversation with all messages."""
-    user_id = get_session_user_id(request)
-    if not user_id:
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
+    user_id = await get_effective_user_id(request, db)
     data = await chat_crud.get_conversation_with_messages(db, conversation_id, user_id)
     if not data:
         return JSONResponse({"error": "Conversation not found"}, status_code=404)
@@ -669,10 +675,11 @@ async def serve_medium_thumbnail(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Serve the 800px medium thumbnail for an image attachment."""
-    user_id = get_session_user_id(request)
-    if not user_id:
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    user_id = await get_effective_user_id(request, db)
     att = await chat_crud.get_attachment(db, attachment_id, user_id)
     if not att or not att.is_image:
         raise HTTPException(status_code=404, detail="Attachment not found")
@@ -704,10 +711,11 @@ async def serve_thumbnail(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Serve the small PNG thumbnail for an attachment."""
-    user_id = get_session_user_id(request)
-    if not user_id:
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    user_id = await get_effective_user_id(request, db)
     att = await chat_crud.get_attachment(db, attachment_id, user_id)
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found")
@@ -809,7 +817,7 @@ async def chat_completions(
 
     # Inject system prompt for consistent math formatting
     # (prepend so it appears before conversation history)
-    _SYSTEM_PROMPT = (
+    _DEFAULT_SYSTEM_PROMPT = (
         "You are a helpful AI assistant provided by the University of Idaho. "
         "All conversations are processed entirely on University of Idaho infrastructure — "
         "your messages never leave campus servers and are not shared with any third party. "
@@ -820,16 +828,25 @@ async def chat_completions(
         "bare without dollar-sign delimiters. Always wrap complete expressions, "
         "not individual symbols — write $\\frac{a}{b} + c$ not $\\frac{a}{b}$ + c."
     )
+    system_prompt = await crud.get_config_json(db, "chat.system_prompt", None)
+    if system_prompt is None:
+        system_prompt = _DEFAULT_SYSTEM_PROMPT
+
     # Only add if there is no user-supplied system message already
     has_system = any(m.get("role") == "system" for m in api_messages)
     if not has_system:
-        api_messages.insert(0, {"role": "system", "content": _SYSTEM_PROMPT})
+        api_messages.insert(0, {"role": "system", "content": system_prompt})
     else:
-        # Append math instructions to the existing system message
+        # Append system prompt to the existing system message
         for m in api_messages:
             if m.get("role") == "system":
-                m["content"] = m["content"] + "\n\n" + _SYSTEM_PROMPT
+                m["content"] = m["content"] + "\n\n" + system_prompt
                 break
+
+    # Read admin-configured generation parameters
+    cfg_max_tokens = await crud.get_config_json(db, "chat.max_tokens", 16384)
+    cfg_temperature = await crud.get_config_json(db, "chat.temperature", None)
+    cfg_think = await crud.get_config_json(db, "chat.think", None)
 
     # Build canonical request
     try:
@@ -837,13 +854,17 @@ async def chat_completions(
             "model": model,
             "messages": api_messages,
             "stream": stream,
-            "max_tokens": 16384,
+            "max_tokens": cfg_max_tokens,
         }
-        # Pass thinking parameters if provided
+        if cfg_temperature is not None:
+            request_data["temperature"] = cfg_temperature
+        # Per-request think/reasoning_effort from client overrides admin default
         think = body.get("think")
         reasoning_effort = body.get("reasoning_effort")
         if think is not None:
             request_data["think"] = think
+        elif cfg_think is not None:
+            request_data["think"] = cfg_think
         if reasoning_effort is not None:
             request_data["reasoning_effort"] = reasoning_effort
 

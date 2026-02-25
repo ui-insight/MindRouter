@@ -16,6 +16,11 @@
             <div class="alert alert-success alert-dismissible fade show" role="alert">
                 {% if success == 'default_updated' %}Default model updated.
                 {% elif success == 'core_updated' %}Core models updated.
+                {% elif success == 'system_prompt_updated' %}System prompt updated.
+                {% elif success == 'system_prompt_reset' %}System prompt reset to default.
+                {% elif success == 'max_tokens_updated' %}Max tokens updated.
+                {% elif success == 'temperature_updated' %}Temperature updated.
+                {% elif success == 'think_updated' %}Thinking mode updated.
                 {% else %}{{ success }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -72,6 +77,82 @@
                                 <p class="text-muted">No healthy backends with models currently online.</p>
                                 {% endif %}
                                 <button type="submit" class="btn btn-primary btn-sm">Save Core Models</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- System Prompt -->
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">System Prompt</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">The system prompt prepended to all chat conversations. Leave blank to use the built-in default.</p>
+                            <form method="post" action="/admin/chat-config">
+                                <input type="hidden" name="action" value="set_system_prompt">
+                                <div class="mb-3">
+                                    <textarea class="form-control" name="system_prompt" rows="6" placeholder="Leave blank to use the built-in default prompt">{{ system_prompt if system_prompt is not none else '' }}</textarea>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save System Prompt</button>
+                                {% if system_prompt is not none %}
+                                <button type="submit" name="action" value="reset_system_prompt" class="btn btn-outline-secondary btn-sm">Reset to Default</button>
+                                {% endif %}
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Generation Parameters -->
+                <div class="col-lg-4">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Max Tokens</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Maximum number of tokens the model can generate per response.</p>
+                            <form method="post" action="/admin/chat-config">
+                                <input type="hidden" name="action" value="set_max_tokens">
+                                <div class="mb-3">
+                                    <input type="number" class="form-control" name="max_tokens" min="256" max="131072" value="{{ chat_max_tokens }}">
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-4">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Temperature</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Sampling temperature. Leave blank to let the backend decide.</p>
+                            <form method="post" action="/admin/chat-config">
+                                <input type="hidden" name="action" value="set_temperature">
+                                <div class="mb-3">
+                                    <input type="number" class="form-control" name="temperature" min="0" max="2" step="0.1" value="{{ chat_temperature if chat_temperature is not none else '' }}" placeholder="(backend default)">
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-4">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Thinking Mode</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Control whether reasoning/thinking is enabled for chat requests.</p>
+                            <form method="post" action="/admin/chat-config">
+                                <input type="hidden" name="action" value="set_think">
+                                <div class="mb-3">
+                                    <select class="form-select" name="think">
+                                        <option value="" {% if chat_think is none %}selected{% endif %}>(auto - let user/backend decide)</option>
+                                        <option value="true" {% if chat_think == true %}selected{% endif %}>On</option>
+                                        <option value="false" {% if chat_think == false %}selected{% endif %}>Off</option>
+                                        <option value="low" {% if chat_think == 'low' %}selected{% endif %}>Low</option>
+                                        <option value="medium" {% if chat_think == 'medium' %}selected{% endif %}>Medium</option>
+                                        <option value="high" {% if chat_think == 'high' %}selected{% endif %}>High</option>
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
                             </form>
                         </div>
                     </div>

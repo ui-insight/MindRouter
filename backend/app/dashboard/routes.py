@@ -35,8 +35,11 @@ from backend.app.dashboard.azure_auth import azure_router
 from backend.app.db import crud, chat_crud
 from backend.app.db.models import BackendEngine, QuotaRequestStatus, UserRole
 from backend.app.db.session import get_async_db
+from backend.app.logging_config import get_logger
 from backend.app.security import generate_api_key, hash_password, verify_password
 from backend.app.settings import get_settings
+
+logger = get_logger(__name__)
 
 dashboard_router = APIRouter(tags=["dashboard"])
 dashboard_router.include_router(azure_router)
@@ -111,6 +114,47 @@ def set_session_cookie(response: Response, user_id: int) -> None:
 def clear_session_cookie(response: Response) -> None:
     """Clear session cookie."""
     response.delete_cookie(key="mindrouter_session")
+
+
+# ---------------------------------------------------------------------------
+# Masquerade helpers
+# ---------------------------------------------------------------------------
+
+_MASQUERADE_COOKIE = "mindrouter_masquerade"
+
+
+def _get_masquerade_serializer() -> URLSafeTimedSerializer:
+    settings = get_settings()
+    return URLSafeTimedSerializer(settings.secret_key, salt="masquerade")
+
+
+def get_masquerade_user_id(request: Request) -> Optional[int]:
+    """Return the masquerade target user ID from the signed cookie, or None."""
+    cookie = request.cookies.get(_MASQUERADE_COOKIE)
+    if cookie:
+        try:
+            ser = _get_masquerade_serializer()
+            return int(ser.loads(cookie, max_age=86400))  # 24h expiry
+        except Exception:
+            pass
+    return None
+
+
+async def get_effective_user_id(request: Request, db: AsyncSession) -> Optional[int]:
+    """Return the masquerade target if the real user is admin, else the real user.
+
+    Only for read-only dashboard views — never for admin routes or actions.
+    """
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
+        return None
+    masquerade_id = get_masquerade_user_id(request)
+    if masquerade_id and masquerade_id != real_user_id:
+        # Verify the real user is actually admin
+        real_user = await crud.get_user_by_id(db, real_user_id)
+        if real_user and real_user.group and real_user.group.is_admin:
+            return masquerade_id
+    return real_user_id
 
 
 # Public Dashboard
@@ -284,29 +328,43 @@ async def user_dashboard(
     db: AsyncSession = Depends(get_async_db),
 ):
     """User dashboard."""
-    user_id = get_session_user_id(request)
-    if not user_id:
+    real_user_id = get_session_user_id(request)
+    if not real_user_id:
         return RedirectResponse(url="/login", status_code=302)
 
-    user = await crud.get_user_by_id(db, user_id)
+    # Support masquerade: admin sees target user's dashboard
+    effective_id = await get_effective_user_id(request, db)
+    user = await crud.get_user_by_id(db, effective_id)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
 
-    # Get user's API keys
-    api_keys = await crud.get_user_api_keys(db, user_id, include_revoked=True)
+    masquerade_user = None
+    if effective_id != real_user_id:
+        masquerade_user = user  # the target user we're viewing as
 
-    # Get quota
-    quota = await crud.get_user_quota(db, user_id)
+    # Get user's API keys
+    api_keys = await crud.get_user_api_keys(db, effective_id, include_revoked=True)
+
+    # Get quota — prefer Redis for tokens_used (consistent across workers)
+    quota = await crud.get_user_quota(db, effective_id)
+    from backend.app.core.redis_client import get_tokens as redis_get_tokens, is_available as redis_is_available
+    tokens_used_display = 0
+    if quota:
+        if redis_is_available():
+            redis_val = await redis_get_tokens(effective_id)
+            tokens_used_display = redis_val if redis_val is not None else quota.tokens_used
+        else:
+            tokens_used_display = quota.tokens_used
 
     # Calculate quota usage percentage using group budget
     group_budget = user.group.token_budget if user.group else 0
     usage_percent = 0
     if quota and group_budget > 0:
-        usage_percent = min(100, (quota.tokens_used / group_budget) * 100)
+        usage_percent = min(100, (tokens_used_display / group_budget) * 100)
 
     # Key limit info
     max_keys = user.group.max_api_keys if user.group else 8
-    active_key_count = await crud.count_user_active_api_keys(db, user_id)
+    active_key_count = await crud.count_user_active_api_keys(db, effective_id)
 
     return templates.TemplateResponse(
         "user/dashboard.html",
@@ -315,6 +373,7 @@ async def user_dashboard(
             "user": user,
             "api_keys": api_keys,
             "quota": quota,
+            "tokens_used_display": tokens_used_display,
             "group_budget": group_budget,
             "usage_percent": usage_percent,
             "pw_error": pw_error,
@@ -323,6 +382,7 @@ async def user_dashboard(
             "max_keys": max_keys,
             "active_key_count": active_key_count,
             "now_utc": datetime.now(timezone.utc),
+            "masquerade_user": masquerade_user,
         },
     )
 
@@ -1962,6 +2022,54 @@ async def edit_user(
         return RedirectResponse(url=f"/admin/users/{user_id}?error={error_msg}", status_code=302)
 
 
+# ---------------------------------------------------------------------------
+# Admin Masquerade
+# ---------------------------------------------------------------------------
+
+@dashboard_router.post("/admin/masquerade/stop")
+async def admin_masquerade_stop(request: Request):
+    """Stop masquerading and return to admin view."""
+    logger.info("masquerade_stop", admin_user_id=get_session_user_id(request))
+    response = RedirectResponse(url="/admin/users", status_code=302)
+    response.delete_cookie(key=_MASQUERADE_COOKIE)
+    return response
+
+
+@dashboard_router.post("/admin/masquerade/{target_user_id}")
+async def admin_masquerade_start(
+    request: Request,
+    target_user_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Start masquerading as the target user (admin only)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    admin_user = await crud.get_user_by_id(db, user_id)
+    if not admin_user or not admin_user.group or not admin_user.group.is_admin:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    # Verify target user exists
+    target = await crud.get_user_by_id(db, target_user_id)
+    if not target:
+        return RedirectResponse(url="/admin/users?error=User+not+found", status_code=302)
+
+    logger.info("masquerade_start", admin_user_id=user_id, target_user_id=target_user_id)
+
+    ser = _get_masquerade_serializer()
+    signed = ser.dumps(target_user_id)
+    response = RedirectResponse(url="/dashboard", status_code=302)
+    response.set_cookie(
+        key=_MASQUERADE_COOKIE,
+        value=signed,
+        httponly=True,
+        samesite="lax",
+        max_age=86400,  # 24h
+    )
+    return response
+
+
 # API Keys listing route
 @dashboard_router.get("/admin/api-keys", response_class=HTMLResponse)
 async def admin_api_keys(
@@ -2258,6 +2366,10 @@ async def admin_chat_config(
 
     core_models = await crud.get_config_json(db, "chat.core_models", [])
     default_model = await crud.get_config_json(db, "chat.default_model", None)
+    system_prompt = await crud.get_config_json(db, "chat.system_prompt", None)
+    chat_max_tokens = await crud.get_config_json(db, "chat.max_tokens", 16384)
+    chat_temperature = await crud.get_config_json(db, "chat.temperature", None)
+    chat_think = await crud.get_config_json(db, "chat.think", None)
 
     return templates.TemplateResponse(
         "admin/chat_config.html",
@@ -2267,6 +2379,10 @@ async def admin_chat_config(
             "available_models": sorted(available_models),
             "core_models": core_models,
             "default_model": default_model,
+            "system_prompt": system_prompt,
+            "chat_max_tokens": chat_max_tokens,
+            "chat_temperature": chat_temperature,
+            "chat_think": chat_think,
             "success": success,
             "error": error,
         },
@@ -2301,6 +2417,59 @@ async def admin_chat_config_post(
         await crud.set_config(db, "chat.core_models", selected)
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=core_updated", status_code=302)
+
+    elif action == "set_system_prompt":
+        prompt_text = form.get("system_prompt", "").strip()
+        if prompt_text:
+            await crud.set_config(db, "chat.system_prompt", prompt_text)
+        else:
+            # Blank = remove override, revert to built-in default
+            await crud.set_config(db, "chat.system_prompt", None)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=system_prompt_updated", status_code=302)
+
+    elif action == "reset_system_prompt":
+        await crud.set_config(db, "chat.system_prompt", None)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=system_prompt_reset", status_code=302)
+
+    elif action == "set_max_tokens":
+        try:
+            val = int(form.get("max_tokens", "16384"))
+            val = max(256, min(131072, val))
+        except (ValueError, TypeError):
+            val = 16384
+        await crud.set_config(db, "chat.max_tokens", val)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=max_tokens_updated", status_code=302)
+
+    elif action == "set_temperature":
+        temp_str = form.get("temperature", "").strip()
+        if temp_str:
+            try:
+                temp_val = float(temp_str)
+                temp_val = max(0.0, min(2.0, temp_val))
+            except (ValueError, TypeError):
+                return RedirectResponse(url="/admin/chat-config?error=Invalid+temperature+value", status_code=302)
+            await crud.set_config(db, "chat.temperature", temp_val)
+        else:
+            await crud.set_config(db, "chat.temperature", None)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=temperature_updated", status_code=302)
+
+    elif action == "set_think":
+        think_str = form.get("think", "").strip()
+        if think_str == "true":
+            think_val = True
+        elif think_str == "false":
+            think_val = False
+        elif think_str in ("low", "medium", "high"):
+            think_val = think_str
+        else:
+            think_val = None
+        await crud.set_config(db, "chat.think", think_val)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=think_updated", status_code=302)
 
     return RedirectResponse(url="/admin/chat-config?error=Unknown+action", status_code=302)
 

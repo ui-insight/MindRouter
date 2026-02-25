@@ -509,7 +509,17 @@ async def create_quota(
 async def update_quota_usage(
     db: AsyncSession, user_id: int, tokens_used: int
 ) -> Optional[Quota]:
-    """Update quota token usage."""
+    """Update quota token usage via Redis (atomic) with DB fallback."""
+    from backend.app.core.redis_client import incr_tokens, is_available
+
+    if is_available():
+        await incr_tokens(user_id, tokens_used)
+        # Return the quota object (tokens_used may be stale in DB but
+        # Redis is the source of truth; the sync loop will persist it)
+        result = await db.execute(select(Quota).where(Quota.user_id == user_id))
+        return result.scalar_one_or_none()
+
+    # Fallback: direct DB update (original behavior)
     result = await db.execute(select(Quota).where(Quota.user_id == user_id))
     quota = result.scalar_one_or_none()
     if quota:
@@ -528,6 +538,10 @@ async def reset_quota_if_needed(db: AsyncSession, user_id: int) -> Optional[Quot
             quota.budget_period_start = datetime.now(timezone.utc)
             quota.tokens_used = 0
             await db.flush()
+            # Also reset Redis counter if available
+            from backend.app.core.redis_client import reset_tokens, is_available
+            if is_available():
+                await reset_tokens(user_id)
     return quota
 
 
