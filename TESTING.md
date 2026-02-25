@@ -15,6 +15,7 @@
 | `run smoke tests`     | `make test-smoke`  | API smoke test against live deployment               |
 | `run stress tests`    | `make test-stress` | Multi-user load/stress test                          |
 | `run matrix tests`  | `make test-matrix` | Structured output matrix tests (all API styles)    |
+| `run thinking tests` | `make test-thinking` | Structured output + thinking compliance (live stack) |
 | `run accessibility tests` | `make test-a11y` | WCAG 2.1 accessibility tests (subset of unit)      |
 | `run sidecar tests`   | `make test-sidecar`| GPU sidecar agent tests                              |
 | `run all tests`       | `make test-all`    | Unit + integration + E2E + smoke + sidecar tests     |
@@ -151,7 +152,23 @@ Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `cr
 
 ---
 
-## 6. Accessibility Tests
+## 6. Structured Output + Thinking Compliance Tests
+
+**Runner:** `python tests/test_structured_thinking.py`
+**Makefile:** `make test-thinking`
+**Requirements:** Live deployment, `MINDROUTER_API_KEY` env var set.
+
+Comprehensive matrix test covering structured output (JSON schema validation) and thinking/reasoning mode control across all 4 API surfaces, 6 models, and all reasoning modes (ON/OFF/low/medium/high/N/A). Runs 3 replicates per combination (144 total requests at 10 concurrency).
+
+| File | What it covers |
+|------|----------------|
+| `tests/test_structured_thinking.py` | 12 model×reasoning combos × 4 endpoints × 3 replicates: JSON schema validation, thinking detection, thinking mode match (ON/OFF/effort levels) across OpenAI, Ollama chat, Ollama generate, and Anthropic endpoints |
+
+**Models tested:** openai/gpt-oss-120b, gpt-oss-32k:120b, qwen/qwen3.5-400b, qwen3-32k:32b, qwen2.5-8k:7b, phi4:14b
+
+---
+
+## 7. Accessibility Tests
 
 **Runner:** `pytest backend/app/tests/unit/test_accessibility.py -v`
 **Makefile:** `make test-a11y`
@@ -161,7 +178,7 @@ Subset of unit tests, broken out for convenience. 96 tests validating WCAG 2.1 L
 
 ---
 
-## 7. GPU Sidecar Tests
+## 8. GPU Sidecar Tests
 
 **Runner:** `pytest sidecar/tests/ -v`
 **Makefile:** `make test-sidecar`
@@ -174,7 +191,7 @@ Subset of unit tests, broken out for convenience. 96 tests validating WCAG 2.1 L
 
 ---
 
-## 8. Security / Vulnerability Tests
+## 9. Security / Vulnerability Tests
 
 > **Status:** Not yet implemented.
 

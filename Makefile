@@ -1,4 +1,4 @@
-.PHONY: help dev test test-unit test-int test-e2e test-smoke test-stress test-matrix test-a11y test-sidecar test-all lint format migrate seed docker-up docker-down clean
+.PHONY: help dev test test-unit test-int test-e2e test-smoke test-stress test-matrix test-thinking test-a11y test-sidecar test-all lint format migrate seed docker-up docker-down clean
 
 # Default target
 help:
@@ -18,6 +18,7 @@ help:
 	@echo "  make test-smoke    - Run API smoke tests (live stack)"
 	@echo "  make test-stress   - Run stress/load test (120s, live stack)"
 	@echo "  make test-matrix   - Run structured output matrix tests (live stack)"
+	@echo "  make test-thinking - Run structured output + thinking compliance tests (live stack)"
 	@echo "  make test-a11y     - Run accessibility tests (WCAG 2.1)"
 	@echo "  make test-sidecar  - Run GPU sidecar tests"
 	@echo "  make test-all      - Run unit + integration + sidecar tests"
@@ -78,6 +79,10 @@ test-stress:
 test-matrix:
 	@echo "Running structured output matrix tests..."
 	MINDROUTER_API_KEY=$(API_KEY) MINDROUTER_BASE_URL=$(or $(BASE_URL),http://localhost:8000) pytest backend/app/tests/integration/test_structured_output_matrix.py -v --tb=short
+
+test-thinking:
+	@echo "Running structured output + thinking compliance tests..."
+	MINDROUTER_API_KEY=$(API_KEY) python tests/test_structured_thinking.py
 
 test-a11y:
 	pytest backend/app/tests/unit/test_accessibility.py -v
