@@ -316,7 +316,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
   "model": "openai/gpt-oss-120b",
   "messages": [{"role": "user", "content": "Solve this step by step"}],
   "reasoning_effort": "high",
-  "max_completion_tokens": 8192
+  "max_completion_tokens": 16384
 }
 
 // Qwen-style: toggle thinking on/off
@@ -324,11 +324,11 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
   "model": "qwen/qwen3.5-400b",
   "messages": [{"role": "user", "content": "Explain quantum computing"}],
   "chat_template_kwargs": {"enable_thinking": true},
-  "max_completion_tokens": 8192
+  "max_completion_tokens": 16384
 }</code></pre>
                 <p>When thinking is enabled, the response includes <code>reasoning_content</code> alongside <code>content</code>.</p>
                 <div class="alert alert-warning">
-                    <strong>Important:</strong> Thinking models can consume large numbers of output tokens for reasoning. Use <code>max_completion_tokens</code> (or <code>max_tokens</code>) to set an adequate budget &mdash; 4096&ndash;8192 is recommended for qwen3.5-400b with thinking enabled.
+                    <strong>Important:</strong> Thinking models can consume large numbers of output tokens for reasoning. Use <code>max_completion_tokens</code> (or <code>max_tokens</code>) to set an adequate budget &mdash; 16384 is recommended for qwen3.5-400b with thinking enabled.
                 </div>
 
                 <p><strong>Output Token Limits:</strong></p>

@@ -259,7 +259,7 @@ MindRouter supports multiple formats for controlling thinking/reasoning on model
   "model": "openai/gpt-oss-120b",
   "messages": [{"role": "user", "content": "Solve this step by step"}],
   "reasoning_effort": "high",
-  "max_completion_tokens": 8192
+  "max_completion_tokens": 16384
 }
 
 // Qwen-style: toggle thinking on/off
@@ -267,7 +267,7 @@ MindRouter supports multiple formats for controlling thinking/reasoning on model
   "model": "qwen/qwen3.5-400b",
   "messages": [{"role": "user", "content": "Explain quantum computing"}],
   "chat_template_kwargs": {"enable_thinking": true},
-  "max_completion_tokens": 8192
+  "max_completion_tokens": 16384
 }
 
 // Also accepted: thinking object (OpenAI/Anthropic style)
@@ -291,7 +291,7 @@ When thinking is enabled, the response includes a `reasoning_content` field alon
 }
 ```
 
-> **Important:** Thinking models can consume large numbers of output tokens for reasoning. Use `max_completion_tokens` (or `max_tokens`) to set an adequate budget -- 4096-8192 is recommended for qwen3.5-400b with thinking enabled. Without a limit, the model may use up to the full context window (131K tokens) on reasoning.
+> **Important:** Thinking models can consume large numbers of output tokens for reasoning. Use `max_completion_tokens` (or `max_tokens`) to set an adequate budget -- 16384 is recommended for qwen3.5-400b with thinking enabled. Without a limit, the model may use up to the full context window (131K tokens) on reasoning.
 
 **Output Token Limits:**
 
