@@ -107,46 +107,13 @@
         </div>
     </div>
 
-    <!-- Trend Charts -->
     <div class="row mb-4">
-        <div class="col-12">
-            <div class="card border-0 shadow-sm">
-                <div class="card-body">
-                    <div class="d-flex justify-content-center mb-3">
-                        <div class="btn-group btn-group-sm" role="group" aria-label="Time range">
-                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="hour">Hour</button>
-                            <button type="button" class="btn btn-outline-secondary trend-range-btn active" data-range="day">Day</button>
-                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="week">Week</button>
-                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="month">Month</button>
-                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="year">Year</button>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <h6 class="text-center text-muted mb-2"><i class="bi bi-bar-chart"></i> Tokens Served</h6>
-                            <div style="position:relative; height:220px;">
-                                <canvas id="tokenTrendChart"></canvas>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <h6 class="text-center text-muted mb-2"><i class="bi bi-people"></i> Active Users</h6>
-                            <div style="position:relative; height:220px;">
-                                <canvas id="userTrendChart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="row">
         <div class="col-md-8">
-            <div class="card">
+            <div class="card h-100">
                 <div class="card-header">
                     <i class="bi bi-cpu"></i> Available Models
                 </div>
-                <div class="card-body" id="models-grid">
+                <div class="card-body" id="models-grid" style="max-height:320px; overflow-y:auto;">
                     {% if models %}
                     <div class="row">
                         {% for model in models %}
@@ -200,6 +167,39 @@
                         <div>
                             <strong>Integrate into Your Code</strong>
                             <div class="small" style="opacity:0.85;">OpenAI-compatible API, drop-in replacement</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trend Charts -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <div class="d-flex justify-content-center mb-3">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Time range">
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="hour">Hour</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn active" data-range="day">Day</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="week">Week</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="month">Month</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="year">Year</button>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6 class="text-center text-muted mb-2"><i class="bi bi-bar-chart"></i> Tokens Served</h6>
+                            <div style="position:relative; height:220px;">
+                                <canvas id="tokenTrendChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <h6 class="text-center text-muted mb-2"><i class="bi bi-people"></i> Active Users</h6>
+                            <div style="position:relative; height:220px;">
+                                <canvas id="userTrendChart"></canvas>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1080,69 +1080,60 @@ response = client.chat.completions.create(
             }
         } catch (e) { /* retry next cycle */ }
     }
-    setInterval(refreshTotalTokens, 10000);
+    setInterval(refreshTotalTokens, 3000);
 
     // --- Trend charts ---
-    function makeTrendChart(canvasId, label, borderColor, bgColor) {
-        const ctx2 = document.getElementById(canvasId);
-        if (!ctx2) return null;
-        return new Chart(ctx2, {
-            type: 'line',
-            data: {
-                datasets: [{
-                    label: label,
-                    data: [],
-                    borderColor: borderColor,
-                    backgroundColor: bgColor,
-                    fill: true,
-                    tension: 0.3,
-                    pointRadius: 0,
-                    pointHoverRadius: 4,
-                    borderWidth: 2,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: { intersect: false, mode: 'index' },
-                scales: {
-                    x: {
-                        type: 'time',
-                        time: { tooltipFormat: 'MMM d, HH:mm' },
-                        grid: { display: false },
-                        ticks: { maxTicksLimit: 8, font: { size: 11 } },
-                    },
-                    y: {
-                        beginAtZero: true,
-                        grid: { color: 'rgba(0,0,0,0.05)' },
-                        ticks: { font: { size: 11 } },
-                    }
-                },
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        callbacks: {
-                            label: function(ctx3) { return label + ': ' + Number(ctx3.parsed.y).toLocaleString(); }
-                        }
-                    }
-                }
-            }
-        });
-    }
+    var timeUnits = { hour: 'minute', day: 'hour', week: 'day', month: 'day', year: 'month' };
+    var timeTooltipFmt = { hour: 'HH:mm', day: 'MMM d, HH:mm', week: 'MMM d', month: 'MMM d', year: 'MMM yyyy' };
 
-    const tokenChart = makeTrendChart('tokenTrendChart', 'Tokens', 'rgba(100, 255, 218, 1)', 'rgba(100, 255, 218, 0.15)');
-    const userChart  = makeTrendChart('userTrendChart',  'Users',  'rgba(130, 170, 255, 1)', 'rgba(130, 170, 255, 0.15)');
+    // Tokens: line/area chart
+    var tokenCtx = document.getElementById('tokenTrendChart');
+    var tokenChart = tokenCtx ? new Chart(tokenCtx, {
+        type: 'line',
+        data: { datasets: [{ label: 'Tokens', data: [], borderColor: 'rgba(100,255,218,1)', backgroundColor: 'rgba(100,255,218,0.15)', fill: true, tension: 0.3, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            scales: {
+                x: { type: 'time', time: { unit: 'hour', tooltipFormat: 'MMM d, HH:mm' }, grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 11 } } },
+                y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { font: { size: 11 } } }
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return 'Tokens: ' + Number(c.parsed.y).toLocaleString(); } } } }
+        }
+    }) : null;
+
+    // Users: bar chart
+    var userCtx = document.getElementById('userTrendChart');
+    var userChart = userCtx ? new Chart(userCtx, {
+        type: 'bar',
+        data: { datasets: [{ label: 'Users', data: [], backgroundColor: 'rgba(130,170,255,0.6)', borderColor: 'rgba(130,170,255,1)', borderWidth: 1, borderRadius: 2 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            scales: {
+                x: { type: 'time', time: { unit: 'hour', tooltipFormat: 'MMM d, HH:mm' }, grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 11 } } },
+                y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { stepSize: 1, font: { size: 11 } } }
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return 'Users: ' + Number(c.parsed.y).toLocaleString(); } } } }
+        }
+    }) : null;
 
     async function loadTrends(range) {
         try {
-            const resp = await fetch('/api/cluster/trends?range=' + encodeURIComponent(range));
+            var resp = await fetch('/api/cluster/trends?range=' + encodeURIComponent(range));
             if (!resp.ok) return;
-            const data = await resp.json();
+            var data = await resp.json();
+            var unit = timeUnits[range] || 'hour';
+            var ttFmt = timeTooltipFmt[range] || 'MMM d, HH:mm';
             if (tokenChart) {
+                tokenChart.options.scales.x.time.unit = unit;
+                tokenChart.options.scales.x.time.tooltipFormat = ttFmt;
                 tokenChart.data.datasets[0].data = data.tokens.map(function(d) { return { x: d.t, y: d.v }; });
                 tokenChart.update('none');
             }
             if (userChart) {
+                userChart.options.scales.x.time.unit = unit;
+                userChart.options.scales.x.time.tooltipFormat = ttFmt;
                 userChart.data.datasets[0].data = data.users.map(function(d) { return { x: d.t, y: d.v }; });
                 userChart.update('none');
             }
@@ -1150,7 +1141,7 @@ response = client.chat.completions.create(
     }
 
     // Range pill buttons
-    let currentRange = 'day';
+    var currentRange = 'day';
     document.querySelectorAll('.trend-range-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
             document.querySelectorAll('.trend-range-btn').forEach(function(b) { b.classList.remove('active'); });
