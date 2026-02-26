@@ -833,6 +833,10 @@ class BackendRegistry:
             sidecar_count=len(self._sidecar_clients),
         )
 
+    def get_sidecar_client(self, node_id: int) -> Optional[SidecarClient]:
+        """Get the sidecar client for a given node, if one exists."""
+        return self._sidecar_clients.get(node_id)
+
     async def _poll_loop(self) -> None:
         """Background polling loop with adaptive intervals for troubled backends."""
         # Fast startup polls — run 2 immediate full polls so backends/nodes

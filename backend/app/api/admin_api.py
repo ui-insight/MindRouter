@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.auth import require_admin
+from backend.app.api.auth import require_admin, require_admin_or_session
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
@@ -288,7 +288,7 @@ async def enable_backend(
 @router.post("/backends/{backend_id}/refresh")
 async def refresh_backend(
     backend_id: int,
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Force refresh capabilities for a backend."""
@@ -309,6 +309,120 @@ async def refresh_backend(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to refresh backend",
         )
+
+
+# Ollama Model Management (pull/delete via sidecar)
+class OllamaPullRequest(BaseModel):
+    """Request to pull a model to an Ollama backend."""
+    model: str = Field(..., min_length=1)
+
+
+class OllamaDeleteRequest(BaseModel):
+    """Request to delete a model from an Ollama backend."""
+    model: str = Field(..., min_length=1)
+
+
+@router.post("/backends/{backend_id}/ollama/pull")
+async def ollama_pull(
+    backend_id: int,
+    request: OllamaPullRequest,
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Start pulling a model to an Ollama backend via its node's sidecar."""
+    backend = await crud.get_backend_by_id(db, backend_id)
+    if not backend:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backend not found")
+    if backend.engine != BackendEngine.OLLAMA:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend is not an Ollama engine")
+    if not backend.node_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no associated node")
+
+    registry = get_registry()
+    sidecar = registry.get_sidecar_client(backend.node_id)
+    if not sidecar:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No sidecar configured for this node")
+
+    result = await sidecar.ollama_pull(backend.url, request.model)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sidecar unreachable")
+
+    logger.info(
+        "ollama_pull_started",
+        admin_id=admin.id,
+        backend_id=backend_id,
+        model=request.model,
+        job_id=result.get("job_id"),
+    )
+
+    return result
+
+
+@router.get("/backends/{backend_id}/ollama/pull/{job_id}")
+async def ollama_pull_status(
+    backend_id: int,
+    job_id: str,
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Poll progress of an Ollama model pull."""
+    backend = await crud.get_backend_by_id(db, backend_id)
+    if not backend:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backend not found")
+    if not backend.node_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no associated node")
+
+    registry = get_registry()
+    sidecar = registry.get_sidecar_client(backend.node_id)
+    if not sidecar:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No sidecar configured for this node")
+
+    result = await sidecar.ollama_pull_status(job_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sidecar unreachable")
+
+    return result
+
+
+@router.post("/backends/{backend_id}/ollama/delete")
+async def ollama_delete(
+    backend_id: int,
+    request: OllamaDeleteRequest,
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Delete a model from an Ollama backend via its node's sidecar."""
+    backend = await crud.get_backend_by_id(db, backend_id)
+    if not backend:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backend not found")
+    if backend.engine != BackendEngine.OLLAMA:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend is not an Ollama engine")
+    if not backend.node_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no associated node")
+
+    registry = get_registry()
+    sidecar = registry.get_sidecar_client(backend.node_id)
+    if not sidecar:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No sidecar configured for this node")
+
+    result = await sidecar.ollama_delete(backend.url, request.model)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sidecar unreachable")
+
+    if "error" in result and result.get("status_code"):
+        raise HTTPException(status_code=result["status_code"], detail=result["error"])
+
+    # Refresh backend model list after successful delete
+    await registry.refresh_backend(backend_id)
+
+    logger.info(
+        "ollama_model_deleted",
+        admin_id=admin.id,
+        backend_id=backend_id,
+        model=request.model,
+    )
+
+    return result
 
 
 @router.get("/backends", response_model=List[BackendResponse])

@@ -795,12 +795,29 @@ async def admin_models(
 
     grouped_models = await crud.get_models_grouped_by_name(db)
 
+    # Get Ollama backends for pull/delete UI
+    all_backends = await crud.get_all_backends(db)
+    ollama_backends = [
+        {
+            "id": b.id,
+            "name": b.name,
+            "url": b.url,
+            "node_id": b.node_id,
+            "node_name": b.node.name if b.node else None,
+            "has_sidecar": bool(b.node and b.node.sidecar_url),
+            "status": b.status.value,
+        }
+        for b in all_backends
+        if b.engine == BackendEngine.OLLAMA
+    ]
+
     return templates.TemplateResponse(
         "admin/models.html",
         {
             "request": request,
             "user": user,
             "grouped_models": grouped_models,
+            "ollama_backends": ollama_backends,
             "success": success,
             "error": error,
         },

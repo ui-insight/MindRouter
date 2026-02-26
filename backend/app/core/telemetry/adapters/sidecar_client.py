@@ -99,6 +99,62 @@ class SidecarClient:
         except Exception:
             return False
 
+    async def ollama_pull(self, ollama_url: str, model: str) -> Optional[dict]:
+        """Start a model pull on the sidecar's Ollama instance."""
+        try:
+            client = await self._get_client()
+            response = await client.post(
+                "/ollama/pull",
+                json={"ollama_url": ollama_url, "model": model},
+            )
+            if response.status_code != 200:
+                logger.warning("sidecar_ollama_pull_failed", status=response.status_code, body=response.text[:200])
+                return None
+            return response.json()
+        except httpx.TimeoutException:
+            logger.warning("sidecar_ollama_pull_timeout", url=self.base_url)
+            return None
+        except Exception as e:
+            logger.warning("sidecar_ollama_pull_error", url=self.base_url, error=str(e))
+            return None
+
+    async def ollama_pull_status(self, job_id: str) -> Optional[dict]:
+        """Poll pull progress from the sidecar."""
+        try:
+            client = await self._get_client()
+            response = await client.get(f"/ollama/pull/{job_id}")
+            if response.status_code == 404:
+                return {"error": "Pull job not found", "status": "error"}
+            if response.status_code != 200:
+                logger.warning("sidecar_pull_status_failed", status=response.status_code)
+                return None
+            return response.json()
+        except httpx.TimeoutException:
+            logger.warning("sidecar_pull_status_timeout", url=self.base_url)
+            return None
+        except Exception as e:
+            logger.warning("sidecar_pull_status_error", url=self.base_url, error=str(e))
+            return None
+
+    async def ollama_delete(self, ollama_url: str, model: str) -> Optional[dict]:
+        """Delete a model from an Ollama instance via the sidecar."""
+        try:
+            client = await self._get_client()
+            response = await client.post(
+                "/ollama/delete",
+                json={"ollama_url": ollama_url, "model": model},
+            )
+            if response.status_code != 200:
+                logger.warning("sidecar_ollama_delete_failed", status=response.status_code, body=response.text[:200])
+                return {"error": response.text[:500], "status_code": response.status_code}
+            return response.json()
+        except httpx.TimeoutException:
+            logger.warning("sidecar_ollama_delete_timeout", url=self.base_url)
+            return None
+        except Exception as e:
+            logger.warning("sidecar_ollama_delete_error", url=self.base_url, error=str(e))
+            return None
+
     def _parse_response(self, data: dict) -> SidecarResponse:
         """Parse raw sidecar response into SidecarResponse dataclass."""
         gpus = []

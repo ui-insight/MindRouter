@@ -29,6 +29,61 @@
             </div>
             {% endif %}
 
+            <!-- Ollama Model Pull Card -->
+            {% if ollama_backends %}
+            <div class="card mb-4">
+                <div class="card-header d-flex align-items-center justify-content-between" style="cursor:pointer"
+                     data-bs-toggle="collapse" data-bs-target="#pullModelCard">
+                    <span><i class="bi bi-cloud-download"></i> Pull Model to Ollama Backends</span>
+                    <i class="bi bi-chevron-down"></i>
+                </div>
+                <div class="collapse" id="pullModelCard">
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-5">
+                                <label class="form-label">Model Name</label>
+                                <input type="text" class="form-control" id="pullModelName"
+                                       placeholder="e.g. qwen2.5:72b, llama3.3:70b">
+                            </div>
+                            <div class="col-md-5">
+                                <label class="form-label">Target Backends</label>
+                                <div class="border rounded p-2" style="max-height:150px; overflow-y:auto;">
+                                    {% for b in ollama_backends %}
+                                    {% if b.has_sidecar %}
+                                    <div class="form-check">
+                                        <input class="form-check-input pull-target-cb" type="checkbox"
+                                               value="{{ b.id }}" id="pullTarget{{ b.id }}">
+                                        <label class="form-check-label" for="pullTarget{{ b.id }}">
+                                            {{ b.name }}
+                                            <small class="text-muted">({{ b.node_name or 'no node' }})</small>
+                                            {% if b.status != 'healthy' %}
+                                            <span class="badge bg-warning text-dark">{{ b.status }}</span>
+                                            {% endif %}
+                                        </label>
+                                    </div>
+                                    {% else %}
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" disabled>
+                                        <label class="form-check-label text-muted">
+                                            {{ b.name }} <small>(no sidecar)</small>
+                                        </label>
+                                    </div>
+                                    {% endif %}
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div class="col-md-2 d-flex align-items-end">
+                                <button class="btn btn-primary w-100" id="pullModelBtn" onclick="startPull()">
+                                    <i class="bi bi-download"></i> Pull
+                                </button>
+                            </div>
+                        </div>
+                        <div id="pullProgressArea" class="mt-3"></div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             <p class="text-muted mb-3">{{ grouped_models|length }} unique model{{ 's' if grouped_models|length != 1 }} across all backends</p>
 
             {% if grouped_models %}
@@ -245,6 +300,7 @@
                                                     <th>URL</th>
                                                     <th>Status</th>
                                                     <th>Loaded</th>
+                                                    <th></th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -271,6 +327,14 @@
                                                         <span class="badge bg-success">Yes</span>
                                                         {% else %}
                                                         <span class="badge bg-secondary">No</span>
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>
+                                                        {% if m.backend and m.backend.engine.value == 'ollama' and m.backend.node and m.backend.node.sidecar_url %}
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete model from this backend"
+                                                                onclick="event.stopPropagation(); deleteModel({{ m.backend.id }}, '{{ model_name|e }}')">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
                                                         {% endif %}
                                                     </td>
                                                 </tr>
@@ -424,7 +488,6 @@ document.addEventListener('DOMContentLoaded', function() {
             var idx = this.dataset.modelIdx;
             var detail = document.getElementById('detail-' + idx);
             if (detail.classList.contains('d-none')) {
-                // Close all other open details
                 document.querySelectorAll('.detail-row').forEach(function(r) {
                     r.classList.add('d-none');
                 });
@@ -440,5 +503,142 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 });
+
+// --- Ollama Pull / Delete ---
+
+var _activePolls = {};
+
+function startPull() {
+    var modelName = document.getElementById('pullModelName').value.trim();
+    if (!modelName) { alert('Enter a model name'); return; }
+
+    var checked = document.querySelectorAll('.pull-target-cb:checked');
+    if (checked.length === 0) { alert('Select at least one target backend'); return; }
+
+    document.getElementById('pullModelBtn').disabled = true;
+    var area = document.getElementById('pullProgressArea');
+
+    checked.forEach(function(cb) {
+        var backendId = cb.value;
+        var label = cb.closest('.form-check').querySelector('label').textContent.trim();
+        var cardId = 'pull-' + backendId + '-' + Date.now();
+
+        area.insertAdjacentHTML('beforeend',
+            '<div id="' + cardId + '" class="border rounded p-2 mb-2">' +
+            '<div class="d-flex justify-content-between align-items-center mb-1">' +
+            '<strong>' + label + '</strong>' +
+            '<span class="badge bg-info pull-status">starting...</span>' +
+            '</div>' +
+            '<div class="progress" style="height:20px;">' +
+            '<div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
+            '</div>' +
+            '<small class="text-muted pull-detail"></small>' +
+            '</div>'
+        );
+
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model: modelName})
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.job_id) {
+                pollPullProgress(backendId, data.job_id, cardId);
+            } else {
+                var el = document.getElementById(cardId);
+                el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+                el.querySelector('.pull-status').textContent = 'error';
+                el.querySelector('.pull-detail').textContent = data.detail || 'Unknown error';
+            }
+        })
+        .catch(function(err) {
+            var el = document.getElementById(cardId);
+            el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+            el.querySelector('.pull-status').textContent = 'error';
+            el.querySelector('.pull-detail').textContent = err.toString();
+        });
+    });
+}
+
+function pollPullProgress(backendId, jobId, cardId) {
+    var interval = setInterval(function() {
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull/' + jobId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var el = document.getElementById(cardId);
+            if (!el) { clearInterval(interval); return; }
+
+            var statusBadge = el.querySelector('.pull-status');
+            var bar = el.querySelector('.progress-bar');
+            var detail = el.querySelector('.pull-detail');
+
+            if (data.progress && data.progress.total && data.progress.completed) {
+                var pct = Math.round((data.progress.completed / data.progress.total) * 100);
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+            }
+            if (data.progress && data.progress.status) {
+                detail.textContent = data.progress.status;
+            }
+
+            if (data.status === 'success') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-success pull-status';
+                statusBadge.textContent = 'complete';
+                bar.style.width = '100%';
+                bar.textContent = '100%';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-success');
+                // Refresh backend discovery
+                fetch('/api/admin/backends/' + backendId + '/refresh', {method: 'POST'})
+                .then(function() { checkAllPullsDone(); });
+            } else if (data.status === 'error') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-danger pull-status';
+                statusBadge.textContent = 'error';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-danger');
+                detail.textContent = data.error || 'Unknown error';
+                checkAllPullsDone();
+            }
+        })
+        .catch(function() { /* ignore transient fetch errors */ });
+    }, 2000);
+
+    _activePolls[cardId] = interval;
+}
+
+function checkAllPullsDone() {
+    var anyActive = document.querySelectorAll('.pull-status');
+    var allDone = true;
+    anyActive.forEach(function(badge) {
+        var txt = badge.textContent;
+        if (txt !== 'complete' && txt !== 'error') allDone = false;
+    });
+    if (allDone) {
+        document.getElementById('pullModelBtn').disabled = false;
+    }
+}
+
+function deleteModel(backendId, modelName) {
+    if (!confirm('Delete "' + modelName + '" from backend #' + backendId + '?\n\nThis cannot be undone.')) return;
+
+    fetch('/api/admin/backends/' + backendId + '/ollama/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model: modelName})
+    })
+    .then(function(r) {
+        if (r.ok) return r.json();
+        return r.json().then(function(d) { throw new Error(d.detail || 'Delete failed'); });
+    })
+    .then(function() {
+        location.reload();
+    })
+    .catch(function(err) {
+        alert('Delete failed: ' + err.message);
+    });
+}
 </script>
 {% endblock %}

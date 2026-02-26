@@ -18,16 +18,20 @@
 
 """GPU metrics sidecar agent using NVIDIA Management Library (pynvml)."""
 
+import asyncio
 import os
 import secrets
 import socket
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 
 def _read_sidecar_version() -> str:
@@ -265,6 +269,124 @@ async def gpu_info(_: None = Depends(verify_sidecar_key)):
         "gpus": gpus,
         "sidecar_version": SIDECAR_VERSION,
     }
+
+
+# ---------------------------------------------------------------------------
+# Ollama model management endpoints
+# ---------------------------------------------------------------------------
+
+_pull_jobs: Dict[str, dict] = {}
+
+
+class OllamaPullRequest(BaseModel):
+    ollama_url: str
+    model: str
+
+
+class OllamaDeleteRequest(BaseModel):
+    ollama_url: str
+    model: str
+
+
+async def _run_pull(job_id: str, ollama_url: str, model: str) -> None:
+    """Background task: stream an Ollama pull and update job progress."""
+    job = _pull_jobs[job_id]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None)) as client:
+            async with client.stream(
+                "POST",
+                f"{ollama_url.rstrip('/')}/api/pull",
+                json={"name": model, "stream": True},
+            ) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    job["status"] = "error"
+                    job["error"] = f"Ollama returned {response.status_code}: {body.decode(errors='replace')[:500]}"
+                    job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        import json
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+
+                    status_str = data.get("status", "")
+                    job["progress"]["status"] = status_str
+
+                    if "digest" in data:
+                        job["progress"]["digest"] = data["digest"]
+                    if "total" in data:
+                        job["progress"]["total"] = data["total"]
+                    if "completed" in data:
+                        job["progress"]["completed"] = data["completed"]
+
+                    if data.get("error"):
+                        job["status"] = "error"
+                        job["error"] = data["error"]
+                        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                        return
+
+        job["status"] = "success"
+        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+
+@app.post("/ollama/pull")
+async def ollama_pull(req: OllamaPullRequest, _: None = Depends(verify_sidecar_key)):
+    """Start a background model pull from the Ollama library."""
+    job_id = str(uuid.uuid4())
+    _pull_jobs[job_id] = {
+        "job_id": job_id,
+        "model": req.model,
+        "ollama_url": req.ollama_url,
+        "status": "pulling",
+        "progress": {"status": "", "digest": None, "total": None, "completed": None},
+        "error": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": None,
+    }
+    asyncio.create_task(_run_pull(job_id, req.ollama_url, req.model))
+    return {"job_id": job_id, "status": "pulling"}
+
+
+@app.get("/ollama/pull/{job_id}")
+async def ollama_pull_status(job_id: str, _: None = Depends(verify_sidecar_key)):
+    """Poll progress of a model pull job."""
+    job = _pull_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Pull job not found")
+    return job
+
+
+@app.post("/ollama/delete")
+async def ollama_delete(req: OllamaDeleteRequest, _: None = Depends(verify_sidecar_key)):
+    """Delete a model from an Ollama instance."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                "DELETE",
+                f"{req.ollama_url.rstrip('/')}/api/delete",
+                json={"name": req.model},
+            )
+        if response.status_code == 200:
+            return {"status": "deleted", "model": req.model}
+        elif response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Model '{req.model}' not found on Ollama instance")
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Ollama returned {response.status_code}: {response.text[:500]}",
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to reach Ollama: {e}")
 
 
 if __name__ == "__main__":
