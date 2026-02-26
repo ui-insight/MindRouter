@@ -647,82 +647,45 @@ class InferenceService:
 
             last_reason = decision.reason
 
-            # Debug: log routing failure details
-            logger.warning(
-                "routing_failure_debug",
-                request_id=job.request_id,
-                model=job.model,
-                reason=last_reason,
-                has_score=decision.score is not None,
-                has_all_scores=decision.all_scores is not None,
-                num_all_scores=len(decision.all_scores) if decision.all_scores else 0,
-                all_failed_constraints=[
-                    s.failed_constraints for s in (decision.all_scores or [])
-                ],
-                requires_multimodal=job.requires_multimodal,
-                modality=str(job.modality),
-            )
-
-            # Classify failure as permanent (fail immediately) or transient (wait for capacity)
-            PERMANENT_CONSTRAINTS = {
-                "modality_not_supported",
-                "model_not_available",
-                "structured_output_not_supported",
-                "memory_insufficient",
-            }
-
+            # Determine if this is a transient capacity issue (worth retrying)
+            # or a permanent failure (fail immediately).
+            # ONLY an explicit no_capacity constraint — where a backend could
+            # serve the request once a slot opens — is transient.  Everything
+            # else (missing model, wrong modality, no backends at all) is
+            # permanent and must not enter the wait loop.
             capacity_issue = False
             if decision.all_scores:
-                # Collect all failed constraints across backends
-                all_failed = set()
-                has_capacity_only_backend = False
                 for s in decision.all_scores:
-                    if s.failed_constraints:
-                        all_failed.update(s.failed_constraints)
-                        # A backend that only failed on capacity could serve the request once freed
-                        if s.failed_constraints == ["no_capacity"]:
-                            has_capacity_only_backend = True
-
-                # Transient only if some backend is just waiting for capacity
-                capacity_issue = has_capacity_only_backend
-
-                # If ALL failures are permanent (no capacity issue at all), fail immediately
-                if not capacity_issue and all_failed:
-                    if waiter_registered:
-                        self._scheduler.unregister_waiter(job)
-                    await self._scheduler.cancel_job(job.request_id)
-
-                    # Return user-friendly error messages for common permanent failures
-                    if all_failed == {"modality_not_supported"} or (
-                        "modality_not_supported" in all_failed
-                        and all_failed <= PERMANENT_CONSTRAINTS
-                    ):
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Model '{job.model}' does not support multimodal/image input",
-                        )
-                    elif "structured_output_not_supported" in all_failed and all_failed <= PERMANENT_CONSTRAINTS:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Model '{job.model}' does not support structured output",
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail=f"No suitable backend: {last_reason}",
-                        )
-            else:
-                # No score info — fall back to substring heuristic
-                capacity_issue = "No backends available" in last_reason
+                    if s.failed_constraints == ["no_capacity"]:
+                        capacity_issue = True
+                        break
 
             if not capacity_issue:
                 if waiter_registered:
                     self._scheduler.unregister_waiter(job)
                 await self._scheduler.cancel_job(job.request_id)
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"No suitable backend: {last_reason}",
-                )
+
+                # Collect failed constraints for a user-friendly error message
+                all_failed = set()
+                for s in (decision.all_scores or []):
+                    if s.failed_constraints:
+                        all_failed.update(s.failed_constraints)
+
+                if "modality_not_supported" in all_failed:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Model '{job.model}' does not support multimodal/image input",
+                    )
+                elif "structured_output_not_supported" in all_failed:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Model '{job.model}' does not support structured output",
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"No suitable backend: {last_reason}",
+                    )
 
             # Register as waiter on first capacity failure
             if not waiter_registered:
