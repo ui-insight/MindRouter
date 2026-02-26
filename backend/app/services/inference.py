@@ -647,6 +647,22 @@ class InferenceService:
 
             last_reason = decision.reason
 
+            # Debug: log routing failure details
+            logger.warning(
+                "routing_failure_debug",
+                request_id=job.request_id,
+                model=job.model,
+                reason=last_reason,
+                has_score=decision.score is not None,
+                has_all_scores=decision.all_scores is not None,
+                num_all_scores=len(decision.all_scores) if decision.all_scores else 0,
+                all_failed_constraints=[
+                    s.failed_constraints for s in (decision.all_scores or [])
+                ],
+                requires_multimodal=job.requires_multimodal,
+                modality=str(job.modality),
+            )
+
             # Classify failure as permanent (fail immediately) or transient (wait for capacity)
             PERMANENT_CONSTRAINTS = {
                 "modality_not_supported",
