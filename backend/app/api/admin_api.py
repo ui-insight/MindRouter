@@ -44,7 +44,28 @@ router = APIRouter()
 _pull_jobs: Dict[str, dict] = {}
 
 
-async def _run_ollama_pull(job_id: str, ollama_url: str, model: str) -> None:
+async def _refresh_node_ollama_backends(node_id: Optional[int]) -> None:
+    """Refresh all Ollama backends on a node (shared models folder)."""
+    if node_id is None:
+        return
+    registry = get_registry()
+    from backend.app.db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        from backend.app.db.models import Backend as BackendModel
+        from sqlalchemy import select
+        result = await db.execute(
+            select(BackendModel.id).where(
+                BackendModel.node_id == node_id,
+                BackendModel.engine == BackendEngine.OLLAMA,
+            )
+        )
+        backend_ids = [row[0] for row in result.all()]
+    for bid in backend_ids:
+        await registry.refresh_backend(bid)
+    logger.info("refreshed_node_backends", node_id=node_id, backend_ids=backend_ids)
+
+
+async def _run_ollama_pull(job_id: str, ollama_url: str, model: str, node_id: Optional[int] = None) -> None:
     """Stream an Ollama pull and update job progress in-memory."""
     job = _pull_jobs[job_id]
     try:
@@ -79,12 +100,14 @@ async def _run_ollama_pull(job_id: str, ollama_url: str, model: str) -> None:
                     if data.get("status") == "success":
                         job["status"] = "success"
                         job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                        await _refresh_node_ollama_backends(node_id)
                         return
 
         # Stream ended without explicit success — treat as success if no error
         if job["status"] == "pulling":
             job["status"] = "success"
             job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            await _refresh_node_ollama_backends(node_id)
 
     except Exception as exc:
         job["status"] = "error"
@@ -407,7 +430,7 @@ async def ollama_pull(
         "completed_at": None,
     }
 
-    asyncio.create_task(_run_ollama_pull(job_id, backend.url, request.model))
+    asyncio.create_task(_run_ollama_pull(job_id, backend.url, request.model, backend.node_id))
 
     logger.info(
         "ollama_pull_started",
@@ -469,9 +492,8 @@ async def ollama_delete(
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=f"Ollama delete failed: {resp.text}")
 
-    # Refresh backend model list after successful delete
-    registry = get_registry()
-    await registry.refresh_backend(backend_id)
+    # Refresh all Ollama backends on this node (they share a models folder)
+    await _refresh_node_ollama_backends(backend.node_id)
 
     logger.info(
         "ollama_model_deleted",
