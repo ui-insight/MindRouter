@@ -60,10 +60,10 @@
         </div>
     </div>
 
-    <!-- Token Flow Animation -->
+    <!-- Token Flow Animation + Total Tokens Counter (seamless) -->
     <div class="row mb-4">
         <div class="col-12">
-            <div class="card" style="overflow:hidden; background:#0a0e1a;">
+            <div class="card" style="overflow:hidden; background:#0a0e1a; border-bottom:none;">
                 <div class="card-header" style="background:#0d1225; border-bottom:1px solid #1a2040; color:#8892b0;">
                     <i class="bi bi-activity"></i> Token Flow &mdash; Live Cluster Throughput
                 </div>
@@ -89,17 +89,10 @@
                         Waiting for inference requests...
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Total Tokens Counter -->
-    <div class="row mb-4">
-        <div class="col-12 text-center">
-            <div class="card border-0 shadow-sm" style="background: linear-gradient(135deg, #0a0e1a 0%, #121829 100%);">
-                <div class="card-body py-4">
-                    <div style="font-size: 0.75rem; text-transform: uppercase; letter-spacing: 2px; color: #5a6380; margin-bottom: 0.5rem;">Total Tokens Served</div>
-                    <div id="total-tokens-counter" style="font-size: 2.5rem; font-weight: 700; color: #64ffda; font-family: 'JetBrains Mono', monospace;">
+                <!-- Total tokens: seamless continuation of the dark canvas -->
+                <div class="text-center" style="background:#0a0e1a; padding:10px 0 14px;">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 2.5px; color: #3a4060;">Total Tokens Served</div>
+                    <div id="total-tokens-counter" style="font-size: 2.2rem; font-weight: 600; color: rgba(100,255,218,0.55); font-family: 'JetBrains Mono', monospace; line-height: 1.1;">
                         {{ "{:,}".format(total_tokens) }}
                     </div>
                 </div>
@@ -1080,7 +1073,7 @@ response = client.chat.completions.create(
             }
         } catch (e) { /* retry next cycle */ }
     }
-    setInterval(refreshTotalTokens, 3000);
+    setInterval(refreshTotalTokens, 2000);
 
     // --- Trend charts ---
     var timeUnits = { hour: 'minute', day: 'hour', week: 'day', month: 'day', year: 'month' };
