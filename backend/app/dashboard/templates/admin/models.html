@@ -74,7 +74,7 @@
                             <td class="text-end">
                                 {% if first.context_length %}{{ '{:,}'.format(first.context_length) }}{% else %}&mdash;{% endif %}
                             </td>
-                            <td>{{ first.quantization or '&mdash;' }}</td>
+                            <td>{% if first.quantization %}{{ first.quantization }}{% else %}&mdash;{% endif %}</td>
                             <td class="text-center">
                                 {% if first.supports_multimodal %}
                                 <i class="bi bi-check-circle-fill text-success"></i>
