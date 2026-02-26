@@ -137,7 +137,10 @@ class TestOllamaToVLLMRoundTrip:
         assert canonical.response_format.type == ResponseFormatType.JSON_OBJECT
 
         vllm_payload = VLLMOutTranslator.translate_chat_request(canonical)
-        assert vllm_payload["response_format"] == {"type": "json_object"}
+        assert vllm_payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "json_response", "schema": {"type": "object"}},
+        }
 
     def test_json_schema_format_to_response_format(self, simple_json_schema):
         """Ollama format:{schema} -> Canonical JSON_SCHEMA -> vLLM response_format."""

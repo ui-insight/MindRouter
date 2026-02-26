@@ -28,7 +28,7 @@
                     <h2 class="card-subtitle mb-2 text-muted h6">Quota Token Usage</h2>
                     {% if quota %}
                     {% if group_budget == 0 %}
-                    <p class="card-title h3 mb-1"><span id="token-usage-top">{{ "{:,}".format(tokens_used_display) }}</span> / Unlimited</p>
+                    <p class="card-title h3 mb-1"><span id="token-usage-top-unlimited">{{ "{:,}".format(tokens_used_display) }}</span> / Unlimited</p>
                     {% else %}
                     <p class="card-title h3 mb-1"><span id="token-usage-top">{{ "{:,}".format(tokens_used_display) }}</span> / {{ "{:,}".format(group_budget) }}</p>
                     <div class="progress" style="height: 6px;">
@@ -242,7 +242,7 @@
 {% if quota %}
 <script>
 (function() {
-    const topEl = document.getElementById('token-usage-top');
+    const topEl = document.getElementById('token-usage-top') || document.getElementById('token-usage-top-unlimited');
     const detailEl = document.getElementById('token-usage-detail');
     const barEl = document.getElementById('token-progress-bar');
     const lifetimeEl = document.getElementById('lifetime-tokens');

@@ -170,12 +170,15 @@ class TestVLLMStructuredOutputTranslation:
         assert result.response_format.type == ResponseFormatType.TEXT
 
     def test_outbound_json_object(self):
-        """Canonical JSON_OBJECT -> vLLM {"type":"json_object"}."""
+        """Canonical JSON_OBJECT -> vLLM promoted to json_schema (vLLM nightly compat)."""
         canonical = _make_canonical(
             ResponseFormat(type=ResponseFormatType.JSON_OBJECT)
         )
         payload = VLLMOutTranslator.translate_chat_request(canonical)
-        assert payload["response_format"] == {"type": "json_object"}
+        assert payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "json_response", "schema": {"type": "object"}},
+        }
 
     def test_outbound_json_schema(self, simple_json_schema):
         """Canonical JSON_SCHEMA -> vLLM {"type":"json_schema","json_schema":{...}}."""
@@ -208,7 +211,7 @@ class TestStructuredOutputCrossEngine:
     """Cross-engine structured output preservation."""
 
     def test_ollama_json_to_vllm_json(self):
-        """Ollama format:"json" -> Canonical -> vLLM {"type":"json_object"}."""
+        """Ollama format:"json" -> Canonical -> vLLM promoted to json_schema."""
         data = {
             "model": "llama3.2",
             "messages": [{"role": "user", "content": "test"}],
@@ -216,7 +219,10 @@ class TestStructuredOutputCrossEngine:
         }
         canonical = OllamaInTranslator.translate_chat_request(data)
         vllm_payload = VLLMOutTranslator.translate_chat_request(canonical)
-        assert vllm_payload["response_format"] == {"type": "json_object"}
+        assert vllm_payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "json_response", "schema": {"type": "object"}},
+        }
 
     def test_ollama_schema_to_vllm_schema(self, simple_json_schema):
         """Ollama format:{schema} -> Canonical -> vLLM json_schema."""

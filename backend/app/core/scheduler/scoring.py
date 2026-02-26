@@ -268,6 +268,7 @@ class BackendScorer:
         latency_emas = latency_emas or {}
 
         eligible_scores = []
+        ineligible_scores = []
 
         for backend in backends:
             models = backend_models.get(backend.id, [])
@@ -295,6 +296,7 @@ class BackendScorer:
                     score.failed_constraints.append("no_capacity")
                 if not constraints.memory_fit:
                     score.failed_constraints.append("memory_insufficient")
+                ineligible_scores.append(score)
                 continue
 
             # Compute soft score
@@ -317,6 +319,11 @@ class BackendScorer:
             ]
 
             eligible_scores.append(score)
+
+        # If no eligible backends, return ineligible scores so the caller
+        # can distinguish permanent constraint failures from empty backend lists.
+        if not eligible_scores and ineligible_scores:
+            return ineligible_scores
 
         # Sort by total score descending
         eligible_scores.sort(key=lambda s: s.total_score, reverse=True)

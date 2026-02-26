@@ -647,14 +647,56 @@ class InferenceService:
 
             last_reason = decision.reason
 
-            # If failure is NOT a capacity issue, don't retry
-            if decision.score and decision.all_scores:
-                capacity_issue = any(
-                    "no_capacity" in s.failed_constraints
-                    for s in decision.all_scores
-                    if s.failed_constraints
-                )
+            # Classify failure as permanent (fail immediately) or transient (wait for capacity)
+            PERMANENT_CONSTRAINTS = {
+                "modality_not_supported",
+                "model_not_available",
+                "structured_output_not_supported",
+                "memory_insufficient",
+            }
+
+            capacity_issue = False
+            if decision.all_scores:
+                # Collect all failed constraints across backends
+                all_failed = set()
+                has_capacity_only_backend = False
+                for s in decision.all_scores:
+                    if s.failed_constraints:
+                        all_failed.update(s.failed_constraints)
+                        # A backend that only failed on capacity could serve the request once freed
+                        if s.failed_constraints == ["no_capacity"]:
+                            has_capacity_only_backend = True
+
+                # Transient only if some backend is just waiting for capacity
+                capacity_issue = has_capacity_only_backend
+
+                # If ALL failures are permanent (no capacity issue at all), fail immediately
+                if not capacity_issue and all_failed:
+                    if waiter_registered:
+                        self._scheduler.unregister_waiter(job)
+                    await self._scheduler.cancel_job(job.request_id)
+
+                    # Return user-friendly error messages for common permanent failures
+                    if all_failed == {"modality_not_supported"} or (
+                        "modality_not_supported" in all_failed
+                        and all_failed <= PERMANENT_CONSTRAINTS
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Model '{job.model}' does not support multimodal/image input",
+                        )
+                    elif "structured_output_not_supported" in all_failed and all_failed <= PERMANENT_CONSTRAINTS:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Model '{job.model}' does not support structured output",
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"No suitable backend: {last_reason}",
+                        )
             else:
+                # No score info — fall back to substring heuristic
                 capacity_issue = "No backends available" in last_reason
 
             if not capacity_issue:

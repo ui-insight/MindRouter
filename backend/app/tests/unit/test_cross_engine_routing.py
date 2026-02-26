@@ -92,7 +92,10 @@ class TestOllamaRequestToVLLMBackend:
         canonical = OllamaInTranslator.translate_chat_request(ollama_data)
         vllm_payload = VLLMOutTranslator.translate_chat_request(canonical)
 
-        assert vllm_payload["response_format"] == {"type": "json_object"}
+        assert vllm_payload["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "json_response", "schema": {"type": "object"}},
+        }
 
     def test_with_schema_format(self, mock_vllm_backend, simple_json_schema):
         """Ollama format:{schema} -> vLLM response_format:{"type":"json_schema",...}."""
