@@ -2311,6 +2311,11 @@ async def get_global_token_total(db: AsyncSession) -> int:
     return int(result.scalar())
 
 
+def _bucket_iso(unix_ts: int) -> str:
+    """Convert a UTC unix timestamp to an ISO 8601 string with Z suffix."""
+    return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 async def get_token_trend(
     db: AsyncSession, range_name: str = "day"
 ) -> List[dict]:
@@ -2321,16 +2326,16 @@ async def get_token_trend(
     from sqlalchemy import text
     stmt = text(
         "SELECT"
-        "  FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(created_at) / :bucket) * :bucket) AS t,"
+        "  FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(created_at, '+00:00', '+00:00')) / :bucket) * :bucket AS bucket_ts,"
         "  COALESCE(SUM(total_tokens), 0) AS v"
         " FROM usage_ledger"
         " WHERE created_at >= :cutoff"
-        " GROUP BY t"
-        " ORDER BY t"
+        " GROUP BY bucket_ts"
+        " ORDER BY bucket_ts"
     )
     result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
     return [
-        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]), "v": int(row[1])}
+        {"t": _bucket_iso(int(row[0])), "v": int(row[1])}
         for row in result.all()
     ]
 
@@ -2345,16 +2350,16 @@ async def get_active_users_trend(
     from sqlalchemy import text
     stmt = text(
         "SELECT"
-        "  FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(created_at) / :bucket) * :bucket) AS t,"
+        "  FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(created_at, '+00:00', '+00:00')) / :bucket) * :bucket AS bucket_ts,"
         "  COUNT(DISTINCT user_id) AS v"
         " FROM requests"
         " WHERE created_at >= :cutoff"
-        " GROUP BY t"
-        " ORDER BY t"
+        " GROUP BY bucket_ts"
+        " ORDER BY bucket_ts"
     )
     result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
     return [
-        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]), "v": int(row[1])}
+        {"t": _bucket_iso(int(row[0])), "v": int(row[1])}
         for row in result.all()
     ]
 

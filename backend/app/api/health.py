@@ -220,11 +220,19 @@ async def cluster_total_tokens() -> Dict[str, Any]:
     return {"total_tokens": total}
 
 
+_RANGE_SECONDS = {
+    "hour": 3600, "day": 86400, "week": 604800,
+    "month": 2592000, "year": 31536000,
+}
+
+
 @router.get("/api/cluster/trends")
 async def cluster_trends(range: str = "day") -> Dict[str, Any]:
     """Public endpoint: token and active-user trends over time."""
-    if range not in ("hour", "day", "week", "month", "year"):
+    if range not in _RANGE_SECONDS:
         range = "day"
+    since = (datetime.now(timezone.utc) - timedelta(seconds=_RANGE_SECONDS[range])).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         from backend.app.db import crud
         async with AsyncSessionLocal() as db:
@@ -233,7 +241,7 @@ async def cluster_trends(range: str = "day") -> Dict[str, Any]:
     except Exception:
         tokens = []
         users = []
-    return {"tokens": tokens, "users": users, "range": range}
+    return {"tokens": tokens, "users": users, "range": range, "since": since, "now": now_str}
 
 
 @router.get("/api/cluster/throughput")

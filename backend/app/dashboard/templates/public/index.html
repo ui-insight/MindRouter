@@ -1118,12 +1118,16 @@ response = client.chat.completions.create(
             var data = await resp.json();
             var ttFmt = timeTooltipFmt[range] || 'MMM d, HH:mm';
             if (tokenChart) {
+                tokenChart.options.scales.x.min = data.since;
+                tokenChart.options.scales.x.max = data.now;
                 tokenChart.options.scales.x.time.unit = false;
                 tokenChart.options.scales.x.time.tooltipFormat = ttFmt;
                 tokenChart.data.datasets[0].data = data.tokens.map(function(d) { return { x: d.t, y: d.v }; });
                 tokenChart.update('none');
             }
             if (userChart) {
+                userChart.options.scales.x.min = data.since;
+                userChart.options.scales.x.max = data.now;
                 userChart.options.scales.x.time.unit = false;
                 userChart.options.scales.x.time.tooltipFormat = ttFmt;
                 userChart.data.datasets[0].data = data.users.map(function(d) { return { x: d.t, y: d.v }; });
