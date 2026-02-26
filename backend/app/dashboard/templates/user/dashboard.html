@@ -12,7 +12,7 @@
     </div>
 
     <div class="row mb-4">
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
             <div class="card card-stat primary h-100">
                 <div class="card-body">
                     <h2 class="card-subtitle mb-2 text-muted h6">Group</h2>
@@ -22,10 +22,10 @@
                 </div>
             </div>
         </div>
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
             <div class="card card-stat {% if quota and group_budget == 0 %}success{% elif usage_percent >= 90 %}danger{% elif usage_percent >= 70 %}warning{% else %}success{% endif %} h-100">
                 <div class="card-body">
-                    <h2 class="card-subtitle mb-2 text-muted h6">Token Usage</h2>
+                    <h2 class="card-subtitle mb-2 text-muted h6">Quota Token Usage</h2>
                     {% if quota %}
                     {% if group_budget == 0 %}
                     <p class="card-title h3 mb-1"><span id="token-usage-top">{{ "{:,}".format(tokens_used_display) }}</span> / Unlimited</p>
@@ -41,7 +41,15 @@
                 </div>
             </div>
         </div>
-        <div class="col-md-4 mb-3">
+        <div class="col-md-3 mb-3">
+            <div class="card card-stat info h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Lifetime Token Usage</h2>
+                    <p class="card-title h3 mb-0"><span id="lifetime-tokens">{{ "{:,}".format(lifetime_tokens) }}</span></p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
             <div class="card card-stat primary h-100">
                 <div class="card-body">
                     <h2 class="card-subtitle mb-2 text-muted h6">Active API Keys</h2>
@@ -237,6 +245,7 @@
     const topEl = document.getElementById('token-usage-top');
     const detailEl = document.getElementById('token-usage-detail');
     const barEl = document.getElementById('token-progress-bar');
+    const lifetimeEl = document.getElementById('lifetime-tokens');
     const budget = {{ group_budget }};
 
     function fmt(n) { return n.toLocaleString(); }
@@ -249,6 +258,7 @@
             const used = data.tokens_used || 0;
             if (topEl) topEl.textContent = fmt(used);
             if (detailEl) detailEl.textContent = fmt(used);
+            if (lifetimeEl && data.lifetime_tokens !== undefined) lifetimeEl.textContent = fmt(data.lifetime_tokens);
             if (barEl && budget > 0) {
                 const pct = Math.min(100, used / budget * 100);
                 barEl.style.width = pct + '%';

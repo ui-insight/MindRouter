@@ -366,6 +366,10 @@ async def user_dashboard(
     max_keys = user.group.max_api_keys if user.group else 8
     active_key_count = await crud.count_user_active_api_keys(db, effective_id)
 
+    # Lifetime token usage from usage_ledger
+    lifetime_map = await crud.get_user_token_totals(db, [effective_id])
+    lifetime_tokens = lifetime_map.get(effective_id, 0)
+
     return templates.TemplateResponse(
         "user/dashboard.html",
         {
@@ -383,6 +387,7 @@ async def user_dashboard(
             "active_key_count": active_key_count,
             "now_utc": datetime.now(timezone.utc),
             "masquerade_user": masquerade_user,
+            "lifetime_tokens": lifetime_tokens,
         },
     )
 
@@ -404,7 +409,7 @@ async def dashboard_token_usage(
 
     quota = await crud.get_user_quota(db, effective_id)
     if not quota:
-        return JSONResponse({"tokens_used": 0, "budget": 0})
+        return JSONResponse({"tokens_used": 0, "budget": 0, "lifetime_tokens": 0})
 
     from backend.app.core.redis_client import get_tokens as redis_get_tokens, is_available as redis_is_available
     if redis_is_available():
@@ -413,8 +418,11 @@ async def dashboard_token_usage(
     else:
         tokens_used = quota.tokens_used
 
+    lifetime_map = await crud.get_user_token_totals(db, [effective_id])
+    lifetime_tokens = lifetime_map.get(effective_id, 0)
+
     group_budget = user.group.token_budget if user.group else 0
-    return JSONResponse({"tokens_used": tokens_used, "budget": group_budget})
+    return JSONResponse({"tokens_used": tokens_used, "budget": group_budget, "lifetime_tokens": lifetime_tokens})
 
 
 @dashboard_router.post("/dashboard/change-password")
@@ -661,6 +669,20 @@ async def admin_users(
     user_ids = [u.id for u in users]
     user_tokens = await crud.get_user_token_totals(db, user_ids)
 
+    # Fetch quota tokens (current period) for each user from Redis, falling back to DB
+    from backend.app.core.redis_client import get_tokens as redis_get_tokens, is_available as redis_is_available
+    user_quota_tokens = {}
+    for u in users:
+        quota = await crud.get_user_quota(db, u.id)
+        if quota:
+            if redis_is_available():
+                redis_val = await redis_get_tokens(u.id)
+                user_quota_tokens[u.id] = redis_val if redis_val is not None else quota.tokens_used
+            else:
+                user_quota_tokens[u.id] = quota.tokens_used
+        else:
+            user_quota_tokens[u.id] = 0
+
     return templates.TemplateResponse(
         "admin/users.html",
         {
@@ -676,6 +698,7 @@ async def admin_users(
             "sort": sort or "",
             "dir": sort_dir,
             "user_tokens": user_tokens,
+            "user_quota_tokens": user_quota_tokens,
         },
     )
 

@@ -68,7 +68,8 @@
                                     <th scope="col">Status</th>
                                     <th scope="col">Created</th>
                                     <th scope="col">Last Login</th>
-                                    <th scope="col">Tokens</th>
+                                    <th scope="col">Quota Tokens</th>
+                                    <th scope="col">Lifetime Tokens</th>
                                     <th scope="col">Detail</th>
                                 </tr>
                             </thead>
@@ -93,6 +94,7 @@
                                     </td>
                                     <td>{{ u.created_at|localtime('%Y-%m-%d') }}</td>
                                     <td>{{ u.last_login_at|localtime if u.last_login_at else 'Never' }}</td>
+                                    <td>{{ "{:,}".format(user_quota_tokens.get(u.id, 0)) }}</td>
                                     <td>{{ "{:,}".format(user_tokens.get(u.id, 0)) }}</td>
                                     <td>
                                         <a href="/admin/users/{{ u.id }}" class="btn btn-sm btn-outline-primary">

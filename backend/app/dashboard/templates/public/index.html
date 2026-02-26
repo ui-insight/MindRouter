@@ -48,7 +48,7 @@
             <div class="card card-stat primary h-100">
                 <div class="card-body">
                     <h2 class="card-subtitle mb-2 text-muted h6">Status</h2>
-                    <p class="card-title mb-0 h2">
+                    <p class="card-title mb-0 h2" id="stat-status">
                         {% if healthy_backends > 0 %}
                         <span class="text-success"><i class="bi bi-check-circle" aria-hidden="true"></i> Online</span>
                         {% else %}
@@ -989,8 +989,18 @@ response = client.chat.completions.create(
                 const status = await statusRes.json();
                 const backendsEl = document.getElementById('stat-backends');
                 const queueEl = document.getElementById('stat-queue');
+                const activeUsersEl = document.getElementById('stat-active-users');
+                const statusEl = document.getElementById('stat-status');
                 if (backendsEl) backendsEl.textContent = status.backends.healthy + ' / ' + status.backends.total;
                 if (queueEl) queueEl.textContent = status.queue.total || 0;
+                if (activeUsersEl && status.active_users !== undefined) activeUsersEl.textContent = status.active_users;
+                if (statusEl) {
+                    if (status.backends.healthy > 0) {
+                        statusEl.innerHTML = '<span class="text-success"><i class="bi bi-check-circle" aria-hidden="true"></i> Online</span>';
+                    } else {
+                        statusEl.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle" aria-hidden="true"></i> Offline</span>';
+                    }
+                }
 
                 const countEl = document.getElementById('stat-models-count');
                 const gridEl = document.getElementById('models-grid');

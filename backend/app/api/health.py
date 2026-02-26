@@ -171,6 +171,17 @@ async def cluster_status() -> Dict[str, Any]:
         except Exception:
             pass
 
+    # Active users in last 24 hours
+    active_users = 0
+    try:
+        from backend.app.db.session import get_async_db
+        from backend.app.db import crud
+        async for db in get_async_db():
+            active_users = await crud.get_active_user_count(db)
+            break
+    except Exception:
+        pass
+
     return {
         "service": settings.app_name,
         "version": settings.app_version,
@@ -184,6 +195,7 @@ async def cluster_status() -> Dict[str, Any]:
         "fair_share": {
             "total_users": scheduler_stats.get("fair_share", {}).get("total_users", 0),
         },
+        "active_users": active_users,
     }
 
 

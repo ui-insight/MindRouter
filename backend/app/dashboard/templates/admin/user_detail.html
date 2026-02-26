@@ -141,7 +141,7 @@
                         <div class="col-6 mb-3">
                             <div class="card card-stat primary h-100">
                                 <div class="card-body">
-                                    <h2 class="card-subtitle h6 mb-2 text-muted">Total Tokens</h2>
+                                    <h2 class="card-subtitle h6 mb-2 text-muted">Lifetime Token Usage</h2>
                                     <p class="card-title h3 mb-0">{{ "{:,}".format(stats.total_tokens) }}</p>
                                 </div>
                             </div>
@@ -165,14 +165,14 @@
                         <div class="col-6 mb-3">
                             <div class="card h-100">
                                 <div class="card-body">
-                                    <h2 class="card-subtitle h6 mb-2 text-muted">Quota Used</h2>
+                                    <h2 class="card-subtitle h6 mb-2 text-muted">Quota Token Usage</h2>
                                     {% if stats.quota %}
                                     {% set grp_budget = detail_user.group.token_budget if detail_user.group else 0 %}
                                     {% if grp_budget == 0 %}
-                                    <p class="card-title h3 mb-1"><span class="badge bg-info">Unlimited</span></p>
+                                    <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / Unlimited</p>
                                     {% else %}
                                     {% set usage_pct = (stats.quota.tokens_used / grp_budget * 100) if grp_budget > 0 else 0 %}
-                                    <p class="card-title h3 mb-1">{{ "%.0f"|format(usage_pct) }}%</p>
+                                    <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / {{ "{:,}".format(grp_budget) }}</p>
                                     <div class="progress" style="height: 6px;">
                                         <div class="progress-bar {% if usage_pct >= 90 %}bg-danger{% elif usage_pct >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_pct }}%" aria-valuenow="{{ usage_pct }}" aria-valuemin="0" aria-valuemax="100" aria-label="Quota usage"></div>
                                     </div>
