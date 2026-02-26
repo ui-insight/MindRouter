@@ -199,15 +199,24 @@ async def cluster_status() -> Dict[str, Any]:
     }
 
 
+_total_tokens_cache: Dict[str, Any] = {"value": 0, "expires": 0.0}
+
+
 @router.get("/api/cluster/total-tokens")
 async def cluster_total_tokens() -> Dict[str, Any]:
-    """Public endpoint: total tokens ever served."""
+    """Public endpoint: total tokens ever served (cached 10s)."""
+    import time
+    now = time.monotonic()
+    if now < _total_tokens_cache["expires"]:
+        return {"total_tokens": _total_tokens_cache["value"]}
     try:
         from backend.app.db import crud
         async with AsyncSessionLocal() as db:
             total = await crud.get_global_token_total(db)
     except Exception:
-        total = 0
+        total = _total_tokens_cache["value"]
+    _total_tokens_cache["value"] = total
+    _total_tokens_cache["expires"] = now + 10
     return {"total_tokens": total}
 
 
