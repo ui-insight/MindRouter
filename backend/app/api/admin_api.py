@@ -14,8 +14,13 @@
 
 """Admin API endpoints."""
 
-from datetime import datetime
+import asyncio
+import json
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -34,6 +39,58 @@ from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+# In-memory pull job tracking (replaces sidecar-based tracking)
+_pull_jobs: Dict[str, dict] = {}
+
+
+async def _run_ollama_pull(job_id: str, ollama_url: str, model: str) -> None:
+    """Stream an Ollama pull and update job progress in-memory."""
+    job = _pull_jobs[job_id]
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=600.0)) as client:
+            async with client.stream(
+                "POST",
+                f"{ollama_url}/api/pull",
+                json={"name": model, "stream": True},
+            ) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    job["status"] = "error"
+                    job["error"] = f"Ollama returned {resp.status_code}: {body.decode(errors='replace')}"
+                    job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    job["progress"] = {
+                        "status": data.get("status", ""),
+                        "digest": data.get("digest", ""),
+                        "total": data.get("total", 0),
+                        "completed": data.get("completed", 0),
+                    }
+
+                    if data.get("status") == "success":
+                        job["status"] = "success"
+                        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                        return
+
+        # Stream ended without explicit success — treat as success if no error
+        if job["status"] == "pulling":
+            job["status"] = "success"
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    except Exception as exc:
+        job["status"] = "error"
+        job["error"] = str(exc)
+        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+        logger.error("ollama_pull_failed", job_id=job_id, model=model, error=str(exc))
 
 
 # Request/Response models
@@ -311,7 +368,7 @@ async def refresh_backend(
         )
 
 
-# Ollama Model Management (pull/delete via sidecar)
+# Ollama Model Management (direct pull/delete — bypasses sidecar)
 class OllamaPullRequest(BaseModel):
     """Request to pull a model to an Ollama backend."""
     model: str = Field(..., min_length=1)
@@ -329,33 +386,38 @@ async def ollama_pull(
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Start pulling a model to an Ollama backend via its node's sidecar."""
+    """Start pulling a model to an Ollama backend (direct call, no sidecar)."""
     backend = await crud.get_backend_by_id(db, backend_id)
     if not backend:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backend not found")
     if backend.engine != BackendEngine.OLLAMA:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend is not an Ollama engine")
-    if not backend.node_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no associated node")
+    if not backend.url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no URL configured")
 
-    registry = get_registry()
-    sidecar = registry.get_sidecar_client(backend.node_id)
-    if not sidecar:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No sidecar configured for this node")
+    job_id = str(uuid.uuid4())
+    _pull_jobs[job_id] = {
+        "job_id": job_id,
+        "model": request.model,
+        "ollama_url": backend.url,
+        "status": "pulling",
+        "progress": {},
+        "error": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": None,
+    }
 
-    result = await sidecar.ollama_pull(backend.url, request.model)
-    if result is None:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sidecar unreachable")
+    asyncio.create_task(_run_ollama_pull(job_id, backend.url, request.model))
 
     logger.info(
         "ollama_pull_started",
         admin_id=admin.id,
         backend_id=backend_id,
         model=request.model,
-        job_id=result.get("job_id"),
+        job_id=job_id,
     )
 
-    return result
+    return {"job_id": job_id, "status": "pulling"}
 
 
 @router.get("/backends/{backend_id}/ollama/pull/{job_id}")
@@ -365,23 +427,12 @@ async def ollama_pull_status(
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Poll progress of an Ollama model pull."""
-    backend = await crud.get_backend_by_id(db, backend_id)
-    if not backend:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backend not found")
-    if not backend.node_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no associated node")
+    """Poll progress of an Ollama model pull (in-memory lookup)."""
+    job = _pull_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pull job not found")
 
-    registry = get_registry()
-    sidecar = registry.get_sidecar_client(backend.node_id)
-    if not sidecar:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No sidecar configured for this node")
-
-    result = await sidecar.ollama_pull_status(job_id)
-    if result is None:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sidecar unreachable")
-
-    return result
+    return job
 
 
 @router.post("/backends/{backend_id}/ollama/delete")
@@ -391,28 +442,35 @@ async def ollama_delete(
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Delete a model from an Ollama backend via its node's sidecar."""
+    """Delete a model from an Ollama backend (direct call, no sidecar)."""
     backend = await crud.get_backend_by_id(db, backend_id)
     if not backend:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backend not found")
     if backend.engine != BackendEngine.OLLAMA:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend is not an Ollama engine")
-    if not backend.node_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no associated node")
+    if not backend.url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backend has no URL configured")
 
-    registry = get_registry()
-    sidecar = registry.get_sidecar_client(backend.node_id)
-    if not sidecar:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No sidecar configured for this node")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            resp = await client.request(
+                "DELETE",
+                f"{backend.url}/api/delete",
+                json={"name": request.model},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to reach Ollama at {backend.url}: {exc}",
+        )
 
-    result = await sidecar.ollama_delete(backend.url, request.model)
-    if result is None:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sidecar unreachable")
-
-    if "error" in result and result.get("status_code"):
-        raise HTTPException(status_code=result["status_code"], detail=result["error"])
+    if resp.status_code == 404:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found on this backend")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=f"Ollama delete failed: {resp.text}")
 
     # Refresh backend model list after successful delete
+    registry = get_registry()
     await registry.refresh_backend(backend_id)
 
     logger.info(
@@ -422,7 +480,7 @@ async def ollama_delete(
         model=request.model,
     )
 
-    return result
+    return {"status": "success", "model": request.model}
 
 
 @router.get("/backends", response_model=List[BackendResponse])
