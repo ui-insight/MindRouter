@@ -199,6 +199,34 @@ async def cluster_status() -> Dict[str, Any]:
     }
 
 
+@router.get("/api/cluster/total-tokens")
+async def cluster_total_tokens() -> Dict[str, Any]:
+    """Public endpoint: total tokens ever served."""
+    try:
+        from backend.app.db import crud
+        async with AsyncSessionLocal() as db:
+            total = await crud.get_global_token_total(db)
+    except Exception:
+        total = 0
+    return {"total_tokens": total}
+
+
+@router.get("/api/cluster/trends")
+async def cluster_trends(range: str = "day") -> Dict[str, Any]:
+    """Public endpoint: token and active-user trends over time."""
+    if range not in ("hour", "day", "week", "month", "year"):
+        range = "day"
+    try:
+        from backend.app.db import crud
+        async with AsyncSessionLocal() as db:
+            tokens = await crud.get_token_trend(db, range)
+            users = await crud.get_active_users_trend(db, range)
+    except Exception:
+        tokens = []
+        users = []
+    return {"tokens": tokens, "users": users, "range": range}
+
+
 @router.get("/api/cluster/throughput")
 async def cluster_throughput() -> Dict[str, Any]:
     """

@@ -196,6 +196,12 @@ async def public_dashboard(
     except Exception:
         active_users = 0
 
+    # Total tokens ever served
+    try:
+        total_tokens = await crud.get_global_token_total(db)
+    except Exception:
+        total_tokens = 0
+
     # Look up user for navbar rendering
     user_id = get_session_user_id(request)
     user = None
@@ -212,6 +218,7 @@ async def public_dashboard(
             "models": sorted(models),
             "queue_size": queue_size,
             "active_users": active_users,
+            "total_tokens": total_tokens,
             "user": user,
             "user_id": user_id,
         },

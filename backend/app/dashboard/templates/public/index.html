@@ -93,6 +93,49 @@
         </div>
     </div>
 
+    <!-- Total Tokens Counter -->
+    <div class="row mb-4">
+        <div class="col-12 text-center">
+            <div class="card border-0 shadow-sm" style="background: linear-gradient(135deg, #0a0e1a 0%, #121829 100%);">
+                <div class="card-body py-4">
+                    <div style="font-size: 0.75rem; text-transform: uppercase; letter-spacing: 2px; color: #5a6380; margin-bottom: 0.5rem;">Total Tokens Served</div>
+                    <div id="total-tokens-counter" style="font-size: 2.5rem; font-weight: 700; color: #64ffda; font-family: 'JetBrains Mono', monospace;">
+                        {{ "{:,}".format(total_tokens) }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trend Charts -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <div class="d-flex justify-content-center mb-3">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Time range">
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="hour">Hour</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn active" data-range="day">Day</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="week">Week</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="month">Month</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="year">Year</button>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6 class="text-center text-muted mb-2"><i class="bi bi-bar-chart"></i> Tokens Served</h6>
+                            <canvas id="tokenTrendChart" height="220"></canvas>
+                        </div>
+                        <div class="col-md-6">
+                            <h6 class="text-center text-muted mb-2"><i class="bi bi-people"></i> Active Users</h6>
+                            <canvas id="userTrendChart" height="220"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="row">
         <div class="col-md-8">
             <div class="card">
@@ -661,6 +704,8 @@ response = client.chat.completions.create(
 {% endblock %}
 
 {% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script>
 (function() {
     const canvas = document.getElementById('tokenFlowCanvas');
@@ -1019,6 +1064,100 @@ response = client.chat.completions.create(
         } catch (e) { /* ignore transient failures */ }
     }
     setInterval(refreshDashboard, 30000);
+
+    // --- Total tokens counter polling ---
+    async function refreshTotalTokens() {
+        try {
+            const resp = await fetch('/api/cluster/total-tokens');
+            if (resp.ok) {
+                const data = await resp.json();
+                const el = document.getElementById('total-tokens-counter');
+                if (el) el.textContent = Number(data.total_tokens).toLocaleString();
+            }
+        } catch (e) { /* retry next cycle */ }
+    }
+    setInterval(refreshTotalTokens, 10000);
+
+    // --- Trend charts ---
+    function makeTrendChart(canvasId, label, borderColor, bgColor) {
+        const ctx2 = document.getElementById(canvasId);
+        if (!ctx2) return null;
+        return new Chart(ctx2, {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: label,
+                    data: [],
+                    borderColor: borderColor,
+                    backgroundColor: bgColor,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    borderWidth: 2,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: { tooltipFormat: 'MMM d, HH:mm' },
+                        grid: { display: false },
+                        ticks: { maxTicksLimit: 8, font: { size: 11 } },
+                    },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(0,0,0,0.05)' },
+                        ticks: { font: { size: 11 } },
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function(ctx3) { return label + ': ' + Number(ctx3.parsed.y).toLocaleString(); }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    const tokenChart = makeTrendChart('tokenTrendChart', 'Tokens', 'rgba(100, 255, 218, 1)', 'rgba(100, 255, 218, 0.15)');
+    const userChart  = makeTrendChart('userTrendChart',  'Users',  'rgba(130, 170, 255, 1)', 'rgba(130, 170, 255, 0.15)');
+
+    async function loadTrends(range) {
+        try {
+            const resp = await fetch('/api/cluster/trends?range=' + encodeURIComponent(range));
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (tokenChart) {
+                tokenChart.data.datasets[0].data = data.tokens.map(function(d) { return { x: d.t, y: d.v }; });
+                tokenChart.update('none');
+            }
+            if (userChart) {
+                userChart.data.datasets[0].data = data.users.map(function(d) { return { x: d.t, y: d.v }; });
+                userChart.update('none');
+            }
+        } catch (e) { /* retry next interaction */ }
+    }
+
+    // Range pill buttons
+    let currentRange = 'day';
+    document.querySelectorAll('.trend-range-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.trend-range-btn').forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            currentRange = btn.getAttribute('data-range');
+            loadTrends(currentRange);
+        });
+    });
+
+    // Initial load
+    loadTrends(currentRange);
 })();
 </script>
 {% endblock %}

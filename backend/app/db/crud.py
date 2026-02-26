@@ -2290,6 +2290,75 @@ async def get_active_request_count_for_node_backends(
     return int(result.scalar())
 
 
+# ---------------------------------------------------------------------------
+# Public stats queries (status page)
+# ---------------------------------------------------------------------------
+
+_TREND_BUCKETS = {
+    "hour":  (3600,       60),
+    "day":   (86400,      900),
+    "week":  (604800,     3600),
+    "month": (2592000,    21600),
+    "year":  (31536000,   86400),
+}
+
+
+async def get_global_token_total(db: AsyncSession) -> int:
+    """Total tokens ever served (all users, all time)."""
+    result = await db.execute(
+        select(func.coalesce(func.sum(UsageLedger.total_tokens), 0))
+    )
+    return int(result.scalar())
+
+
+async def get_token_trend(
+    db: AsyncSession, range_name: str = "day"
+) -> List[dict]:
+    """Token counts bucketed over time for trend chart."""
+    since_sec, bucket_sec = _TREND_BUCKETS.get(range_name, _TREND_BUCKETS["day"])
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_sec)
+
+    from sqlalchemy import text
+    stmt = text(
+        "SELECT"
+        "  FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(created_at) / :bucket) * :bucket) AS t,"
+        "  COALESCE(SUM(total_tokens), 0) AS v"
+        " FROM usage_ledger"
+        " WHERE created_at >= :cutoff"
+        " GROUP BY t"
+        " ORDER BY t"
+    )
+    result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
+    return [
+        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]), "v": int(row[1])}
+        for row in result.all()
+    ]
+
+
+async def get_active_users_trend(
+    db: AsyncSession, range_name: str = "day"
+) -> List[dict]:
+    """Distinct user counts bucketed over time for trend chart."""
+    since_sec, bucket_sec = _TREND_BUCKETS.get(range_name, _TREND_BUCKETS["day"])
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_sec)
+
+    from sqlalchemy import text
+    stmt = text(
+        "SELECT"
+        "  FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(created_at) / :bucket) * :bucket) AS t,"
+        "  COUNT(DISTINCT user_id) AS v"
+        " FROM requests"
+        " WHERE created_at >= :cutoff"
+        " GROUP BY t"
+        " ORDER BY t"
+    )
+    result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
+    return [
+        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]), "v": int(row[1])}
+        for row in result.all()
+    ]
+
+
 async def cancel_active_requests_for_backends(
     db: AsyncSession, backend_ids: List[int]
 ) -> int:
