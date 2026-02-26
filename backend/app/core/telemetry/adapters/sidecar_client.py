@@ -144,7 +144,7 @@ class SidecarClient:
             response = await client.post(
                 "/ollama/delete",
                 json={"ollama_url": ollama_url, "model": model},
-                timeout=30.0,
+                timeout=120.0,
             )
             if response.status_code != 200:
                 logger.warning("sidecar_ollama_delete_failed", status=response.status_code, body=response.text[:200])
