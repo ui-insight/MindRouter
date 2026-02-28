@@ -989,8 +989,8 @@ async def upsert_model(
         if model.thinking_override is not None:
             effective_thinking = model.thinking_override
         model.modality = modality
-        model.context_length = model.context_length_override if model.context_length_override is not None else context_length
-        model.model_max_context = model_max_context
+        model.context_length = model.context_length_override if model.context_length_override is not None else (context_length if context_length is not None else model.context_length)
+        model.model_max_context = model_max_context if model_max_context is not None else model.model_max_context
         model.supports_multimodal = effective_multimodal
         model.supports_thinking = effective_thinking
         model.supports_structured_output = supports_structured_output

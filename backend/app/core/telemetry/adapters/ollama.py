@@ -324,7 +324,7 @@ class OllamaAdapter:
             response = await client.post(
                 "/api/show",
                 json={"name": model_name},
-                timeout=5.0,
+                timeout=15.0,
             )
             if response.status_code == 200:
                 return response.json()
