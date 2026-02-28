@@ -791,23 +791,8 @@ function startRepullAll() {
             });
         });
 
-        var completed = 0;
-
         function updateOverall() {
-            completed++;
-            var pct = Math.round((completed / totalModels) * 100);
-            var bar = document.getElementById('repull-overall-bar');
-            var countEl = document.getElementById('repull-overall-count');
-            bar.style.width = pct + '%';
-            bar.textContent = pct + '%';
-            countEl.textContent = completed + ' / ' + totalModels;
-            if (completed >= totalModels) {
-                bar.classList.remove('progress-bar-animated');
-                bar.classList.add('bg-success');
-                document.getElementById('ollamaOpSpinner').classList.add('d-none');
-                document.getElementById('ollamaOpFooter').classList.remove('d-none');
-                document.getElementById('repullAllBtn').disabled = false;
-            }
+            _updateRepullOverallForRetry();
         }
 
         // Process each node's queue sequentially (but all nodes in parallel)
@@ -1045,7 +1030,7 @@ function addRetryButton(cardId, backendId, model) {
 }
 
 function _updateRepullOverallForRetry() {
-    // Recount completed (success/error/skipped) vs total
+    // Single source of truth: recount from DOM badges
     var allStatuses = document.querySelectorAll('#ollamaOpResult .pull-status');
     var done = 0;
     var total = 0;
@@ -1064,6 +1049,12 @@ function _updateRepullOverallForRetry() {
         if (done >= total) {
             bar.classList.remove('progress-bar-animated');
             bar.classList.add('bg-success');
+            document.getElementById('ollamaOpSpinner').classList.add('d-none');
+            document.getElementById('ollamaOpFooter').classList.remove('d-none');
+            document.getElementById('repullAllBtn').disabled = false;
+        } else {
+            bar.classList.remove('bg-success');
+            bar.classList.add('progress-bar-animated');
         }
     }
 }
