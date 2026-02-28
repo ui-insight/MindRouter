@@ -66,63 +66,98 @@ async def _refresh_node_ollama_backends(node_id: Optional[int]) -> None:
 
 
 async def _run_ollama_pull(job_id: str, ollama_url: str, model: str, node_id: Optional[int] = None) -> None:
-    """Stream an Ollama pull and update job progress in-memory."""
+    """Stream an Ollama pull and update job progress in-memory.
+
+    Retries up to 3 times with exponential backoff on transient failures
+    (network errors, DNS resolution, HTTP errors).
+    """
+    import asyncio as _asyncio
+
     job = _pull_jobs[job_id]
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=600.0)) as client:
-            async with client.stream(
-                "POST",
-                f"{ollama_url}/api/pull",
-                json={"name": model, "stream": True},
-            ) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    job["status"] = "error"
-                    job["error"] = f"Ollama returned {resp.status_code}: {body.decode(errors='replace')}"
-                    job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                    return
+    max_attempts = 3
+    last_error = ""
 
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Reset status for retry
+            job["status"] = "pulling"
+            if attempt > 1:
+                job["progress"] = {"status": f"Retry {attempt}/{max_attempts}..."}
+                logger.info(
+                    "ollama_pull_retry",
+                    job_id=job_id, model=model, attempt=attempt,
+                )
 
-                    job["progress"] = {
-                        "status": data.get("status", ""),
-                        "digest": data.get("digest", ""),
-                        "total": data.get("total", 0),
-                        "completed": data.get("completed", 0),
-                    }
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=600.0)) as client:
+                async with client.stream(
+                    "POST",
+                    f"{ollama_url}/api/pull",
+                    json={"name": model, "stream": True},
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        last_error = f"Ollama returned {resp.status_code}: {body.decode(errors='replace')}"
+                        raise _PullRetryable(last_error)
 
-                    # Ollama may return an error in the stream
-                    if data.get("error"):
-                        job["status"] = "error"
-                        job["error"] = data["error"]
-                        job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                        logger.error("ollama_pull_failed", job_id=job_id, model=model, error=data["error"])
-                        return
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if data.get("status") == "success":
-                        job["status"] = "success"
-                        job["completed_at"] = datetime.now(timezone.utc).isoformat()
-                        await _refresh_node_ollama_backends(node_id)
-                        return
+                        job["progress"] = {
+                            "status": data.get("status", ""),
+                            "digest": data.get("digest", ""),
+                            "total": data.get("total", 0),
+                            "completed": data.get("completed", 0),
+                        }
 
-        # Stream ended without explicit success — treat as success if no error
-        if job["status"] == "pulling":
-            job["status"] = "success"
-            job["completed_at"] = datetime.now(timezone.utc).isoformat()
-            await _refresh_node_ollama_backends(node_id)
+                        # Ollama may return an error in the stream
+                        if data.get("error"):
+                            last_error = data["error"]
+                            raise _PullRetryable(last_error)
 
-    except Exception as exc:
-        job["status"] = "error"
-        error_msg = str(exc) or f"{type(exc).__name__}: {repr(exc)}"
-        job["error"] = error_msg
-        job["completed_at"] = datetime.now(timezone.utc).isoformat()
-        logger.error("ollama_pull_failed", job_id=job_id, model=model, error=error_msg)
+                        if data.get("status") == "success":
+                            job["status"] = "success"
+                            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                            await _refresh_node_ollama_backends(node_id)
+                            return
+
+            # Stream ended without explicit success — treat as success
+            if job["status"] == "pulling":
+                job["status"] = "success"
+                job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                await _refresh_node_ollama_backends(node_id)
+            return
+
+        except Exception as exc:
+            last_error = last_error or str(exc) or f"{type(exc).__name__}: {repr(exc)}"
+            if attempt < max_attempts:
+                delay = 2 ** attempt  # 2s, 4s
+                logger.warning(
+                    "ollama_pull_attempt_failed",
+                    job_id=job_id, model=model, attempt=attempt,
+                    error=last_error, retry_in=delay,
+                )
+                job["progress"] = {"status": f"Failed (attempt {attempt}/{max_attempts}), retrying in {delay}s..."}
+                await _asyncio.sleep(delay)
+                last_error = ""
+            else:
+                job["status"] = "error"
+                job["error"] = f"{last_error} (after {max_attempts} attempts)"
+                job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                logger.error(
+                    "ollama_pull_failed",
+                    job_id=job_id, model=model,
+                    error=last_error, attempts=max_attempts,
+                )
+
+
+class _PullRetryable(Exception):
+    """Raised to trigger retry logic in _run_ollama_pull."""
+    pass
 
 
 # Request/Response models
