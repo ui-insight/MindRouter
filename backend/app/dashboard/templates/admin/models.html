@@ -827,10 +827,16 @@ function processNodeQueue(backendId, nodeName, models, idx, allCardIds, updateOv
     var cardId = allCardIds[nodeName + ':' + model];
     var el = document.getElementById(cardId);
 
-    // Mark as pulling
+    // Mark as pulling and add skip button
     el.querySelector('.pull-status').className = 'badge bg-info pull-status';
     el.querySelector('.pull-status').textContent = 'pulling...';
     el.querySelector('.progress-bar').classList.add('progress-bar-striped', 'progress-bar-animated');
+    var skipBtn = document.createElement('button');
+    skipBtn.className = 'btn btn-outline-warning btn-sm ms-2 repull-skip-btn';
+    skipBtn.innerHTML = '<i class="bi bi-skip-forward"></i> Skip';
+    skipBtn.style.fontSize = '0.7rem';
+    skipBtn.style.padding = '0 6px';
+    el.querySelector('.pull-status').after(skipBtn);
 
     fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
         method: 'POST',
@@ -867,17 +873,62 @@ function processNodeQueue(backendId, nodeName, models, idx, allCardIds, updateOv
     });
 }
 
+var REPULL_STALE_TIMEOUT_MS = 120000;  // 2 minutes with no progress change → auto-skip
+
 function pollRepullProgress(backendId, jobId, cardId, onDone) {
+    var lastProgressStr = '';
+    var lastChangeTime = Date.now();
+    var skipped = false;
+
+    function doSkip(reason) {
+        if (skipped) return;
+        skipped = true;
+        clearInterval(interval);
+        var el = document.getElementById(cardId);
+        if (el) {
+            el.querySelector('.pull-status').className = 'badge bg-warning text-dark pull-status';
+            el.querySelector('.pull-status').textContent = 'skipped';
+            el.querySelector('.progress-bar').classList.remove('progress-bar-striped', 'progress-bar-animated');
+            el.querySelector('.pull-detail').textContent = reason;
+            var btn = el.querySelector('.repull-skip-btn');
+            if (btn) btn.remove();
+        }
+        onDone();
+    }
+
+    // Wire up the skip button
+    var el = document.getElementById(cardId);
+    if (el) {
+        var skipBtn = el.querySelector('.repull-skip-btn');
+        if (skipBtn) {
+            skipBtn.addEventListener('click', function() { doSkip('Manually skipped'); });
+        }
+    }
+
     var interval = setInterval(function() {
+        // Check for staleness
+        if (Date.now() - lastChangeTime > REPULL_STALE_TIMEOUT_MS) {
+            doSkip('Auto-skipped: no progress for 2 minutes');
+            return;
+        }
+
         fetch('/api/admin/backends/' + backendId + '/ollama/pull/' + jobId)
         .then(function(r) { return r.json(); })
         .then(function(data) {
+            if (skipped) return;
             var el = document.getElementById(cardId);
             if (!el) { clearInterval(interval); return; }
 
             var statusBadge = el.querySelector('.pull-status');
             var bar = el.querySelector('.progress-bar');
             var detail = el.querySelector('.pull-detail');
+
+            // Track progress changes for staleness detection
+            var curProgressStr = JSON.stringify(data.progress || {});
+            if (curProgressStr !== lastProgressStr) {
+                lastProgressStr = curProgressStr;
+                lastChangeTime = Date.now();
+            }
 
             if (data.progress && data.progress.total && data.progress.completed) {
                 var pct = Math.round((data.progress.completed / data.progress.total) * 100);
@@ -896,6 +947,8 @@ function pollRepullProgress(backendId, jobId, cardId, onDone) {
                 bar.textContent = '100%';
                 bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
                 bar.classList.add('bg-success');
+                var btn = el.querySelector('.repull-skip-btn');
+                if (btn) btn.remove();
                 onDone();
             } else if (data.status === 'error') {
                 clearInterval(interval);
@@ -904,6 +957,8 @@ function pollRepullProgress(backendId, jobId, cardId, onDone) {
                 bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
                 bar.classList.add('bg-danger');
                 detail.textContent = data.error || 'Pull failed';
+                var btn = el.querySelector('.repull-skip-btn');
+                if (btn) btn.remove();
                 onDone();
             }
         })
