@@ -701,11 +701,12 @@ function startRepullAll() {
     .then(function(r) { return r.json(); })
     .then(function(data) {
         var backends = (data.backends || []).filter(function(b) {
-            return b.engine === 'ollama' && b.loaded_models && b.loaded_models.length > 0;
+            var models = b.all_models || b.loaded_models || [];
+            return b.engine === 'ollama' && models.length > 0;
         });
 
         if (backends.length === 0) {
-            _opDone('<i class="bi bi-info-circle"></i> No Ollama backends with loaded models found.', true);
+            _opDone('<i class="bi bi-info-circle"></i> No Ollama backends with models found.', true);
             document.getElementById('repullAllBtn').disabled = false;
             return;
         }
@@ -727,7 +728,7 @@ function startRepullAll() {
         backends.forEach(function(b) {
             var key = b.node_name || ('backend-' + b.id);
             if (!nodeModels[key]) nodeModels[key] = new Set();
-            b.loaded_models.forEach(function(m) { nodeModels[key].add(m); });
+            (b.all_models || b.loaded_models || []).forEach(function(m) { nodeModels[key].add(m); });
         });
 
         var pullPlan = [];
