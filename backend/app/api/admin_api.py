@@ -97,6 +97,14 @@ async def _run_ollama_pull(job_id: str, ollama_url: str, model: str, node_id: Op
                         "completed": data.get("completed", 0),
                     }
 
+                    # Ollama may return an error in the stream
+                    if data.get("error"):
+                        job["status"] = "error"
+                        job["error"] = data["error"]
+                        job["completed_at"] = datetime.now(timezone.utc).isoformat()
+                        logger.error("ollama_pull_failed", job_id=job_id, model=model, error=data["error"])
+                        return
+
                     if data.get("status") == "success":
                         job["status"] = "success"
                         job["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -111,9 +119,10 @@ async def _run_ollama_pull(job_id: str, ollama_url: str, model: str, node_id: Op
 
     except Exception as exc:
         job["status"] = "error"
-        job["error"] = str(exc)
+        error_msg = str(exc) or f"{type(exc).__name__}: {repr(exc)}"
+        job["error"] = error_msg
         job["completed_at"] = datetime.now(timezone.utc).isoformat()
-        logger.error("ollama_pull_failed", job_id=job_id, model=model, error=str(exc))
+        logger.error("ollama_pull_failed", job_id=job_id, model=model, error=error_msg)
 
 
 # Request/Response models

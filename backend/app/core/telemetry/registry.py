@@ -1009,77 +1009,93 @@ class BackendRegistry:
             async with self._lock:
                 self._capabilities[backend_id] = caps
 
-            # Update database with discovered info
-            async with get_async_db_context() as db:
-                backend = await crud.get_backend_by_id(db, backend_id)
-                if backend:
-                    # Update backend capabilities
-                    backend.supports_multimodal = caps.supports_multimodal
-                    backend.supports_embeddings = caps.supports_embeddings
-                    backend.supports_structured_output = caps.supports_structured_output
-                    backend.version = caps.engine_version
+            # Update database with discovered info.  Retry on deadlock —
+            # concurrent discovery tasks all upsert/delete models and can
+            # collide on MariaDB row locks.
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    async with get_async_db_context() as db:
+                        backend = await crud.get_backend_by_id(db, backend_id)
+                        if backend:
+                            # Update backend capabilities
+                            backend.supports_multimodal = caps.supports_multimodal
+                            backend.supports_embeddings = caps.supports_embeddings
+                            backend.supports_structured_output = caps.supports_structured_output
+                            backend.version = caps.engine_version
 
-                    # Don't overwrite admin-set statuses (DISABLED, DRAINING)
-                    if backend.status not in (
-                        BackendStatus.DISABLED,
-                        BackendStatus.DRAINING,
-                    ):
-                        if caps.is_healthy:
-                            backend.status = BackendStatus.HEALTHY
-                        else:
-                            backend.status = BackendStatus.UNHEALTHY
+                            # Don't overwrite admin-set statuses (DISABLED, DRAINING)
+                            if backend.status not in (
+                                BackendStatus.DISABLED,
+                                BackendStatus.DRAINING,
+                            ):
+                                if caps.is_healthy:
+                                    backend.status = BackendStatus.HEALTHY
+                                else:
+                                    backend.status = BackendStatus.UNHEALTHY
 
-                    await db.flush()
+                            await db.flush()
 
-                    # Update models
-                    discovered_names = []
-                    for model_info in caps.models:
-                        modality = Modality.CHAT
-                        if model_info.supports_multimodal:
-                            modality = Modality.MULTIMODAL
-                        elif "rerank" in model_info.name.lower():
-                            modality = Modality.RERANKING
-                        elif "embed" in model_info.name.lower():
-                            modality = Modality.EMBEDDING
+                            # Update models
+                            discovered_names = []
+                            for model_info in caps.models:
+                                modality = Modality.CHAT
+                                if model_info.supports_multimodal:
+                                    modality = Modality.MULTIMODAL
+                                elif "rerank" in model_info.name.lower():
+                                    modality = Modality.RERANKING
+                                elif "embed" in model_info.name.lower():
+                                    modality = Modality.EMBEDDING
 
-                        # Serialize capabilities list to JSON string for DB
-                        caps_json = None
-                        if model_info.capabilities:
-                            caps_json = json.dumps(model_info.capabilities)
+                                # Serialize capabilities list to JSON string for DB
+                                caps_json = None
+                                if model_info.capabilities:
+                                    caps_json = json.dumps(model_info.capabilities)
 
-                        await crud.upsert_model(
-                            db=db,
+                                await crud.upsert_model(
+                                    db=db,
+                                    backend_id=backend_id,
+                                    name=model_info.name,
+                                    modality=modality,
+                                    context_length=model_info.context_length,
+                                    supports_multimodal=model_info.supports_multimodal,
+                                    supports_thinking=model_info.supports_thinking,
+                                    supports_structured_output=model_info.supports_structured_output,
+                                    is_loaded=model_info.is_loaded,
+                                    quantization=model_info.quantization,
+                                    model_format=model_info.model_format,
+                                    capabilities_json=caps_json,
+                                    embedding_length=model_info.embedding_length,
+                                    head_count=model_info.head_count,
+                                    layer_count=model_info.layer_count,
+                                    feed_forward_length=model_info.feed_forward_length,
+                                    parent_model=model_info.parent_model,
+                                    model_max_context=model_info.model_max_context,
+                                )
+                                discovered_names.append(model_info.name)
+
+                            # Remove models no longer present on this backend
+                            if discovered_names:
+                                removed = await crud.remove_stale_models(
+                                    db, backend_id, discovered_names
+                                )
+                                if removed:
+                                    logger.info(
+                                        "stale_models_removed",
+                                        backend_id=backend_id,
+                                        count=removed,
+                                    )
+                    break  # success
+                except Exception as db_err:
+                    if "Deadlock" in str(db_err) and attempt < max_retries - 1:
+                        logger.debug(
+                            "discovery_deadlock_retry",
                             backend_id=backend_id,
-                            name=model_info.name,
-                            modality=modality,
-                            context_length=model_info.context_length,
-                            supports_multimodal=model_info.supports_multimodal,
-                            supports_thinking=model_info.supports_thinking,
-                            supports_structured_output=model_info.supports_structured_output,
-                            is_loaded=model_info.is_loaded,
-                            quantization=model_info.quantization,
-                            model_format=model_info.model_format,
-                            capabilities_json=caps_json,
-                            embedding_length=model_info.embedding_length,
-                            head_count=model_info.head_count,
-                            layer_count=model_info.layer_count,
-                            feed_forward_length=model_info.feed_forward_length,
-                            parent_model=model_info.parent_model,
-                            model_max_context=model_info.model_max_context,
+                            attempt=attempt + 1,
                         )
-                        discovered_names.append(model_info.name)
-
-                    # Remove models no longer present on this backend
-                    if discovered_names:
-                        removed = await crud.remove_stale_models(
-                            db, backend_id, discovered_names
-                        )
-                        if removed:
-                            logger.info(
-                                "stale_models_removed",
-                                backend_id=backend_id,
-                                count=removed,
-                            )
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    raise
 
             logger.info(
                 "backend_discovered",
