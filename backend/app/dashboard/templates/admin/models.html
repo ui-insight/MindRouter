@@ -722,8 +722,7 @@ function startRepullAll() {
             }
         });
 
-        // Collect all (backend, model) pull jobs — also gather models from other
-        // backends on the same node so we don't miss any
+        // Collect all models per node from all backends on that node
         var nodeModels = {};
         backends.forEach(function(b) {
             var key = b.node_name || ('backend-' + b.id);
@@ -731,23 +730,24 @@ function startRepullAll() {
             (b.all_models || b.loaded_models || []).forEach(function(m) { nodeModels[key].add(m); });
         });
 
-        var pullPlan = [];
-        Object.keys(nodeMap).forEach(function(nodeKey) {
+        // Build per-node queues: [{backendId, backendName, nodeName, models: [...]}]
+        var nodeQueues = [];
+        var totalModels = 0;
+        Object.keys(nodeMap).sort().forEach(function(nodeKey) {
             var b = nodeMap[nodeKey];
             var models = Array.from(nodeModels[nodeKey]).sort();
-            models.forEach(function(model) {
-                pullPlan.push({ backendId: b.id, backendName: b.name, nodeName: nodeKey, model: model });
-            });
+            totalModels += models.length;
+            nodeQueues.push({ backendId: b.id, backendName: b.name, nodeName: nodeKey, models: models });
         });
 
-        if (pullPlan.length === 0) {
+        if (totalModels === 0) {
             _opDone('<i class="bi bi-info-circle"></i> No models to re-pull.', true);
             document.getElementById('repullAllBtn').disabled = false;
             return;
         }
 
         document.getElementById('ollamaOpStatus').textContent =
-            'Re-pulling ' + pullPlan.length + ' model(s) across ' + Object.keys(nodeMap).length + ' node(s)...';
+            'Re-pulling ' + totalModels + ' model(s) across ' + nodeQueues.length + ' node(s) (sequential per node)...';
 
         var resultEl = document.getElementById('ollamaOpResult');
         resultEl.classList.remove('d-none');
@@ -758,7 +758,7 @@ function startRepullAll() {
             '<div id="repull-overall" class="mb-3 p-2 border rounded bg-light">' +
             '<div class="d-flex justify-content-between mb-1">' +
             '<strong>Overall Progress</strong>' +
-            '<span id="repull-overall-count">0 / ' + pullPlan.length + '</span>' +
+            '<span id="repull-overall-count">0 / ' + totalModels + '</span>' +
             '</div>' +
             '<div class="progress" style="height:20px;">' +
             '<div id="repull-overall-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
@@ -766,18 +766,41 @@ function startRepullAll() {
             '</div>'
         );
 
+        // Create card elements for all models up front, grouped by node
+        var allCardIds = {};  // keyed by "nodeKey:model"
+        nodeQueues.forEach(function(nq) {
+            resultEl.insertAdjacentHTML('beforeend',
+                '<h6 class="mt-3 mb-2"><i class="bi bi-hdd-rack"></i> ' + nq.nodeName +
+                ' <small class="text-muted">via ' + nq.backendName + '</small></h6>');
+            nq.models.forEach(function(model) {
+                var cardId = 'repull-' + nq.backendId + '-' + model.replace(/[^a-zA-Z0-9]/g, '_');
+                allCardIds[nq.nodeName + ':' + model] = cardId;
+                resultEl.insertAdjacentHTML('beforeend',
+                    '<div id="' + cardId + '" class="border rounded p-2 mb-2">' +
+                    '<div class="d-flex justify-content-between align-items-center mb-1">' +
+                    '<span><strong>' + model + '</strong></span>' +
+                    '<span class="badge bg-secondary pull-status">queued</span>' +
+                    '</div>' +
+                    '<div class="progress" style="height:16px;">' +
+                    '<div class="progress-bar" role="progressbar" style="width:0%">0%</div>' +
+                    '</div>' +
+                    '<small class="text-muted pull-detail"></small>' +
+                    '</div>'
+                );
+            });
+        });
+
         var completed = 0;
-        var total = pullPlan.length;
 
         function updateOverall() {
             completed++;
-            var pct = Math.round((completed / total) * 100);
+            var pct = Math.round((completed / totalModels) * 100);
             var bar = document.getElementById('repull-overall-bar');
             var countEl = document.getElementById('repull-overall-count');
             bar.style.width = pct + '%';
             bar.textContent = pct + '%';
-            countEl.textContent = completed + ' / ' + total;
-            if (completed >= total) {
+            countEl.textContent = completed + ' / ' + totalModels;
+            if (completed >= totalModels) {
                 bar.classList.remove('progress-bar-animated');
                 bar.classList.add('bg-success');
                 document.getElementById('ollamaOpSpinner').classList.add('d-none');
@@ -786,51 +809,61 @@ function startRepullAll() {
             }
         }
 
-        pullPlan.forEach(function(job) {
-            var cardId = 'repull-' + job.backendId + '-' + job.model.replace(/[^a-zA-Z0-9]/g, '_') + '-' + Date.now();
-
-            resultEl.insertAdjacentHTML('beforeend',
-                '<div id="' + cardId + '" class="border rounded p-2 mb-2">' +
-                '<div class="d-flex justify-content-between align-items-center mb-1">' +
-                '<span><strong>' + job.model + '</strong> <small class="text-muted">via ' + job.backendName + ' (' + job.nodeName + ')</small></span>' +
-                '<span class="badge bg-info pull-status">starting...</span>' +
-                '</div>' +
-                '<div class="progress" style="height:16px;">' +
-                '<div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
-                '</div>' +
-                '<small class="text-muted pull-detail"></small>' +
-                '</div>'
-            );
-
-            fetch('/api/admin/backends/' + job.backendId + '/ollama/pull', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({model: job.model})
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.job_id) {
-                    pollRepullProgress(job.backendId, data.job_id, cardId, updateOverall);
-                } else {
-                    var el = document.getElementById(cardId);
-                    el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
-                    el.querySelector('.pull-status').textContent = 'error';
-                    el.querySelector('.pull-detail').textContent = data.detail || 'Unknown error';
-                    updateOverall();
-                }
-            })
-            .catch(function(err) {
-                var el = document.getElementById(cardId);
-                el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
-                el.querySelector('.pull-status').textContent = 'error';
-                el.querySelector('.pull-detail').textContent = err.toString();
-                updateOverall();
-            });
+        // Process each node's queue sequentially (but all nodes in parallel)
+        nodeQueues.forEach(function(nq) {
+            processNodeQueue(nq.backendId, nq.nodeName, nq.models, 0, allCardIds, updateOverall);
         });
     })
     .catch(function(err) {
         _opDone('<i class="bi bi-x-circle"></i> Failed to fetch backend info: ' + err.toString(), true);
         document.getElementById('repullAllBtn').disabled = false;
+    });
+}
+
+function processNodeQueue(backendId, nodeName, models, idx, allCardIds, updateOverall) {
+    if (idx >= models.length) return;
+
+    var model = models[idx];
+    var cardId = allCardIds[nodeName + ':' + model];
+    var el = document.getElementById(cardId);
+
+    // Mark as pulling
+    el.querySelector('.pull-status').className = 'badge bg-info pull-status';
+    el.querySelector('.pull-status').textContent = 'pulling...';
+    el.querySelector('.progress-bar').classList.add('progress-bar-striped', 'progress-bar-animated');
+
+    fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model: model})
+    })
+    .then(function(r) {
+        if (!r.ok) {
+            return r.json().then(function(d) { throw new Error(d.detail || 'HTTP ' + r.status); });
+        }
+        return r.json();
+    })
+    .then(function(data) {
+        if (data.job_id) {
+            pollRepullProgress(backendId, data.job_id, cardId, function() {
+                updateOverall();
+                processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
+            });
+        } else {
+            el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+            el.querySelector('.pull-status').textContent = 'error';
+            el.querySelector('.pull-detail').textContent = data.detail || data.error || 'No job_id returned';
+            updateOverall();
+            processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
+        }
+    })
+    .catch(function(err) {
+        el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+        el.querySelector('.pull-status').textContent = 'error';
+        el.querySelector('.progress-bar').classList.remove('progress-bar-striped', 'progress-bar-animated');
+        el.querySelector('.pull-detail').textContent = err.message || err.toString();
+        updateOverall();
+        processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
     });
 }
 
@@ -861,16 +894,16 @@ function pollRepullProgress(backendId, jobId, cardId, onDone) {
                 statusBadge.textContent = 'complete';
                 bar.style.width = '100%';
                 bar.textContent = '100%';
-                bar.classList.remove('progress-bar-animated');
+                bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
                 bar.classList.add('bg-success');
                 onDone();
             } else if (data.status === 'error') {
                 clearInterval(interval);
                 statusBadge.className = 'badge bg-danger pull-status';
                 statusBadge.textContent = 'error';
-                bar.classList.remove('progress-bar-animated');
+                bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
                 bar.classList.add('bg-danger');
-                detail.textContent = data.error || 'Unknown error';
+                detail.textContent = data.error || 'Pull failed';
                 onDone();
             }
         })
