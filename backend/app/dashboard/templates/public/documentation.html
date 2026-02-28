@@ -433,15 +433,34 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
   "object": "list",
   "data": [
     {
-      "id": "llama3.2",
+      "id": "llama3.3:70b",
       "object": "model",
       "created": 1700000000,
       "owned_by": "mindrouter",
-      "capabilities": {"multimodal": false, "embeddings": false, "structured_output": true},
-      "backends": ["ollama-gpu1", "ollama-gpu2"]
+      "capabilities": {
+        "multimodal": false,
+        "embeddings": false,
+        "structured_output": true,
+        "thinking": false
+      },
+      "backends": ["lynx-gpu0", "lynx-gpu2"],
+      "context_length": 32768,
+      "model_max_context": 131072,
+      "parameter_count": "70B",
+      "quantization": "Q4_K_M",
+      "family": "llama"
     }
   ]
 }</code></pre>
+                <p>Fields include:</p>
+                <ul>
+                    <li><code>context_length</code> &mdash; effective context window (num_ctx injected per request)</li>
+                    <li><code>model_max_context</code> &mdash; architectural maximum context the model supports</li>
+                    <li><code>parameter_count</code> &mdash; model size (e.g. "7B", "70B")</li>
+                    <li><code>quantization</code> &mdash; quantization level (e.g. "Q4_K_M", "FP16")</li>
+                    <li><code>family</code> &mdash; model family (e.g. "llama", "qwen2")</li>
+                    <li><code>capabilities.thinking</code> &mdash; whether the model supports thinking/reasoning mode</li>
+                </ul>
 
                 <h3>Ollama-Compatible Endpoints</h3>
                 <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter2 as a drop-in replacement.</p>
@@ -456,6 +475,30 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>GET</td><td><code>/api/tags</code></td><td>API Key</td><td>List models (Ollama format)</td></tr>
                     </tbody>
                 </table>
+
+                <h4>List Models (Ollama Format)</h4>
+                <pre><code>curl http://localhost:8000/api/tags \
+  -H "Authorization: Bearer mr2_your-api-key"</code></pre>
+
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "models": [
+    {
+      "name": "llama3.3:70b",
+      "model": "llama3.3:70b",
+      "modified_at": "2026-02-28T12:00:00",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "llama",
+        "parameter_size": "70B",
+        "quantization_level": "Q4_K_M"
+      },
+      "context_length": 32768,
+      "model_max_context": 131072
+    }
+  ]
+}</code></pre>
 
                 <h4>Ollama Chat</h4>
                 <pre><code>curl -X POST http://localhost:8000/api/chat \
