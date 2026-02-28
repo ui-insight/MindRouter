@@ -776,7 +776,8 @@ function startRepullAll() {
                 var cardId = 'repull-' + nq.backendId + '-' + model.replace(/[^a-zA-Z0-9]/g, '_');
                 allCardIds[nq.nodeName + ':' + model] = cardId;
                 resultEl.insertAdjacentHTML('beforeend',
-                    '<div id="' + cardId + '" class="border rounded p-2 mb-2">' +
+                    '<div id="' + cardId + '" class="border rounded p-2 mb-2"' +
+                    ' data-backend-id="' + nq.backendId + '" data-model="' + model + '">' +
                     '<div class="d-flex justify-content-between align-items-center mb-1">' +
                     '<span><strong>' + model + '</strong></span>' +
                     '<span class="badge bg-secondary pull-status">queued</span>' +
@@ -859,6 +860,7 @@ function processNodeQueue(backendId, nodeName, models, idx, allCardIds, updateOv
             el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
             el.querySelector('.pull-status').textContent = 'error';
             el.querySelector('.pull-detail').textContent = data.detail || data.error || 'No job_id returned';
+            addRetryButton(cardId, backendId, model);
             updateOverall();
             processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
         }
@@ -868,6 +870,7 @@ function processNodeQueue(backendId, nodeName, models, idx, allCardIds, updateOv
         el.querySelector('.pull-status').textContent = 'error';
         el.querySelector('.progress-bar').classList.remove('progress-bar-striped', 'progress-bar-animated');
         el.querySelector('.pull-detail').textContent = err.message || err.toString();
+        addRetryButton(cardId, backendId, model);
         updateOverall();
         processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
     });
@@ -892,6 +895,7 @@ function pollRepullProgress(backendId, jobId, cardId, onDone) {
             el.querySelector('.pull-detail').textContent = reason;
             var btn = el.querySelector('.repull-skip-btn');
             if (btn) btn.remove();
+            addRetryButton(cardId, el.dataset.backendId, el.dataset.model);
         }
         onDone();
     }
@@ -959,11 +963,109 @@ function pollRepullProgress(backendId, jobId, cardId, onDone) {
                 detail.textContent = data.error || 'Pull failed';
                 var btn = el.querySelector('.repull-skip-btn');
                 if (btn) btn.remove();
+                addRetryButton(cardId, el.dataset.backendId, el.dataset.model);
                 onDone();
             }
         })
         .catch(function() { /* ignore transient */ });
     }, 2000);
+}
+
+function addRetryButton(cardId, backendId, model) {
+    var el = document.getElementById(cardId);
+    if (!el) return;
+    // Remove existing retry button if any
+    var existing = el.querySelector('.repull-retry-btn');
+    if (existing) existing.remove();
+
+    var btn = document.createElement('button');
+    btn.className = 'btn btn-outline-primary btn-sm ms-2 repull-retry-btn';
+    btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Retry';
+    btn.style.fontSize = '0.7rem';
+    btn.style.padding = '0 6px';
+    btn.addEventListener('click', function() {
+        btn.remove();
+        var statusBadge = el.querySelector('.pull-status');
+        var bar = el.querySelector('.progress-bar');
+        var detail = el.querySelector('.pull-detail');
+
+        // Reset card to pulling state
+        statusBadge.className = 'badge bg-info pull-status';
+        statusBadge.textContent = 'retrying...';
+        bar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+        bar.style.width = '0%';
+        bar.textContent = '0%';
+        detail.textContent = '';
+
+        // Add skip button
+        var skipBtn = document.createElement('button');
+        skipBtn.className = 'btn btn-outline-warning btn-sm ms-2 repull-skip-btn';
+        skipBtn.innerHTML = '<i class="bi bi-skip-forward"></i> Skip';
+        skipBtn.style.fontSize = '0.7rem';
+        skipBtn.style.padding = '0 6px';
+        statusBadge.after(skipBtn);
+
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model: model})
+        })
+        .then(function(r) {
+            if (!r.ok) {
+                return r.json().then(function(d) { throw new Error(d.detail || 'HTTP ' + r.status); });
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            if (data.job_id) {
+                pollRepullProgress(backendId, data.job_id, cardId, function() {
+                    // Update overall count on success/error
+                    _updateRepullOverallForRetry();
+                });
+            } else {
+                statusBadge.className = 'badge bg-danger pull-status';
+                statusBadge.textContent = 'error';
+                detail.textContent = data.detail || data.error || 'No job_id returned';
+                var skip = el.querySelector('.repull-skip-btn');
+                if (skip) skip.remove();
+                addRetryButton(cardId, backendId, model);
+            }
+        })
+        .catch(function(err) {
+            statusBadge.className = 'badge bg-danger pull-status';
+            statusBadge.textContent = 'error';
+            bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+            detail.textContent = err.message || err.toString();
+            var skip = el.querySelector('.repull-skip-btn');
+            if (skip) skip.remove();
+            addRetryButton(cardId, backendId, model);
+        });
+    });
+    el.querySelector('.pull-status').after(btn);
+}
+
+function _updateRepullOverallForRetry() {
+    // Recount completed (success/error/skipped) vs total
+    var allStatuses = document.querySelectorAll('#ollamaOpResult .pull-status');
+    var done = 0;
+    var total = 0;
+    allStatuses.forEach(function(badge) {
+        total++;
+        var txt = badge.textContent;
+        if (txt === 'complete' || txt === 'error' || txt === 'skipped') done++;
+    });
+    var bar = document.getElementById('repull-overall-bar');
+    var countEl = document.getElementById('repull-overall-count');
+    if (bar && countEl) {
+        var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        bar.style.width = pct + '%';
+        bar.textContent = pct + '%';
+        countEl.textContent = done + ' / ' + total;
+        if (done >= total) {
+            bar.classList.remove('progress-bar-animated');
+            bar.classList.add('bg-success');
+        }
+    }
 }
 
 function deleteModel(backendId, modelName) {
