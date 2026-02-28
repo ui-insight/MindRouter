@@ -3,8 +3,20 @@
 {% block title %}Chat - MindRouter2{% endblock %}
 
 {% block extra_css %}
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css" id="hljs-theme-light">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" id="hljs-theme-dark" disabled>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script>
+(function() {
+    var isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+    if (isDark) {
+        var l = document.getElementById('hljs-theme-light');
+        var d = document.getElementById('hljs-theme-dark');
+        if (l) l.disabled = true;
+        if (d) d.disabled = false;
+    }
+})();
+</script>
 <style>
     /* Full-height layout: no footer, no scrollbar on body */
     body { overflow: hidden; }
@@ -22,8 +34,8 @@
     .chat-sidebar {
         width: 260px;
         min-width: 260px;
-        background: #f8f9fa;
-        border-right: 1px solid #dee2e6;
+        background: var(--mr-sidebar-bg);
+        border-right: 1px solid var(--mr-border-color);
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -36,7 +48,7 @@
     }
     .sidebar-header {
         padding: 0.75rem;
-        border-bottom: 1px solid #dee2e6;
+        border-bottom: 1px solid var(--mr-border-color);
         display: flex;
         gap: 0.5rem;
     }
@@ -55,11 +67,11 @@
         gap: 0.5rem;
         margin-bottom: 2px;
         font-size: 0.875rem;
-        color: #333;
+        color: var(--mr-text-primary);
         text-decoration: none;
     }
-    .conv-item:hover { background: #e9ecef; }
-    .conv-item.active { background: #d4e5ff; }
+    .conv-item:hover { background: var(--mr-sidebar-hover); }
+    .conv-item.active { background: var(--mr-conv-active-bg); }
     .conv-item .conv-title {
         flex: 1;
         white-space: nowrap;
@@ -86,11 +98,11 @@
     }
     .chat-header {
         padding: 0.5rem 1rem;
-        border-bottom: 1px solid #dee2e6;
+        border-bottom: 1px solid var(--mr-border-color);
         display: flex;
         align-items: center;
         gap: 0.75rem;
-        background: #fff;
+        background: var(--mr-body-bg);
     }
     .chat-header .toggle-sidebar {
         border: none;
@@ -98,7 +110,7 @@
         font-size: 1.2rem;
         cursor: pointer;
         padding: 0.25rem;
-        color: #666;
+        color: var(--mr-text-secondary);
     }
     .chat-header select {
         max-width: 350px;
@@ -119,7 +131,7 @@
         /* no special bg — just the message bubble */
     }
     .message-assistant {
-        background: #f7f7f8;
+        background: var(--mr-msg-assistant-bg);
     }
     .message .role-label {
         font-weight: 600;
@@ -131,7 +143,7 @@
     .model-tag {
         display: block;
         font-size: 0.72rem;
-        color: #888;
+        color: var(--mr-text-muted);
         margin-top: -0.2rem;
         margin-bottom: 0.25rem;
     }
@@ -144,8 +156,8 @@
     /* Code blocks */
     .message-content pre {
         position: relative;
-        background: #f6f8fa;
-        border: 1px solid #e1e4e8;
+        background: var(--mr-code-bg);
+        border: 1px solid var(--mr-code-border);
         border-radius: 0.375rem;
         padding: 1rem;
         overflow-x: auto;
@@ -157,8 +169,9 @@
         position: absolute;
         top: 0.5rem;
         right: 0.5rem;
-        border: 1px solid #d0d7de;
-        background: #f6f8fa;
+        border: 1px solid var(--mr-copy-btn-border);
+        background: var(--mr-copy-btn-bg);
+        color: var(--mr-text-secondary);
         border-radius: 0.25rem;
         padding: 0.2rem 0.5rem;
         font-size: 0.75rem;
@@ -176,7 +189,7 @@
         font-size: 0.75rem;
         color: #6c757d;
         background: none;
-        border: 1px solid #dee2e6;
+        border: 1px solid var(--mr-border-color);
         border-radius: 0.25rem;
         cursor: pointer;
         transition: color 0.15s, border-color 0.15s;
@@ -236,7 +249,7 @@
         width: 200px;
         height: auto;
         border-radius: 0.375rem;
-        border: 1px solid #dee2e6;
+        border: 1px solid var(--mr-border-color);
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
         cursor: pointer;
         transition: box-shadow 0.15s;
@@ -246,7 +259,7 @@
     }
     .attached-file-thumb .thumb-label {
         font-size: 0.7rem;
-        color: #666;
+        color: var(--mr-text-secondary);
         max-width: 200px;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -260,8 +273,8 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: #f0f4f8;
-        border: 1px solid #dee2e6;
+        background: var(--mr-doc-icon-bg);
+        border: 1px solid var(--mr-border-color);
         border-radius: 0.375rem;
         font-size: 2.5rem;
         color: #6c757d;
@@ -280,8 +293,8 @@
     .chat-input-wrapper {
         max-width: 800px;
         margin: 0 auto;
-        background: #fff;
-        border: 1px solid #dee2e6;
+        background: var(--mr-chat-input-bg);
+        border: 1px solid var(--mr-border-color);
         border-radius: 1rem;
         box-shadow: 0 2px 12px rgba(0,0,0,0.08);
         padding: 0.6rem 0.75rem;
@@ -303,12 +316,12 @@
         width: 200px;
         height: auto;
         border-radius: 0.375rem;
-        border: 1px solid #dee2e6;
+        border: 1px solid var(--mr-border-color);
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
     .file-preview-thumb .preview-label {
         font-size: 0.7rem;
-        color: #666;
+        color: var(--mr-text-secondary);
         max-width: 200px;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -341,8 +354,8 @@
         display: flex;
         align-items: center;
         justify-content: center;
-        background: #f0f4f8;
-        border: 1px solid #dee2e6;
+        background: var(--mr-doc-icon-bg);
+        border: 1px solid var(--mr-border-color);
         border-radius: 0.375rem;
         font-size: 2.5rem;
         color: #6c757d;
@@ -350,13 +363,13 @@
     .file-preview-thumb .uploading-overlay {
         position: absolute;
         inset: 0;
-        background: rgba(255,255,255,0.7);
+        background: var(--mr-upload-overlay-bg);
         display: flex;
         align-items: center;
         justify-content: center;
         border-radius: 0.375rem;
         font-size: 0.85rem;
-        color: #666;
+        color: var(--mr-text-secondary);
     }
 
     /* Image modal */
@@ -391,8 +404,8 @@
         height: 32px;
         border-radius: 50%;
         border: none;
-        background: #fff;
-        color: #333;
+        background: var(--mr-modal-close-bg);
+        color: var(--mr-modal-close-color);
         font-size: 1.1rem;
         cursor: pointer;
         display: flex;
@@ -400,7 +413,7 @@
         justify-content: center;
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
-    .image-modal-close:hover { background: #f0f0f0; }
+    .image-modal-close:hover { background: var(--mr-sidebar-hover); }
     .image-modal-filename {
         text-align: center;
         color: #fff;
@@ -413,8 +426,8 @@
         display: inline-flex;
         align-items: center;
         gap: 0.35rem;
-        background: #f0f0f0;
-        border: 1px solid #ddd;
+        background: var(--mr-file-chip-bg);
+        border: 1px solid var(--mr-file-chip-border);
         border-radius: 1rem;
         padding: 0.25rem 0.6rem;
         font-size: 0.8rem;
@@ -439,8 +452,9 @@
         border-radius: 0.75rem;
         padding: 0.5rem 0.75rem;
         font-size: 0.95rem;
-        border: 1px solid #e0e0e0;
-        background: #f9f9fb;
+        border: 1px solid var(--mr-border-color);
+        background: var(--mr-input-bg);
+        color: var(--mr-text-primary);
         overflow-y: auto;
         line-height: 1.5;
     }
@@ -448,7 +462,7 @@
         outline: none;
         border-color: #0d6efd;
         box-shadow: none;
-        background: #fff;
+        background: var(--mr-input-bg-focus);
     }
     .input-actions {
         display: flex;
@@ -476,8 +490,8 @@
         max-width: 500px;
         padding: 2rem;
     }
-    .welcome-content h2 { color: #333; margin-bottom: 0.5rem; }
-    .welcome-content p { color: #666; }
+    .welcome-content h2 { color: var(--mr-text-primary); margin-bottom: 0.5rem; }
+    .welcome-content p { color: var(--mr-text-secondary); }
 
     /* No API key alert */
     .no-key-alert {
@@ -538,9 +552,9 @@
     /* Thinking/reasoning block */
     .thinking-block {
         margin-bottom: 0.75rem;
-        border: 1px solid #e9ecef;
+        border: 1px solid var(--mr-border-color);
         border-radius: 0.375rem;
-        background: #fefce8;
+        background: var(--mr-thinking-bg);
     }
     .thinking-toggle {
         display: flex;
@@ -549,20 +563,20 @@
         padding: 0.4rem 0.75rem;
         cursor: pointer;
         font-size: 0.8rem;
-        color: #92400e;
+        color: var(--mr-thinking-text);
         background: none;
         border: none;
         width: 100%;
         text-align: left;
     }
-    .thinking-toggle:hover { background: #fef9c3; }
+    .thinking-toggle:hover { background: var(--mr-thinking-hover); }
     .thinking-toggle i { transition: transform 0.2s; }
     .thinking-toggle.collapsed i { transform: rotate(-90deg); }
     .thinking-content {
         padding: 0.5rem 0.75rem;
-        border-top: 1px solid #e9ecef;
+        border-top: 1px solid var(--mr-border-color);
         font-size: 0.85rem;
-        color: #78350f;
+        color: var(--mr-thinking-content-text);
         white-space: pre-wrap;
         max-height: 300px;
         overflow-y: auto;
@@ -741,6 +755,20 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+<script>
+// Highlight.js theme swap on dark/light toggle
+document.addEventListener('mr-theme-changed', function(e) {
+    var light = document.getElementById('hljs-theme-light');
+    var dark = document.getElementById('hljs-theme-dark');
+    if (e.detail.theme === 'dark') {
+        if (light) light.disabled = true;
+        if (dark) dark.disabled = false;
+    } else {
+        if (light) light.disabled = false;
+        if (dark) dark.disabled = true;
+    }
+});
+</script>
 <script>
 (function() {
     'use strict';
