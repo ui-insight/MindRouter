@@ -18,6 +18,11 @@
     .fade-update { transition: opacity 0.3s; }
     .loading-spinner { display: none; }
     .loading .loading-spinner { display: inline-block; }
+    .config-section-header { font-size: 1.1rem; font-weight: 600; }
+    .config-table td, .config-table th { white-space: nowrap; font-size: 0.85rem; vertical-align: middle; }
+    .config-table .status-healthy { color: #198754; }
+    .config-table .status-disabled { color: #ffc107; }
+    .config-table .status-unhealthy { color: #dc3545; }
 </style>
 {% endblock %}
 
@@ -139,6 +144,79 @@
                         <div class="card-body">
                             <div class="chart-container">
                                 <canvas id="chart-requests" aria-label="Request throughput over time chart" role="img"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Backend Configuration Summary -->
+            <div class="mb-4" id="config-tables-section">
+                <h4 class="config-section-header mb-3"><i class="bi bi-sliders"></i> Backend Configuration</h4>
+                <div class="row">
+                    <div class="col-12 mb-3">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <i class="bi bi-box"></i> Ollama Backends
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover config-table mb-0">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Backend</th>
+                                                <th>Status</th>
+                                                <th>URL</th>
+                                                <th>Node</th>
+                                                <th>GPUs</th>
+                                                <th>GPU Type</th>
+                                                <th>Compute Cap</th>
+                                                <th>CUDA</th>
+                                                <th>GPU Memory</th>
+                                                <th>Max Concurrent</th>
+                                                <th>Version</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="config-ollama-tbody">
+                                            <tr><td colspan="11" class="text-center text-muted py-3">
+                                                <div class="spinner-border spinner-border-sm" role="status"></div> Loading...
+                                            </td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12 mb-3">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <i class="bi bi-cpu"></i> vLLM Backends
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover config-table mb-0">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Backend</th>
+                                                <th>Status</th>
+                                                <th>URL</th>
+                                                <th>Node</th>
+                                                <th>GPUs</th>
+                                                <th>GPU Type</th>
+                                                <th>Compute Cap</th>
+                                                <th>CUDA</th>
+                                                <th>GPU Memory</th>
+                                                <th>Max Concurrent</th>
+                                                <th>Version</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="config-vllm-tbody">
+                                            <tr><td colspan="11" class="text-center text-muted py-3">
+                                                <div class="spinner-border spinner-border-sm" role="status"></div> Loading...
+                                            </td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -316,6 +394,7 @@ async function fetchLatestTelemetry() {
         updateStatCards(data.cluster);
         if (data.nodes) updateNodeAccordions(data.nodes);
         updateBackendAccordions(data.backends);
+        updateConfigTables(data.backends, data.nodes || []);
         document.getElementById('last-updated').textContent =
             'Last updated: ' + new Date().toLocaleTimeString();
     } catch (e) {
@@ -462,6 +541,55 @@ function updateNodeContent(node, idx) {
     }
 
     body.innerHTML = html;
+}
+
+function updateConfigTables(backends, nodes) {
+    const nodeMap = {};
+    nodes.forEach(n => { nodeMap[n.name] = n; });
+
+    function statusBadge(status) {
+        if (status === 'healthy') return '<span class="badge bg-success">healthy</span>';
+        if (status === 'disabled') return '<span class="badge bg-warning text-dark">disabled</span>';
+        return '<span class="badge bg-danger">' + (status || 'unknown') + '</span>';
+    }
+
+    function buildRows(filtered) {
+        if (filtered.length === 0) {
+            return '<tr><td colspan="11" class="text-center text-muted py-3">No backends</td></tr>';
+        }
+        filtered.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        return filtered.map(b => {
+            const node = b.node_name ? nodeMap[b.node_name] : null;
+            const cudaVer = node ? (node.cuda_version || 'N/A') : 'N/A';
+            const gpuIndices = b.gpu_indices ? b.gpu_indices.join(', ') : 'All';
+            const gpuType = (b.gpus && b.gpus.length > 0) ? b.gpus[0].name : 'N/A';
+            const computeCap = (b.gpus && b.gpus.length > 0 && b.gpus[0].compute_capability)
+                ? b.gpus[0].compute_capability : 'N/A';
+            const totalMem = (b.gpus && b.gpus.length > 0)
+                ? b.gpus.reduce((sum, g) => sum + (g.memory_total_gb || 0), 0) : null;
+            const memStr = totalMem != null ? totalMem.toFixed(1) + ' GB' : 'N/A';
+
+            return `<tr>
+                <td><strong>${b.name}</strong></td>
+                <td>${statusBadge(b.status)}</td>
+                <td><small class="text-muted">${b.url}</small></td>
+                <td>${b.node_name || 'N/A'}</td>
+                <td>${gpuIndices}</td>
+                <td>${gpuType}</td>
+                <td>${computeCap}</td>
+                <td>${cudaVer}</td>
+                <td>${memStr}</td>
+                <td>${b.max_concurrent != null ? b.max_concurrent : 'N/A'}</td>
+                <td>${b.version || 'N/A'}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    const ollamaBackends = backends.filter(b => b.engine === 'ollama');
+    const vllmBackends = backends.filter(b => b.engine === 'vllm');
+
+    document.getElementById('config-ollama-tbody').innerHTML = buildRows(ollamaBackends);
+    document.getElementById('config-vllm-tbody').innerHTML = buildRows(vllmBackends);
 }
 
 function updateBackendAccordions(backends) {
