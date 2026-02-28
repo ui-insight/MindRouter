@@ -15,6 +15,7 @@
 """Canonical schema to vLLM (OpenAI-compatible) API format translator."""
 
 import json
+import re
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -45,6 +46,22 @@ from backend.app.core.canonical_schemas import (
     TextContent,
     UsageInfo,
 )
+
+
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+
+def _extract_think_tags(content: str) -> tuple:
+    """Extract <think>...</think> from content, returning (reasoning, cleaned_content).
+
+    Returns (None, original_content) if no tags found.
+    """
+    match = _THINK_RE.search(content)
+    if not match:
+        return None, content
+    reasoning = match.group(1).strip() or None
+    cleaned = (content[: match.start()] + content[match.end() :]).strip()
+    return reasoning, cleaned or None
 
 
 class VLLMOutTranslator:
@@ -231,6 +248,11 @@ class VLLMOutTranslator:
             content = message_data.get("content")
             reasoning = message_data.get("reasoning_content") or message_data.get("reasoning")
 
+            # Fallback: extract <think> tags from content when vLLM
+            # doesn't separate reasoning (e.g. Qwen3-32B)
+            if not reasoning and content and "<think>" in content:
+                reasoning, content = _extract_think_tags(content)
+
             # vLLM/Qwen3.5 bug: when thinking is disabled the model
             # may put all output into reasoning_content with content
             # empty.  Promote reasoning to content in that case.
@@ -291,6 +313,10 @@ class VLLMOutTranslator:
             CanonicalStreamChunk objects
         """
         buffer = ""
+        # State for extracting <think> tags from streaming content
+        # when vLLM doesn't provide reasoning_content (e.g. Qwen3-32B)
+        in_think = False
+        think_tag_buf = ""  # buffer for partial tag matching
 
         async for chunk_bytes in openai_stream:
             buffer += chunk_bytes.decode("utf-8")
@@ -345,6 +371,52 @@ class VLLMOutTranslator:
                                 if not thinking_enabled and not content_delta and reasoning_delta and not tc_deltas:
                                     content_delta = reasoning_delta
                                     reasoning_delta = None
+
+                                # Fallback: extract <think> tags from content
+                                # stream when vLLM doesn't provide
+                                # reasoning_content (e.g. Qwen3-32B)
+                                if content_delta and not reasoning_delta:
+                                    think_tag_buf += content_delta
+                                    content_delta = None
+                                    emit_content = ""
+                                    emit_reasoning = ""
+
+                                    while think_tag_buf:
+                                        if in_think:
+                                            end_idx = think_tag_buf.find("</think>")
+                                            if end_idx != -1:
+                                                emit_reasoning += think_tag_buf[:end_idx]
+                                                think_tag_buf = think_tag_buf[end_idx + 8:]
+                                                in_think = False
+                                            else:
+                                                # Check for partial </think> at end
+                                                partial = ""
+                                                for i in range(1, min(len("</think>"), len(think_tag_buf) + 1)):
+                                                    if think_tag_buf.endswith("</think>"[:i]):
+                                                        partial = think_tag_buf[-i:]
+                                                        break
+                                                emit_reasoning += think_tag_buf[:len(think_tag_buf) - len(partial)]
+                                                think_tag_buf = partial
+                                                break
+                                        else:
+                                            start_idx = think_tag_buf.find("<think>")
+                                            if start_idx != -1:
+                                                emit_content += think_tag_buf[:start_idx]
+                                                think_tag_buf = think_tag_buf[start_idx + 7:]
+                                                in_think = True
+                                            else:
+                                                # Check for partial <think> at end
+                                                partial = ""
+                                                for i in range(1, min(len("<think>"), len(think_tag_buf) + 1)):
+                                                    if think_tag_buf.endswith("<think>"[:i]):
+                                                        partial = think_tag_buf[-i:]
+                                                        break
+                                                emit_content += think_tag_buf[:len(think_tag_buf) - len(partial)]
+                                                think_tag_buf = partial
+                                                break
+
+                                    content_delta = emit_content if emit_content else None
+                                    reasoning_delta = emit_reasoning if emit_reasoning else None
 
                                 delta = CanonicalStreamDelta(
                                     role=(
