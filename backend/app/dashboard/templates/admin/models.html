@@ -78,6 +78,13 @@
                                 </button>
                             </div>
                         </div>
+                        <hr class="my-3">
+                        <div class="d-flex align-items-center">
+                            <button class="btn btn-outline-secondary" id="repullAllBtn" onclick="startRepullAll()">
+                                <i class="bi bi-arrow-repeat"></i> Re-pull All Ollama Models
+                            </button>
+                            <small class="text-muted ms-3">Re-pulls every loaded model once per node (shared model folder).</small>
+                        </div>
                         <div id="pullProgressArea" class="mt-3"></div>
                     </div>
                 </div>
@@ -683,6 +690,191 @@ function _opDone(html, isError) {
     result.classList.remove('d-none');
     result.innerHTML = '<div class="alert ' + (isError ? 'alert-danger' : 'alert-success') + ' mb-0">' + html + '</div>';
     document.getElementById('ollamaOpFooter').classList.remove('d-none');
+}
+
+function startRepullAll() {
+    document.getElementById('repullAllBtn').disabled = true;
+    _showOpModal('Re-pull All Ollama Models');
+    document.getElementById('ollamaOpStatus').textContent = 'Fetching backend info...';
+
+    fetch('/api/admin/telemetry/latest')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var backends = (data.backends || []).filter(function(b) {
+            return b.engine === 'ollama' && b.loaded_models && b.loaded_models.length > 0;
+        });
+
+        if (backends.length === 0) {
+            _opDone('<i class="bi bi-info-circle"></i> No Ollama backends with loaded models found.', true);
+            document.getElementById('repullAllBtn').disabled = false;
+            return;
+        }
+
+        // Group by node_name, pick first healthy (or first) backend per node
+        var nodeMap = {};
+        backends.forEach(function(b) {
+            var key = b.node_name || ('backend-' + b.id);
+            if (!nodeMap[key]) {
+                nodeMap[key] = b;
+            } else if (b.status === 'healthy' && nodeMap[key].status !== 'healthy') {
+                nodeMap[key] = b;
+            }
+        });
+
+        // Collect all (backend, model) pull jobs — also gather models from other
+        // backends on the same node so we don't miss any
+        var nodeModels = {};
+        backends.forEach(function(b) {
+            var key = b.node_name || ('backend-' + b.id);
+            if (!nodeModels[key]) nodeModels[key] = new Set();
+            b.loaded_models.forEach(function(m) { nodeModels[key].add(m); });
+        });
+
+        var pullPlan = [];
+        Object.keys(nodeMap).forEach(function(nodeKey) {
+            var b = nodeMap[nodeKey];
+            var models = Array.from(nodeModels[nodeKey]).sort();
+            models.forEach(function(model) {
+                pullPlan.push({ backendId: b.id, backendName: b.name, nodeName: nodeKey, model: model });
+            });
+        });
+
+        if (pullPlan.length === 0) {
+            _opDone('<i class="bi bi-info-circle"></i> No models to re-pull.', true);
+            document.getElementById('repullAllBtn').disabled = false;
+            return;
+        }
+
+        document.getElementById('ollamaOpStatus').textContent =
+            'Re-pulling ' + pullPlan.length + ' model(s) across ' + Object.keys(nodeMap).length + ' node(s)...';
+
+        var resultEl = document.getElementById('ollamaOpResult');
+        resultEl.classList.remove('d-none');
+        resultEl.innerHTML = '';
+
+        // Overall summary bar
+        resultEl.insertAdjacentHTML('beforeend',
+            '<div id="repull-overall" class="mb-3 p-2 border rounded bg-light">' +
+            '<div class="d-flex justify-content-between mb-1">' +
+            '<strong>Overall Progress</strong>' +
+            '<span id="repull-overall-count">0 / ' + pullPlan.length + '</span>' +
+            '</div>' +
+            '<div class="progress" style="height:20px;">' +
+            '<div id="repull-overall-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
+            '</div>' +
+            '</div>'
+        );
+
+        var completed = 0;
+        var total = pullPlan.length;
+
+        function updateOverall() {
+            completed++;
+            var pct = Math.round((completed / total) * 100);
+            var bar = document.getElementById('repull-overall-bar');
+            var countEl = document.getElementById('repull-overall-count');
+            bar.style.width = pct + '%';
+            bar.textContent = pct + '%';
+            countEl.textContent = completed + ' / ' + total;
+            if (completed >= total) {
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-success');
+                document.getElementById('ollamaOpSpinner').classList.add('d-none');
+                document.getElementById('ollamaOpFooter').classList.remove('d-none');
+                document.getElementById('repullAllBtn').disabled = false;
+            }
+        }
+
+        pullPlan.forEach(function(job) {
+            var cardId = 'repull-' + job.backendId + '-' + job.model.replace(/[^a-zA-Z0-9]/g, '_') + '-' + Date.now();
+
+            resultEl.insertAdjacentHTML('beforeend',
+                '<div id="' + cardId + '" class="border rounded p-2 mb-2">' +
+                '<div class="d-flex justify-content-between align-items-center mb-1">' +
+                '<span><strong>' + job.model + '</strong> <small class="text-muted">via ' + job.backendName + ' (' + job.nodeName + ')</small></span>' +
+                '<span class="badge bg-info pull-status">starting...</span>' +
+                '</div>' +
+                '<div class="progress" style="height:16px;">' +
+                '<div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
+                '</div>' +
+                '<small class="text-muted pull-detail"></small>' +
+                '</div>'
+            );
+
+            fetch('/api/admin/backends/' + job.backendId + '/ollama/pull', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({model: job.model})
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.job_id) {
+                    pollRepullProgress(job.backendId, data.job_id, cardId, updateOverall);
+                } else {
+                    var el = document.getElementById(cardId);
+                    el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+                    el.querySelector('.pull-status').textContent = 'error';
+                    el.querySelector('.pull-detail').textContent = data.detail || 'Unknown error';
+                    updateOverall();
+                }
+            })
+            .catch(function(err) {
+                var el = document.getElementById(cardId);
+                el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+                el.querySelector('.pull-status').textContent = 'error';
+                el.querySelector('.pull-detail').textContent = err.toString();
+                updateOverall();
+            });
+        });
+    })
+    .catch(function(err) {
+        _opDone('<i class="bi bi-x-circle"></i> Failed to fetch backend info: ' + err.toString(), true);
+        document.getElementById('repullAllBtn').disabled = false;
+    });
+}
+
+function pollRepullProgress(backendId, jobId, cardId, onDone) {
+    var interval = setInterval(function() {
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull/' + jobId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var el = document.getElementById(cardId);
+            if (!el) { clearInterval(interval); return; }
+
+            var statusBadge = el.querySelector('.pull-status');
+            var bar = el.querySelector('.progress-bar');
+            var detail = el.querySelector('.pull-detail');
+
+            if (data.progress && data.progress.total && data.progress.completed) {
+                var pct = Math.round((data.progress.completed / data.progress.total) * 100);
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+            }
+            if (data.progress && data.progress.status) {
+                detail.textContent = data.progress.status;
+            }
+
+            if (data.status === 'success') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-success pull-status';
+                statusBadge.textContent = 'complete';
+                bar.style.width = '100%';
+                bar.textContent = '100%';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-success');
+                onDone();
+            } else if (data.status === 'error') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-danger pull-status';
+                statusBadge.textContent = 'error';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-danger');
+                detail.textContent = data.error || 'Unknown error';
+                onDone();
+            }
+        })
+        .catch(function() { /* ignore transient */ });
+    }, 2000);
 }
 
 function deleteModel(backendId, modelName) {
