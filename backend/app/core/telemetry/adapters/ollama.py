@@ -291,9 +291,12 @@ class OllamaAdapter:
                         if arch_fields.get("context_length") is not None:
                             model.model_max_context = arch_fields["context_length"]
                         # Effective context_length: use num_ctx if configured,
-                        # else Ollama's default of 4096
+                        # else model's architectural max (Ollama 0.17+ auto-adjusts
+                        # down if it can't fit in VRAM)
                         if num_ctx is not None:
                             model.context_length = num_ctx
+                        elif model.model_max_context is not None:
+                            model.context_length = model.model_max_context
                         else:
                             model.context_length = 4096
                         model.embedding_length = arch_fields.get("embedding_length")
