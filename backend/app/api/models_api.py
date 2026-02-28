@@ -59,8 +59,14 @@ async def list_models(
                         "multimodal": False,
                         "embeddings": False,
                         "structured_output": True,
+                        "thinking": False,
                     },
                     "created": int(model.created_at.timestamp()) if model.created_at else int(time.time()),
+                    "context_length": None,
+                    "model_max_context": None,
+                    "parameter_count": None,
+                    "quantization": None,
+                    "family": None,
                 }
 
             model_data[model.name]["backends"].append(backend.name)
@@ -68,8 +74,29 @@ async def list_models(
             # Update capabilities
             if model.supports_multimodal:
                 model_data[model.name]["capabilities"]["multimodal"] = True
+            if model.supports_thinking:
+                model_data[model.name]["capabilities"]["thinking"] = True
             if "embed" in model.name.lower():
                 model_data[model.name]["capabilities"]["embeddings"] = True
+
+            # Use max context_length across backends
+            if model.context_length is not None:
+                cur = model_data[model.name]["context_length"]
+                if cur is None or model.context_length > cur:
+                    model_data[model.name]["context_length"] = model.context_length
+
+            if model.model_max_context is not None:
+                cur = model_data[model.name]["model_max_context"]
+                if cur is None or model.model_max_context > cur:
+                    model_data[model.name]["model_max_context"] = model.model_max_context
+
+            # Take first non-None value for these fields
+            if model.parameter_count and not model_data[model.name]["parameter_count"]:
+                model_data[model.name]["parameter_count"] = model.parameter_count
+            if model.quantization and not model_data[model.name]["quantization"]:
+                model_data[model.name]["quantization"] = model.quantization
+            if model.family and not model_data[model.name]["family"]:
+                model_data[model.name]["family"] = model.family
 
     # Build response
     models: List[CanonicalModelInfo] = []
@@ -81,6 +108,11 @@ async def list_models(
                 owned_by="mindrouter",
                 capabilities=data["capabilities"],
                 backends=data["backends"],
+                context_length=data["context_length"],
+                model_max_context=data["model_max_context"],
+                parameter_count=data["parameter_count"],
+                quantization=data["quantization"],
+                family=data["family"],
             )
         )
 

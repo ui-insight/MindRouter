@@ -428,6 +428,13 @@ class CanonicalModelInfo(BaseModel):
     capabilities: Optional[Dict[str, bool]] = None  # vision, embeddings, structured_output
     backends: Optional[List[str]] = None  # List of backend names
 
+    # Model details
+    context_length: Optional[int] = None  # Effective context window (num_ctx injected)
+    model_max_context: Optional[int] = None  # Architectural maximum
+    parameter_count: Optional[str] = None  # e.g. "7B", "70B"
+    quantization: Optional[str] = None  # e.g. "Q4_K_M", "FP16"
+    family: Optional[str] = None  # e.g. "llama", "qwen2"
+
 
 class CanonicalModelList(BaseModel):
     """List of available models."""
