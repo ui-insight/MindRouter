@@ -94,9 +94,21 @@ class BackendRegistry:
         # Load existing backends from database
         await self._load_backends_from_db()
 
-        # Load persisted latency EMAs
+        # Load persisted latency EMAs and reset stale failure counters.
+        # On a fresh restart every backend gets a clean slate — the first
+        # poll will determine actual health.  Without this reset, backends
+        # that had consecutive_failures > 0 when the app stopped would need
+        # extra successful polls to clear the counter and become HEALTHY.
         async with get_async_db_context() as db:
             all_backends = await crud.get_all_backends(db=db)
+            for b in all_backends:
+                if b.consecutive_failures > 0 and b.status not in (
+                    BackendStatus.DISABLED,
+                    BackendStatus.DRAINING,
+                ):
+                    b.consecutive_failures = 0
+                    b.status = BackendStatus.UNKNOWN
+            await db.commit()
         await self._latency_tracker.load_from_db(all_backends)
 
         # Load persisted circuit breaker state
@@ -893,25 +905,26 @@ class BackendRegistry:
                 logger.error("poll_loop_error", error=str(e))
 
     async def _poll_all_backends(self) -> None:
-        """Poll all nodes' sidecars, then all backends for health and telemetry."""
-        # Phase A: Poll all unique nodes' sidecars (deduplicated)
+        """Poll all nodes' sidecars and all backends concurrently."""
         async with self._lock:
             node_ids = list(self._sidecar_clients.keys())
             backend_ids = list(self._adapters.keys())
 
-        if node_ids:
-            node_tasks = [
-                self._collect_node_telemetry(nid)
-                for nid in node_ids
-            ]
-            await asyncio.gather(*node_tasks, return_exceptions=True)
+        # Run sidecar collection and backend health checks concurrently.
+        # Backend health checks hit the backend directly (GET /api/tags or
+        # /health) and don't depend on sidecar data, so there's no need
+        # to wait for Phase A before starting Phase B.
+        all_tasks = []
 
-        # Phase B: Poll all backends for health/request metrics
-        tasks = [
-            self._check_backend_health(bid)
-            for bid in backend_ids
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Phase A: sidecar telemetry per node
+        for nid in node_ids:
+            all_tasks.append(self._collect_node_telemetry(nid))
+
+        # Phase B: backend health checks
+        for bid in backend_ids:
+            all_tasks.append(self._check_backend_health(bid))
+
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
     async def _check_backend_health(self, backend_id: int) -> None:
         """Check health of a single backend."""
@@ -969,9 +982,12 @@ class BackendRegistry:
 
             # Get telemetry if healthy
             if health.is_healthy:
-                # Auto-discover if no capabilities stored yet
+                # Auto-discover if no capabilities stored yet — run in
+                # background so the health status update is not delayed by
+                # model enumeration (which can be slow for Ollama backends
+                # with many models).
                 if backend_id not in self._capabilities:
-                    await self._discover_backend(backend_id)
+                    asyncio.create_task(self._discover_backend(backend_id))
                 await self._collect_telemetry(backend_id)
 
         except Exception as e:
