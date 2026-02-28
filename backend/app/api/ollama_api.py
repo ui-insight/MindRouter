@@ -193,12 +193,14 @@ async def ollama_tags(
                     "size": 0,  # We don't track size
                     "digest": "",
                     "details": {
-                        "parent_model": "",
-                        "format": "gguf",
+                        "parent_model": model.parent_model or "",
+                        "format": model.model_format or "gguf",
                         "family": model.family or "",
                         "parameter_size": model.parameter_count or "",
-                        "quantization_level": "",
+                        "quantization_level": model.quantization or "",
                     },
+                    "context_length": model.context_length,
+                    "model_max_context": model.model_max_context,
                 })
 
     return {"models": models}
