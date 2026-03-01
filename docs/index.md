@@ -21,8 +21,9 @@ MindRouter is a production-ready **LLM inference load balancer and translation l
 11. [Chat System](#chat-system)
 12. [Blog System](#blog-system)
 13. [Configuration Reference](#configuration-reference)
-14. [Deployment](#deployment)
-15. [Testing](#testing)
+14. [Implementation Notes](#implementation-notes)
+15. [Deployment](#deployment)
+16. [Testing](#testing)
 
 ---
 
@@ -165,14 +166,42 @@ curl -H "X-API-Key: mr2_your-api-key" http://localhost:8000/v1/models
 **Session Cookie** (dashboard/admin AJAX only):
 Browser-based dashboard calls authenticate via the `mindrouter_session` cookie set at login. This is used internally by the web UI and is not intended for programmatic access.
 
+**Authentication error messages (401):**
+
+| Detail message | Cause |
+|----------------|-------|
+| "Missing API key. Provide via Authorization header or X-API-Key header." | No API key provided in the request |
+| "Invalid API key" | API key not found in the database |
+| "API key is {status}" | API key has been revoked |
+| "API key has expired" | API key's `expires_at` timestamp has passed |
+| "User account is inactive" | The user associated with the key is disabled |
+
+### Request IDs
+
+Every API response includes a unique request ID for tracing and audit correlation:
+
+- **Auto-generated** in the format `chatcmpl-*`, `cmpl-*`, `emb-*`, or `msg-*` based on the endpoint type.
+- **Client-provided** -- Clients can supply their own ID via the `X-Request-ID` header, which MindRouter will use instead of generating one.
+- **Returned** in both the response body (`id` field) and response headers for easy correlation.
+- **Audit trail** -- The request ID links the audit log entry to the API response for end-to-end traceability.
+
 ### Error Responses
 
-All error responses follow a consistent format:
+Error response format varies by API style:
 
+**OpenAI endpoints** (`/v1/*`):
 ```json
-{
-  "detail": "Human-readable error message"
-}
+{"error": {"message": "...", "type": "invalid_request_error", "code": "model_not_found"}}
+```
+
+**Ollama endpoints** (`/api/*`):
+```json
+{"detail": "model 'xxx' not found"}
+```
+
+**Anthropic endpoints** (`/anthropic/v1/*`):
+```json
+{"type": "error", "error": {"type": "not_found_error", "message": "..."}}
 ```
 
 Common HTTP status codes:
@@ -180,12 +209,23 @@ Common HTTP status codes:
 | Code | Meaning |
 |------|---------|
 | 400 | Invalid request body or parameters |
+| 400 | "Model '{model}' does not support multimodal/image input" -- Sent images to a non-vision model |
+| 400 | "Model '{model}' does not support structured output" -- Requested JSON schema on unsupported model |
 | 401 | Missing or invalid API key |
 | 403 | Insufficient permissions (e.g., non-admin accessing admin endpoint) |
 | 404 | Resource not found |
 | 409 | Conflict (duplicate name, URL, etc.) |
-| 429 | Rate limit exceeded |
+| 413 | Request payload exceeds `MAX_REQUEST_SIZE` (default 50 MB) |
+| 422 | Request validation failed (malformed JSON, wrong types, missing required fields). Returned by FastAPI's built-in request validation. |
+| 429 | Rate limit exceeded. MindRouter does not include a `Retry-After` header on 429 responses. Clients should implement exponential backoff. |
 | 500 | Internal server error |
+| 503 | "No suitable backend: {reason}" -- Model doesn't support required capability (vision, structured output) |
+| 503 | "No backend capacity available (waited Ns)" -- All backends at max concurrent; timed out waiting |
+| 503 | "No healthy backends available" -- All backends unhealthy or circuit-broken |
+
+> **Backend pass-through:** Backend 4xx errors (e.g., invalid prompt format) are forwarded directly to the client and are not retried.
+
+> **Model names are exact match only.** MindRouter does not support prefix matching, aliases, or fuzzy matching. The `model` field in requests must exactly match a model name as shown in `/v1/models` or `/api/tags`.
 
 ### OpenAI-Compatible Endpoints
 
@@ -368,6 +408,30 @@ MindRouter accepts both `max_completion_tokens` (preferred, current OpenAI stand
 
 When the model decides to call a tool, the response includes `tool_calls` with `finish_reason: "tool_calls"`. Submit the tool result back as a `role: "tool"` message with the matching `tool_call_id`.
 
+#### Tool Calling Details
+
+MindRouter supports OpenAI-style tool/function calling across all API formats (OpenAI, Ollama, and Anthropic inbound):
+
+- **Tool definitions** use `type: "function"` with a `function` object containing `name`, `description`, and `parameters` (JSON Schema).
+- **`tool_choice`** controls tool selection: `"auto"` (model decides), `"none"` (no tools), or `{"type": "function", "function": {"name": "..."}}` (force a specific tool).
+- **Tool results** are submitted as follow-up messages with `role: "tool"`, including the `tool_call_id` from the model's response.
+- **Streaming** -- tool call data arrives as `tool_calls` deltas within SSE chunks, with each delta containing the function name and argument fragments.
+- **Finish reason** is set to `"tool_calls"` when the model invokes one or more tools.
+- **Backend requirement** -- the backend must support tool calling. For vLLM, this requires the `--enable-auto-tool-choice` and `--tool-call-parser <parser>` flags at serve time.
+
+> **OpenAI spec compliance:** Chat completion responses always include `message.content` in each choice, even when the value is `null` (e.g., when `finish_reason` is `"tool_calls"`).
+
+#### Completions Parameters
+
+The `/v1/completions` endpoint supports additional parameters beyond the standard chat completions set:
+
+- **`suffix`** -- Text appended after the completion.
+- **`echo`** -- Echo the prompt back in the response.
+- **`n`** -- Number of completions to generate (default 1).
+- **`best_of`** -- Number of beam search candidates to consider.
+
+> **Note:** Chat completions (`/v1/chat/completions`) also support `n` to generate multiple alternative responses (default 1).
+
 #### Embeddings
 
 ```bash
@@ -376,6 +440,11 @@ curl -X POST http://localhost:8000/v1/embeddings \
   -H "Content-Type: application/json" \
   -d '{"model": "nomic-embed-text", "input": "Hello world"}'
 ```
+
+Additional embedding parameters:
+
+- **`encoding_format`** -- Response encoding (`"float"` or `"base64"`, default `"float"`).
+- **`dimensions`** -- Desired output dimensionality (model-dependent).
 
 #### List Models
 
@@ -467,6 +536,8 @@ When thinking is enabled, the response includes a `thinking` field in the messag
 
 > **Note:** For `/api/generate`, thinking content appears as a top-level `thinking` field alongside `response`.
 
+> **Ollama `think` placement:** For Ollama backends, the `think` parameter is placed at the **top level** of the request payload, not inside the `options` dict. This matches Ollama's native API format.
+
 #### Ollama Generate
 
 ```bash
@@ -475,6 +546,8 @@ curl -X POST http://localhost:8000/api/generate \
   -H "Content-Type: application/json" \
   -d '{"model": "llama3.2", "prompt": "Why is the sky blue?"}'
 ```
+
+> **Ollama `/api/generate` system prompt:** When a `system` field is provided in an Ollama `/api/generate` request, it is prepended to the `prompt` field (separated by a blank line) before translation to canonical format. This differs from `/api/chat`, where system messages are preserved as separate message objects.
 
 ### Anthropic-Compatible Endpoint
 
@@ -552,7 +625,7 @@ message = client.messages.create(
 **Supported features:**
 - System prompts (string or content block array)
 - Multimodal inputs (base64 and URL images)
-- Tool calling -- `tools` with `input_schema`, `tool_choice` (`auto`/`any`/`tool`), `tool_use`/`tool_result` content blocks, streaming tool use with `input_json_delta`
+- Tool calling -- `tools` with `input_schema`, `tool_choice` (`auto`/`any`/`tool`), `tool_use`/`tool_result` content blocks, streaming tool use with `input_json_delta`. Anthropic `tool_choice` values are mapped: `auto` to `auto`, `any` to `required`, `tool` (with name) to `{"type": "function", "function": {"name": "..."}}`.
 - Thinking/reasoning mode (`thinking.type`: `enabled`, `adaptive`, `disabled`; set `budget_tokens` to control reasoning token allocation)
 - Structured output via `output_config.format` with `type: "json_schema"`
 - Parameters: `max_tokens` (required), `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream`
@@ -573,6 +646,63 @@ These endpoints are unauthenticated and intended for monitoring infrastructure.
 | GET | `/api/cluster/throughput` | None | Token throughput (last 10 seconds) |
 | GET | `/api/cluster/total-tokens` | None | Total tokens ever served (cached 10s) |
 | GET | `/api/cluster/trends` | None | Token and active-user trends over time (query param: `range=hour\|day\|week\|month\|year`) |
+
+#### Example Responses
+
+**GET /healthz** — Liveness probe:
+```json
+{"status": "alive", "timestamp": "2026-03-01T12:00:00+00:00"}
+```
+
+**GET /readyz** — Readiness probe:
+```json
+{
+  "status": "ready",
+  "checks": {"database": true, "backends": true},
+  "timestamp": "2026-03-01T12:00:00+00:00"
+}
+```
+
+**GET /status** — Cluster summary:
+```json
+{
+  "service": "MindRouter",
+  "version": "0.20.0",
+  "timestamp": "2026-03-01T12:00:00+00:00",
+  "backends": {"total": 6, "healthy": 5},
+  "models": ["gpt-oss-120b", "llama3.2", "qwen3.5"],
+  "queue": {"total": 3},
+  "fair_share": {"total_users": 2},
+  "active_users": 12
+}
+```
+
+**GET /api/cluster/throughput** — Token throughput:
+```json
+{
+  "tokens_per_second": 142.5,
+  "requests_per_minute": 8,
+  "active_requests": 3,
+  "total_tokens_last_10s": 1425,
+  "inflight_tokens": 200
+}
+```
+
+**GET /api/cluster/total-tokens** — Total tokens served:
+```json
+{"total_tokens": 15234567}
+```
+
+**GET /api/cluster/trends** — Trends over time:
+```json
+{
+  "tokens": [{"period": "2026-03-01T11:00:00Z", "total": 50000}, ...],
+  "users": [{"period": "2026-03-01T11:00:00Z", "count": 5}, ...],
+  "range": "day",
+  "since": "2026-02-28T12:00:00Z",
+  "now": "2026-03-01T12:00:00Z"
+}
+```
 
 #### Prometheus Metrics
 
@@ -667,9 +797,9 @@ All admin endpoints require the `admin` role. They are mounted under `/api/admin
 |--------|------|-------------|
 | GET | `/api/admin/telemetry/overview` | Cluster-wide telemetry (nodes, backends, GPUs) |
 | GET | `/api/admin/telemetry/latest` | Lightweight polling endpoint for dashboard |
-| GET | `/api/admin/telemetry/backends/{id}/history` | Time-series telemetry for a backend |
-| GET | `/api/admin/telemetry/gpus/{id}/history` | Time-series telemetry for a GPU device |
-| GET | `/api/admin/telemetry/nodes/{id}/history` | Aggregated time-series for a node (all GPUs) |
+| GET | `/api/admin/telemetry/backends/{backend_id}/history` | Time-series telemetry for a backend |
+| GET | `/api/admin/telemetry/gpus/{gpu_device_id}/history` | Time-series telemetry for a GPU device |
+| GET | `/api/admin/telemetry/nodes/{node_id}/history` | Aggregated time-series for a node (all GPUs) |
 | GET | `/api/admin/telemetry/export` | Export raw telemetry as JSON or CSV |
 
 ---
@@ -686,6 +816,8 @@ MindRouter includes a full web dashboard built with Bootstrap 5. All pages exten
 | Login | `/login` | Username/password authentication (and Azure AD SSO when configured) |
 | Blog | `/blog` | Public blog with published posts |
 
+The public landing page (`/`) includes a live token flow animation showing real-time cluster throughput, along with counters for healthy backends, available models, active users (24h), and total tokens served.
+
 ### User Dashboard
 
 | Page | URL | Description |
@@ -693,6 +825,14 @@ MindRouter includes a full web dashboard built with Bootstrap 5. All pages exten
 | Dashboard | `/dashboard` | Token usage progress bar, active API keys, quota usage history |
 | Request Quota | `/dashboard/request-quota` | Submit a quota increase request with justification |
 | Key Created | (after creation) | Displays the full API key once (copy-to-clipboard) |
+
+The user dashboard includes the following features:
+
+- **Dark Mode Toggle** -- The Preferences section includes a dark mode toggle. The preference is saved to browser localStorage and persists across sessions.
+- **Live Token Usage** -- Token usage statistics on the dashboard update in real-time via polling (every 1 second), providing live feedback without page refresh.
+- **Lifetime vs Rolling Usage** -- The dashboard displays two token metrics: **Lifetime Token Usage** (all-time total tokens consumed) and **Current Period Usage** (tokens used in the current rolling budget period). These are distinct -- the lifetime counter never resets, while the period counter resets when the budget period rolls over.
+- **Quota Details** -- Users can view their current quota limits (RPM limit and max concurrent requests) in the Quota Details card on the dashboard.
+- **API Key Expiration Warnings** -- API keys nearing expiration (7 days or fewer remaining) display a yellow warning countdown. Expired keys show an "Expired" badge. The "Last Used" column shows when each key was last used for authentication.
 
 ### Admin Dashboard
 
@@ -702,7 +842,7 @@ The admin dashboard has a persistent sidebar with links to all admin pages:
 |------|-----|-------------|
 | Overview | `/admin` | System metrics overview with pending request badges and health alerts |
 | Backends | `/admin/backends` | Backend health, models, enable/disable/drain controls |
-| Models | `/admin/models` | Model catalog with capability overrides (multimodal, thinking), metadata editing, context length configuration |
+| Models | `/admin/models` | Model catalog with capability overrides, metadata editing, context length configuration (see below) |
 | Nodes | `/admin/nodes` | GPU node management, sidecar status, take offline/bring online, force drain, active requests |
 | GPU Metrics | `/admin/metrics` | Real-time GPU utilization, memory, temperature, power charts with time range controls |
 | Users | `/admin/users` | User accounts, group assignment, quota management, masquerade |
@@ -730,6 +870,28 @@ These are dashboard routes (not API endpoints) that require an admin session coo
 | POST | `/admin/masquerade/{target_user_id}` | Start masquerading as a user (sets signed cookie, redirects to their dashboard) |
 | POST | `/admin/masquerade/stop` | Stop masquerading and return to admin view |
 | GET | `/admin/audit/export` | Export audit logs as CSV or JSON (filterable by user, model, status, date range) |
+
+> **Export content option:** Both audit and conversation exports support an optional `include_content` checkbox. When enabled, exports include full prompt messages, request parameters, and response content. This is disabled by default; enabling it produces significantly larger export files.
+
+### Model Metadata Editing
+
+The model detail page (`/admin/models`) allows admins to override discovery-provided metadata for any model. Available override fields:
+
+- **Context Length Override** -- Effective context window injected as `num_ctx` (overrides discovery value)
+- **Model Max Context Override** -- Architectural maximum context (immutable from discovery, but overridable)
+- **Embedding Dimension** -- Vector dimension for embedding models
+- **Attention Heads**, **Layers/Depth**, **FFN Size** -- Architecture parameters
+- **Model Format** -- Quantization or format label (e.g., `Q4_K_M`, `fp16`)
+- **Parent Model** -- Base model identifier
+- **Description** -- Admin-provided text description
+- **Model URL** -- Link to the model card or documentation
+- **Capabilities** -- Comma-separated list: `completion`, `vision`, `tools`, `thinking`, `embedding`
+
+The **"Reset All Overrides"** button clears all metadata customizations, reverting the model to discovery-provided values.
+
+### Re-pull All Ollama Models
+
+The models page includes a **"Re-pull All Ollama Models"** button that triggers a bulk re-pull across all Ollama backends. Models are processed sequentially per node (respecting shared model storage folders). The UI provides per-backend progress tracking with success, failure, retry, and skip controls, along with an overall progress bar. Individual pulls can be cancelled or skipped.
 
 ### Health Alerts
 
@@ -797,6 +959,8 @@ The seed script creates four default groups:
 
 Group defaults are configurable through the admin UI or API. The per-role environment variables (e.g., `DEFAULT_TOKEN_BUDGET_STUDENT`, `SCHEDULER_WEIGHT_STAFF`) are **deprecated** and serve only as fallbacks for environments that have not migrated to database-driven groups.
 
+> **Per-user weight override:** Admins can override an individual user's scheduler weight via the user detail page (`/admin/users/{id}`). When set, the user's `weight_override` takes precedence over their group's `scheduler_weight`. An empty or null `weight_override` means the user inherits the group default. This allows fine-grained fair-share tuning for specific users without changing group-wide settings.
+
 ### Change Password
 
 Users with local (non-SSO) accounts can change their password from the user dashboard (`/dashboard`). The form requires the current password, a new password (minimum 8 characters), and password confirmation.
@@ -810,6 +974,8 @@ Users with local (non-SSO) accounts can change their password from the user dash
 5. **Revocation** -- Keys can be revoked (soft-delete) without deleting the audit trail.
 6. **Usage tracking** -- `last_used_at` and `usage_count` updated atomically on each request.
 
+> API keys can become unusable through two distinct mechanisms: **expiration** (automatic -- the key's `expires_at` timestamp has passed) or **revocation** (admin action -- the key's status is set to `REVOKED`). In both cases, authentication fails and the key's audit trail is preserved.
+
 ### Quota System
 
 Each user has a quota record with:
@@ -819,6 +985,17 @@ Each user has a quota record with:
 - **Max concurrent** -- Maximum simultaneous in-flight requests.
 
 When a quota is exceeded, the request is rejected with HTTP 429.
+
+> **Rolling budget period:** Token budgets use a rolling window, not calendar months. Each user's quota tracks `budget_period_start` and `budget_period_days` (default: 30). When the current time exceeds the period end, `tokens_used` resets to zero and the period start advances. This means budget resets are per-user, not system-wide.
+
+### Rate Limiting
+
+MindRouter enforces per-user rate limits based on the user's group quota configuration:
+
+- **RPM (requests per minute)** -- Enforced per user based on the group's `rpm_limit` setting.
+- **Concurrent request limit** -- Maximum simultaneous in-flight requests per user, set by the group's `max_concurrent` value.
+- **In-memory rate limiter** -- Rate state is tracked in memory with automatic cleanup of idle entries after 5 minutes.
+- **HTTP 429** -- Returns `429 Too Many Requests` when either the RPM or concurrent limit is exceeded.
 
 ### Quota Increase Requests
 
@@ -852,7 +1029,7 @@ Node: gpu-server-1 (4x A100-80GB, sidecar at :8007)
 
 | Engine | Health Check | Model Discovery | Telemetry Source |
 |--------|-------------|-----------------|------------------|
-| **Ollama** | `GET /api/tags` | `GET /api/tags` + `POST /api/ps` (loaded models) | Sidecar agent |
+| **Ollama** | `GET /api/tags` | `GET /api/tags` + `POST /api/show` (model details) + `POST /api/ps` (loaded models) | Sidecar agent |
 | **vLLM** | `GET /health` (fallback: `GET /v1/models`) | `GET /v1/models` | `GET /metrics` (Prometheus format) |
 
 ### Registration
@@ -939,7 +1116,32 @@ When multiple backends can serve a request, the scheduler scores them on:
 
 Hard constraints (vision capability, embedding support, model availability) are checked before soft scoring.
 
+> **Priority gating:** When multiple requests are waiting for backend capacity on the same model, the highest-priority waiter (based on fair-share deficit) proceeds first. Lower-priority waiters yield briefly (100ms) and retry, ensuring fair ordering even under contention.
+
+> **Scheduling audit trail:** Each routing decision is recorded in a `SchedulerDecision` log entry containing the selected backend, all candidate backends with their scores, hard constraints passed/failed, and the user's deficit and weight at decision time. This data is available in the admin audit view for debugging fairness and routing issues.
+
 For the complete algorithm specification, see **[scheduler.md](scheduler.md)**.
+
+### Retry & Failover
+
+MindRouter automatically retries failed inference requests with intelligent backend selection:
+
+- **Max attempts:** Up to 3 total attempts (configurable via `BACKEND_RETRY_MAX_ATTEMPTS`).
+- **Retryable errors:** 5xx responses, timeouts, and connection failures trigger retries. 4xx errors (bad request, auth failure, etc.) fail immediately and are **not** retried.
+- **Fail-fast routing on retries:** The first attempt waits for backend capacity as normal. Subsequent retry attempts use fail-fast routing (`max_wait=0`) -- if no backend has immediate capacity, the retry is skipped.
+- **Backend diversity:** Each retry attempt selects a different backend when one is available, avoiding a backend that just failed.
+- **Streaming constraint:** Streaming requests can only retry **before** the first chunk is sent to the client. Once streaming has begun, a failure is terminal because partial data has already been delivered.
+
+> **Mid-stream errors:** If a backend fails after streaming has begun (first SSE chunk already sent), the connection is terminated immediately. No `[DONE]` signal or error event is sent — the SSE stream simply ends, and the client must handle the incomplete response.
+
+### Circuit Breaker
+
+Per-backend circuit breakers prevent routing to repeatedly failing backends:
+
+- **Threshold:** After **`BACKEND_CIRCUIT_BREAKER_THRESHOLD`** (default: 3) consecutive failures, the backend's circuit opens and it is excluded from routing.
+- **Recovery:** After **`BACKEND_CIRCUIT_BREAKER_RECOVERY_SECONDS`** (default: 30) seconds, a probe request is allowed through to test recovery.
+- **State transitions:** Closed (healthy) → Open (failing, excluded from routing) → Half-Open (probe allowed) → Closed (recovered)
+- Circuit breakers work alongside retry logic -- broken backends are automatically skipped during failover selection.
 
 ---
 
@@ -995,6 +1197,7 @@ The canonical internal representation (`backend/app/core/canonical_schemas.py`) 
 | Tool results | `role: "tool"` + `tool_call_id` | -- | `tool_result` content blocks | `CanonicalMessage(role=TOOL, tool_call_id)` |
 | Thinking mode | `think` (bool), `thinking.type`, `chat_template_kwargs`, `reasoning_effort` | `think` (bool or `"low"`/`"medium"`/`"high"`) | `thinking.type` (enabled/adaptive/disabled) | `think` (`Union[bool, str]`) |
 | User ID | `user` | -- | `metadata.user_id` | `user` |
+| Structured output | `response_format` | `format` | `output_config` | `response_format` |
 | Stream format | SSE (`data: {...}`) | NDJSON | SSE (Anthropic events) | `CanonicalStreamChunk` |
 
 ### Translators
@@ -1008,6 +1211,20 @@ The canonical internal representation (`backend/app/core/canonical_schemas.py`) 
 | `VLLMOutTranslator` | Canonical → Backend | Translates outgoing requests to vLLM backends |
 
 All translators use static methods -- no instantiation needed.
+
+### vLLM Thinking Translations
+
+- When `think` is a **boolean** (Qwen-style), it translates to `chat_template_kwargs: {enable_thinking: bool}` for vLLM.
+- When `think` is a **string** like `"low"`/`"medium"`/`"high"` (GPT-OSS style), it translates to `reasoning_effort` for vLLM.
+
+### Model-Specific Behaviors
+
+- **Qwen3-32B on vLLM:** Does not use the `reasoning_content` response field. Instead, thinking content appears as `<think>...</think>` tags embedded in the content field. MindRouter automatically extracts these tags into the canonical `reasoning` field for both streaming and non-streaming responses.
+- **Qwen3.5 on vLLM with thinking disabled:** When thinking is explicitly disabled (`think: false`), vLLM may return all output in `reasoning_content` with an empty `content` field. MindRouter promotes the reasoning content to the `content` field in this case, ensuring clients receive the expected output.
+
+### Backend-Specific Options
+
+> The `backend_options` dict allows passing Ollama-specific parameters (e.g., `mirostat`, `tfs_z`, `repeat_penalty`) that are forwarded directly to Ollama backends. These options are ignored for vLLM backends. See [Implementation Notes](#implementation-notes) for details.
 
 ---
 
@@ -1023,7 +1240,7 @@ Each GPU node runs a lightweight FastAPI sidecar agent (`sidecar/gpu_agent.py`) 
 - Temperature (GPU and memory)
 - Power draw and limit (watts)
 - Fan speed, SM/memory clocks
-- Running processes (PID + memory)
+- Running processes (PID + memory) — **Note:** Process information is collected by the sidecar but is not currently stored in MindRouter's database — it is available only in the raw `/gpu-info` response.
 - Device identity (name, UUID, compute capability)
 - Driver and CUDA versions
 
@@ -1035,13 +1252,24 @@ Each GPU node runs a lightweight FastAPI sidecar agent (`sidecar/gpu_agent.py`) 
 2. **Standalone Docker** -- Build from `sidecar/Dockerfile.sidecar`, run with `--gpus all`
 3. **Direct Python** -- `pip install fastapi uvicorn nvidia-ml-py && python sidecar/gpu_agent.py`
 
+**Sidecar HTTP endpoints:**
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/health` | `X-Sidecar-Key` | Health check — returns `{"status": "ok", "gpu_count": N, "sidecar_version": "..."}` |
+| GET | `/gpu-info` | `X-Sidecar-Key` | Full GPU metrics — returns hostname, timestamp, driver/CUDA versions, sidecar version, per-GPU metrics |
+| POST | `/ollama/pull` | `X-Sidecar-Key` | Start model pull — body: `{"ollama_url": "...", "model": "..."}`, returns `{"job_id": "...", "status": "pulling"}` |
+| GET | `/ollama/pull/{job_id}` | `X-Sidecar-Key` | Poll pull progress — returns job status with progress, error, timestamps |
+| POST | `/ollama/delete` | `X-Sidecar-Key` | Delete a model from Ollama backend |
+
 ### Health Polling
 
-The Backend Registry runs an adaptive polling loop:
+The Backend Registry runs an adaptive polling loop that accelerates when problems are detected:
 
-- **Normal interval:** 30 seconds (configurable via `BACKEND_POLL_INTERVAL`)
-- **Fast interval:** 10 seconds after a backend becomes unhealthy (configurable)
-- **Fast duration:** 120 seconds before returning to normal polling
+- **Normal interval:** `BACKEND_POLL_INTERVAL` (default: 30 seconds)
+- **Fast interval:** When failures are detected, polling speeds up to `BACKEND_ADAPTIVE_POLL_FAST_INTERVAL` (default: 10 seconds)
+- **Fast duration:** Fast polling lasts for `BACKEND_ADAPTIVE_POLL_FAST_DURATION` (default: 120 seconds) before returning to normal
+- **Unhealthy threshold:** `BACKEND_UNHEALTHY_THRESHOLD` (default: 3) consecutive poll failures marks a backend as unhealthy
 
 Each poll cycle has two phases:
 1. Poll sidecar agents (one per physical node) for GPU snapshots
@@ -1053,11 +1281,7 @@ On container start, the registry runs **two immediate full poll cycles** with a 
 
 ### Circuit Breaker
 
-Per-backend circuit breaker protects against cascading failures:
-
-- **Threshold:** 3 consecutive failures before opening (configurable via `BACKEND_CIRCUIT_BREAKER_THRESHOLD`)
-- **Recovery:** 30 seconds before allowing a probe request (`BACKEND_CIRCUIT_BREAKER_RECOVERY_SECONDS`)
-- **States:** Closed (healthy) → Open (failing) → Half-Open (probe) → Closed (recovered)
+> See [Circuit Breaker](#circuit-breaker) under Scheduling & Fair Share for full details on thresholds, recovery, and state transitions.
 
 ### Latency Tracking
 
@@ -1109,7 +1333,8 @@ MindRouter includes a built-in chat interface at `/chat` with full conversation 
 
 - Messages include role (user/assistant/system) and content
 - Assistant messages are streamed in real-time
-- Messages can be edited or deleted after creation
+- Messages are immutable once sent — to revise a conversation, start a new one or continue from the current point
+- Conversations are automatically titled based on the first user message
 - Attachments are linked to individual messages
 
 ### File Upload
@@ -1125,9 +1350,9 @@ Supported file types and processing:
 | Text files | `.txt`, `.md`, `.csv`, `.json`, `.html`, `.htm`, `.log` | Read as-is |
 
 **Limits:**
-- Max upload size: 10 MB (configurable via `CHAT_UPLOAD_MAX_SIZE_MB`)
+- Chat file uploads are limited to `CHAT_UPLOAD_MAX_SIZE_MB` (default 10 MB)
+- System artifact uploads allow up to `ARTIFACT_MAX_SIZE_MB` (default 50 MB)
 - Artifact storage path: `/data/artifacts` (configurable via `ARTIFACT_STORAGE_PATH`)
-- Artifact max size: 50 MB (configurable via `ARTIFACT_MAX_SIZE_MB`)
 - Artifact retention: 365 days
 
 **Storage layout:**
@@ -1161,6 +1386,35 @@ Admins can configure the chat interface defaults at `/admin/chat-config`:
 - **Temperature** -- Default temperature for chat requests.
 - **Thinking mode** -- Enable or disable thinking/reasoning mode by default for chat.
 
+### Chat UI Features
+
+**File drag-and-drop** -- Files can be uploaded by dragging and dropping anywhere in the chat window (not just the input area). A visual drop overlay appears during drag.
+
+**Advanced models toggle** -- When core models are configured (via admin Chat Config), the model dropdown shows only core models by default. An "Advanced" checkbox reveals the full model list. This preference persists in browser localStorage.
+
+**Per-request thinking controls** -- For thinking-capable models, the chat UI shows inline controls:
+
+- A checkbox to enable/disable thinking mode (Qwen-style boolean)
+- A dropdown to select reasoning effort level (low/medium/high for GPT-OSS-style models)
+
+These controls only appear when the selected model supports thinking.
+
+**Thinking block collapsing** -- When thinking/reasoning content is streamed, it appears in a collapsible block with a toggle button. Users can expand or collapse the reasoning to focus on the final response.
+
+**Keyboard shortcuts** -- `Shift+Enter` inserts a newline in the message input. `Enter` alone sends the message.
+
+**Sidebar collapse/expand** -- The conversation sidebar can be collapsed or expanded via a toggle button. The sidebar state persists across page reloads via browser localStorage.
+
+**Copy buttons** -- Each assistant response includes a "Copy" button to copy the response text to the clipboard. Individual code blocks also have copy buttons that appear on hover.
+
+**Image lightbox** -- Clicking an image thumbnail in a chat message opens a larger preview in a lightbox modal.
+
+**LaTeX rendering** -- Mathematical expressions are rendered client-side. The system handles LaTeX placeholder extraction, dollar-sign notation, and bare environment wrapping for reliable rendering of equations in responses.
+
+**Auto-conversation titling** -- New conversations are automatically titled from the first user message. The title can be updated by the user via the conversation settings.
+
+**Model selection persistence** -- The last selected model is saved to browser localStorage and automatically restored when returning to the chat.
+
 ---
 
 ## Blog System
@@ -1181,6 +1435,11 @@ Blog management is available at `/admin/blog` (admin access required):
 - **Edit post** (`/admin/blog/{id}/edit`) -- Edit an existing post's title, slug, and content.
 - **Publish post** (`POST /admin/blog/{id}/publish`) -- Publish or unpublish a post.
 - **Delete post** (`POST /admin/blog/{id}/delete`) -- Soft-delete a post (not permanently removed from the database).
+
+The blog editor includes:
+- **Live split-screen markdown preview** with a "Show Preview"/"Hide Preview" toggle
+- **Real-time HTML rendering** using marked.js with syntax highlighting
+- **Auto-generated URL slugs** from post titles (editable before saving)
 
 ---
 
@@ -1235,7 +1494,7 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 | `AZURE_AD_REDIRECT_URI` | str | `https://your-domain.example.com/login/azure/authorized` | OAuth2 redirect URI |
 | `AZURE_AD_DEFAULT_GROUP` | str | `other` | Default group for new SSO users |
 
-Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_AD_TENANT_ID` are set. Users authenticating via SSO for the first time are automatically created and assigned to the group specified by `AZURE_AD_DEFAULT_GROUP`.
+Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_AD_TENANT_ID` are set. Users authenticating via SSO for the first time are automatically created with JIT (just-in-time) group mapping based on the user's `jobTitle` claim from Azure AD. The mapping uses case-insensitive substring matching: if `jobTitle` contains "student", the user is assigned to the `students` group; if it contains "faculty" or "professor", the user is assigned to the `faculty` group; if it contains "staff", the user is assigned to the `staff` group. If `jobTitle` is missing or does not match any of these substrings, the user falls back to the group specified by `AZURE_AD_DEFAULT_GROUP`.
 
 ### Artifact Storage
 
@@ -1313,6 +1572,10 @@ Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_
 | `BACKEND_RETRY_BACKOFF` | float | `1.0` | Retry backoff multiplier (deprecated -- not currently used by retry logic) |
 | `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | When enabled, retries the request on a different backend if the response fails structured output JSON validation |
 
+> *Note: `STRUCTURED_OUTPUT_RETRY_ON_INVALID` is defined but not currently implemented in the inference pipeline. It is reserved for future use.*
+
+> **Timeout split behavior:** The total `BACKEND_REQUEST_TIMEOUT` is split in half -- the first half is allocated for routing and capacity wait (waiting for a backend with available capacity), and the remaining half for actual inference. Retry attempts after the first use immediate fail-fast routing (`max_wait=0`) to avoid wasting time waiting again. `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` (default 180s) applies independently to each individual attempt, separate from the total timeout budget.
+
 ### Logging
 
 | Variable | Type | Default | Description |
@@ -1336,6 +1599,8 @@ Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_
 | `TELEMETRY_RETENTION_DAYS` | int | `30` | Telemetry data retention period |
 | `TELEMETRY_CLEANUP_INTERVAL` | int | `3600` | Cleanup interval (seconds) |
 | `SIDECAR_TIMEOUT` | int | `5` | Sidecar HTTP call timeout (seconds) |
+| `GPU_AGENT_HOST` | str | `0.0.0.0` | Bind address for sidecar HTTP server |
+| `GPU_AGENT_PORT` | int | `8007` | Port for sidecar HTTP server |
 
 ### Observability
 
@@ -1384,6 +1649,74 @@ When configured, users can toggle web search in the chat interface. Search resul
 |----------|------|---------|-------------|
 | `DEFAULT_TOKENIZER` | str | `cl100k_base` | Default tokenizer encoding |
 
+### Runtime AppConfig (Database-Driven)
+
+In addition to the environment variables above, MindRouter stores runtime configuration in the `app_config` database table. These settings are managed via the Admin Dashboard (Site Settings and Chat Config pages) and take effect immediately without restart.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `chat.core_models` | JSON array | `[]` | Models pinned to chat dropdown |
+| `chat.default_model` | string | (none) | Default model for new conversations |
+| `chat.system_prompt` | string | (none) | Global system prompt override for chat |
+| `chat.max_tokens` | integer | `16384` | Default max_tokens for chat requests |
+| `chat.temperature` | float | (none) | Default temperature override |
+| `chat.think` | bool/string | (none) | Default thinking mode (`true`/`false`/`"low"`/`"medium"`/`"high"`) |
+| `app.timezone` | string | `"America/Los_Angeles"` | IANA timezone for date display in web UI |
+| `ollama.enforce_num_ctx` | boolean | `true` | Override user-supplied `num_ctx` with model config `context_length` |
+
+---
+
+## Implementation Notes
+
+This section documents internal behaviors useful for operators and developers.
+
+### Inflight Token Estimation
+
+During streaming responses, tokens are estimated at **1 token per 4 characters** for real-time quota and throughput tracking. Estimates are flushed to Redis every 10 chunks. When the response completes, estimated counts are replaced by accurate backend-reported token counts.
+
+> **Token count fallback:** If a backend returns zero for both prompt and completion token counts, MindRouter falls back to the job's pre-estimated token counts (based on tiktoken encoding of the input).
+
+### Redis Token Counter Sync
+
+A background sync loop flushes Redis token usage counters to the database every **60 seconds**. On startup, counters are seeded from the database. A final flush runs on graceful shutdown to prevent token count drift.
+
+### Conversation Cleanup
+
+A background task automatically deletes expired conversations every **24 hours** (configurable via `CONVERSATION_CLEANUP_INTERVAL`). The default retention period is 2 years (`CONVERSATION_RETENTION_DAYS=730`).
+
+### Backend Options Passthrough
+
+The `backend_options` dict in requests allows passing Ollama-specific options (e.g., `mirostat`, `tfs_z`, `repeat_penalty`) directly to Ollama backends. These options are ignored when the request is routed to a vLLM backend.
+
+### Thinking Input Format Priority
+
+The system accepts four input formats for thinking/reasoning mode, resolved in priority order:
+
+1. `think` field (bool or string) -- canonical format
+2. `thinking: {type: "enabled"/"disabled"}` -- OpenAI/Anthropic style
+3. `chat_template_kwargs: {enable_thinking: bool}` -- vLLM-specific
+4. Ollama top-level `think` field
+
+### Response Format Normalization
+
+When an `/api/chat` request (Ollama format) is routed to a vLLM backend, responses are automatically converted back to Ollama format. The `reasoning_content` field from vLLM/OpenAI responses is promoted to the Ollama `thinking` field.
+
+### Per-Backend Performance Tracking
+
+The scheduler maintains an exponential moving average (EMA) of request latency (`latency_ema_ms`) and time-to-first-token (`ttft_ema_ms`) for each backend. These metrics inform the "Low Latency" and "High Throughput" scoring factors. Circuit breaker state (`live_failure_count`, `circuit_open_until`) is also persisted per-backend, surviving application restarts.
+
+### Soft Delete
+
+User accounts and blog posts use soft deletion -- a `deleted_at` timestamp is set rather than removing the row. Soft-deleted records are excluded from normal queries but retained in the database for audit purposes.
+
+### Status Enums
+
+**BackendStatus:** `HEALTHY` (available for routing), `UNHEALTHY` (failed health checks), `DISABLED` (admin-disabled), `DRAINING` (graceful shutdown -- no new requests, existing ones complete), `UNKNOWN` (initial state before first health check).
+
+**NodeStatus:** `ONLINE` (reachable), `OFFLINE` (unreachable), `UNKNOWN` (initial state).
+
+**RequestStatus:** `QUEUED` (waiting in scheduler), `PROCESSING` (executing on backend), `COMPLETED` (success), `FAILED` (error), `CANCELLED` (timeout or user-cancelled).
+
 ---
 
 ## Deployment
@@ -1401,6 +1734,8 @@ MindRouter is designed for deployment on Linux servers with NVIDIA GPUs. The ful
 - Verification and ongoing operations
 
 For step-by-step production deployment instructions, see **[../deploy/DEPLOYMENT.md](../deploy/DEPLOYMENT.md)**.
+
+> **Database migrations:** MindRouter uses Alembic for schema migrations. Run `alembic upgrade head` inside the app container after deployment. When writing new migrations, note that MariaDB DDL is non-transactional -- a failed migration leaves partial state requiring manual cleanup. Always drop foreign key constraints before dropping their backing indexes (MariaDB error 1553).
 
 ---
 

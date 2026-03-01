@@ -67,12 +67,19 @@
                 <li class="nav-item"><a class="nav-link" href="#users-groups-quotas">Users, Groups &amp; Quotas</a></li>
                 <li class="nav-item"><a class="nav-link" href="#backend-management">Backend Management</a></li>
                 <li class="nav-item"><a class="nav-link" href="#scheduling-fair-share">Scheduling &amp; Fair Share</a></li>
+                <li class="nav-item"><a class="nav-link" href="#retry-failover">Retry &amp; Failover</a></li>
+                <li class="nav-item"><a class="nav-link" href="#circuit-breaker">Circuit Breaker</a></li>
+                <li class="nav-item"><a class="nav-link" href="#rate-limiting">Rate Limiting</a></li>
+                <li class="nav-item"><a class="nav-link" href="#tool-calling">Tool Calling</a></li>
+                <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
                 <li class="nav-item"><a class="nav-link" href="#chat-system">Chat System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#blog-system">Blog / CMS</a></li>
                 <li class="nav-item"><a class="nav-link" href="#app-config">AppConfig System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#configuration-reference">Configuration Reference</a></li>
+                <li class="nav-item"><a class="nav-link" href="#status-enums">Status Enums Reference</a></li>
+                <li class="nav-item"><a class="nav-link" href="#security-hardening">Security Hardening</a></li>
                 <li class="nav-item"><a class="nav-link" href="#deployment">Deployment</a></li>
                 <li class="nav-item"><a class="nav-link" href="#testing">Testing</a></li>
             </ul>
@@ -185,7 +192,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td><code>admin</code></td><td><code>admin123</code></td><td>Admin</td><td>10</td></tr>
                         <tr><td><code>faculty1</code></td><td><code>faculty123</code></td><td>Faculty</td><td>3</td></tr>
                         <tr><td><code>staff1</code></td><td><code>staff123</code></td><td>Staff</td><td>2</td></tr>
-                        <tr><td><code>student1</code></td><td><code>student123</code></td><td>Students</td><td>1</td></tr>
+                        <tr><td><code>student1</code></td><td><code>student123</code></td><td>Student</td><td>1</td></tr>
                     </tbody>
                 </table>
 
@@ -250,6 +257,17 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>500</td><td>Internal server error</td></tr>
                     </tbody>
                 </table>
+
+                <h4>Error Response Formats by API Style</h4>
+                <p>Error response formats differ depending on which API style the client is using:</p>
+                <ul>
+                    <li><strong>OpenAI</strong> (<code>/v1/*</code>) &mdash; Returns a nested error object: <code>{"error": {"message": "...", "type": "...", "code": ...}}</code></li>
+                    <li><strong>Ollama</strong> (<code>/api/*</code>) &mdash; Returns a plain detail string: <code>{"detail": "..."}</code></li>
+                    <li><strong>Anthropic</strong> (<code>/anthropic/v1/*</code>) &mdash; Returns a typed error object: <code>{"type": "error", "error": {"type": "...", "message": "..."}}</code></li>
+                </ul>
+
+                <h3>Model Name Matching</h3>
+                <p>Model names in requests are matched <strong>exactly</strong> against the model catalog. There is no prefix matching, alias resolution, or fuzzy matching. The <code>model</code> field must match a model name as listed by <code>/v1/models</code> or <code>/api/tags</code>.</p>
 
                 <h3>OpenAI-Compatible Endpoints</h3>
                 <p>These endpoints accept and return data in the OpenAI API format. Any OpenAI-compatible client or SDK can be pointed at MindRouter by changing the base URL.</p>
@@ -650,7 +668,7 @@ message = client.messages.create(
                         <tr><td>PATCH</td><td><code>/api/admin/backends/{id}</code></td><td>Update backend properties</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/disable</code></td><td>Disable a backend</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/enable</code></td><td>Enable a disabled backend</td></tr>
-                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/drain</code></td><td>Initiate graceful drain (stops new requests, waits for in-flight to complete, then disables). Dashboard route only, not available via API.</td></tr>
+                        <tr><td>POST</td><td><code>/admin/backends/{id}/drain</code></td><td>Initiate graceful drain (stops new requests, waits for in-flight to complete, then disables). Dashboard route only, not available via API.</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/refresh</code></td><td>Force-refresh capabilities and models</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/ollama/pull</code></td><td>Start pulling a model to an Ollama backend</td></tr>
                         <tr><td>GET</td><td><code>/api/admin/backends/{id}/ollama/pull/{job_id}</code></td><td>Poll progress of an Ollama model pull</td></tr>
@@ -793,6 +811,14 @@ message = client.messages.create(
                         <tr><td>Key Created</td><td>(after creation)</td><td>Displays the full API key once (copy-to-clipboard)</td></tr>
                     </tbody>
                 </table>
+                <p>The user dashboard includes:</p>
+                <ul>
+                    <li><strong>Dark mode toggle</strong> &mdash; saved to browser localStorage, persists across sessions</li>
+                    <li><strong>Live token usage</strong> &mdash; usage statistics poll every 1 second for real-time feedback without page refresh</li>
+                    <li><strong>Lifetime vs rolling usage</strong> &mdash; displays both <em>Lifetime Token Usage</em> (all-time total, never resets) and <em>Current Period Usage</em> (resets when the budget period rolls over)</li>
+                    <li><strong>Quota details</strong> &mdash; current RPM limit and max concurrent requests shown in the Quota Details card</li>
+                    <li><strong>API key expiration warnings</strong> &mdash; keys within 7 days of expiration show a yellow countdown; expired keys display an &ldquo;Expired&rdquo; badge; &ldquo;Last Used&rdquo; column shows last authentication time</li>
+                </ul>
 
                 <h3>Admin Dashboard</h3>
                 <p>The admin dashboard has a persistent sidebar with links to all admin pages. Access requires membership in a group with <code>is_admin = true</code>.</p>
@@ -958,6 +984,14 @@ message = client.messages.create(
                     <li>LaTeX rendering</li>
                     <li>Message editing and deletion</li>
                     <li>Dark mode toggle (stored in browser localStorage)</li>
+                    <li>Advanced models toggle &mdash; show or hide non-core models in the model selector</li>
+                    <li>Per-request thinking controls &mdash; enable/disable thinking mode and set reasoning effort for supported models</li>
+                    <li>Collapsible thinking blocks in assistant responses</li>
+                    <li>Keyboard shortcuts &mdash; Shift+Enter for newline, Enter to send</li>
+                    <li>Sidebar collapse for a wider chat area</li>
+                    <li>Copy buttons on code blocks and assistant messages</li>
+                    <li>Image lightbox for viewing uploaded images full-size</li>
+                    <li>Auto-titling of conversations based on the first message</li>
                 </ul>
             </section>
 
@@ -1025,6 +1059,9 @@ message = client.messages.create(
                     <li><strong>Max concurrent</strong> &mdash; Maximum simultaneous in-flight requests.</li>
                 </ul>
                 <p>When a quota is exceeded, the request is rejected with HTTP 429.</p>
+
+                <h3>Rolling Budget Period</h3>
+                <p>Token budgets use <strong>rolling 30-day windows</strong> per user, not calendar months. Usage is tracked continuously and the oldest usage falls off as the window advances.</p>
 
                 <h3>Quota Increase Requests</h3>
                 <p>Users can submit quota increase requests via the dashboard (<code>/dashboard/request-quota</code>). The request includes:</p>
@@ -1159,6 +1196,78 @@ message = client.messages.create(
                     <li><strong>Priority</strong> (+N &times; 10 points) &mdash; from the backend's configured <code>priority</code> value</li>
                 </ul>
                 <p>Hard constraints (multimodal capability, embedding support, model availability) are checked before soft scoring.</p>
+
+                <h3>Priority Gating</h3>
+                <p>When multiple requests are waiting for the same model, the scheduler ensures the <strong>highest-priority waiter proceeds first</strong>. Priority is determined by the user's group scheduler weight and deficit counter, preventing lower-priority requests from starving higher-priority ones during contention.</p>
+            </section>
+
+            <hr>
+
+            <!-- Retry & Failover -->
+            <section id="retry-failover">
+                <h2>Retry &amp; Failover</h2>
+                <p>MindRouter automatically retries failed inference requests to improve reliability across the backend cluster.</p>
+                <ul>
+                    <li><strong>Automatic retries</strong> &mdash; Up to 3 attempts on 5xx errors, timeouts, and connection failures. Configurable via the <code>BACKEND_RETRY_MAX_ATTEMPTS</code> environment variable.</li>
+                    <li><strong>Fast fail on 4xx</strong> &mdash; Client errors (400, 401, 404, etc.) are never retried and return immediately.</li>
+                    <li><strong>Streaming constraints</strong> &mdash; Retries can only occur before the first chunk is sent to the client. Once streaming has begun, a backend failure is terminal and the stream ends with an error.</li>
+                    <li><strong>Backend rotation</strong> &mdash; Each retry attempt selects a different backend when multiple backends are available for the requested model, maximizing the chance of success.</li>
+                </ul>
+
+                <h3>Mid-Stream Error Behavior</h3>
+                <p>Once streaming has begun and the first chunk has been sent to the client, a backend failure <strong>terminates the SSE stream immediately</strong> with no error event. The client receives an abrupt end-of-stream. Retries are not possible after the first chunk because the response format has already been committed.</p>
+            </section>
+
+            <hr>
+
+            <!-- Circuit Breaker -->
+            <section id="circuit-breaker">
+                <h2>Circuit Breaker</h2>
+                <p>MindRouter uses a per-backend circuit breaker to avoid routing requests to backends that are experiencing persistent failures.</p>
+                <ul>
+                    <li><strong>Trip threshold</strong> &mdash; After 3 consecutive failures (configurable), the backend is marked as "open" and excluded from routing for 30 seconds (configurable).</li>
+                    <li><strong>Integration with retry</strong> &mdash; The circuit breaker works alongside retry. Backends with an open circuit are skipped during failover selection, so retries are directed to healthier backends.</li>
+                    <li><strong>Automatic recovery</strong> &mdash; After the exclusion window expires, the backend is eligible for routing again. A successful request resets the failure counter.</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Rate Limiting -->
+            <section id="rate-limiting">
+                <h2>Rate Limiting</h2>
+                <p>MindRouter enforces per-user and per-group rate limits to prevent abuse and ensure fair access.</p>
+                <ul>
+                    <li><strong>Requests per minute (RPM)</strong> &mdash; Configurable per user or inherited from the user's group defaults.</li>
+                    <li><strong>Concurrent request cap</strong> &mdash; Limits the number of in-flight requests a single user can have at once.</li>
+                    <li><strong>429 responses</strong> &mdash; When a limit is exceeded, MindRouter returns HTTP 429 (Too Many Requests) with a descriptive error message. Clients should back off and retry after a brief delay.</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Tool Calling -->
+            <section id="tool-calling">
+                <h2>Tool Calling</h2>
+                <p>MindRouter supports tool calling (function calling) across all three API formats, with transparent translation between them.</p>
+                <ul>
+                    <li><strong>Tool definitions</strong> &mdash; Pass an OpenAI-style <code>tools</code> array describing available functions, with optional <code>tool_choice</code> (<code>"auto"</code>, <code>"none"</code>, or a specific function name).</li>
+                    <li><strong>Tool results</strong> &mdash; Submit results back via <code>role: "tool"</code> messages with a matching <code>tool_call_id</code>.</li>
+                    <li><strong>Cross-format support</strong> &mdash; Tool calls work whether the request arrives in OpenAI, Ollama, or Anthropic format. MindRouter translates tool definitions, tool calls, and tool results between all formats automatically.</li>
+                    <li><strong>Backend requirement</strong> &mdash; The selected backend must support tool calling. For vLLM, this requires <code>--enable-auto-tool-choice</code> and the appropriate <code>--tool-call-parser</code> flag. For Ollama, tool calling is supported natively on compatible models.</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Request ID -->
+            <section id="request-id">
+                <h2>Request ID</h2>
+                <p>Every inference response includes a unique request ID for tracing and debugging.</p>
+                <ul>
+                    <li><strong>Auto-generated IDs</strong> &mdash; MindRouter generates request IDs with format-specific prefixes: <code>chatcmpl-*</code> for chat completions, <code>cmpl-*</code> for text completions, <code>embd-*</code> for embeddings, etc.</li>
+                    <li><strong>Custom IDs</strong> &mdash; You can provide your own request ID by setting the <code>X-Request-ID</code> header. When provided, MindRouter uses your ID instead of generating one, making it easier to correlate requests across your systems.</li>
+                </ul>
             </section>
 
             <hr>
@@ -1232,6 +1341,12 @@ Anthropic Request --&gt; AnthropicInTranslator --&gt; CanonicalChatRequest
                     </tbody>
                 </table>
                 <p>All translators use static methods &mdash; no instantiation needed.</p>
+
+                <h3>Model-Specific Behaviors</h3>
+                <ul>
+                    <li><strong>Qwen3-32B on vLLM</strong> &mdash; This model embeds <code>&lt;think&gt;...&lt;/think&gt;</code> tags directly in the content field instead of using the <code>reasoning_content</code> field. MindRouter automatically extracts these tags and moves the reasoning text to the canonical <code>reasoning</code> field for both streaming and non-streaming responses.</li>
+                    <li><strong>Qwen3.5 on vLLM with thinking disabled</strong> &mdash; When thinking is disabled but the model still returns reasoning content with an empty content field, MindRouter promotes the reasoning content to the content field so the response is not blank.</li>
+                </ul>
             </section>
 
             <hr>
@@ -1486,7 +1601,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         <tr><td><code>chat.think</code></td><td>bool/string</td><td><code>null</code></td><td>Default thinking mode for chat: <code>true</code>, <code>false</code>, <code>"low"</code>, <code>"medium"</code>, <code>"high"</code>, or null (no default)</td><td>Chat Configuration</td></tr>
                     </tbody>
                 </table>
-                <p>All AppConfig values take effect immediately upon save &mdash; no application restart is required.</p>
+                <p>All AppConfig values take effect immediately upon save &mdash; no application restart is required. These settings are managed via the <strong>Admin Dashboard</strong> under Site Settings and Chat Configuration.</p>
             </section>
 
             <hr>
@@ -1563,6 +1678,15 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     </tbody>
                 </table>
                 <p>When <code>AZURE_AD_CLIENT_ID</code> and <code>AZURE_AD_TENANT_ID</code> are set, a "Sign in with Microsoft" button appears on the login page. Users are JIT-provisioned on first login &mdash; their <code>jobTitle</code> from Microsoft Graph determines group assignment (student/faculty/staff/other). Pre-existing accounts are linked by email.</p>
+
+                <h4>Azure AD Group Mapping</h4>
+                <p>Group assignment uses <strong>substring matching</strong> on the user's <code>jobTitle</code> field from Microsoft Graph:</p>
+                <ul>
+                    <li><code>jobTitle</code> contains <strong>"student"</strong> &rarr; <code>students</code> group</li>
+                    <li><code>jobTitle</code> contains <strong>"faculty"</strong> or <strong>"professor"</strong> &rarr; <code>faculty</code> group</li>
+                    <li><code>jobTitle</code> contains <strong>"staff"</strong> &rarr; <code>staff</code> group</li>
+                    <li>No match &rarr; falls back to <code>AZURE_AD_DEFAULT_GROUP</code> (default: <code>other</code>)</li>
+                </ul>
 
                 <h3>Web Search (Optional)</h3>
                 <table class="table table-bordered table-sm">
@@ -1766,6 +1890,52 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         <tr><td><code>DEFAULT_TOKENIZER</code></td><td>str</td><td><code>cl100k_base</code></td><td>Default tokenizer encoding</td></tr>
                     </tbody>
                 </table>
+            </section>
+
+            <hr>
+
+            <!-- Status Enums Reference -->
+            <section id="status-enums">
+                <h2>Status Enums Reference</h2>
+                <p>MindRouter uses the following status enumerations throughout the system:</p>
+
+                <h3>BackendStatus</h3>
+                <ul>
+                    <li><code>HEALTHY</code> &mdash; Backend is online and accepting requests</li>
+                    <li><code>UNHEALTHY</code> &mdash; Backend is failing health checks</li>
+                    <li><code>DISABLED</code> &mdash; Backend has been manually disabled by an admin</li>
+                    <li><code>DRAINING</code> &mdash; Backend is finishing in-flight requests but not accepting new ones</li>
+                    <li><code>UNKNOWN</code> &mdash; Backend status has not yet been determined</li>
+                </ul>
+
+                <h3>NodeStatus</h3>
+                <ul>
+                    <li><code>ONLINE</code> &mdash; Node sidecar is reachable and reporting metrics</li>
+                    <li><code>OFFLINE</code> &mdash; Node sidecar is unreachable</li>
+                    <li><code>UNKNOWN</code> &mdash; Node status has not yet been determined</li>
+                </ul>
+
+                <h3>RequestStatus</h3>
+                <ul>
+                    <li><code>QUEUED</code> &mdash; Request is waiting for a backend slot</li>
+                    <li><code>PROCESSING</code> &mdash; Request is being handled by a backend</li>
+                    <li><code>COMPLETED</code> &mdash; Request finished successfully</li>
+                    <li><code>FAILED</code> &mdash; Request encountered an error</li>
+                    <li><code>CANCELLED</code> &mdash; Request was cancelled (e.g., client disconnect)</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Production Security Hardening -->
+            <section id="security-hardening">
+                <h2>Production Security Hardening</h2>
+                <p>When deploying MindRouter to production, apply the following security measures:</p>
+                <ul>
+                    <li><strong>Secure session cookies</strong> &mdash; Set <code>SESSION_COOKIE_SECURE=True</code> to ensure session cookies are only sent over HTTPS.</li>
+                    <li><strong>Security headers</strong> &mdash; Add <code>Strict-Transport-Security</code> (HSTS), <code>X-Frame-Options</code>, and <code>Content-Security-Policy</code> (CSP) headers at the reverse proxy layer (e.g., nginx).</li>
+                    <li><strong>Restrict CORS origins</strong> &mdash; Set <code>CORS_ORIGINS</code> to only the specific domains that need API access. Do not use <code>*</code> in production.</li>
+                </ul>
             </section>
 
             <hr>

@@ -291,11 +291,11 @@ async def _stream_anthropic_events(
             if finish_reason:
                 stop_reason = AnthropicInTranslator._map_finish_reason(finish_reason)
 
-                # Close text block if still open (text block is always at index 0 when present)
+                # Close text block if still open
                 if text_block_started:
                     yield fmt("content_block_stop", {
                         "type": "content_block_stop",
-                        "index": 0,
+                        "index": content_block_index,
                     })
 
                 # Close all open tool blocks
@@ -327,7 +327,7 @@ async def _stream_anthropic_events(
         if text_block_started:
             yield fmt("content_block_stop", {
                 "type": "content_block_stop",
-                "index": 0,
+                "index": content_block_index,
             })
         for tc_idx in sorted(active_tool_blocks.keys()):
             yield fmt("content_block_stop", {

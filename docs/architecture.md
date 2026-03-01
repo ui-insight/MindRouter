@@ -134,7 +134,7 @@ Multi-factor scoring for backend selection.
 - Low GPU utilization: +50
 - Low latency: +40
 - Short queue: +30
-- High throughput GPU: +20
+- High throughput: +20 (recent tokens/second)
 - Priority: +N×10 (admin-configured backend preference)
 
 ### 6. Quota Management

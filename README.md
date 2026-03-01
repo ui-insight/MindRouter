@@ -335,6 +335,11 @@ make migrate      # Run database migrations
 make seed         # Seed development data
 make docker-up    # Start docker compose stack
 make docker-down  # Stop docker compose stack
+make migrate-down   # Rollback one Alembic migration
+make demo           # Run fairness demo script
+make docker-shell   # Open bash shell in the app container
+make docker-seed    # Seed development data via docker-compose
+make docker-migrate # Run Alembic migrations via docker-compose
 ```
 
 ## API Documentation

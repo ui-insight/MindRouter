@@ -101,7 +101,7 @@ Eligible backends are ranked by total score:
 | Low Utilization | +50 | GPU utilization < 50% |
 | Low Latency | +40 | Low real-world latency (EMA) |
 | Short Queue | +30 | Few pending requests |
-| High Throughput | +20 | Fast GPU type |
+| High Throughput | +20 | Recent tokens/second processed |
 | Priority | +N×10 | Admin-configured preference |
 
 ### Backend Selection

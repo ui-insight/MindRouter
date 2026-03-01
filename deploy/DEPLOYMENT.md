@@ -373,6 +373,60 @@ curl -H "Authorization: Bearer admin-api-key" \
 
 **Firewall note:** The MindRouter server needs network access to each GPU node's sidecar port (default 8007). Ensure firewall rules allow this traffic between the gateway and GPU nodes.
 
+## Uvicorn Worker Count
+
+The Dockerfile runs `uvicorn` with `--workers 8` by default. This should be adjusted based on available CPU cores in production. A common starting point is 2-4 workers per CPU core. Too many workers on a small VM will cause memory pressure; too few will underutilize the CPU.
+
+## MariaDB Tuning
+
+The file `mariadb/custom.cnf` contains production tuning parameters that are mounted into the MariaDB container:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `innodb_buffer_pool_size` | `2G` | Adjust based on available RAM (typically 50-70% of total) |
+| `innodb_log_file_size` | `512M` | Larger log files improve write performance |
+| `innodb_io_capacity` | `2000` | Tune for SSD-backed storage |
+| `max_connections` | `200` | Must exceed total uvicorn workers across all app replicas |
+| `slow_query_log` | `1` | Logs queries taking longer than 1 second |
+
+Operators should adjust `innodb_buffer_pool_size` based on available RAM on the database host. On a dedicated MariaDB server, 50-70% of total RAM is a reasonable target.
+
+## Nginx Configuration
+
+Key nginx parameters in the production config that operators may need to adjust:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `client_max_body_size` | `50m` | Maximum upload/request body size |
+| `proxy_read_timeout` | `300s` | Must be >= `BACKEND_REQUEST_TIMEOUT` for long-running LLM requests |
+| `proxy_send_timeout` | `300s` | Timeout for sending data to the proxied server |
+| `proxy_connect_timeout` | `60s` | Timeout for establishing a connection to the backend |
+
+If LLM requests are timing out at the nginx layer before the backend responds, increase `proxy_read_timeout` to match or exceed the `BACKEND_REQUEST_TIMEOUT` setting (default 300s).
+
+## Docker Network Subnet
+
+The production `docker-compose.prod.yml` defines a custom bridge network with subnet `10.101.0.0/16`. This is used to avoid collisions with institutional/campus network routing that may overlap with Docker's default `172.17.0.0/16` range. Operators should adjust this subnet if `10.101.0.0/16` conflicts with their network.
+
+## Docker Compose Profiles
+
+The Docker Compose configuration supports profiles for optional services:
+
+- **Default (no profile)**: Runs the core services — `app`, `mariadb`, `redis`, `nginx`
+- **`--profile dev`**: Adds development tools
+- **`--profile gpu`**: Adds the `gpu-agent` service for GPU telemetry collection on sidecar nodes
+
+```bash
+# Start core services only
+docker compose -f docker-compose.prod.yml up -d
+
+# Start with GPU sidecar agent
+docker compose -f docker-compose.prod.yml --profile gpu up -d
+
+# Start with development tools
+docker compose -f docker-compose.prod.yml --profile dev up -d
+```
+
 ## Ongoing Operations
 
 ### View Logs
@@ -463,3 +517,23 @@ docker compose -f docker-compose.prod.yml exec app \
 - [ ] Nginx reverse proxy configured on each GPU node (port 8007 → 127.0.0.1:18007)
 - [ ] Sidecar agents running on all GPU nodes with unique `SIDECAR_SECRET_KEY`
 - [ ] Docker daemon configured with 10.x.x.x address space on all GPU nodes
+
+## Production Security Hardening
+
+### CORS
+
+By default, MindRouter's CORS middleware is configured with `allow_methods=["*"]` and `allow_headers=["*"]`. For tighter security in production, customize `CORS_ORIGINS` in `.env.prod` to restrict allowed origins to your actual domain(s) only.
+
+### Security Headers
+
+MindRouter does not set HSTS, X-Frame-Options, or CSP headers at the application level. These should be added at the reverse proxy layer (nginx or Apache). For example, in your nginx config:
+
+```
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+add_header X-Frame-Options "DENY" always;
+add_header Content-Security-Policy "default-src 'self'" always;
+```
+
+### Session Cookies
+
+Set `SESSION_COOKIE_SECURE=True` in `.env.prod` for HTTPS deployments to ensure session cookies are only transmitted over TLS. This prevents cookies from being sent over unencrypted HTTP connections.
