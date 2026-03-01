@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 018_add_thinking_description_url.py: Add supports_thinking,
 #     thinking_override, description, and model_url columns

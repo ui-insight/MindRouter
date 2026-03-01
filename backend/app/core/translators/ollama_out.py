@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # ollama_out.py: Canonical schema to Ollama API format translator
 #

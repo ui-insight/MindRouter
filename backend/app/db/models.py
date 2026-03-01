@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # models.py: SQLAlchemy ORM models for all database entities
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""SQLAlchemy database models for MindRouter2."""
+"""SQLAlchemy database models for MindRouter."""
 
 from datetime import datetime
 from enum import Enum as PyEnum

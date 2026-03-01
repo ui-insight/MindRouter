@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # logging_config.py: Structured logging configuration using structlog
 #

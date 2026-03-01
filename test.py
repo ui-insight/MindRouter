@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-MindRouter2 Comprehensive Smoke Test
+MindRouter Comprehensive Smoke Test
 
-A manual diagnostic tool that exercises every API surface of MindRouter2
+A manual diagnostic tool that exercises every API surface of MindRouter
 against a live deployment. Prints colored pass/fail results.
 
 Usage:
@@ -838,7 +838,7 @@ SECTIONS = {
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MindRouter2 comprehensive smoke test",
+        description="MindRouter comprehensive smoke test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -850,7 +850,7 @@ Examples:
 """,
     )
     parser.add_argument("--base-url", default="http://localhost:8000",
-                        help="Base URL of MindRouter2 (default: http://localhost:8000)")
+                        help="Base URL of MindRouter (default: http://localhost:8000)")
     parser.add_argument("--api-key", required=True,
                         help="API key for authentication (required)")
     parser.add_argument("--admin-key", default=None,
@@ -870,7 +870,7 @@ Examples:
     cfg = parser.parse_args()
     sections_to_run = cfg.sections or list(SECTIONS.keys())
 
-    print(f"\n{BOLD}MindRouter2 Smoke Test{RESET}")
+    print(f"\n{BOLD}MindRouter Smoke Test{RESET}")
     print(f"  Base URL:      {cfg.base_url}")
     print(f"  Ollama model:  {cfg.ollama_model}")
     print(f"  vLLM model:    {cfg.vllm_model}")

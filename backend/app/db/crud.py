@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # crud.py: Database CRUD operations for all entities
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Database CRUD operations for MindRouter2."""
+"""Database CRUD operations for MindRouter."""
 
 import json as _json
 from datetime import datetime, timedelta, timezone

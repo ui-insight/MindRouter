@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: API translation layer package exports
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""API translation layer for MindRouter2.
+"""API translation layer for MindRouter.
 
 Provides bidirectional translation between:
 - OpenAI API format

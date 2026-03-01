@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 002_add_latency_circuit_breaker.py: Add latency EMA and circuit breaker columns
 #

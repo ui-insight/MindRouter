@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Database package initialization and exports
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Database package for MindRouter2."""
+"""Database package for MindRouter."""
 
 from backend.app.db.base import Base
 from backend.app.db.session import get_db, get_async_db, engine, AsyncSessionLocal

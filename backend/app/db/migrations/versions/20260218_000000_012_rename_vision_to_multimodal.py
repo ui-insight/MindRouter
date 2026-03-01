@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 012_rename_vision_to_multimodal.py: Rename supports_vision
 #     to supports_multimodal, add multimodal_override, update

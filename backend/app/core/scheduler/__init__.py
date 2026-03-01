@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Fair-share scheduler package exports
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Fair-share scheduler for MindRouter2.
+"""Fair-share scheduler for MindRouter.
 
 Implements Weighted Deficit Round Robin (WDRR) for fair resource allocation
 across users with different priority levels.

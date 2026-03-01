@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Storage utilities package exports
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Storage utilities for MindRouter2."""
+"""Storage utilities for MindRouter."""
 
 from backend.app.storage.artifacts import ArtifactStorage
 

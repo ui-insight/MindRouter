@@ -1,11 +1,11 @@
 """
 RAG pipeline integration tests.
 
-Tests embedding, reranking, and scoring endpoints through the MindRouter2 proxy,
+Tests embedding, reranking, and scoring endpoints through the MindRouter proxy,
 culminating in an end-to-end RAG pipeline test.
 
 Requirements:
-  - Live MindRouter2 deployment with Qwen3-Embedding-8B and Qwen3-Reranker-8B models
+  - Live MindRouter deployment with Qwen3-Embedding-8B and Qwen3-Reranker-8B models
   - Valid admin API key
 """
 

@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 007_chat_tables.py: Add chat_conversations, chat_messages,
 #                     chat_attachments tables

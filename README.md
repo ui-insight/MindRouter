@@ -1,4 +1,4 @@
-# MindRouter2
+# MindRouter
 
 A production-ready **LLM inference load balancer** that fronts a heterogeneous backend cluster of **Ollama** and **vLLM** inference nodes, providing a unified OpenAI-compatible API surface with native Ollama compatibility.
 
@@ -99,7 +99,7 @@ curl -X POST http://localhost:8000/anthropic/v1/messages \
   }'
 ```
 
-Anthropic SDK clients (Python, TypeScript) can point directly at MindRouter2:
+Anthropic SDK clients (Python, TypeScript) can point directly at MindRouter:
 
 ```python
 import anthropic
@@ -159,7 +159,7 @@ After running the seed script:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        MindRouter2 Gateway                      │
+│                        MindRouter Gateway                      │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌────────┐ ┌────────┐ ┌───────────┐ ┌───────┐ ┌──────────────┐ │
 │  │ OpenAI │ │ Ollama │ │ Anthropic │ │ Admin │ │  Dashboard   │ │
@@ -227,7 +227,7 @@ Key settings:
 
 ### Node and Backend Registration
 
-MindRouter2 separates **nodes** (physical GPU servers) from **backends** (inference endpoints). Register a node first, then attach backends to it.
+MindRouter separates **nodes** (physical GPU servers) from **backends** (inference endpoints). Register a node first, then attach backends to it.
 
 ```bash
 # Step 1: Register a GPU node (physical server running the sidecar agent)
@@ -393,7 +393,7 @@ make docker-down  # Stop docker compose stack
 
 ## Scheduler Algorithm
 
-MindRouter2 implements **Weighted Deficit Round Robin (WDRR)** for fair resource allocation:
+MindRouter implements **Weighted Deficit Round Robin (WDRR)** for fair resource allocation:
 
 1. **Share Weights**: faculty=3, staff=2, student=1, admin=10
 2. **Deficit Counters**: Track service debt per user
@@ -404,7 +404,7 @@ See [docs/scheduler.md](docs/scheduler.md) for detailed algorithm specification.
 
 ## GPU Sidecar Agent
 
-Each GPU node runs a lightweight **sidecar agent** (`sidecar/gpu_agent.py`) that exposes per-GPU hardware metrics via HTTP. MindRouter2's backend registry polls the sidecar once per node (not per backend) to collect telemetry.
+Each GPU node runs a lightweight **sidecar agent** (`sidecar/gpu_agent.py`) that exposes per-GPU hardware metrics via HTTP. MindRouter's backend registry polls the sidecar once per node (not per backend) to collect telemetry.
 
 ### What it collects
 
@@ -497,12 +497,12 @@ Then build and run:
 # Build a specific release tag
 docker build -t mindrouter-sidecar:v0.19.1 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.19.1:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
 
 # Or build latest from master
 docker build -t mindrouter-sidecar:latest \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git:sidecar
+  https://github.com/ui-insight/MindRouter.git:sidecar
 
 # Run bound to localhost only (nginx will proxy external traffic)
 docker run -d --name gpu-sidecar \
@@ -518,7 +518,7 @@ To upgrade an existing sidecar to a new version:
 ```bash
 docker build -t mindrouter-sidecar:v0.19.1 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.19.1:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
@@ -565,7 +565,7 @@ SIDECAR_SECRET_KEY=your-generated-key GPU_AGENT_PORT=8007 python gpu_agent.py
 
 ### Registering nodes with sidecars
 
-After starting the sidecar on a GPU server, register the node in MindRouter2. Include the same `sidecar_key` that was set as `SIDECAR_SECRET_KEY` on the sidecar:
+After starting the sidecar on a GPU server, register the node in MindRouter. Include the same `sidecar_key` that was set as `SIDECAR_SECRET_KEY` on the sidecar:
 
 ```bash
 curl -X POST http://mindrouter:8000/api/admin/nodes/register \

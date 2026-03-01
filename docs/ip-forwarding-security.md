@@ -13,7 +13,7 @@ recommended hardening steps.
 
 Docker containers with published ports were unreachable from any external host.
 The GPU sidecar (`gpu-sidecar` container, port 8007) worked locally
-(`curl localhost:8007`) but timed out when accessed from MindRouter2 or any
+(`curl localhost:8007`) but timed out when accessed from MindRouter or any
 other machine on the network.
 
 ### Root Cause
@@ -136,11 +136,11 @@ interface from participating in forwarding.
 
 ### Option 2: Restrict Sidecar Access via DOCKER-USER
 
-Add nftables rules so only the MindRouter2 production server can reach
+Add nftables rules so only the MindRouter production server can reach
 container ports:
 
 ```bash
-# Allow only MindRouter2 server to reach sidecar
+# Allow only MindRouter server to reach sidecar
 sudo nft add rule ip filter DOCKER-USER ip saddr != <mindrouter-server-ip> tcp dport 8007 drop
 
 # To persist, add to a startup script or nftables config file
@@ -162,7 +162,7 @@ net.ipv4.conf.<infiniband-iface>.forwarding = 0
 EOF
 sudo sysctl -p /etc/sysctl.d/99-docker-forward.conf
 
-# 2. Restrict sidecar access to MindRouter2 server only
+# 2. Restrict sidecar access to MindRouter server only
 sudo nft add rule ip filter DOCKER-USER \
     ip saddr != <mindrouter-server-ip> tcp dport 8007 drop
 ```
@@ -174,7 +174,7 @@ sudo nft add rule ip filter DOCKER-USER \
 After applying hardening, verify:
 
 ```bash
-# 1. Sidecar still reachable from MindRouter2 server
+# 1. Sidecar still reachable from MindRouter server
 curl -H "X-Sidecar-Key: <key>" http://<gpu-host>:8007/health
 
 # 2. Sidecar NOT reachable from random campus hosts

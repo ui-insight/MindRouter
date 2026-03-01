@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Backend telemetry and registry package exports
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Backend telemetry and registry for MindRouter2."""
+"""Backend telemetry and registry for MindRouter."""
 
 from backend.app.core.telemetry.registry import BackendRegistry
 from backend.app.core.telemetry.models import BackendCapabilities, TelemetrySnapshot

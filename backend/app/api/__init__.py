@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: API endpoints package and router configuration
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""API endpoints for MindRouter2."""
+"""API endpoints for MindRouter."""
 
 from fastapi import APIRouter
 

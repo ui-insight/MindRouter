@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # chat.py: Web chat interface routes
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Chat interface routes for MindRouter2."""
+"""Chat interface routes for MindRouter."""
 
 import asyncio
 import base64

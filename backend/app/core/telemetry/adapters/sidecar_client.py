@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # sidecar_client.py: Client for GPU sidecar agent
 #
@@ -33,7 +33,7 @@ class SidecarClient:
 
     Each inference node can optionally run a sidecar agent that
     exposes per-GPU hardware metrics via GET /gpu-info. This client
-    fetches and parses those metrics for storage in MindRouter2.
+    fetches and parses those metrics for storage in MindRouter.
     """
 
     def __init__(self, sidecar_url: str, timeout: float = 5.0, sidecar_key: Optional[str] = None):

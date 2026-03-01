@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # azure_auth.py: Azure AD OAuth2 SSO routes
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Azure AD OAuth2 SSO authentication for MindRouter2."""
+"""Azure AD OAuth2 SSO authentication for MindRouter."""
 
 import json
 import logging
@@ -52,7 +52,7 @@ def _get_serializer() -> URLSafeTimedSerializer:
 
 
 def _map_job_title_to_group(job_title: Optional[str]) -> str:
-    """Map Azure AD jobTitle to MindRouter2 group name."""
+    """Map Azure AD jobTitle to MindRouter group name."""
     settings = get_settings()
     if not job_title:
         return settings.azure_ad_default_group

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # demo_fairness.py: Demo script for fair-share scheduling behavior
 #
@@ -13,7 +13,7 @@
 #
 ############################################################
 
-"""Demonstration script for fair-share scheduling in MindRouter2.
+"""Demonstration script for fair-share scheduling in MindRouter.
 
 This script simulates two users (one heavy, one light) making requests
 to show how the fair-share scheduler balances load.
@@ -130,7 +130,7 @@ async def light_user_burst(session: aiohttp.ClientSession, delay: float) -> List
 async def run_demo():
     """Run the fairness demonstration."""
     print("=" * 60)
-    print("MindRouter2 Fair-Share Scheduling Demo")
+    print("MindRouter Fair-Share Scheduling Demo")
     print("=" * 60)
     print()
     print(f"Target: {BASE_URL}")
@@ -180,7 +180,7 @@ async def run_demo():
 def main():
     """Main entry point."""
     print("Before running this demo:")
-    print("1. Start MindRouter2: docker compose up")
+    print("1. Start MindRouter: docker compose up")
     print("2. Register at least one backend with the model")
     print("3. Update HEAVY_USER_KEY and LIGHT_USER_KEY in this script")
     print()

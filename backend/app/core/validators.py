@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # validators.py: Structured output validation for JSON schemas
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Structured output validation for MindRouter2."""
+"""Structured output validation for MindRouter."""
 
 import json
 from typing import Any, Dict, List, Optional, Tuple, Union

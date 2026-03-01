@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # blog.py: Blog routes (public viewing + admin CRUD)
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Blog routes for MindRouter2."""
+"""Blog routes for MindRouter."""
 
 import os
 import re

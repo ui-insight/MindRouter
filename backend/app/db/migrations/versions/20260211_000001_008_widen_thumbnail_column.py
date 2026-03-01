@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 008_widen_thumbnail_column.py: Widen chat_attachments
 #                                thumbnail_base64 to MEDIUMTEXT

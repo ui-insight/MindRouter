@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 011_drop_thumbnail_base64.py: Drop thumbnail_base64 column
 #     after migrate_thumbnails.py has moved data to filesystem

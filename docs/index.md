@@ -1,6 +1,6 @@
-# MindRouter2 Documentation
+# MindRouter Documentation
 
-MindRouter2 is a production-ready **LLM inference load balancer and translation layer** that fronts a heterogeneous cluster of **Ollama** and **vLLM** inference backends. It provides a unified OpenAI-compatible API surface with native Ollama compatibility, fair-share scheduling, per-user quotas, full audit logging, and real-time GPU telemetry.
+MindRouter is a production-ready **LLM inference load balancer and translation layer** that fronts a heterogeneous cluster of **Ollama** and **vLLM** inference backends. It provides a unified OpenAI-compatible API surface with native Ollama compatibility, fair-share scheduling, per-user quotas, full audit logging, and real-time GPU telemetry.
 
 **Developed by** Luke Sheneman, Research Computing and Data Services (RCDS), Institute for Interdisciplinary Data Sciences (IIDS), University of Idaho.
 
@@ -27,7 +27,7 @@ MindRouter2 is a production-ready **LLM inference load balancer and translation 
 
 ## Overview
 
-MindRouter2 sits between API consumers and GPU inference servers, providing:
+MindRouter sits between API consumers and GPU inference servers, providing:
 
 - **Unified API Gateway** -- OpenAI-compatible `/v1/*`, Ollama-compatible `/api/*`, and Anthropic-compatible `/anthropic/v1/*` endpoints, all backed by the same pool of inference servers.
 - **Cross-Engine Routing** -- A request arriving as OpenAI format can be served by an Ollama backend (and vice versa). The translation layer handles all protocol conversion transparently.
@@ -48,7 +48,7 @@ MindRouter2 sits between API consumers and GPU inference servers, providing:
 
 ## Architecture
 
-MindRouter2 follows a layered architecture:
+MindRouter follows a layered architecture:
 
 ```
 Client Request (OpenAI, Ollama, or Anthropic format)
@@ -98,7 +98,7 @@ For a deep dive into component interactions, data flow, and design decisions, se
 ```bash
 # 1. Clone and configure
 git clone <repository-url>
-cd mindrouter2
+cd mindrouter
 cp .env.example .env
 nano .env  # Set DATABASE_URL, SECRET_KEY, etc.
 
@@ -140,7 +140,7 @@ After running the seed script:
 
 ### Interactive API Documentation
 
-MindRouter2 includes built-in interactive API documentation powered by FastAPI:
+MindRouter includes built-in interactive API documentation powered by FastAPI:
 
 - **Swagger UI** at [`/docs`](/docs) -- Interactive API explorer where you can try endpoints directly from your browser. Supports authentication via the "Authorize" button (enter your API key as a Bearer token).
 - **ReDoc** at [`/redoc`](/redoc) -- Clean, readable API reference with request/response schemas and examples.
@@ -149,7 +149,7 @@ Both are auto-generated from the application's route definitions and Pydantic mo
 
 ### Authentication
 
-All inference and admin endpoints require authentication. MindRouter2 supports two methods:
+All inference and admin endpoints require authentication. MindRouter supports two methods:
 
 **API Key (Bearer Token):**
 ```bash
@@ -188,7 +188,7 @@ Common HTTP status codes:
 
 ### OpenAI-Compatible Endpoints
 
-These endpoints accept and return data in the OpenAI API format. Any OpenAI-compatible client or SDK can be pointed at MindRouter2 by changing the base URL.
+These endpoints accept and return data in the OpenAI API format. Any OpenAI-compatible client or SDK can be pointed at MindRouter by changing the base URL.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -400,7 +400,7 @@ curl http://localhost:8000/v1/models \
 
 ### Ollama-Compatible Endpoints
 
-These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter2 as a drop-in replacement.
+These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter as a drop-in replacement.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -470,7 +470,7 @@ curl -X POST http://localhost:8000/api/generate \
 
 ### Anthropic-Compatible Endpoint
 
-This endpoint accepts and returns data in the Anthropic Messages API format. Anthropic SDK clients can be pointed at MindRouter2 by setting `base_url`.
+This endpoint accepts and returns data in the Anthropic Messages API format. Anthropic SDK clients can be pointed at MindRouter by setting `base_url`.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -640,7 +640,7 @@ All admin endpoints require the `admin` role. They are mounted under `/api/admin
 
 ## Web Dashboard
 
-MindRouter2 includes a full web dashboard built with Bootstrap 5. All pages extend a common base template with navigation and accessibility features (WCAG 2.1 Level AA).
+MindRouter includes a full web dashboard built with Bootstrap 5. All pages extend a common base template with navigation and accessibility features (WCAG 2.1 Level AA).
 
 ### Public Pages
 
@@ -694,7 +694,7 @@ The chat interface supports:
 
 ### Role Hierarchy
 
-MindRouter2 uses a four-tier role hierarchy. Higher roles have all the permissions of lower roles.
+MindRouter uses a four-tier role hierarchy. Higher roles have all the permissions of lower roles.
 
 | Role | Level | Permissions |
 |------|-------|-------------|
@@ -747,7 +747,7 @@ Admins review requests at `/admin/requests` or via `POST /api/admin/quota-reques
 
 ### Node/Backend Model
 
-MindRouter2 separates the concept of physical GPU servers (**Nodes**) from inference endpoints (**Backends**):
+MindRouter separates the concept of physical GPU servers (**Nodes**) from inference endpoints (**Backends**):
 
 - A **Node** represents a physical server with GPUs and a sidecar agent.
 - A **Backend** is an Ollama or vLLM instance running on a node.
@@ -808,7 +808,7 @@ curl -X POST http://localhost:8000/api/admin/backends/register \
 
 ## Scheduling & Fair Share
 
-MindRouter2 implements **Weighted Deficit Round Robin (WDRR)** to ensure fair GPU access across users.
+MindRouter implements **Weighted Deficit Round Robin (WDRR)** to ensure fair GPU access across users.
 
 ### How It Works
 
@@ -836,7 +836,7 @@ For the complete algorithm specification, see **[scheduler.md](scheduler.md)**.
 
 ## Translation Layer
 
-MindRouter2's translation layer enables cross-engine routing: a request arriving in OpenAI, Ollama, or Anthropic format can be served by any Ollama or vLLM backend. All translation passes through a **canonical internal schema**.
+MindRouter's translation layer enables cross-engine routing: a request arriving in OpenAI, Ollama, or Anthropic format can be served by any Ollama or vLLM backend. All translation passes through a **canonical internal schema**.
 
 ### Request Flow
 
@@ -974,7 +974,7 @@ See [Telemetry endpoints](#telemetry) for the full API reference.
 
 ## Chat System
 
-MindRouter2 includes a built-in chat interface at `/chat` with full conversation management.
+MindRouter includes a built-in chat interface at `/chat` with full conversation management.
 
 ### Conversations
 
@@ -1038,7 +1038,7 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `APP_NAME` | str | `MindRouter2` | Application name |
+| `APP_NAME` | str | `MindRouter` | Application name |
 | `APP_VERSION` | str | `1.0.0` | Application version |
 | `DEBUG` | bool | `false` | Enable debug mode |
 | `RELOAD` | bool | `false` | Auto-reload on code changes (development) |
@@ -1202,7 +1202,7 @@ Default allowed extensions: `.txt`, `.md`, `.csv`, `.json`, `.html`, `.htm`, `.l
 
 ## Deployment
 
-MindRouter2 is designed for deployment on Linux servers with NVIDIA GPUs. The full deployment guide covers:
+MindRouter is designed for deployment on Linux servers with NVIDIA GPUs. The full deployment guide covers:
 
 - Rocky Linux 8 prerequisites and dependency installation
 - SSL/TLS configuration (self-signed and Let's Encrypt)
@@ -1220,7 +1220,7 @@ For step-by-step production deployment instructions, see **[../deploy/DEPLOYMENT
 
 ## Testing
 
-MindRouter2 has a comprehensive test suite covering unit, integration, end-to-end, smoke, stress, and accessibility tests.
+MindRouter has a comprehensive test suite covering unit, integration, end-to-end, smoke, stress, and accessibility tests.
 
 ### Quick Reference
 

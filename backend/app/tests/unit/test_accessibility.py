@@ -1,5 +1,5 @@
 """
-Accessibility tests for MindRouter2 HTML templates.
+Accessibility tests for MindRouter HTML templates.
 
 Validates WCAG 2.1 Level A and AA compliance by parsing Jinja2 templates
 and checking for required ARIA attributes, semantic HTML, heading hierarchy,

@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 017_add_model_max_context.py: Add model_max_context column
 #     to track architectural maximum context length separately

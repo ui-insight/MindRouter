@@ -1,8 +1,8 @@
-# MindRouter2 Architecture
+# MindRouter Architecture
 
 ## Overview
 
-MindRouter2 is a production-ready LLM inference load balancer designed to front heterogeneous backend clusters of Ollama and vLLM inference nodes. It provides a unified OpenAI-compatible API surface while implementing fair-share scheduling, quota management, and comprehensive audit logging.
+MindRouter is a production-ready LLM inference load balancer designed to front heterogeneous backend clusters of Ollama and vLLM inference nodes. It provides a unified OpenAI-compatible API surface while implementing fair-share scheduling, quota management, and comprehensive audit logging.
 
 ## System Components
 

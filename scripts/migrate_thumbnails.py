@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # migrate_thumbnails.py: Migrate thumbnail data from DB
 #     (thumbnail_base64) to filesystem (thumbnail_path)

@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 013_add_sidecar_version_to_node.py: Add sidecar_version
 #     column to nodes table for version alignment tracking

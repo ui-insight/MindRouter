@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-End-to-end tests for MindRouter2 chat subsystem.
+End-to-end tests for MindRouter chat subsystem.
 
 Exercises: persistence, image preprocessing, storage, multi-turn context,
 vision model Q&A, cross-user isolation, and CRUD operations against the
@@ -16,7 +16,7 @@ Usage:
         --cookie-file /tmp/mr_cookies.txt \
         --cookie-file2 /tmp/mr_cookies2.txt \
         --skip-vision \
-        --docker-container mindrouter2-app-1
+        --docker-container mindrouter-app-1
 """
 
 import argparse
@@ -603,7 +603,7 @@ class ChatE2ETests:
         ]
 
         print(f"\n{'='*70}")
-        print("  MindRouter2 Chat E2E Test Suite")
+        print("  MindRouter Chat E2E Test Suite")
         print(f"  Target: {self.base}")
         print(f"  Text model: {self.args.text_model}")
         print(f"  Vision model: {self.args.vision_model or '(none)'}")
@@ -645,7 +645,7 @@ class ChatE2ETests:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MindRouter2 Chat E2E Tests",
+        description="MindRouter Chat E2E Tests",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--base-url", default="http://localhost:8000",

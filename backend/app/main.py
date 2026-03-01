@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # main.py: FastAPI application entry point and configuration
 #
@@ -133,7 +133,7 @@ _redis_sync_task: Optional[asyncio.Task] = None
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Application lifespan manager."""
     global _cleanup_task, _redis_sync_task
-    logger.info("Starting MindRouter2...")
+    logger.info("Starting MindRouter...")
 
     # Initialize components
     await init_registry()
@@ -158,12 +158,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     if redis_is_available():
         _redis_sync_task = asyncio.create_task(_redis_sync_loop())
 
-    logger.info("MindRouter2 started successfully")
+    logger.info("MindRouter started successfully")
 
     yield
 
     # Shutdown
-    logger.info("Shutting down MindRouter2...")
+    logger.info("Shutting down MindRouter...")
     if _cleanup_task:
         _cleanup_task.cancel()
         try:
@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     await close_redis()
     await shutdown_scheduler()
     await shutdown_registry()
-    logger.info("MindRouter2 shutdown complete")
+    logger.info("MindRouter shutdown complete")
 
 
 class RequestIDMiddleware:

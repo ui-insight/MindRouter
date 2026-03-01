@@ -2,7 +2,7 @@
 
 # Default target
 help:
-	@echo "MindRouter2 Development Commands"
+	@echo "MindRouter Development Commands"
 	@echo "================================"
 	@echo ""
 	@echo "Development:"

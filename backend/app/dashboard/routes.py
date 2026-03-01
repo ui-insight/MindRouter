@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # routes.py: Dashboard web routes and views
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Dashboard routes for MindRouter2."""
+"""Dashboard routes for MindRouter."""
 
 import csv
 import io

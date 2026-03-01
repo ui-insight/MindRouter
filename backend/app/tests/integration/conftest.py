@@ -9,13 +9,13 @@ def pytest_addoption(parser):
         "--api-key",
         action="store",
         default=None,
-        help="MindRouter2 API key for live tests",
+        help="MindRouter API key for live tests",
     )
     parser.addoption(
         "--base-url",
         action="store",
         default="https://localhost:8000",
-        help="MindRouter2 base URL (default: https://localhost:8000)",
+        help="MindRouter base URL (default: https://localhost:8000)",
     )
 
 

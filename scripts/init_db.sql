@@ -1,4 +1,4 @@
--- MindRouter2 Database Initialization
+-- MindRouter Database Initialization
 -- This script runs on first container startup
 
 -- Ensure the database exists with proper character set

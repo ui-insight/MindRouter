@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # settings.py: Application configuration and environment settings
 #
@@ -26,7 +26,7 @@ def _get_version() -> str:
     """Read version from pyproject.toml (single source of truth)."""
     try:
         from importlib.metadata import version
-        return version("mindrouter2")
+        return version("mindrouter")
     except Exception:
         pass
     # Fallback: read pyproject.toml directly (works in dev without pip install)
@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     )
 
     # Application
-    app_name: str = "MindRouter2"
+    app_name: str = "MindRouter"
     app_version: str = Field(default_factory=_get_version)
     debug: bool = False
     reload: bool = False

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # sync_nodes_to_prod.py: Export nodes & backends from one
 # database and import them into another.

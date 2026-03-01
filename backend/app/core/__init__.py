@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Core application logic package
 #
@@ -12,4 +12,4 @@
 #
 ############################################################
 
-"""Core application logic for MindRouter2."""
+"""Core application logic for MindRouter."""

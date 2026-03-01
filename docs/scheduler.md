@@ -1,8 +1,8 @@
-# MindRouter2 Scheduler
+# MindRouter Scheduler
 
 ## Overview
 
-MindRouter2 implements a **Weighted Deficit Round Robin (WDRR)** scheduler with backend scoring to achieve fair resource allocation across users while maximizing cluster throughput.
+MindRouter implements a **Weighted Deficit Round Robin (WDRR)** scheduler with backend scoring to achieve fair resource allocation across users while maximizing cluster throughput.
 
 ## Goals
 

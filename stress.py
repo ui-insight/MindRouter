@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MindRouter2 Stress Test with Auto-Provisioned Multi-User Support
+MindRouter Stress Test with Auto-Provisioned Multi-User Support
 
 Validates the fair-share WDRR scheduler under load by simulating multiple
 concurrent users with different roles (student, staff, faculty, admin).
@@ -584,7 +584,7 @@ async def dashboard_loop(
             d_min, d_sec = divmod(duration, 60)
 
             lines = []
-            lines.append(f"{BOLD}{CYAN}─── MindRouter2 Stress Test ── {e_min:02d}:{e_sec:02d} / {d_min:02d}:{d_sec:02d} {'─' * 30}{RESET}")
+            lines.append(f"{BOLD}{CYAN}─── MindRouter Stress Test ── {e_min:02d}:{e_sec:02d} / {d_min:02d}:{d_sec:02d} {'─' * 30}{RESET}")
             lines.append(
                 f"  Requests:  {snap['total']:,} total │ "
                 f"{snap['ok']:,} ok │ {snap['err']:,} err │ "
@@ -672,7 +672,7 @@ async def print_summary(metrics: MetricsCollector, elapsed: float):
     snap = await metrics.snapshot()
 
     print(f"\n{BOLD}{'=' * 70}{RESET}")
-    print(f"{BOLD}  MindRouter2 Stress Test — Final Summary{RESET}")
+    print(f"{BOLD}  MindRouter Stress Test — Final Summary{RESET}")
     print(f"{'=' * 70}")
 
     # Overall stats
@@ -718,7 +718,7 @@ async def async_main(cfg):
     user_specs = generate_user_specs(cfg.users)
     workload = get_workload(cfg)
 
-    print(f"\n{BOLD}MindRouter2 Stress Test{RESET}")
+    print(f"\n{BOLD}MindRouter Stress Test{RESET}")
     print(f"  Base URL:      {cfg.base_url}")
     print(f"  Duration:      {cfg.duration}s")
     print(f"  Concurrency:   {cfg.concurrency}")
@@ -822,7 +822,7 @@ async def async_main(cfg):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MindRouter2 multi-user stress test",
+        description="MindRouter multi-user stress test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -834,7 +834,7 @@ Examples:
     parser.add_argument("--api-key", required=True,
                         help="Admin API key for provisioning (required)")
     parser.add_argument("--base-url", default="http://localhost:8000",
-                        help="MindRouter2 URL (default: http://localhost:8000)")
+                        help="MindRouter URL (default: http://localhost:8000)")
     parser.add_argument("--duration", type=int, default=300,
                         help="Test duration in seconds (default: 300)")
     parser.add_argument("--concurrency", type=int, default=10,

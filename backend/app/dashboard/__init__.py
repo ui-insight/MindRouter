@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Dashboard package for web UI
 #
@@ -12,4 +12,4 @@
 #
 ############################################################
 
-"""Dashboard package for MindRouter2."""
+"""Dashboard package for MindRouter."""

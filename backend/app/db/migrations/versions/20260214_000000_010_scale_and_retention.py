@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 010_scale_and_retention.py: Scale columns to MEDIUMTEXT,
 #     add thumbnail_path, add indexes for retention and audit

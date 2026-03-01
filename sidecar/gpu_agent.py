@@ -1,11 +1,11 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # gpu_agent.py: GPU metrics sidecar agent using pynvml
 #
 # Runs on each GPU inference node to expose per-GPU hardware
-# metrics via a lightweight HTTP API. MindRouter2's backend
+# metrics via a lightweight HTTP API. MindRouter's backend
 # registry polls this endpoint to collect telemetry.
 #
 # Luke Sheneman
@@ -64,7 +64,7 @@ async def verify_sidecar_key(x_sidecar_key: Optional[str] = Header(None)) -> Non
         raise HTTPException(status_code=401, detail="Invalid or missing sidecar key")
 
 
-app = FastAPI(title="MindRouter2 GPU Sidecar Agent", version=SIDECAR_VERSION)
+app = FastAPI(title="MindRouter GPU Sidecar Agent", version=SIDECAR_VERSION)
 
 # GPU state cached at startup
 _initialized = False

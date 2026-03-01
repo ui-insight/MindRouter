@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # conftest.py: Pytest configuration and shared test fixtures
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Pytest configuration and shared fixtures for MindRouter2 tests."""
+"""Pytest configuration and shared fixtures for MindRouter tests."""
 
 import asyncio
 import pytest

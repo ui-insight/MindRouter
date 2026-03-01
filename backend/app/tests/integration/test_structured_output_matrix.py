@@ -8,10 +8,10 @@ Exercises every meaningful combination of:
   - Streaming (True, False)
   - Model category (non-thinking, thinking-toggle, always-thinking)
 
-Runs through the MindRouter2 API (full stack).
+Runs through the MindRouter API (full stack).
 
 Requirements:
-  - Live MindRouter2 deployment
+  - Live MindRouter deployment
   - Valid API key (MINDROUTER_API_KEY env var)
 """
 

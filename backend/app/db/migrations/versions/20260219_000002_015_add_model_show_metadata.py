@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # 015_add_model_show_metadata.py: Add rich metadata columns
 #     to models table from Ollama /api/show endpoint

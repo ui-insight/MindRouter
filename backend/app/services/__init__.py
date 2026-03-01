@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Services package exports
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""Services for MindRouter2."""
+"""Services for MindRouter."""
 
 from backend.app.services.inference import InferenceService
 

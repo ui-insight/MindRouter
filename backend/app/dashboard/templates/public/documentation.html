@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Documentation - MindRouter2{% endblock %}
+{% block title %}Documentation - MindRouter{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -78,8 +78,8 @@
 
         <!-- Main Content -->
         <div class="col-md-10 py-4 px-4 docs-content">
-            <h1 class="mb-3"><i class="bi bi-book"></i> MindRouter2 Documentation</h1>
-            <p class="lead">MindRouter2 is a production-ready <strong>LLM inference load balancer and translation layer</strong> that fronts a heterogeneous cluster of <strong>Ollama</strong> and <strong>vLLM</strong> inference backends. It provides a unified OpenAI-compatible API surface with native Ollama compatibility, fair-share scheduling, per-user quotas, full audit logging, and real-time GPU telemetry.</p>
+            <h1 class="mb-3"><i class="bi bi-book"></i> MindRouter Documentation</h1>
+            <p class="lead">MindRouter is a production-ready <strong>LLM inference load balancer and translation layer</strong> that fronts a heterogeneous cluster of <strong>Ollama</strong> and <strong>vLLM</strong> inference backends. It provides a unified OpenAI-compatible API surface with native Ollama compatibility, fair-share scheduling, per-user quotas, full audit logging, and real-time GPU telemetry.</p>
             <p class="text-muted"><strong>Developed by</strong> Luke Sheneman, Research Computing and Data Services (RCDS), Institute for Interdisciplinary Data Sciences (IIDS), University of Idaho.</p>
 
             <hr>
@@ -87,7 +87,7 @@
             <!-- Section 1: Overview -->
             <section id="overview">
                 <h2>Overview</h2>
-                <p>MindRouter2 sits between API consumers and GPU inference servers, providing:</p>
+                <p>MindRouter sits between API consumers and GPU inference servers, providing:</p>
                 <ul>
                     <li><strong>Unified API Gateway</strong> &mdash; OpenAI-compatible <code>/v1/*</code>, Ollama-compatible <code>/api/*</code>, and Anthropic-compatible <code>/anthropic/v1/*</code> endpoints, all backed by the same pool of inference servers.</li>
                     <li><strong>Cross-Engine Routing</strong> &mdash; A request arriving in OpenAI, Ollama, or Anthropic format can be served by any backend. The translation layer handles all protocol conversion transparently.</li>
@@ -112,7 +112,7 @@
             <!-- Section 2: Architecture -->
             <section id="architecture">
                 <h2>Architecture</h2>
-                <p>MindRouter2 follows a layered architecture:</p>
+                <p>MindRouter follows a layered architecture:</p>
                 <pre><code class="arch-diagram">Client Request (OpenAI, Ollama, or Anthropic format)
         |
         v
@@ -160,7 +160,7 @@
                 <h3>Quickstart with Docker Compose</h3>
                 <pre><code># 1. Clone and configure
 git clone &lt;repository-url&gt;
-cd mindrouter2
+cd mindrouter
 cp .env.example .env
 nano .env  # Set DATABASE_URL, SECRET_KEY, etc.
 
@@ -210,7 +210,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                 <h2>API Reference</h2>
 
                 <h3>Interactive API Documentation</h3>
-                <p>MindRouter2 includes built-in interactive API documentation powered by FastAPI:</p>
+                <p>MindRouter includes built-in interactive API documentation powered by FastAPI:</p>
                 <ul>
                     <li><strong>Swagger UI</strong> at <a href="/docs"><code>/docs</code></a> &mdash; Interactive API explorer where you can try endpoints directly from your browser. Supports authentication via the "Authorize" button (enter your API key as a Bearer token).</li>
                     <li><strong>ReDoc</strong> at <a href="/redoc"><code>/redoc</code></a> &mdash; Clean, readable API reference with request/response schemas and examples.</li>
@@ -218,7 +218,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                 <p>Both are auto-generated from the application's route definitions and Pydantic models, so they always reflect the current API surface.</p>
 
                 <h3>Authentication</h3>
-                <p>All inference and admin endpoints require authentication. MindRouter2 supports two methods:</p>
+                <p>All inference and admin endpoints require authentication. MindRouter supports two methods:</p>
 
                 <p><strong>API Key (Bearer Token):</strong></p>
                 <pre><code>curl -H "Authorization: Bearer mr2_your-api-key" http://localhost:8000/v1/models</code></pre>
@@ -250,7 +250,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                 </table>
 
                 <h3>OpenAI-Compatible Endpoints</h3>
-                <p>These endpoints accept and return data in the OpenAI API format. Any OpenAI-compatible client or SDK can be pointed at MindRouter2 by changing the base URL.</p>
+                <p>These endpoints accept and return data in the OpenAI API format. Any OpenAI-compatible client or SDK can be pointed at MindRouter by changing the base URL.</p>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
                         <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
@@ -463,7 +463,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                 </ul>
 
                 <h3>Ollama-Compatible Endpoints</h3>
-                <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter2 as a drop-in replacement.</p>
+                <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter as a drop-in replacement.</p>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
                         <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
@@ -527,7 +527,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
   -d '{"model": "llama3.2", "prompt": "Why is the sky blue?"}'</code></pre>
 
                 <h3>Anthropic-Compatible Endpoint</h3>
-                <p>This endpoint accepts and returns data in the Anthropic Messages API format. Anthropic SDK clients (Python, TypeScript) can be pointed at MindRouter2 by setting <code>base_url</code>.</p>
+                <p>This endpoint accepts and returns data in the Anthropic Messages API format. Anthropic SDK clients (Python, TypeScript) can be pointed at MindRouter by setting <code>base_url</code>.</p>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
                         <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
@@ -762,7 +762,7 @@ message = client.messages.create(
             <!-- Section 5: Web Dashboard -->
             <section id="web-dashboard">
                 <h2>Web Dashboard</h2>
-                <p>MindRouter2 includes a full web dashboard built with Bootstrap 5. All pages extend a common base template with navigation and accessibility features (WCAG 2.1 Level AA).</p>
+                <p>MindRouter includes a full web dashboard built with Bootstrap 5. All pages extend a common base template with navigation and accessibility features (WCAG 2.1 Level AA).</p>
 
                 <h3>Public Pages</h3>
                 <table class="table table-bordered table-sm">
@@ -841,7 +841,7 @@ message = client.messages.create(
                 <h2>Users, Groups &amp; Quotas</h2>
 
                 <h3>Group System</h3>
-                <p>MindRouter2 uses a <strong>database-driven group system</strong> for authorization, quota defaults, and scheduler weights. Each user belongs to exactly one group. Groups are fully manageable via the admin UI at <code>/admin/groups</code>.</p>
+                <p>MindRouter uses a <strong>database-driven group system</strong> for authorization, quota defaults, and scheduler weights. Each user belongs to exactly one group. Groups are fully manageable via the admin UI at <code>/admin/groups</code>.</p>
                 <p>Admin privileges are determined by the group's <code>is_admin</code> flag. Users in an admin group can access the admin dashboard and admin API endpoints.</p>
 
                 <h3>Default Groups</h3>
@@ -915,7 +915,7 @@ message = client.messages.create(
                 <h2>Backend Management</h2>
 
                 <h3>Node/Backend Model</h3>
-                <p>MindRouter2 separates the concept of physical GPU servers (<strong>Nodes</strong>) from inference endpoints (<strong>Backends</strong>):</p>
+                <p>MindRouter separates the concept of physical GPU servers (<strong>Nodes</strong>) from inference endpoints (<strong>Backends</strong>):</p>
                 <ul>
                     <li>A <strong>Node</strong> represents a physical server with GPUs and a sidecar agent.</li>
                     <li>A <strong>Backend</strong> is an Ollama or vLLM instance running on a node.</li>
@@ -1010,7 +1010,7 @@ message = client.messages.create(
             <!-- Section 8: Scheduling & Fair Share -->
             <section id="scheduling-fair-share">
                 <h2>Scheduling &amp; Fair Share</h2>
-                <p>MindRouter2 implements <strong>Weighted Deficit Round Robin (WDRR)</strong> to ensure fair GPU access across users.</p>
+                <p>MindRouter implements <strong>Weighted Deficit Round Robin (WDRR)</strong> to ensure fair GPU access across users.</p>
 
                 <h3>How It Works</h3>
                 <ol>
@@ -1038,7 +1038,7 @@ message = client.messages.create(
             <!-- Section 9: Translation Layer -->
             <section id="translation-layer">
                 <h2>Translation Layer</h2>
-                <p>MindRouter2's translation layer enables cross-engine routing: a request arriving in OpenAI, Ollama, or Anthropic format can be served by any Ollama or vLLM backend. All translation passes through a <strong>canonical internal schema</strong>.</p>
+                <p>MindRouter's translation layer enables cross-engine routing: a request arriving in OpenAI, Ollama, or Anthropic format can be served by any Ollama or vLLM backend. All translation passes through a <strong>canonical internal schema</strong>.</p>
 
                 <h3>Request Flow</h3>
                 <pre><code>OpenAI Request    --&gt; OpenAIInTranslator    --&gt; CanonicalChatRequest
@@ -1209,7 +1209,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
             <!-- Section 11: Chat System -->
             <section id="chat-system">
                 <h2>Chat System</h2>
-                <p>MindRouter2 includes a built-in chat interface at <code>/chat</code> with full conversation management.</p>
+                <p>MindRouter includes a built-in chat interface at <code>/chat</code> with full conversation management.</p>
 
                 <h3>Conversations</h3>
                 <ul>
@@ -1285,7 +1285,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>APP_NAME</code></td><td>str</td><td><code>MindRouter2</code></td><td>Application name</td></tr>
+                        <tr><td><code>APP_NAME</code></td><td>str</td><td><code>MindRouter</code></td><td>Application name</td></tr>
                         <tr><td><code>APP_VERSION</code></td><td>str</td><td><code>1.0.0</code></td><td>Application version</td></tr>
                         <tr><td><code>DEBUG</code></td><td>bool</td><td><code>false</code></td><td>Enable debug mode</td></tr>
                         <tr><td><code>RELOAD</code></td><td>bool</td><td><code>false</code></td><td>Auto-reload on code changes (development)</td></tr>
@@ -1556,7 +1556,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
             <!-- Section 13: Deployment -->
             <section id="deployment">
                 <h2>Deployment</h2>
-                <p>MindRouter2 is designed for deployment on Linux servers with NVIDIA GPUs. The full deployment guide covers:</p>
+                <p>MindRouter is designed for deployment on Linux servers with NVIDIA GPUs. The full deployment guide covers:</p>
                 <ul>
                     <li>Rocky Linux 8 prerequisites and dependency installation</li>
                     <li>SSL/TLS configuration (self-signed and Let's Encrypt)</li>
@@ -1581,12 +1581,12 @@ sudo chmod 600 /etc/mindrouter/sidecar.env</code></pre>
                 <h4>Build a specific version</h4>
 <pre><code>docker build -t mindrouter-sidecar:v0.19.1 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.19.1:sidecar</code></pre>
+  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar</code></pre>
 
                 <h4>Build latest from master</h4>
 <pre><code>docker build -t mindrouter-sidecar:latest \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git:sidecar</code></pre>
+  https://github.com/ui-insight/MindRouter.git:sidecar</code></pre>
 
                 <h4>Run the sidecar</h4>
 <pre><code># Run bound to localhost only (nginx will proxy external traffic)
@@ -1600,7 +1600,7 @@ docker run -d --name gpu-sidecar \
                 <h4>Upgrade to a new version</h4>
 <pre><code>docker build -t mindrouter-sidecar:v0.19.1 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.19.1:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
@@ -1618,7 +1618,7 @@ docker run -d --name gpu-sidecar \
             <!-- Section 14: Testing -->
             <section id="testing">
                 <h2>Testing</h2>
-                <p>MindRouter2 has a comprehensive test suite covering unit, integration, end-to-end, smoke, stress, and accessibility tests.</p>
+                <p>MindRouter has a comprehensive test suite covering unit, integration, end-to-end, smoke, stress, and accessibility tests.</p>
 
                 <h3>Quick Reference</h3>
                 <table class="table table-bordered table-sm">

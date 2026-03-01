@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Test suite package
 #
@@ -12,4 +12,4 @@
 #
 ############################################################
 
-"""Tests for MindRouter2."""
+"""Tests for MindRouter."""

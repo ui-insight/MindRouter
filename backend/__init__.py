@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Root package initialization and version definition
 #
@@ -12,6 +12,6 @@
 #
 ############################################################
 
-"""MindRouter2 - LLM Inference Load Balancer."""
+"""MindRouter - LLM Inference Load Balancer."""
 
 __version__ = "0.16.0"

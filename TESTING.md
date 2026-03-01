@@ -1,4 +1,4 @@
-# MindRouter2 — Test Manifest
+# MindRouter — Test Manifest
 
 > **Single source of truth** for every test in the project.
 > When adding new tests, **add an entry here** so `run all tests` stays accurate.
@@ -65,7 +65,7 @@
 | File | What it covers |
 |------|----------------|
 | `backend/app/tests/integration/test_live_backends.py` | Full translation pipeline against real Ollama and vLLM backends — streaming and non-streaming chat |
-| `backend/app/tests/integration/test_rag_pipeline.py` | RAG pipeline: embedding, reranking, scoring endpoints through MindRouter2 proxy, end-to-end RAG test |
+| `backend/app/tests/integration/test_rag_pipeline.py` | RAG pipeline: embedding, reranking, scoring endpoints through MindRouter proxy, end-to-end RAG test |
 | `backend/app/tests/integration/test_structured_output_matrix.py` | Structured output matrix: all combos of API style (OpenAI/Ollama/Anthropic) × format (text/json_object/json_schema) × thinking mode × streaming across model categories |
 | `backend/app/tests/integration/test_structured_outputs_live.py` | Live structured output: 5 models × 6 schema types × 3 API surfaces × 2 streaming modes + cross-engine routing (`--api-key`, `--base-url` CLI args) |
 

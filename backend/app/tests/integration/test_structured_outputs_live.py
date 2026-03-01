@@ -1,7 +1,7 @@
 """
 Live structured output integration tests.
 
-Hits the live MindRouter2 deployment to verify end-to-end structured output
+Hits the live MindRouter deployment to verify end-to-end structured output
 behavior across all API surfaces (OpenAI, Ollama, Anthropic), multiple
 schema types, streaming modes, and models.
 

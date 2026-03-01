@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # seed_dev_data.py: Seed database with development test data
 #
@@ -13,7 +13,7 @@
 #
 ############################################################
 
-"""Seed development data for MindRouter2."""
+"""Seed development data for MindRouter."""
 
 import asyncio
 import sys
@@ -131,7 +131,7 @@ async def seed_users():
 async def main():
     """Main entry point."""
     print("=" * 60)
-    print("MindRouter2 Development Data Seeder")
+    print("MindRouter Development Data Seeder")
     print("=" * 60)
     print()
 

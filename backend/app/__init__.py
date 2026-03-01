@@ -1,6 +1,6 @@
 ############################################################
 #
-# mindrouter2 - LLM Inference Translator and Load Balancer
+# mindrouter - LLM Inference Translator and Load Balancer
 #
 # __init__.py: Application package initialization
 #
@@ -12,7 +12,7 @@
 #
 ############################################################
 
-"""MindRouter2 Application Package."""
+"""MindRouter Application Package."""
 
 from backend import __version__
 

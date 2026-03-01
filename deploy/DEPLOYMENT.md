@@ -1,4 +1,4 @@
-# MindRouter2 Deployment Guide - Rocky Linux 8
+# MindRouter Deployment Guide - Rocky Linux 8
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ sudo chown $USER:$USER /opt/mindrouter
 cd /opt/mindrouter
 
 # Clone from GitHub
-git clone https://github.com/sheneman/mindrouter2.git .
+git clone https://github.com/ui-insight/MindRouter.git .
 ```
 
 ## Step 3: Configure Environment
@@ -139,7 +139,7 @@ docker compose -f docker-compose.prod.yml exec app python scripts/seed_dev_data.
 
 ## Step 10: Deploy GPU Sidecar Agents
 
-Each GPU inference node needs a sidecar agent running to report GPU metrics back to MindRouter2.
+Each GPU inference node needs a sidecar agent running to report GPU metrics back to MindRouter.
 
 ### 10a. Install NVIDIA Container Toolkit
 
@@ -217,12 +217,12 @@ Build and run:
 # Build a specific release tag directly from GitHub (no clone needed)
 docker build -t mindrouter-sidecar:v0.11.0 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.11.0:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.11.0:sidecar
 
 # Or build latest from master
 docker build -t mindrouter-sidecar:latest \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git:sidecar
+  https://github.com/ui-insight/MindRouter.git:sidecar
 
 # Run bound to localhost only (nginx will proxy external traffic)
 docker run -d --name gpu-sidecar \
@@ -238,7 +238,7 @@ To upgrade an existing sidecar to a new version:
 ```bash
 docker build -t mindrouter-sidecar:v0.11.0 \
   -f Dockerfile.sidecar \
-  https://github.com/sheneman/mindrouter2.git#v0.11.0:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.11.0:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
@@ -250,7 +250,7 @@ docker run -d --name gpu-sidecar \
 
 ### 10d. Configure nginx reverse proxy
 
-Install nginx and create a proxy config so MindRouter2 can reach the sidecar on port 8007:
+Install nginx and create a proxy config so MindRouter can reach the sidecar on port 8007:
 
 ```bash
 # Install nginx (Rocky Linux / RHEL)
@@ -286,11 +286,11 @@ Verify the sidecar is reachable:
 # Locally
 curl -H "X-Sidecar-Key: your-generated-key" http://localhost:8007/health
 
-# From MindRouter2 server
+# From MindRouter server
 curl -H "X-Sidecar-Key: your-generated-key" http://gpu-server.example.com:8007/health
 ```
 
-### 10e. Register the node in MindRouter2
+### 10e. Register the node in MindRouter
 
 Include the same key that was set as `SIDECAR_SECRET_KEY` on the sidecar:
 
@@ -363,7 +363,7 @@ curl -X POST https://mindrouter.example.com/anthropic/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model": "llama3.2", "max_tokens": 16, "messages": [{"role": "user", "content": "Say ok."}]}'
 
-# Verify sidecar connectivity (from MindRouter2 server)
+# Verify sidecar connectivity (from MindRouter server)
 curl http://gpu1.example.com:8007/health
 
 # Verify node appears in telemetry
@@ -371,7 +371,7 @@ curl -H "Authorization: Bearer admin-api-key" \
   https://mindrouter.example.com/api/admin/telemetry/overview
 ```
 
-**Firewall note:** The MindRouter2 server needs network access to each GPU node's sidecar port (default 8007). Ensure firewall rules allow this traffic between the gateway and GPU nodes.
+**Firewall note:** The MindRouter server needs network access to each GPU node's sidecar port (default 8007). Ensure firewall rules allow this traffic between the gateway and GPU nodes.
 
 ## Ongoing Operations
 
