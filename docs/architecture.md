@@ -132,8 +132,10 @@ Multi-factor scoring for backend selection.
 **Soft Scores (higher = better):**
 - Model already loaded: +100
 - Low GPU utilization: +50
+- Low latency: +40
 - Short queue: +30
 - High throughput GPU: +20
+- Priority: +N×10 (admin-configured backend preference)
 
 ### 6. Quota Management
 

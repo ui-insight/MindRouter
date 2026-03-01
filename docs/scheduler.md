@@ -99,6 +99,7 @@ Eligible backends are ranked by total score:
 |--------|--------|-------------|
 | Model Loaded | +100 | Model already in GPU memory |
 | Low Utilization | +50 | GPU utilization < 50% |
+| Low Latency | +40 | Low real-world latency (EMA) |
 | Short Queue | +30 | Few pending requests |
 | High Throughput | +20 | Fast GPU type |
 | Priority | +N×10 | Admin-configured preference |
@@ -167,6 +168,7 @@ SCHEDULER_DEPRIORITIZE_THRESHOLD=0.5  # 50%
 # Scoring
 SCHEDULER_SCORE_MODEL_LOADED=100
 SCHEDULER_SCORE_LOW_UTILIZATION=50
+SCHEDULER_SCORE_LATENCY=40
 SCHEDULER_SCORE_SHORT_QUEUE=30
 SCHEDULER_SCORE_HIGH_THROUGHPUT=20
 ```

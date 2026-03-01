@@ -565,9 +565,9 @@ These endpoints are unauthenticated and intended for monitoring infrastructure.
 | GET | `/readyz` | None | Readiness probe (checks DB + healthy backends) |
 | GET | `/metrics` | None | Prometheus metrics (text format) |
 | GET | `/status` | None | Cluster status summary (JSON) |
-| GET | `/api/cluster/throughput` | None | Token throughput (last 20 seconds) |
+| GET | `/api/cluster/throughput` | None | Token throughput (last 10 seconds) |
 | GET | `/api/cluster/total-tokens` | None | Total tokens ever served (cached 10s) |
-| GET | `/api/cluster/trends` | None | Token and active-user trends over time (query param: `range=day\|week\|month`) |
+| GET | `/api/cluster/trends` | None | Token and active-user trends over time (query param: `range=hour\|day\|week\|month\|year`) |
 
 #### Prometheus Metrics
 
@@ -594,7 +594,6 @@ All admin endpoints require the `admin` role. They are mounted under `/api/admin
 | PATCH | `/api/admin/backends/{id}` | Update backend properties |
 | POST | `/api/admin/backends/{id}/disable` | Disable a backend |
 | POST | `/api/admin/backends/{id}/enable` | Enable a disabled backend |
-| POST | `/api/admin/backends/{id}/drain` | Start draining (stop new requests, let in-flight finish) |
 | POST | `/api/admin/backends/{id}/refresh` | Force-refresh capabilities and models |
 | POST | `/api/admin/backends/{id}/ollama/pull` | Pull a model on an Ollama backend |
 | GET | `/api/admin/backends/{id}/ollama/pull/{job_id}` | Check pull job status |
@@ -681,7 +680,6 @@ MindRouter includes a full web dashboard built with Bootstrap 5. All pages exten
 | Cluster Status | `/` | Shows healthy backend count, available models, queue size, and overall cluster status |
 | Login | `/login` | Username/password authentication (and Azure AD SSO when configured) |
 | Blog | `/blog` | Public blog with published posts |
-| Request API Key | `/request-api-key` | Form for unauthenticated users to request an API key |
 
 ### User Dashboard
 
@@ -711,6 +709,22 @@ The admin dashboard has a persistent sidebar with links to all admin pages:
 | Chat Config | `/admin/chat-config` | Configure core models, default model, system prompt, max_tokens, temperature, thinking mode |
 | Blog | `/admin/blog` | Blog/CMS management -- create, edit, publish, delete posts |
 | Settings | `/admin/settings` | Site-wide settings: timezone, enforce `num_ctx` override |
+
+#### Admin Dashboard Actions
+
+These are dashboard routes (not API endpoints) that require an admin session cookie:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/admin/system/toggle-online` | Force the entire system offline or back online |
+| POST | `/admin/backends/{id}/drain` | Start draining a backend (stop new requests, let in-flight finish) |
+| POST | `/admin/nodes/{id}/take-offline` | Disable all backends on a node and mark it offline |
+| POST | `/admin/nodes/{id}/bring-online` | Re-enable all backends on a node and mark it online |
+| POST | `/admin/nodes/{id}/force-drain` | Force-cancel all active requests on a node's backends |
+| GET | `/admin/nodes/{id}/active-requests` | Count of in-flight requests across all backends on a node |
+| POST | `/admin/masquerade/{target_user_id}` | Start masquerading as a user (sets signed cookie, redirects to their dashboard) |
+| POST | `/admin/masquerade/stop` | Stop masquerading and return to admin view |
+| GET | `/admin/audit/export` | Export audit logs as CSV or JSON (filterable by user, model, status, date range) |
 
 ### Health Alerts
 
@@ -870,7 +884,7 @@ curl -X POST http://localhost:8000/api/admin/backends/register \
 
 - **Disable** a backend to take it out of rotation without deleting it: `POST /api/admin/backends/{id}/disable`
 - **Enable** to bring it back: `POST /api/admin/backends/{id}/enable`
-- **Drain** for graceful shutdown: `POST /api/admin/backends/{id}/drain`
+- **Drain** for graceful shutdown: `POST /admin/backends/{id}/drain` (dashboard route, not an API endpoint -- requires admin session)
 - **Refresh** to force re-discovery of models and capabilities: `POST /api/admin/backends/{id}/refresh`
 
 ### Drain Mode
@@ -916,6 +930,7 @@ When multiple backends can serve a request, the scheduler scores them on:
 - **Low latency** (+40 points) -- based on EMA of recent response times
 - **Short queue** (+30 points) -- prefers backends with fewer queued requests
 - **High throughput** (+20 points) -- based on recent tokens/second
+- **Priority** (+N x 10 points) -- admin-configured backend priority (N = backend `priority` value)
 
 Hard constraints (vision capability, embedding support, model availability) are checked before soft scoring.
 
@@ -1048,6 +1063,14 @@ Exponential Moving Average (EMA) tracks per-backend latency:
 - **Throughput score:** `1.0 / (1.0 + latency_ms / 5000.0)` -- used in backend scoring
 - **Persistence:** EMAs are periodically saved to the database for recovery after restart
 
+### Redis
+
+When a `REDIS_URL` is configured, MindRouter uses Redis for several purposes beyond rate limiting:
+
+- **Inflight streaming token counting** -- During streaming responses, token counts are atomically incremented/decremented in Redis (`streaming:inflight_tokens` key) so the `/api/cluster/throughput` endpoint can include tokens from in-progress requests.
+- **Per-user quota caching** -- Token usage counters are cached in Redis (`quota:tokens:{user_id}` keys) for fast atomic increment/read without hitting the database on every request.
+- **Graceful degradation** -- All Redis operations are wrapped in try/except blocks. If Redis is unavailable (not configured, connection lost, or connection fails), MindRouter falls back silently: inflight token counts return 0, quota checks fall through to the database, and a `redis_disabled` or `redis_connect_failed` log entry is emitted. No requests are rejected due to Redis unavailability.
+
 ### Prometheus Metrics
 
 Scrape `/metrics` for Prometheus-compatible metrics. See the [Health & Metrics Endpoints](#health--metrics-endpoints) section for the full list.
@@ -1075,6 +1098,7 @@ MindRouter includes a built-in chat interface at `/chat` with full conversation 
 - Conversations store: title, selected model, creation/update timestamps
 - Users can rename, switch models, or delete conversations
 - Up to 50 conversations shown in the sidebar (most recent first)
+- Conversations older than `CONVERSATION_RETENTION_DAYS` (default 730 days / 2 years) are automatically purged by a background cleanup task
 
 ### Messages
 
@@ -1164,7 +1188,7 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `APP_NAME` | str | `MindRouter` | Application name |
-| `APP_VERSION` | str | `1.0.0` | Application version |
+| `APP_VERSION` | str | (from `pyproject.toml`) | Application version |
 | `DEBUG` | bool | `false` | Enable debug mode |
 | `RELOAD` | bool | `false` | Auto-reload on code changes (development) |
 
@@ -1280,9 +1304,9 @@ Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_
 | `BACKEND_REQUEST_TIMEOUT` | int | `300` | Total request timeout (seconds) |
 | `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds) |
 | `BACKEND_RETRY_MAX_ATTEMPTS` | int | `3` | Max total retry attempts |
-| `BACKEND_RETRY_ATTEMPTS` | int | `2` | Default retry attempts |
-| `BACKEND_RETRY_BACKOFF` | float | `1.0` | Retry backoff multiplier |
-| `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | Retry on invalid structured output |
+| `BACKEND_RETRY_ATTEMPTS` | int | `2` | Default retry attempts (deprecated -- not currently used by retry logic; see `BACKEND_RETRY_MAX_ATTEMPTS`) |
+| `BACKEND_RETRY_BACKOFF` | float | `1.0` | Retry backoff multiplier (deprecated -- not currently used by retry logic) |
+| `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | When enabled, retries the request on a different backend if the response fails structured output JSON validation |
 
 ### Logging
 

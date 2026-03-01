@@ -215,9 +215,9 @@ Build and run:
 
 ```bash
 # Build a specific release tag directly from GitHub (no clone needed)
-docker build -t mindrouter-sidecar:v0.11.0 \
+docker build -t mindrouter-sidecar:v0.19.1 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.11.0:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
 
 # Or build latest from master
 docker build -t mindrouter-sidecar:latest \
@@ -230,22 +230,22 @@ docker run -d --name gpu-sidecar \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.11.0
+  mindrouter-sidecar:v0.19.1
 ```
 
 To upgrade an existing sidecar to a new version:
 
 ```bash
-docker build -t mindrouter-sidecar:v0.11.0 \
+docker build -t mindrouter-sidecar:v0.19.1 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.11.0:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.11.0
+  mindrouter-sidecar:v0.19.1
 ```
 
 ### 10d. Configure nginx reverse proxy

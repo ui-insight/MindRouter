@@ -378,9 +378,9 @@ make docker-down  # Stop docker compose stack
 | DELETE | `/api/admin/nodes/{id}` | Remove a node |
 | POST | `/api/admin/nodes/{id}/refresh` | Refresh node sidecar |
 | POST | `/api/admin/backends/register` | Register new backend |
-| POST | `/admin/backends/{id}/disable` | Disable backend |
-| POST | `/admin/backends/{id}/enable` | Enable backend |
-| POST | `/admin/backends/{id}/drain` | Drain backend (graceful offline) |
+| POST | `/api/admin/backends/{id}/disable` | Disable backend |
+| POST | `/api/admin/backends/{id}/enable` | Enable backend |
+| POST | `/admin/backends/{id}/drain` | Drain backend (dashboard-only) |
 | POST | `/api/admin/backends/{id}/refresh` | Refresh capabilities |
 | POST | `/api/admin/backends/{id}/ollama/pull` | Pull a model to Ollama backend |
 | POST | `/api/admin/backends/{id}/ollama/delete` | Delete a model from Ollama backend |

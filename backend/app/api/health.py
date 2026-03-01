@@ -291,6 +291,6 @@ async def cluster_throughput() -> Dict[str, Any]:
         "tokens_per_second": tokens_per_second,
         "requests_per_minute": request_count,
         "active_requests": active_requests,
-        "total_tokens_last_5s": total_tokens,
+        "total_tokens_last_10s": total_tokens,
         "inflight_tokens": inflight_tokens,
     }

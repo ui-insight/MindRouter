@@ -650,6 +650,7 @@ message = client.messages.create(
                         <tr><td>PATCH</td><td><code>/api/admin/backends/{id}</code></td><td>Update backend properties</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/disable</code></td><td>Disable a backend</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/enable</code></td><td>Enable a disabled backend</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/drain</code></td><td>Initiate graceful drain (stops new requests, waits for in-flight to complete, then disables). Dashboard route only, not available via API.</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/refresh</code></td><td>Force-refresh capabilities and models</td></tr>
                         <tr><td>POST</td><td><code>/api/admin/backends/{id}/ollama/pull</code></td><td>Start pulling a model to an Ollama backend</td></tr>
                         <tr><td>GET</td><td><code>/api/admin/backends/{id}/ollama/pull/{job_id}</code></td><td>Poll progress of an Ollama model pull</td></tr>
@@ -726,7 +727,7 @@ message = client.messages.create(
                         <tr><th>Method</th><th>Path</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>POST</td><td><code>/admin/conversations/export</code></td><td>Export conversations as CSV or JSON (form-based, filterable)</td></tr>
+                        <tr><td>GET</td><td><code>/admin/conversations/export</code></td><td>Export conversations as CSV or JSON (form-based, filterable)</td></tr>
                         <tr><td>GET</td><td><code>/api/admin/conversations/export</code></td><td>Bulk API export (JSON with content, for programmatic access)</td></tr>
                     </tbody>
                 </table>
@@ -774,7 +775,7 @@ message = client.messages.create(
                     <tbody>
                         <tr><td>Cluster Status</td><td><code>/</code></td><td>Shows healthy backend count, available models, queue size, and overall cluster status</td></tr>
                         <tr><td>Login</td><td><code>/login</code></td><td>Username/password authentication (Azure AD SSO when configured)</td></tr>
-                        <tr><td>Request API Key</td><td><code>/request-api-key</code></td><td>Form for unauthenticated users to request an API key</td></tr>
+
                         <tr><td>Blog</td><td><code>/blog</code></td><td>Public blog listing with published posts</td></tr>
                         <tr><td>Blog Post</td><td><code>/blog/{slug}</code></td><td>Individual blog post rendered from Markdown</td></tr>
                     </tbody>
@@ -1490,7 +1491,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     </thead>
                     <tbody>
                         <tr><td><code>APP_NAME</code></td><td>str</td><td><code>MindRouter</code></td><td>Application name</td></tr>
-                        <tr><td><code>APP_VERSION</code></td><td>str</td><td><code>1.0.0</code></td><td>Application version</td></tr>
+                        <tr><td><code>APP_VERSION</code></td><td>str</td><td><em>(from pyproject.toml)</em></td><td>Application version (read dynamically at startup)</td></tr>
                         <tr><td><code>DEBUG</code></td><td>bool</td><td><code>false</code></td><td>Enable debug mode</td></tr>
                         <tr><td><code>RELOAD</code></td><td>bool</td><td><code>false</code></td><td>Auto-reload on code changes (development)</td></tr>
                     </tbody>
