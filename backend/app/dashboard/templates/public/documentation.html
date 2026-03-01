@@ -70,6 +70,8 @@
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
                 <li class="nav-item"><a class="nav-link" href="#chat-system">Chat System</a></li>
+                <li class="nav-item"><a class="nav-link" href="#blog-system">Blog / CMS</a></li>
+                <li class="nav-item"><a class="nav-link" href="#app-config">AppConfig System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#configuration-reference">Configuration Reference</a></li>
                 <li class="nav-item"><a class="nav-link" href="#deployment">Deployment</a></li>
                 <li class="nav-item"><a class="nav-link" href="#testing">Testing</a></li>
@@ -773,6 +775,8 @@ message = client.messages.create(
                         <tr><td>Cluster Status</td><td><code>/</code></td><td>Shows healthy backend count, available models, queue size, and overall cluster status</td></tr>
                         <tr><td>Login</td><td><code>/login</code></td><td>Username/password authentication (Azure AD SSO when configured)</td></tr>
                         <tr><td>Request API Key</td><td><code>/request-api-key</code></td><td>Form for unauthenticated users to request an API key</td></tr>
+                        <tr><td>Blog</td><td><code>/blog</code></td><td>Public blog listing with published posts</td></tr>
+                        <tr><td>Blog Post</td><td><code>/blog/{slug}</code></td><td>Individual blog post rendered from Markdown</td></tr>
                     </tbody>
                 </table>
 
@@ -782,7 +786,8 @@ message = client.messages.create(
                         <tr><th>Page</th><th>URL</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>Dashboard</td><td><code>/dashboard</code></td><td>Token usage progress bar, active API keys, quota usage history</td></tr>
+                        <tr><td>Dashboard</td><td><code>/dashboard</code></td><td>Token usage progress bar, active API keys, quota usage history, change password</td></tr>
+                        <tr><td>Change Password</td><td><code>POST /dashboard/change-password</code></td><td>Change password for local (non-SSO) accounts. Requires current password, new password (min 8 chars), and confirmation. Not available for Azure AD SSO users.</td></tr>
                         <tr><td>Request Quota</td><td><code>/dashboard/request-quota</code></td><td>Submit a quota increase request with justification</td></tr>
                         <tr><td>Key Created</td><td>(after creation)</td><td>Displays the full API key once (copy-to-clipboard)</td></tr>
                     </tbody>
@@ -795,18 +800,139 @@ message = client.messages.create(
                         <tr><th>Page</th><th>URL</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td>Overview</td><td><code>/admin</code></td><td>System metrics overview, health alert banner for unhealthy backends/offline nodes, pending request badges</td></tr>
+                        <tr><td>Overview</td><td><code>/admin</code></td><td>System metrics overview, health alert banner for unhealthy backends/offline nodes, pending request badges, system force offline/online toggle</td></tr>
                         <tr><td>Backends</td><td><code>/admin/backends</code></td><td>Backend health, models, enable/disable/drain controls</td></tr>
-                        <tr><td>Nodes</td><td><code>/admin/nodes</code></td><td>GPU node management, sidecar status, hardware specs</td></tr>
+                        <tr><td>Nodes</td><td><code>/admin/nodes</code></td><td>GPU node management, sidecar status, hardware specs, take offline/bring online/force drain controls</td></tr>
+                        <tr><td>Models</td><td><code>/admin/models</code></td><td>Model management: multimodal and thinking overrides, full metadata overrides (family, parameters, quantization, context length, etc.), Ollama pull/delete</td></tr>
                         <tr><td>GPU Metrics</td><td><code>/admin/metrics</code></td><td>Real-time GPU utilization, memory, temperature, power charts with time range controls</td></tr>
                         <tr><td>Users</td><td><code>/admin/users</code></td><td>User accounts with search, group filter, and pagination</td></tr>
                         <tr><td>User Detail</td><td><code>/admin/users/{id}</code></td><td>Individual user profile, usage stats, API keys, monthly usage chart, quota overrides, masquerade (view dashboard as user)</td></tr>
                         <tr><td>Groups</td><td><code>/admin/groups</code></td><td>Group management: create, edit, delete groups with quota defaults and scheduler weights</td></tr>
                         <tr><td>API Keys</td><td><code>/admin/api-keys</code></td><td>All API keys across users with search, status filter, and pagination</td></tr>
                         <tr><td>Requests</td><td><code>/admin/requests</code></td><td>Pending API key and quota increase requests, approve/deny</td></tr>
-                        <tr><td>Audit Log</td><td><code>/admin/audit</code></td><td>Inference request history with filtering and search</td></tr>
+                        <tr><td>Audit Log</td><td><code>/admin/audit</code></td><td>Inference request history with filtering, search, and CSV/JSON export</td></tr>
                         <tr><td>Conversations</td><td><code>/admin/conversations</code></td><td>Browse and export all user conversations</td></tr>
+                        <tr><td>Chat Configuration</td><td><code>/admin/chat-config</code></td><td>Configure chat UI defaults: core models, default model, system prompt, max tokens, temperature, thinking mode</td></tr>
+                        <tr><td>Blog Management</td><td><code>/admin/blog</code></td><td>Blog CMS: create, edit, publish/unpublish, and delete blog posts</td></tr>
                         <tr><td>Site Settings</td><td><code>/admin/settings</code></td><td>Global settings: display timezone, Ollama context length enforcement</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>System Force Offline/Online</h3>
+                <p>Administrators can force the entire MindRouter system offline from the admin overview page (<code>/admin</code>). This is useful for planned maintenance windows or emergency situations.</p>
+                <ul>
+                    <li><strong>Force Offline</strong> (<code>POST /admin/system/toggle-online</code>) &mdash; Stops the backend polling loop, marks all backends as unhealthy in the database, and sets an internal <code>_force_offline</code> flag. While offline, no health checks or discovery runs, and no inference requests can be served.</li>
+                    <li><strong>Force Online</strong> &mdash; Clears the offline flag, closes and reloads all backend adapters and sidecar clients from the database, restarts the polling loop, and immediately runs a full poll cycle to restore backend health status.</li>
+                </ul>
+                <p>The toggle is available as a button on the admin overview page. The system status is visible to all users on the public status page.</p>
+
+                <h3>Node Lifecycle Management</h3>
+                <p>Beyond basic node registration and editing, administrators can manage node operational state from the Nodes page (<code>/admin/nodes</code>):</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Action</th><th>Route</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Take Offline</td><td><code>POST /admin/nodes/{id}/take-offline</code></td><td>Disables all backends on the node and marks the node status as OFFLINE. New requests will not be routed to any backend on this node.</td></tr>
+                        <tr><td>Bring Online</td><td><code>POST /admin/nodes/{id}/bring-online</code></td><td>Re-enables all backends on the node and marks the node status as ONLINE. Backends will begin receiving requests again after the next health poll.</td></tr>
+                        <tr><td>View Active Requests</td><td><code>GET /admin/nodes/{id}/active-requests</code></td><td>Returns a JSON count of in-flight requests across all backends on the node. Useful for monitoring drain progress before taking a node offline.</td></tr>
+                        <tr><td>Force Drain</td><td><code>POST /admin/nodes/{id}/force-drain</code></td><td>Force-cancels all active (in-flight) requests on the node's backends. Returns the number of cancelled requests. Use this when you need to take a node offline immediately without waiting for requests to complete naturally.</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Recommended workflow for node maintenance:</strong></p>
+                <ol>
+                    <li>Take the node offline to stop new requests from being routed there.</li>
+                    <li>Monitor active requests using the active requests endpoint until the count reaches zero.</li>
+                    <li>If requests are stuck, use force drain to cancel them.</li>
+                    <li>Perform maintenance (upgrade vLLM, restart Ollama, etc.).</li>
+                    <li>Bring the node back online.</li>
+                </ol>
+
+                <h3>Admin Models Page</h3>
+                <p>The Models page at <code>/admin/models</code> provides comprehensive model management. Models are grouped by name (since the same model may appear on multiple backends) and presented with their current metadata and override status.</p>
+
+                <h4>Capability Overrides</h4>
+                <p>MindRouter auto-detects model capabilities during discovery, but admins can override the detected values:</p>
+                <ul>
+                    <li><strong>Multimodal override</strong> &mdash; Toggle or reset the <code>supports_multimodal</code> flag for all instances of a model. Use this when auto-detection incorrectly classifies a model (e.g., a vision model whose name does not match the usual patterns).</li>
+                    <li><strong>Thinking override</strong> &mdash; Toggle or reset the <code>supports_thinking</code> flag for all instances. Use this for models that support thinking/reasoning mode but are not detected automatically.</li>
+                    <li>Resetting an override returns the field to auto-detected values from the next discovery cycle.</li>
+                </ul>
+
+                <h4>Metadata Overrides</h4>
+                <p>Admins can override any model metadata field across all instances of a model via the metadata edit form. Overridable fields:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>family</code></td><td>string</td><td>Model family (e.g., <code>llama</code>, <code>qwen2</code>)</td></tr>
+                        <tr><td><code>parameter_count</code></td><td>string</td><td>Model size (e.g., <code>7B</code>, <code>70B</code>)</td></tr>
+                        <tr><td><code>quantization</code></td><td>string</td><td>Quantization level (e.g., <code>Q4_K_M</code>, <code>FP16</code>)</td></tr>
+                        <tr><td><code>context_length</code></td><td>int</td><td>Effective context window (injected as <code>num_ctx</code>). Overrides the auto-discovered value.</td></tr>
+                        <tr><td><code>embedding_length</code></td><td>int</td><td>Embedding dimension length</td></tr>
+                        <tr><td><code>head_count</code></td><td>int</td><td>Number of attention heads</td></tr>
+                        <tr><td><code>layer_count</code></td><td>int</td><td>Number of transformer layers</td></tr>
+                        <tr><td><code>feed_forward_length</code></td><td>int</td><td>Feed-forward network dimension</td></tr>
+                        <tr><td><code>model_format</code></td><td>string</td><td>Model format (e.g., <code>gguf</code>, <code>safetensors</code>)</td></tr>
+                        <tr><td><code>parent_model</code></td><td>string</td><td>Parent model identifier</td></tr>
+                        <tr><td><code>capabilities</code></td><td>string</td><td>Comma-separated list of capabilities (stored as JSON array)</td></tr>
+                        <tr><td><code>description</code></td><td>string</td><td>Human-readable model description</td></tr>
+                        <tr><td><code>model_url</code></td><td>string</td><td>URL to model documentation or repository</td></tr>
+                    </tbody>
+                </table>
+                <p>Clearing a field (setting it to blank) removes the override and reverts to the auto-discovered value. Admins can also reset all overrides at once via the "Reset All Overrides" action.</p>
+
+                <h4>Ollama Model Pull and Delete</h4>
+                <p>The Models page lists all Ollama backends and provides UI controls to:</p>
+                <ul>
+                    <li><strong>Pull a model</strong> &mdash; Trigger a model download on a specific Ollama backend via the admin API (<code>POST /api/admin/backends/{id}/ollama/pull</code>). Progress can be polled until completion.</li>
+                    <li><strong>Delete a model</strong> &mdash; Remove a model from a specific Ollama backend via the admin API (<code>POST /api/admin/backends/{id}/ollama/delete</code>).</li>
+                </ul>
+
+                <h3>Admin Masquerade</h3>
+                <p>Administrators can "masquerade" as another user to view the user dashboard from that user's perspective. This is useful for troubleshooting user-reported issues or verifying quota and usage display.</p>
+                <ul>
+                    <li><strong>Start masquerade</strong> (<code>POST /admin/masquerade/{target_user_id}</code>) &mdash; Sets a signed cookie (<code>mindrouter_masquerade</code>) containing the target user ID. The cookie is signed using <code>itsdangerous.URLSafeTimedSerializer</code> with the application's <code>SECRET_KEY</code> and a <code>"masquerade"</code> salt. The cookie expires after 24 hours.</li>
+                    <li><strong>During masquerade</strong> &mdash; The user dashboard (<code>/dashboard</code>) shows the target user's data (usage stats, API keys, quota, conversations) instead of the admin's own data. The masquerade applies only to read-only dashboard views &mdash; admin routes and actions are never affected.</li>
+                    <li><strong>Stop masquerade</strong> (<code>POST /admin/masquerade/stop</code>) &mdash; Deletes the masquerade cookie and redirects back to the admin users page.</li>
+                    <li><strong>Security</strong> &mdash; Only users in an admin group can start a masquerade. The target user ID is verified to exist before the cookie is set. The signed cookie prevents tampering.</li>
+                </ul>
+                <p>Masquerade is initiated from the user detail page (<code>/admin/users/{id}</code>) via a "View as User" button.</p>
+
+                <h3>Audit Log Export</h3>
+                <p>Administrators can export audit log data as CSV or JSON via <code>GET /admin/audit/export</code>. The export supports the same filters as the audit log UI:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>format</code></td><td>string</td><td>Output format: <code>csv</code> (default) or <code>json</code></td></tr>
+                        <tr><td><code>search</code></td><td>string</td><td>Free-text search across request fields</td></tr>
+                        <tr><td><code>user_id_filter</code></td><td>int</td><td>Filter by user ID</td></tr>
+                        <tr><td><code>model_filter</code></td><td>string</td><td>Filter by model name</td></tr>
+                        <tr><td><code>status_filter</code></td><td>string</td><td>Filter by request status</td></tr>
+                        <tr><td><code>start_date</code></td><td>string</td><td>Start date (ISO 8601 format)</td></tr>
+                        <tr><td><code>end_date</code></td><td>string</td><td>End date (ISO 8601 format)</td></tr>
+                        <tr><td><code>include_content</code></td><td>bool</td><td>Include prompt/response content in export (default: false)</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Export fields:</strong> <code>request_uuid</code>, <code>created_at</code>, <code>user_id</code>, <code>model</code>, <code>endpoint</code>, <code>status</code>, <code>prompt_tokens</code>, <code>completion_tokens</code>, <code>total_tokens</code>, <code>total_time_ms</code>, <code>error_message</code>. When <code>include_content=true</code>, additional fields are included: <code>messages</code>, <code>prompt</code>, <code>parameters</code>, <code>response_content</code>, <code>finish_reason</code>.</p>
+                <p>Exports are limited to 10,000 records. The file is downloaded as an attachment (<code>audit_log.csv</code> or <code>audit_log.json</code>).</p>
+
+                <h3>Admin Chat Configuration</h3>
+                <p>The Chat Configuration page at <code>/admin/chat-config</code> allows administrators to control default settings for the built-in chat interface. All settings are stored in the <a href="#app-config">AppConfig</a> database and take effect immediately.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Setting</th><th>Description</th><th>Details</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Core Models</td><td>Subset of models shown in the chat model selector</td><td>Select from all available (non-embedding) models on healthy backends. When set, only these models appear in the chat UI dropdown. Empty means show all models.</td></tr>
+                        <tr><td>Default Model</td><td>Pre-selected model in the chat UI</td><td>The model automatically selected when a user starts a new conversation. Blank means no default.</td></tr>
+                        <tr><td>System Prompt</td><td>Global system prompt for all chat conversations</td><td>Prepended to every chat conversation. Blank removes the override and reverts to the built-in default. Can also be explicitly reset via a "Reset" button.</td></tr>
+                        <tr><td>Max Tokens</td><td>Default max tokens for chat requests</td><td>Range: 256&ndash;131072. Default: 16384. Clamped to the allowed range on save.</td></tr>
+                        <tr><td>Temperature</td><td>Default temperature for chat responses</td><td>Range: 0.0&ndash;2.0. Blank means use the model's default temperature.</td></tr>
+                        <tr><td>Thinking Mode</td><td>Default thinking/reasoning mode</td><td>Options: <code>true</code>, <code>false</code>, <code>low</code>, <code>medium</code>, <code>high</code>, or blank (no default). Controls whether thinking is enabled by default for models that support it.</td></tr>
                     </tbody>
                 </table>
 
@@ -1274,7 +1400,85 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
 
             <hr>
 
-            <!-- Section 12: Configuration Reference -->
+            <!-- Section 12: Blog / CMS -->
+            <section id="blog-system">
+                <h2>Blog / CMS</h2>
+                <p>MindRouter includes a built-in blog system with public viewing and admin content management. Blog posts are written in Markdown and rendered to HTML with syntax highlighting, tables, fenced code blocks, and table of contents support.</p>
+
+                <h3>Public Blog</h3>
+                <ul>
+                    <li><strong>Blog listing</strong> at <code>/blog</code> &mdash; displays all published posts, most recent first</li>
+                    <li><strong>Individual posts</strong> at <code>/blog/{slug}</code> &mdash; renders the post's Markdown content as styled HTML</li>
+                    <li>Posts are accessible without authentication</li>
+                </ul>
+
+                <h3>Admin Blog Management</h3>
+                <p>Admin users can manage blog posts at <code>/admin/blog</code>. The admin interface provides a full CMS workflow:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Action</th><th>Route</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>List all posts</td><td><code>GET /admin/blog</code></td><td>View all posts (published, draft, and soft-deleted) with status indicators</td></tr>
+                        <tr><td>New post</td><td><code>GET /admin/blog/new</code></td><td>Form to create a new blog post</td></tr>
+                        <tr><td>Create post</td><td><code>POST /admin/blog/new</code></td><td>Submit new post with title, slug, Markdown content, excerpt, and publish toggle</td></tr>
+                        <tr><td>Edit post</td><td><code>GET /admin/blog/{id}/edit</code></td><td>Edit form for an existing post</td></tr>
+                        <tr><td>Update post</td><td><code>POST /admin/blog/{id}/edit</code></td><td>Save changes to a post</td></tr>
+                        <tr><td>Toggle publish</td><td><code>POST /admin/blog/{id}/publish</code></td><td>Publish a draft or unpublish a live post</td></tr>
+                        <tr><td>Delete post</td><td><code>POST /admin/blog/{id}/delete</code></td><td>Soft-delete a post (not permanently removed from the database)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Post Fields</h3>
+                <ul>
+                    <li><strong>Title</strong> &mdash; Display title of the post</li>
+                    <li><strong>Slug</strong> &mdash; URL-safe identifier (auto-generated from title or manually set). Used in the public URL as <code>/blog/{slug}</code></li>
+                    <li><strong>Content</strong> &mdash; Full post body written in Markdown. Supports fenced code blocks with syntax highlighting, tables, and table of contents</li>
+                    <li><strong>Excerpt</strong> &mdash; Optional short summary shown in the blog listing</li>
+                    <li><strong>Published</strong> &mdash; Toggle for publish state. The <code>published_at</code> timestamp is set automatically when a post is first published</li>
+                    <li><strong>Author</strong> &mdash; Automatically set to the admin user who creates the post</li>
+                </ul>
+
+                <h3>Soft Delete</h3>
+                <p>Deleting a post is a soft delete &mdash; the post is marked as deleted but remains in the database. Soft-deleted posts are hidden from the public blog listing but still visible in the admin list.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 13: AppConfig System -->
+            <section id="app-config">
+                <h2>AppConfig System</h2>
+                <p>MindRouter stores runtime configuration in a key-value <code>AppConfig</code> database table. Values are JSON-encoded and can be read or written at any time without restarting the application. This powers several features that need runtime-adjustable settings.</p>
+
+                <h3>API</h3>
+                <p>Configuration is accessed via two async CRUD functions in <code>backend/app/db/crud.py</code>:</p>
+                <ul>
+                    <li><code>get_config_json(db, key, default)</code> &mdash; Read a config value, JSON-decoded. Returns <code>default</code> if the key does not exist.</li>
+                    <li><code>set_config(db, key, value, description=None)</code> &mdash; Upsert a config value (JSON-encoded). Creates the key if it does not exist, updates it otherwise.</li>
+                </ul>
+
+                <h3>Known Configuration Keys</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th><th>Managed Via</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>app.timezone</code></td><td>string</td><td><code>None</code></td><td>Display timezone for the dashboard (e.g. <code>"America/Los_Angeles"</code>)</td><td>Site Settings</td></tr>
+                        <tr><td><code>ollama.enforce_num_ctx</code></td><td>bool</td><td><code>true</code></td><td>Whether MindRouter overrides user-supplied <code>num_ctx</code> values</td><td>Site Settings</td></tr>
+                        <tr><td><code>chat.core_models</code></td><td>list</td><td><code>[]</code></td><td>Subset of models shown in the chat interface model selector. Empty means show all.</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>chat.default_model</code></td><td>string</td><td><code>null</code></td><td>Pre-selected model in the chat interface</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>chat.system_prompt</code></td><td>string</td><td><code>null</code></td><td>Global system prompt prepended to all chat conversations. Blank removes the override.</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>chat.max_tokens</code></td><td>int</td><td><code>16384</code></td><td>Default max tokens for chat requests (range: 256&ndash;131072)</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>chat.temperature</code></td><td>float</td><td><code>null</code></td><td>Default temperature for chat requests (range: 0.0&ndash;2.0). Null means use model default.</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>chat.think</code></td><td>bool/string</td><td><code>null</code></td><td>Default thinking mode for chat: <code>true</code>, <code>false</code>, <code>"low"</code>, <code>"medium"</code>, <code>"high"</code>, or null (no default)</td><td>Chat Configuration</td></tr>
+                    </tbody>
+                </table>
+                <p>All AppConfig values take effect immediately upon save &mdash; no application restart is required.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 14: Configuration Reference -->
             <section id="configuration-reference">
                 <h2>Configuration Reference</h2>
                 <p>All settings are loaded from environment variables or <code>.env</code> / <code>.env.prod</code> files. Variable names are case-insensitive.</p>
@@ -1299,8 +1503,8 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     </thead>
                     <tbody>
                         <tr><td><code>DATABASE_URL</code></td><td>str</td><td><code>mysql+pymysql://...</code></td><td>MariaDB/MySQL connection string</td></tr>
-                        <tr><td><code>DATABASE_POOL_SIZE</code></td><td>int</td><td><code>20</code></td><td>Connection pool size</td></tr>
-                        <tr><td><code>DATABASE_MAX_OVERFLOW</code></td><td>int</td><td><code>10</code></td><td>Max overflow connections beyond pool</td></tr>
+                        <tr><td><code>DATABASE_POOL_SIZE</code></td><td>int</td><td><code>30</code></td><td>Connection pool size</td></tr>
+                        <tr><td><code>DATABASE_MAX_OVERFLOW</code></td><td>int</td><td><code>20</code></td><td>Max overflow connections beyond pool</td></tr>
                         <tr><td><code>DATABASE_ECHO</code></td><td>bool</td><td><code>false</code></td><td>Log SQL queries</td></tr>
                     </tbody>
                 </table>

@@ -2,7 +2,7 @@
 
 ## Overview
 
-MindRouter is a production-ready LLM inference load balancer designed to front heterogeneous backend clusters of Ollama and vLLM inference nodes. It provides a unified OpenAI-compatible API surface while implementing fair-share scheduling, quota management, and comprehensive audit logging.
+MindRouter is a production-ready LLM inference load balancer designed to front heterogeneous backend clusters of Ollama and vLLM inference nodes. It provides a unified API surface compatible with OpenAI, Ollama, and Anthropic clients while implementing fair-share scheduling, quota management, and comprehensive audit logging.
 
 ## System Components
 
@@ -19,7 +19,10 @@ The API Gateway is the entry point for all client requests.
 
 **Endpoints:**
 - `/v1/chat/completions` - OpenAI-compatible chat
+- `/v1/completions` - OpenAI-compatible text completions
 - `/v1/embeddings` - OpenAI-compatible embeddings
+- `/v1/rerank` - Reranking
+- `/v1/score` - Scoring
 - `/v1/models` - List available models
 - `/api/chat` - Ollama-compatible chat
 - `/api/generate` - Ollama-compatible generation
@@ -73,7 +76,7 @@ The translation layer converts between different API formats.
 Implements Weighted Deficit Round Robin (WDRR) for fair resource allocation.
 
 **Key Concepts:**
-- **Share Weights**: faculty=3, staff=2, student=1, admin=10
+- **Share Weights**: Per-group (e.g. faculty=3, staff=2, student=1, admin=10), configured in `/admin/groups`
 - **Deficit Counters**: Track service debt per user
 - **Burst Credits**: Allow full cluster use when idle
 - **Deprioritization**: Reduce priority for heavy users
@@ -134,7 +137,7 @@ Multi-factor scoring for backend selection.
 
 ### 6. Quota Management
 
-Token-based quota system with role-based defaults.
+Token-based quota system with group-based defaults.
 
 **Features:**
 - Monthly token budgets

@@ -16,14 +16,16 @@ MindRouter implements a **Weighted Deficit Round Robin (WDRR)** scheduler with b
 
 ### Share Weights
 
-Each user role has a weight that determines their share of resources:
+Each user belongs to a **group** that has a configurable `scheduler_weight` determining their share of resources. Groups are managed in the admin UI at `/admin/groups`.
 
-| Role | Weight | Relative Share |
-|------|--------|----------------|
+| Group | Default Weight | Relative Share |
+|-------|----------------|----------------|
 | Student | 1 | 1x |
 | Staff | 2 | 2x |
 | Faculty | 3 | 3x |
 | Admin | 10 | 10x |
+
+Weights are stored per-group in the database (`groups.scheduler_weight`). Individual users can also have a `weight_override` set on their quota record, which takes precedence over the group weight.
 
 ### Deficit Counters
 
@@ -49,7 +51,7 @@ priority = (deficit + burst_credits) / weight * deprioritization_factor + wait_b
 Where:
 - `deficit`: Current deficit counter
 - `burst_credits`: Accumulated credits from idle time
-- `weight`: Role-based share weight
+- `weight`: Group-based share weight (or per-user override)
 - `deprioritization_factor`: Penalty for heavy users (0.1 to 1.0)
 - `wait_bonus`: Small bonus for time spent waiting
 
@@ -133,20 +135,26 @@ Time 5: Student submits single request
 ### Scenario 3: Multiple Users Competing
 
 ```
-Faculty (weight=3), Staff (weight=2), Student (weight=1) all active
+Faculty group (weight=3), Staff group (weight=2), Student group (weight=1) all active
 
 Distribution over time approaches:
-- Faculty: 50% of resources (3/6)
-- Staff: 33% of resources (2/6)
-- Student: 17% of resources (1/6)
+- Faculty group: 50% of resources (3/6)
+- Staff group: 33% of resources (2/6)
+- Student group: 17% of resources (1/6)
 ```
 
 ## Configuration
 
+### Group Configuration (Preferred)
+
+Weights are configured per-group in the admin UI at `/admin/groups`. Each group has a `scheduler_weight` field that controls fair-share allocation. Individual users can have a `weight_override` on their quota record.
+
 ### Environment Variables
 
 ```bash
-# Weights
+# Deprecated weight env vars — still read as fallbacks when a user has
+# no group or the group has no scheduler_weight set, but the admin UI
+# group settings take precedence.
 SCHEDULER_WEIGHT_STUDENT=1
 SCHEDULER_WEIGHT_STAFF=2
 SCHEDULER_WEIGHT_FACULTY=3
@@ -179,8 +187,8 @@ SCHEDULER_SCORE_HIGH_THROUGHPUT=20
     "total_users": 2,
     "global_recent_tokens": 50000,
     "user_stats": [
-      {"user_id": 1, "weight": 3, "deficit": -1000, "recent_tokens": 30000},
-      {"user_id": 2, "weight": 1, "deficit": 500, "recent_tokens": 20000}
+      {"user_id": 1, "weight": 3, "deficit": -1000, "recent_tokens": 30000, "group": "faculty"},
+      {"user_id": 2, "weight": 1, "deficit": 500, "recent_tokens": 20000, "group": "student"}
     ]
   }
 }
@@ -198,6 +206,7 @@ Each routing decision is logged:
   "scores": {"1": 150, "2": 80, "3": 60},
   "user_deficit": -1000,
   "user_weight": 3,
+  "user_group": "faculty",
   "user_recent_usage": 30000
 }
 ```

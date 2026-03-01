@@ -13,15 +13,16 @@ MindRouter is a production-ready **LLM inference load balancer and translation l
 3. [Getting Started](#getting-started)
 4. [API Reference](#api-reference)
 5. [Web Dashboard](#web-dashboard)
-6. [Users, Roles & Quotas](#users-roles--quotas)
+6. [Users, Groups & Quotas](#users-groups--quotas)
 7. [Backend Management](#backend-management)
 8. [Scheduling & Fair Share](#scheduling--fair-share)
 9. [Translation Layer](#translation-layer)
 10. [Telemetry & Monitoring](#telemetry--monitoring)
 11. [Chat System](#chat-system)
-12. [Configuration Reference](#configuration-reference)
-13. [Deployment](#deployment)
-14. [Testing](#testing)
+12. [Blog System](#blog-system)
+13. [Configuration Reference](#configuration-reference)
+14. [Deployment](#deployment)
+15. [Testing](#testing)
 
 ---
 
@@ -33,7 +34,7 @@ MindRouter sits between API consumers and GPU inference servers, providing:
 - **Cross-Engine Routing** -- A request arriving as OpenAI format can be served by an Ollama backend (and vice versa). The translation layer handles all protocol conversion transparently.
 - **Fair-Share Scheduling** -- Weighted Deficit Round Robin (WDRR) ensures equitable GPU access across users with different roles and priorities.
 - **Multi-Modal Support** -- Text chat, text completion, embeddings, vision-language models, structured JSON outputs, and tool calling (function calling).
-- **Per-User Quotas** -- Token budgets, requests-per-minute limits, and concurrent request caps, all configurable by role.
+- **Per-User Quotas** -- Token budgets, requests-per-minute limits, and concurrent request caps, all configurable by group.
 - **Full Audit Logging** -- Every prompt, response, and token count is recorded for compliance and review.
 - **Real-Time GPU Telemetry** -- Per-GPU utilization, memory, temperature, and power metrics via lightweight sidecar agents.
 - **Web Dashboards** -- Public status page, user self-service dashboard, admin control panel, and built-in chat interface.
@@ -193,8 +194,10 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/v1/chat/completions` | API Key | Chat completions (streaming and non-streaming) |
-| POST | `/v1/completions` | API Key | Text completions (legacy) |
+| POST | `/v1/completions` | API Key | Text completions (legacy, internally converts to chat format) |
 | POST | `/v1/embeddings` | API Key | Generate embeddings |
+| POST | `/v1/rerank` | API Key | Rerank documents against a query |
+| POST | `/v1/score` | API Key | Score similarity between text pairs |
 | GET | `/v1/models` | API Key | List available models |
 
 #### Chat Completions
@@ -563,6 +566,8 @@ These endpoints are unauthenticated and intended for monitoring infrastructure.
 | GET | `/metrics` | None | Prometheus metrics (text format) |
 | GET | `/status` | None | Cluster status summary (JSON) |
 | GET | `/api/cluster/throughput` | None | Token throughput (last 20 seconds) |
+| GET | `/api/cluster/total-tokens` | None | Total tokens ever served (cached 10s) |
+| GET | `/api/cluster/trends` | None | Token and active-user trends over time (query param: `range=day\|week\|month`) |
 
 #### Prometheus Metrics
 
@@ -589,7 +594,11 @@ All admin endpoints require the `admin` role. They are mounted under `/api/admin
 | PATCH | `/api/admin/backends/{id}` | Update backend properties |
 | POST | `/api/admin/backends/{id}/disable` | Disable a backend |
 | POST | `/api/admin/backends/{id}/enable` | Enable a disabled backend |
+| POST | `/api/admin/backends/{id}/drain` | Start draining (stop new requests, let in-flight finish) |
 | POST | `/api/admin/backends/{id}/refresh` | Force-refresh capabilities and models |
+| POST | `/api/admin/backends/{id}/ollama/pull` | Pull a model on an Ollama backend |
+| GET | `/api/admin/backends/{id}/ollama/pull/{job_id}` | Check pull job status |
+| POST | `/api/admin/backends/{id}/ollama/delete` | Delete a model from an Ollama backend |
 
 #### Node Management
 
@@ -605,10 +614,27 @@ All admin endpoints require the `admin` role. They are mounted under `/api/admin
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/admin/users` | List all users (filterable by role) |
-| POST | `/api/admin/users` | Create a new user with role-based quota defaults |
+| GET | `/api/admin/users` | List all users (filterable by group) |
+| POST | `/api/admin/users` | Create a new user with group-based quota defaults |
+| GET | `/api/admin/users/{id}` | Get user detail including quotas, API keys, and group |
+| PATCH | `/api/admin/users/{id}` | Update user properties (group, quotas, etc.) |
 | DELETE | `/api/admin/users/{id}` | Hard-delete a user and all associated data |
 | POST | `/api/admin/users/{id}/api-keys` | Create an API key for a user |
+
+#### Group Management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/groups` | List all groups with user counts |
+| POST | `/api/admin/groups` | Create a new group |
+| PATCH | `/api/admin/groups/{id}` | Update group defaults (token budget, RPM, etc.) |
+| DELETE | `/api/admin/groups/{id}` | Delete a group (fails if users are assigned) |
+
+#### API Key Management
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/api-keys` | List all API keys with user info (filterable by status, searchable) |
 
 #### Quota Management
 
@@ -624,6 +650,12 @@ All admin endpoints require the `admin` role. They are mounted under `/api/admin
 | GET | `/api/admin/queue` | Scheduler queue statistics |
 | GET | `/api/admin/audit/search` | Search audit logs (filter by user, model, status, date, text) |
 | GET | `/api/admin/audit/{id}` | Full audit detail including prompt and response content |
+
+#### Conversations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/admin/conversations/export` | Export conversations as CSV or JSON (filterable by user, date range, search) |
 
 #### Telemetry
 
@@ -647,7 +679,8 @@ MindRouter includes a full web dashboard built with Bootstrap 5. All pages exten
 | Page | URL | Description |
 |------|-----|-------------|
 | Cluster Status | `/` | Shows healthy backend count, available models, queue size, and overall cluster status |
-| Login | `/login` | Username/password authentication |
+| Login | `/login` | Username/password authentication (and Azure AD SSO when configured) |
+| Blog | `/blog` | Public blog with published posts |
 | Request API Key | `/request-api-key` | Form for unauthenticated users to request an API key |
 
 ### User Dashboard
@@ -664,46 +697,76 @@ The admin dashboard has a persistent sidebar with links to all admin pages:
 
 | Page | URL | Description |
 |------|-----|-------------|
-| Overview | `/admin` | System metrics overview with pending request badges |
-| Backends | `/admin/backends` | Backend health, models, enable/disable controls |
-| Nodes | `/admin/nodes` | GPU node management, sidecar status, hardware specs |
+| Overview | `/admin` | System metrics overview with pending request badges and health alerts |
+| Backends | `/admin/backends` | Backend health, models, enable/disable/drain controls |
+| Models | `/admin/models` | Model catalog with capability overrides (multimodal, thinking), metadata editing, context length configuration |
+| Nodes | `/admin/nodes` | GPU node management, sidecar status, take offline/bring online, force drain, active requests |
 | GPU Metrics | `/admin/metrics` | Real-time GPU utilization, memory, temperature, power charts with time range controls |
-| Users | `/admin/users` | User accounts, roles, quota management |
+| Users | `/admin/users` | User accounts, group assignment, quota management, masquerade |
+| Groups | `/admin/groups` | Group management with quota defaults, scheduler weights, admin flag |
+| API Keys | `/admin/api-keys` | All API keys across users, status filtering, search |
 | Requests | `/admin/requests` | Pending API key and quota increase requests, approve/deny |
 | Audit Log | `/admin/audit` | Inference request history with filtering and search |
+| Conversations | `/admin/conversations` | Browse and search all user conversations, view messages, export |
+| Chat Config | `/admin/chat-config` | Configure core models, default model, system prompt, max_tokens, temperature, thinking mode |
+| Blog | `/admin/blog` | Blog/CMS management -- create, edit, publish, delete posts |
+| Settings | `/admin/settings` | Site-wide settings: timezone, enforce `num_ctx` override |
+
+### Health Alerts
+
+The admin dashboard (`/admin`) displays a prominent warning banner when any backend is unhealthy/unknown or any node is offline/unknown. The alert includes counts and names of affected items with direct links to the backends or nodes management pages. Intentionally **disabled** backends are excluded from the alert -- only unexpected health issues are flagged.
+
+### System Offline Toggle
+
+Admins can force the entire MindRouter system offline or back online via `POST /admin/system/toggle-online`. When forced offline, the registry stops polling and marks all backends as unhealthy, causing all inference requests to be rejected. This is useful for planned maintenance windows.
+
+### Masquerade
+
+Admins can masquerade as any user to view the system from their perspective. Start masquerading via `POST /admin/masquerade/{target_user_id}` -- a signed cookie is set and the admin is redirected to the target user's dashboard. The admin sees the user's token usage, API keys, and conversations as if logged in as that user. Stop masquerading via `POST /admin/masquerade/stop` to return to the admin view.
 
 ### Chat Interface
 
 | Page | URL | Description |
 |------|-----|-------------|
-| Chat | `/chat` | Full-featured chat UI with model selection, streaming, file upload, vision support |
+| Chat | `/chat` | Full-featured chat UI with model selection, streaming, file upload, web search, vision support |
 
 The chat interface supports:
 - Collapsible conversation sidebar
 - Model and backend selection
 - Real-time streaming responses
-- File upload (images, PDFs, DOCX, XLSX, CSV, JSON, Markdown, etc.)
+- File upload via button or **drag-and-drop** anywhere in the chat window (images, PDFs, DOCX, XLSX, CSV, JSON, Markdown, etc.)
 - Vision model support with automatic image handling
+- **Web search toggle** -- when enabled, queries are sent to the Brave Search API and results are injected into the system message as context before the LLM generates its response (requires `BRAVE_SEARCH_API_KEY` configuration)
 - Code syntax highlighting
 - LaTeX rendering
 - Message editing and deletion
 
 ---
 
-## Users, Roles & Quotas
+## Users, Groups & Quotas
 
-### Role Hierarchy
+### Groups
 
-MindRouter uses a four-tier role hierarchy. Higher roles have all the permissions of lower roles.
+MindRouter uses database-driven **groups** to control permissions, quotas, and scheduling priority. Each user belongs to exactly one group. Groups replace the earlier role-based system with more flexible, admin-configurable settings.
 
-| Role | Level | Permissions |
-|------|-------|-------------|
-| `student` | 0 | Inference endpoints, own dashboard, chat |
-| `staff` | 1 | Same as student (higher quotas) |
-| `faculty` | 2 | Same as staff (higher quotas) |
-| `admin` | 3 | All of the above + admin API + admin dashboard |
+Each group has the following fields:
 
-### Default Quotas by Role
+| Field | Description |
+|-------|-------------|
+| `name` | Unique identifier (e.g., `student`, `staff`, `faculty`, `admin`) |
+| `display_name` | Human-readable name shown in the UI |
+| `description` | Optional description |
+| `is_admin` | Whether members have admin access |
+| `scheduler_weight` | Scheduling priority weight for fair-share scheduling |
+| `default_token_budget` | Default monthly token budget for new users in this group |
+| `default_rpm` | Default requests-per-minute limit |
+| `default_max_concurrent` | Default maximum concurrent requests |
+
+Groups are managed via the admin dashboard (`/admin/groups`) or the admin API (`/api/admin/groups`).
+
+### Default Quotas by Group
+
+The seed script creates four default groups:
 
 | Setting | Student | Staff | Faculty | Admin |
 |---------|---------|-------|---------|-------|
@@ -711,8 +774,13 @@ MindRouter uses a four-tier role hierarchy. Higher roles have all the permission
 | Requests per minute (RPM) | 30 | 60 | 120 | 1,000 |
 | Max concurrent requests | 2 | 4 | 8 | 50 |
 | Scheduler weight | 1 | 2 | 3 | 10 |
+| Admin access | No | No | No | Yes |
 
-All defaults are configurable via environment variables (see [Configuration Reference](#configuration-reference)).
+Group defaults are configurable through the admin UI or API. The per-role environment variables (e.g., `DEFAULT_TOKEN_BUDGET_STUDENT`, `SCHEDULER_WEIGHT_STAFF`) are **deprecated** and serve only as fallbacks for environments that have not migrated to database-driven groups.
+
+### Change Password
+
+Users with local (non-SSO) accounts can change their password from the user dashboard (`/dashboard`). The form requires the current password, a new password (minimum 8 characters), and password confirmation.
 
 ### API Key Lifecycle
 
@@ -798,11 +866,32 @@ curl -X POST http://localhost:8000/api/admin/backends/register \
   }'
 ```
 
-### Enable/Disable/Refresh
+### Enable/Disable/Drain/Refresh
 
 - **Disable** a backend to take it out of rotation without deleting it: `POST /api/admin/backends/{id}/disable`
 - **Enable** to bring it back: `POST /api/admin/backends/{id}/enable`
+- **Drain** for graceful shutdown: `POST /api/admin/backends/{id}/drain`
 - **Refresh** to force re-discovery of models and capabilities: `POST /api/admin/backends/{id}/refresh`
+
+### Drain Mode
+
+**Drain mode** provides graceful backend shutdown for maintenance. When a backend is set to draining:
+
+1. The scheduler stops routing **new** requests to the backend.
+2. Existing in-flight requests continue to completion.
+3. When the backend's queue depth reaches 0, it automatically transitions to **disabled**.
+
+This avoids abruptly killing active requests when you need to restart an inference engine, upgrade models, or perform node maintenance. Use it before upgrading vLLM, restarting Ollama, or taking a GPU node offline.
+
+### Node Lifecycle
+
+Nodes support the following lifecycle operations from the admin dashboard (`/admin/nodes`):
+
+- **Take Offline** (`POST /admin/nodes/{id}/take-offline`) -- Disables all backends on the node and marks the node as offline.
+- **Bring Online** (`POST /admin/nodes/{id}/bring-online`) -- Re-enables all backends on the node and marks it online.
+- **Force Drain** (`POST /admin/nodes/{id}/force-drain`) -- Force-cancels all active (in-flight) requests on the node's backends. Use this when you need to immediately stop all processing on a node.
+- **Active Requests** (`GET /admin/nodes/{id}/active-requests`) -- Returns the count of in-flight requests across all backends on the node.
+- **Refresh** (`POST /api/admin/nodes/{id}/refresh`) -- Force-refreshes sidecar GPU data for the node.
 
 ---
 
@@ -812,7 +901,7 @@ MindRouter implements **Weighted Deficit Round Robin (WDRR)** to ensure fair GPU
 
 ### How It Works
 
-1. **Share weights** are assigned by role (student=1, staff=2, faculty=3, admin=10).
+1. **Share weights** are assigned by group (e.g., student=1, staff=2, faculty=3, admin=10).
 2. Each user has a **deficit counter** that tracks how much service debt they've accrued.
 3. On each scheduling round, users with the highest deficit (most underserved) are served first.
 4. **Burst credits** allow full cluster utilization when the cluster is idle.
@@ -938,6 +1027,10 @@ Each poll cycle has two phases:
 1. Poll sidecar agents (one per physical node) for GPU snapshots
 2. Poll each backend adapter for health, models, and engine-specific telemetry
 
+### Startup Fast Polls
+
+On container start, the registry runs **two immediate full poll cycles** with a 5-second gap between them. This ensures backends and nodes are marked healthy within seconds of a restart, rather than waiting for the first normal 30-second poll interval.
+
 ### Circuit Breaker
 
 Per-backend circuit breaker protects against cascading failures:
@@ -1028,6 +1121,38 @@ Chat responses are streamed in real-time:
 - TTFT (time-to-first-token) is tracked for latency monitoring
 - If the client disconnects, the backend request is not cancelled (to prevent DB corruption)
 
+### Chat Configuration
+
+Admins can configure the chat interface defaults at `/admin/chat-config`:
+
+- **Core models** -- Select which models appear in the chat model selector.
+- **Default model** -- The model pre-selected when a user starts a new conversation.
+- **System prompt** -- A default system prompt injected into all chat conversations (can be reset to empty).
+- **Max tokens** -- Default `max_tokens` value for chat requests.
+- **Temperature** -- Default temperature for chat requests.
+- **Thinking mode** -- Enable or disable thinking/reasoning mode by default for chat.
+
+---
+
+## Blog System
+
+MindRouter includes a built-in blog/CMS for publishing announcements, documentation, and updates.
+
+### Public Pages
+
+- **Blog listing** (`/blog`) -- Displays all published blog posts, most recent first.
+- **Blog post** (`/blog/{slug}`) -- Displays a single blog post by its URL slug.
+
+### Admin Management
+
+Blog management is available at `/admin/blog` (admin access required):
+
+- **Post listing** (`/admin/blog`) -- View all posts (published and draft) with edit/delete controls.
+- **Create post** (`/admin/blog/new`) -- Create a new blog post with title, slug, content, and publish status.
+- **Edit post** (`/admin/blog/{id}/edit`) -- Edit an existing post's title, slug, and content.
+- **Publish post** (`POST /admin/blog/{id}/publish`) -- Publish or unpublish a post.
+- **Delete post** (`POST /admin/blog/{id}/delete`) -- Permanently delete a post.
+
 ---
 
 ## Configuration Reference
@@ -1048,8 +1173,8 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `DATABASE_URL` | str | `mysql+pymysql://...` | MariaDB/MySQL connection string |
-| `DATABASE_POOL_SIZE` | int | `20` | Connection pool size |
-| `DATABASE_MAX_OVERFLOW` | int | `10` | Max overflow connections beyond pool |
+| `DATABASE_POOL_SIZE` | int | `30` | Connection pool size |
+| `DATABASE_MAX_OVERFLOW` | int | `20` | Max overflow connections beyond pool |
 | `DATABASE_ECHO` | bool | `false` | Log SQL queries |
 
 ### Cache
@@ -1071,6 +1196,18 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 | `SESSION_COOKIE_SAMESITE` | str | `lax` | SameSite cookie policy |
 | `API_KEY_HASH_ALGORITHM` | str | `argon2` | API key hashing algorithm |
 
+### Azure AD SSO
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `AZURE_AD_CLIENT_ID` | str | `None` | Azure AD application (client) ID |
+| `AZURE_AD_CLIENT_SECRET` | str | `None` | Azure AD client secret |
+| `AZURE_AD_TENANT_ID` | str | `None` | Azure AD tenant ID |
+| `AZURE_AD_REDIRECT_URI` | str | `https://your-domain.example.com/login/azure/authorized` | OAuth2 redirect URI |
+| `AZURE_AD_DEFAULT_GROUP` | str | `other` | Default group for new SSO users |
+
+Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_AD_TENANT_ID` are set. Users authenticating via SSO for the first time are automatically created and assigned to the group specified by `AZURE_AD_DEFAULT_GROUP`.
+
 ### Artifact Storage
 
 | Variable | Type | Default | Description |
@@ -1079,7 +1216,9 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 | `ARTIFACT_MAX_SIZE_MB` | int | `50` | Max artifact file size |
 | `ARTIFACT_RETENTION_DAYS` | int | `365` | Artifact retention period |
 
-### Quotas
+### Quotas (Deprecated)
+
+> **Note:** These per-role environment variables are **deprecated**. Use database-driven Groups instead (see [Groups](#groups)). These variables serve as fallbacks only.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -1098,12 +1237,14 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 
 ### Scheduler
 
+> **Note:** The per-role `SCHEDULER_WEIGHT_*` variables are **deprecated**. Use `Group.scheduler_weight` in the database instead.
+
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `SCHEDULER_WEIGHT_STUDENT` | int | `1` | Student scheduling priority weight |
-| `SCHEDULER_WEIGHT_STAFF` | int | `2` | Staff scheduling priority weight |
-| `SCHEDULER_WEIGHT_FACULTY` | int | `3` | Faculty scheduling priority weight |
-| `SCHEDULER_WEIGHT_ADMIN` | int | `10` | Admin scheduling priority weight |
+| `SCHEDULER_WEIGHT_STUDENT` | int | `1` | Student scheduling priority weight (deprecated) |
+| `SCHEDULER_WEIGHT_STAFF` | int | `2` | Staff scheduling priority weight (deprecated) |
+| `SCHEDULER_WEIGHT_FACULTY` | int | `3` | Faculty scheduling priority weight (deprecated) |
+| `SCHEDULER_WEIGHT_ADMIN` | int | `10` | Admin scheduling priority weight (deprecated) |
 | `SCHEDULER_FAIRNESS_WINDOW` | int | `300` | Fairness tracking window (seconds) |
 | `SCHEDULER_DEPRIORITIZE_THRESHOLD` | float | `0.5` | Usage threshold for deprioritization |
 | `SCHEDULER_SCORE_MODEL_LOADED` | int | `100` | Score bonus for pre-loaded model |
@@ -1137,7 +1278,7 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 |----------|------|---------|-------------|
 | `MAX_REQUEST_SIZE` | int | `52428800` | Max HTTP request body (50 MB) |
 | `BACKEND_REQUEST_TIMEOUT` | int | `300` | Total request timeout (seconds) |
-| `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `60` | Per-attempt timeout (seconds) |
+| `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds) |
 | `BACKEND_RETRY_MAX_ATTEMPTS` | int | `3` | Max total retry attempts |
 | `BACKEND_RETRY_ATTEMPTS` | int | `2` | Default retry attempts |
 | `BACKEND_RETRY_BACKOFF` | float | `1.0` | Retry backoff multiplier |
@@ -1191,6 +1332,22 @@ All settings are loaded from environment variables or `.env` / `.env.prod` files
 | `CHAT_UPLOAD_ALLOWED_EXTENSIONS` | list | See below | Allowed upload file extensions |
 
 Default allowed extensions: `.txt`, `.md`, `.csv`, `.json`, `.html`, `.htm`, `.log`, `.docx`, `.xlsx`, `.pdf`, `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`
+
+### Conversation Retention
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `CONVERSATION_RETENTION_DAYS` | int | `730` | Conversation retention period (days, default 2 years) |
+| `CONVERSATION_CLEANUP_INTERVAL` | int | `86400` | Cleanup interval in seconds (default 24 hours) |
+
+### Web Search (Brave)
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `BRAVE_SEARCH_API_KEY` | str | `None` | Brave Search API key (enables web search in chat) |
+| `BRAVE_SEARCH_MAX_RESULTS` | int | `5` | Maximum number of search results to inject as context |
+
+When configured, users can toggle web search in the chat interface. Search results from the Brave Search API are formatted and injected into the system message as context before the LLM generates its response.
 
 ### Tokenizer
 
