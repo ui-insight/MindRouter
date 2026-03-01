@@ -1236,11 +1236,11 @@ message = client.messages.create(
             <!-- Rate Limiting -->
             <section id="rate-limiting">
                 <h2>Rate Limiting</h2>
-                <p>MindRouter enforces per-user and per-group rate limits to prevent abuse and ensure fair access.</p>
+                <p><strong>Note:</strong> RPM and concurrent request rate limiting are defined in the codebase but <strong>not currently enforced</strong>. The rate limiter middleware is not registered in the application. Only token quota (monthly budget) enforcement is active, returning HTTP 429 when the token budget is exceeded.</p>
                 <ul>
-                    <li><strong>Requests per minute (RPM)</strong> &mdash; Configurable per user or inherited from the user's group defaults.</li>
-                    <li><strong>Concurrent request cap</strong> &mdash; Limits the number of in-flight requests a single user can have at once.</li>
-                    <li><strong>429 responses</strong> &mdash; When a limit is exceeded, MindRouter returns HTTP 429 (Too Many Requests) with a descriptive error message. Clients should back off and retry after a brief delay.</li>
+                    <li><strong>Requests per minute (RPM)</strong> &mdash; Configurable per group but not yet enforced at runtime.</li>
+                    <li><strong>Concurrent request cap</strong> &mdash; Configurable per group but not yet enforced at runtime.</li>
+                    <li><strong>Token quota (active)</strong> &mdash; Monthly token budget is enforced. Returns HTTP 429 when exceeded. Clients should implement exponential backoff.</li>
                 </ul>
             </section>
 

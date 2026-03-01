@@ -13,11 +13,11 @@ MindRouter is a production-ready **LLM inference load balancer and translation l
 3. [Getting Started](#getting-started)
 4. [API Reference](#api-reference)
 5. [Web Dashboard](#web-dashboard)
-6. [Users, Groups & Quotas](#users-groups--quotas)
+6. [Users, Groups & Quotas](#users-groups-quotas)
 7. [Backend Management](#backend-management)
-8. [Scheduling & Fair Share](#scheduling--fair-share)
+8. [Scheduling & Fair Share](#scheduling-fair-share)
 9. [Translation Layer](#translation-layer)
-10. [Telemetry & Monitoring](#telemetry--monitoring)
+10. [Telemetry & Monitoring](#telemetry-monitoring)
 11. [Chat System](#chat-system)
 12. [Blog System](#blog-system)
 13. [Configuration Reference](#configuration-reference)
@@ -990,12 +990,7 @@ When a quota is exceeded, the request is rejected with HTTP 429.
 
 ### Rate Limiting
 
-MindRouter enforces per-user rate limits based on the user's group quota configuration:
-
-- **RPM (requests per minute)** -- Enforced per user based on the group's `rpm_limit` setting.
-- **Concurrent request limit** -- Maximum simultaneous in-flight requests per user, set by the group's `max_concurrent` value.
-- **In-memory rate limiter** -- Rate state is tracked in memory with automatic cleanup of idle entries after 5 minutes.
-- **HTTP 429** -- Returns `429 Too Many Requests` when either the RPM or concurrent limit is exceeded.
+> **Note:** RPM and concurrent request rate limiting are defined in the codebase but **not currently enforced**. The rate limiter middleware is not registered in the application. Only token quota (monthly budget) enforcement is active, returning HTTP 429 when the token budget is exceeded. The `rpm_limit` and `max_concurrent` fields are stored in group/quota configuration for future use.
 
 ### Quota Increase Requests
 

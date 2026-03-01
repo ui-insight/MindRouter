@@ -4,9 +4,10 @@
 
 - Rocky Linux 8 VM with root/sudo access
 - Docker and Docker Compose installed
-- Apache httpd installed
 - Git installed
 - SSL certificate (self-signed for testing, or real cert for production)
+
+> **Reverse proxy:** The production Docker Compose stack includes an nginx container that handles TLS termination and reverse proxying on ports 80/443. You do **not** need to install a separate web server (Apache, nginx, etc.) on the host. If you prefer to use an external reverse proxy (e.g., Apache httpd), see [Alternative: External Apache Reverse Proxy](#alternative-external-apache-reverse-proxy) below and remove the `nginx` service from `docker-compose.prod.yml`.
 
 ## Step 1: Install Dependencies (if needed)
 
@@ -17,9 +18,8 @@ sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo systemctl enable --now docker
 sudo usermod -aG docker $USER
 
-# Install Apache, Git, and modules
-sudo dnf install -y httpd mod_ssl git
-sudo systemctl enable httpd
+# Install Git
+sudo dnf install -y git
 ```
 
 ## Step 2: Clone Repository
@@ -58,39 +58,38 @@ nano .env.prod
 
 ## Step 4: Configure SSL Certificate
 
+The Docker nginx container expects SSL certificates at `./nginx/ssl/`.
+
+```bash
+cd /opt/mindrouter
+mkdir -p nginx/ssl
+```
+
 ### Option A: Self-signed certificate (testing only)
 ```bash
-sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout /etc/pki/tls/private/mindrouter.key \
-  -out /etc/pki/tls/certs/mindrouter.crt \
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout nginx/ssl/server.key \
+  -out nginx/ssl/fullchain.crt \
   -subj "/CN=mindrouter.example.com"
 ```
 
 ### Option B: Let's Encrypt (production)
 ```bash
-sudo dnf install -y certbot python3-certbot-apache
-sudo certbot --apache -d mindrouter.example.com
+sudo dnf install -y certbot
+sudo certbot certonly --standalone -d mindrouter.example.com
+
+# Copy certs to nginx/ssl (or symlink)
+sudo cp /etc/letsencrypt/live/mindrouter.example.com/fullchain.pem nginx/ssl/fullchain.crt
+sudo cp /etc/letsencrypt/live/mindrouter.example.com/privkey.pem nginx/ssl/server.key
 ```
 
-## Step 5: Configure Apache
+## Step 5: Configure Nginx
 
 ```bash
-# Copy Apache config
-sudo cp deploy/apache-mindrouter.conf /etc/httpd/conf.d/mindrouter.conf
-
-# Edit to match your domain
-sudo nano /etc/httpd/conf.d/mindrouter.conf
-# Update ServerName to your actual domain
-# Update SSL certificate paths if using Let's Encrypt
-
-# Enable required modules
-sudo dnf install -y mod_proxy_html
-
-# Test Apache config
-sudo apachectl configtest
-
-# Restart Apache
-sudo systemctl restart httpd
+# Edit nginx config to match your domain
+nano nginx/nginx.conf
+# Update server_name to your actual domain
+# Verify ssl_certificate and ssl_certificate_key paths match nginx/ssl/ filenames
 ```
 
 ## Step 6: Configure Firewall
@@ -105,10 +104,7 @@ sudo firewall-cmd --reload
 ## Step 7: Configure SELinux (if enabled)
 
 ```bash
-# Allow Apache to connect to backend
-sudo setsebool -P httpd_can_network_connect 1
-
-# If you have issues with Docker, you may need:
+# If you have issues with Docker networking, you may need:
 sudo setsebool -P container_manage_cgroup 1
 ```
 
@@ -462,13 +458,16 @@ docker compose -f docker-compose.prod.yml exec app alembic upgrade head
 
 ### Backup Database
 ```bash
+# Source the env file to get the root password
+source .env.prod
+
 # Backup
 docker compose -f docker-compose.prod.yml exec mariadb \
-  mysqldump -u root -p mindrouter > backup_$(date +%Y%m%d).sql
+  mysqldump -u root -p"${MYSQL_ROOT_PASSWORD}" mindrouter > backup_$(date +%Y%m%d).sql
 
 # Restore
 docker compose -f docker-compose.prod.yml exec -T mariadb \
-  mysql -u root -p mindrouter < backup.sql
+  mysql -u root -p"${MYSQL_ROOT_PASSWORD}" mindrouter < backup.sql
 ```
 
 ## Troubleshooting
@@ -482,14 +481,13 @@ docker compose -f docker-compose.prod.yml logs app
 sudo ss -tlnp | grep 8000
 ```
 
-### Apache 502 Bad Gateway
+### Nginx 502 Bad Gateway
 ```bash
-# Check if app is running
-curl http://127.0.0.1:8000/healthz
+# Check if app container is running
+docker compose -f docker-compose.prod.yml ps app
 
-# Check SELinux
-sudo ausearch -m avc -ts recent
-sudo setsebool -P httpd_can_network_connect 1
+# Check app health from inside the Docker network
+docker compose -f docker-compose.prod.yml exec nginx curl http://app:8000/healthz
 ```
 
 ### Database connection issues
@@ -537,3 +535,30 @@ add_header Content-Security-Policy "default-src 'self'" always;
 ### Session Cookies
 
 Set `SESSION_COOKIE_SECURE=True` in `.env.prod` for HTTPS deployments to ensure session cookies are only transmitted over TLS. This prevents cookies from being sent over unencrypted HTTP connections.
+
+---
+
+## Alternative: External Apache Reverse Proxy
+
+If you prefer to use Apache httpd instead of the Docker nginx container:
+
+1. **Remove the nginx service** from `docker-compose.prod.yml` and expose the app port directly:
+   ```yaml
+   app:
+     ports:
+       - "127.0.0.1:8000:8000"
+   ```
+
+2. **Install and configure Apache:**
+   ```bash
+   sudo dnf install -y httpd mod_ssl mod_proxy_html
+   sudo cp deploy/apache-mindrouter.conf /etc/httpd/conf.d/mindrouter.conf
+   # Edit ServerName, SSL cert paths, and ProxyPass target
+   sudo nano /etc/httpd/conf.d/mindrouter.conf
+   sudo setsebool -P httpd_can_network_connect 1
+   sudo systemctl enable --now httpd
+   ```
+
+3. Place SSL certificates in the paths specified in the Apache config (typically `/etc/pki/tls/`).
+
+> **Do not run both** the Docker nginx service and a host Apache on ports 80/443 — they will conflict.
