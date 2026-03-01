@@ -70,6 +70,31 @@
     --mr-thinking-content-text: #c9a03d;
 }
 
+/* Features showcase section */
+.features-showcase {
+    background: linear-gradient(180deg, #f8f9fa 0%, #ffffff 50%, #f8f9fa 100%);
+}
+[data-bs-theme="dark"] .features-showcase {
+    background: linear-gradient(180deg, #1a1d21 0%, #212529 50%, #1a1d21 100%);
+}
+
+/* Chat mockup on landing page */
+.chat-mockup { background: #ffffff; border: 1px solid #dee2e6; }
+.chat-mockup-header { background: #f8f9fa; border-bottom: 1px solid #dee2e6; }
+.chat-mockup-body { background: #fff; }
+.chat-mockup-user { background: #e7f1ff; }
+.chat-mockup-assistant { background: #f8f9fa; }
+.chat-mockup-footer { border-top: 1px solid #dee2e6; background: #f8f9fa; }
+.chat-mockup-input { background: #fff; border: 1px solid #ced4da; color: #6c757d; }
+
+[data-bs-theme="dark"] .chat-mockup { background: #212529; border-color: #373b3e; }
+[data-bs-theme="dark"] .chat-mockup-header { background: #1a1d21; border-color: #373b3e; }
+[data-bs-theme="dark"] .chat-mockup-body { background: #212529; }
+[data-bs-theme="dark"] .chat-mockup-user { background: #1a3a5c; color: #e9ecef; }
+[data-bs-theme="dark"] .chat-mockup-assistant { background: #2b3035; color: #e9ecef; }
+[data-bs-theme="dark"] .chat-mockup-footer { border-color: #373b3e; background: #1a1d21; }
+[data-bs-theme="dark"] .chat-mockup-input { background: #2b3035; border-color: #495057; color: #8b929a; }
+
 /* General */
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;

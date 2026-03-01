@@ -204,7 +204,7 @@
 <!-- ====================================================================== -->
 <!-- Features & Capabilities Showcase                                       -->
 <!-- ====================================================================== -->
-<div style="background: linear-gradient(180deg, #f8f9fa 0%, #ffffff 50%, #f8f9fa 100%);">
+<div class="features-showcase">
 <div class="container py-5">
 
     <!-- Section Header -->
@@ -316,9 +316,9 @@ response = client.chat.completions.create(
         </div>
         <div class="col-lg-6">
             <!-- Chat UI mockup -->
-            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#ffffff; border:1px solid #dee2e6;">
+            <div class="rounded-3 shadow-lg overflow-hidden chat-mockup">
                 <!-- Chat header -->
-                <div class="d-flex align-items-center justify-content-between px-3 py-2" style="background:#f8f9fa; border-bottom:1px solid #dee2e6;">
+                <div class="d-flex align-items-center justify-content-between px-3 py-2 chat-mockup-header">
                     <div class="d-flex align-items-center">
                         <i class="bi bi-chat-dots text-primary me-2"></i>
                         <span class="fw-semibold" style="font-size:0.9rem;">MindRouter Chat</span>
@@ -326,16 +326,16 @@ response = client.chat.completions.create(
                     <span class="badge bg-secondary" style="font-size:0.7rem;">openai/gpt-oss-20b</span>
                 </div>
                 <!-- Chat messages mockup -->
-                <div class="p-3" style="min-height:240px; background:#fff;">
+                <div class="p-3 chat-mockup-body" style="min-height:240px;">
                     <!-- User message -->
                     <div class="d-flex justify-content-end mb-3">
-                        <div class="rounded-3 px-3 py-2" style="background:#e7f1ff; max-width:80%; font-size:0.85rem;">
+                        <div class="rounded-3 px-3 py-2 chat-mockup-user" style="max-width:80%; font-size:0.85rem;">
                             Write a Python function that finds prime numbers using the Sieve of Eratosthenes.
                         </div>
                     </div>
                     <!-- Assistant message -->
                     <div class="d-flex justify-content-start mb-2">
-                        <div class="rounded-3 px-3 py-2" style="background:#f8f9fa; max-width:85%; font-size:0.85rem;">
+                        <div class="rounded-3 px-3 py-2 chat-mockup-assistant" style="max-width:85%; font-size:0.85rem;">
                             <p class="mb-2">Here's an efficient implementation:</p>
                             <div class="rounded-2 p-2 mb-2" style="background:#1e1e2e; color:#cdd6f4; font-size:0.78rem; font-family:monospace; line-height:1.5;">
                                 <span style="color:#cba6f7;">def</span> <span style="color:#89b4fa;">sieve</span>(n):<br>
@@ -351,8 +351,8 @@ response = client.chat.completions.create(
                     </div>
                 </div>
                 <!-- Chat input mockup -->
-                <div class="d-flex align-items-center px-3 py-2" style="border-top:1px solid #dee2e6; background:#f8f9fa;">
-                    <div class="flex-grow-1 rounded-pill px-3 py-1" style="background:#fff; border:1px solid #ced4da; font-size:0.82rem; color:#6c757d;">
+                <div class="d-flex align-items-center px-3 py-2 chat-mockup-footer">
+                    <div class="flex-grow-1 rounded-pill px-3 py-1 chat-mockup-input" style="font-size:0.82rem;">
                         Type a message...
                     </div>
                     <button class="btn btn-primary btn-sm rounded-pill ms-2 px-3"><i class="bi bi-send"></i></button>
