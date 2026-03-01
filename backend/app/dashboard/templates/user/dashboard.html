@@ -173,6 +173,25 @@
         </div>
     </div>
 
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-gear"></i> Preferences
+                </div>
+                <div class="card-body">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="darkModeToggle">
+                        <label class="form-check-label" for="darkModeToggle">
+                            <i class="bi bi-moon-stars me-1"></i> Dark mode
+                        </label>
+                    </div>
+                    <div class="form-text">Your theme preference is saved in this browser.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     {% if user.password_hash %}
     <div class="row">
         <div class="col-md-6">
@@ -239,6 +258,22 @@
 {% endblock %}
 
 {% block extra_js %}
+<script>
+(function() {
+    var toggle = document.getElementById('darkModeToggle');
+    var isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+    toggle.checked = isDark;
+    toggle.addEventListener('change', function() {
+        var next = toggle.checked ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-bs-theme', next);
+        localStorage.setItem('mr-theme', next);
+        // Sync the navbar toggle button icon
+        var btn = document.getElementById('themeToggleBtn');
+        if (btn) btn.innerHTML = '<i class="bi bi-' + (next === 'dark' ? 'sun' : 'moon-stars') + '"></i>';
+        document.dispatchEvent(new CustomEvent('mr-theme-changed', {detail: {theme: next}}));
+    });
+})();
+</script>
 {% if quota %}
 <script>
 (function() {
