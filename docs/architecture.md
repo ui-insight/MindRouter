@@ -125,7 +125,7 @@ Multi-factor scoring for backend selection.
 
 **Hard Constraints (must pass):**
 - Model availability
-- Modality support (vision, embeddings)
+- Modality support (multimodal, embeddings)
 - Memory fit
 - Capacity available
 

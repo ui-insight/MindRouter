@@ -394,8 +394,13 @@ curl http://localhost:8000/v1/models \
       "object": "model",
       "created": 1700000000,
       "owned_by": "mindrouter",
-      "capabilities": {"vision": false, "embeddings": false, "structured_output": true},
-      "backends": ["ollama-gpu1", "ollama-gpu2"]
+      "capabilities": {"multimodal": false, "embeddings": false, "structured_output": true, "thinking": false},
+      "backends": ["ollama-gpu1", "ollama-gpu2"],
+      "context_length": 32768,
+      "model_max_context": 131072,
+      "parameter_count": "8.0B",
+      "quantization": "Q4_K_M",
+      "family": "llama"
     }
   ]
 }
@@ -1175,7 +1180,7 @@ Blog management is available at `/admin/blog` (admin access required):
 - **Create post** (`/admin/blog/new`) -- Create a new blog post with title, slug, content, and publish status.
 - **Edit post** (`/admin/blog/{id}/edit`) -- Edit an existing post's title, slug, and content.
 - **Publish post** (`POST /admin/blog/{id}/publish`) -- Publish or unpublish a post.
-- **Delete post** (`POST /admin/blog/{id}/delete`) -- Permanently delete a post.
+- **Delete post** (`POST /admin/blog/{id}/delete`) -- Soft-delete a post (not permanently removed from the database).
 
 ---
 
@@ -1407,7 +1412,7 @@ MindRouter has a comprehensive test suite covering unit, integration, end-to-end
 
 | Command | Description |
 |---------|-------------|
-| `make test-unit` | Run unit tests (238 tests) |
+| `make test-unit` | Run unit tests (525+ tests) |
 | `make test-int` | Integration tests (requires live backends) |
 | `make test-e2e` | End-to-end tests |
 | `make test-smoke` | Smoke tests (full API surface) |

@@ -221,9 +221,8 @@ Key settings:
 | `SECRET_KEY` | Session/JWT signing key | Required |
 | `REDIS_URL` | Redis for rate limiting (optional) | None |
 | `ARTIFACT_STORAGE_PATH` | Path for uploaded files | `/data/artifacts` |
-| `DEFAULT_TOKEN_BUDGET` | Monthly token allowance | 100000 |
 | `SCHEDULER_FAIRNESS_WINDOW` | Rolling window for usage tracking | 300 (5 min) |
-| `GPU_AGENT_PORT` | Sidecar agent listen port | 8007 |
+| `GPU_AGENT_PORT` | Sidecar agent listen port (sidecar-side env var, not a MindRouter setting) | 8007 |
 
 ### Node and Backend Registration
 
@@ -495,9 +494,9 @@ Then build and run:
 
 ```bash
 # Build a specific release tag
-docker build -t mindrouter-sidecar:v0.19.1 \
+docker build -t mindrouter-sidecar:v0.20.0 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.20.0:sidecar
 
 # Or build latest from master
 docker build -t mindrouter-sidecar:latest \
@@ -510,22 +509,22 @@ docker run -d --name gpu-sidecar \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.19.1
+  mindrouter-sidecar:v0.20.0
 ```
 
 To upgrade an existing sidecar to a new version:
 
 ```bash
-docker build -t mindrouter-sidecar:v0.19.1 \
+docker build -t mindrouter-sidecar:v0.20.0 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.20.0:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.19.1
+  mindrouter-sidecar:v0.20.0
 ```
 
 Then configure nginx to proxy external port 8007 to the container:

@@ -1094,7 +1094,7 @@ message = client.messages.create(
                 <ul>
                     <li><strong>Disable</strong> a backend to take it out of rotation without deleting it: <code>POST /api/admin/backends/{id}/disable</code></li>
                     <li><strong>Enable</strong> to bring it back: <code>POST /api/admin/backends/{id}/enable</code></li>
-                    <li><strong>Drain</strong> for graceful offline maintenance: <code>POST /api/admin/backends/{id}/drain</code></li>
+                    <li><strong>Drain</strong> for graceful offline maintenance: <code>POST /admin/backends/{id}/drain</code> (dashboard-only route)</li>
                     <li><strong>Refresh</strong> to force re-discovery of models and capabilities: <code>POST /api/admin/backends/{id}/refresh</code></li>
                 </ul>
 
@@ -1156,6 +1156,7 @@ message = client.messages.create(
                     <li><strong>Low latency</strong> (+40 points) &mdash; based on EMA of recent response times</li>
                     <li><strong>Short queue</strong> (+30 points) &mdash; prefers backends with fewer queued requests</li>
                     <li><strong>High throughput</strong> (+20 points) &mdash; based on recent tokens/second</li>
+                    <li><strong>Priority</strong> (+N &times; 10 points) &mdash; from the backend's configured <code>priority</code> value</li>
                 </ul>
                 <p>Hard constraints (multimodal capability, embedding support, model availability) are checked before soft scoring.</p>
             </section>
@@ -1329,6 +1330,14 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     <li><strong>Per-GPU history</strong> &mdash; Individual GPU device telemetry over time</li>
                     <li><strong>Export</strong> &mdash; Download telemetry data as JSON or CSV</li>
                 </ul>
+
+                <h3>Redis (Optional)</h3>
+                <p>Redis is an optional dependency configured via <code>REDIS_URL</code>. When available, it serves three roles:</p>
+                <ul>
+                    <li><strong>Inflight streaming token counting</strong> &mdash; Atomically tracks tokens currently being streamed across all workers, enabling accurate real-time throughput metrics.</li>
+                    <li><strong>Per-user quota token caching</strong> &mdash; Caches per-user token counters (<code>quota:tokens:{user_id}</code>) for fast atomic increments without hitting the database on every request.</li>
+                    <li><strong>Graceful degradation</strong> &mdash; All features that depend on Redis continue to work without it. Quota enforcement falls back to database queries, and inflight token counts default to zero. No functionality is lost; only caching benefits are reduced.</li>
+                </ul>
             </section>
 
             <hr>
@@ -1397,6 +1406,9 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     <li>TTFT (time-to-first-token) is tracked for latency monitoring</li>
                     <li>If the client disconnects, the backend request is not cancelled (to prevent DB corruption)</li>
                 </ul>
+
+                <h3>Conversation Retention</h3>
+                <p>Conversations older than <code>CONVERSATION_RETENTION_DAYS</code> (default 730 days / 2 years) are automatically purged by a background task that runs every <code>CONVERSATION_CLEANUP_INTERVAL</code> seconds (default 86400 / once per day). Associated messages and attachments are deleted along with the conversation.</p>
             </section>
 
             <hr>
@@ -1550,7 +1562,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         <tr><td><code>AZURE_AD_DEFAULT_GROUP</code></td><td>str</td><td><code>other</code></td><td>Default group for new Azure AD users</td></tr>
                     </tbody>
                 </table>
-                <p>When <code>AZURE_AD_CLIENT_ID</code> and <code>AZURE_AD_CLIENT_SECRET</code> are set, a "Sign in with Microsoft" button appears on the login page. Users are JIT-provisioned on first login &mdash; their <code>jobTitle</code> from Microsoft Graph determines group assignment (student/faculty/staff/other). Pre-existing accounts are linked by email.</p>
+                <p>When <code>AZURE_AD_CLIENT_ID</code> and <code>AZURE_AD_TENANT_ID</code> are set, a "Sign in with Microsoft" button appears on the login page. Users are JIT-provisioned on first login &mdash; their <code>jobTitle</code> from Microsoft Graph determines group assignment (student/faculty/staff/other). Pre-existing accounts are linked by email.</p>
 
                 <h3>Web Search (Optional)</h3>
                 <table class="table table-bordered table-sm">
@@ -1667,8 +1679,8 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         <tr><td><code>BACKEND_REQUEST_TIMEOUT</code></td><td>int</td><td><code>300</code></td><td>Total request timeout (seconds)</td></tr>
                         <tr><td><code>BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT</code></td><td>int</td><td><code>180</code></td><td>Per-attempt timeout (seconds, high for large model prefills)</td></tr>
                         <tr><td><code>BACKEND_RETRY_MAX_ATTEMPTS</code></td><td>int</td><td><code>3</code></td><td>Max total retry attempts</td></tr>
-                        <tr><td><code>BACKEND_RETRY_ATTEMPTS</code></td><td>int</td><td><code>2</code></td><td>Default retry attempts</td></tr>
-                        <tr><td><code>BACKEND_RETRY_BACKOFF</code></td><td>float</td><td><code>1.0</code></td><td>Retry backoff multiplier</td></tr>
+                        <tr><td><code>BACKEND_RETRY_ATTEMPTS</code></td><td>int</td><td><code>2</code></td><td>Default retry attempts (deprecated &mdash; not currently used by retry logic)</td></tr>
+                        <tr><td><code>BACKEND_RETRY_BACKOFF</code></td><td>float</td><td><code>1.0</code></td><td>Retry backoff multiplier (deprecated &mdash; not currently used by retry logic)</td></tr>
                         <tr><td><code>STRUCTURED_OUTPUT_RETRY_ON_INVALID</code></td><td>bool</td><td><code>true</code></td><td>Retry on invalid structured output</td></tr>
                     </tbody>
                 </table>
@@ -1784,9 +1796,9 @@ python3 -c "import secrets; print('SIDECAR_SECRET_KEY=' + secrets.token_hex(32))
 sudo chmod 600 /etc/mindrouter/sidecar.env</code></pre>
 
                 <h4>Build a specific version</h4>
-<pre><code>docker build -t mindrouter-sidecar:v0.19.1 \
+<pre><code>docker build -t mindrouter-sidecar:v0.20.0 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar</code></pre>
+  https://github.com/ui-insight/MindRouter.git#v0.20.0:sidecar</code></pre>
 
                 <h4>Build latest from master</h4>
 <pre><code>docker build -t mindrouter-sidecar:latest \
@@ -1800,19 +1812,19 @@ docker run -d --name gpu-sidecar \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.19.1</code></pre>
+  mindrouter-sidecar:v0.20.0</code></pre>
 
                 <h4>Upgrade to a new version</h4>
-<pre><code>docker build -t mindrouter-sidecar:v0.19.1 \
+<pre><code>docker build -t mindrouter-sidecar:v0.20.0 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.19.1:sidecar
+  https://github.com/ui-insight/MindRouter.git#v0.20.0:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.19.1</code></pre>
+  mindrouter-sidecar:v0.20.0</code></pre>
 
                 <p>In production, bind the sidecar to localhost only (as shown above) and use an nginx reverse proxy on port 8007 to handle external traffic.
                    The env file at <code>/etc/mindrouter/sidecar.env</code> persists the secret key across upgrades — generate it once per node and it's reused automatically.</p>
