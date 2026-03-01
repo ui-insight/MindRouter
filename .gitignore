@@ -1,0 +1,116 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Documentation
+docs/_build/
+
+# Local configuration
+.env
+.env.local
+.env.prod
+.env.*.local
+*.local.py
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+logs/
+/var/log/mindrouter/
+
+# Artifacts and uploads
+/data/
+artifacts/
+
+# Docker
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+vhost-ports.html
+
+# Claude Code (contains API keys, session data)
+.claude/
+
+# Secrets (never commit)
+secrets/
+*.pem
+*.key
+credentials.json
+service-account.json
+
+# Build outputs
+*.tar.gz
+*.zip
+
+# Stray pip install artifacts (pip install =x.y.z)
+=*
+
+# Test artifacts
+test.pdf

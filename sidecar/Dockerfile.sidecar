@@ -1,0 +1,21 @@
+FROM nvidia/cuda:12.4.0-base-ubuntu22.04
+
+# Install Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+COPY VERSION .
+COPY gpu_agent.py .
+
+EXPOSE 8007
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python3 -c "import os, urllib.request; req = urllib.request.Request('http://localhost:8007/health', headers={'X-Sidecar-Key': os.environ.get('SIDECAR_SECRET_KEY', '')}); urllib.request.urlopen(req)" || exit 1
+
+CMD ["python3", "-m", "uvicorn", "gpu_agent:app", "--host", "0.0.0.0", "--port", "8007"]

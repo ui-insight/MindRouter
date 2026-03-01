@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}Request Quota Increase - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card shadow">
+                <div class="card-body p-4">
+                    <h1 class="card-title text-center mb-4 h3">
+                        <i class="bi bi-arrow-up-circle" aria-hidden="true"></i> Request Quota Increase
+                    </h1>
+
+                    <form method="POST" action="/dashboard/request-quota">
+                        <div class="mb-3">
+                            <label for="requested_tokens" class="form-label">Requested Token Budget</label>
+                            <input type="number" class="form-control" id="requested_tokens" name="requested_tokens" required min="1" placeholder="e.g., 500000">
+                            <div class="form-text">The total number of tokens you need per month.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="justification" class="form-label">Justification</label>
+                            <textarea class="form-control" id="justification" name="justification" rows="4" required placeholder="Please explain why you need additional quota..."></textarea>
+                        </div>
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-send"></i> Submit Request
+                            </button>
+                            <a href="/dashboard" class="btn btn-outline-secondary">Cancel</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

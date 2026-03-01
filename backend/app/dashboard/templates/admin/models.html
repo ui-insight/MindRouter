@@ -1,0 +1,1085 @@
+{% extends "base.html" %}
+
+{% block title %}Model Management - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "models" %}{% include "admin/_sidebar.html" %}
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-3">
+            <h1 class="mb-4"><i class="bi bi-boxes"></i> Model Management</h1>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                <i class="bi bi-check-circle"></i>
+                {% if success == 'updated' %}Setting updated.
+                {% elif success == 'reset' %}Override reset to auto-detect.
+                {% elif success == 'metadata_updated' %}Model metadata overrides saved.
+                {% elif success == 'overrides_reset' %}All metadata overrides cleared.
+                {% else %}Operation completed successfully.{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                <i class="bi bi-exclamation-triangle"></i> {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+
+            <!-- Ollama Model Pull Card -->
+            {% if ollama_backends %}
+            <div class="card mb-4">
+                <div class="card-header d-flex align-items-center justify-content-between" style="cursor:pointer"
+                     data-bs-toggle="collapse" data-bs-target="#pullModelCard">
+                    <span><i class="bi bi-cloud-download"></i> Pull Model to Ollama Backends</span>
+                    <i class="bi bi-chevron-down"></i>
+                </div>
+                <div class="collapse" id="pullModelCard">
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-5">
+                                <label class="form-label">Model Name</label>
+                                <input type="text" class="form-control" id="pullModelName"
+                                       placeholder="e.g. qwen2.5:72b, llama3.3:70b">
+                            </div>
+                            <div class="col-md-5">
+                                <label class="form-label">Target Backends</label>
+                                <div class="border rounded p-2" style="max-height:150px; overflow-y:auto;">
+                                    {% for b in ollama_backends %}
+                                    {% if b.has_sidecar %}
+                                    <div class="form-check">
+                                        <input class="form-check-input pull-target-cb" type="checkbox"
+                                               value="{{ b.id }}" id="pullTarget{{ b.id }}">
+                                        <label class="form-check-label" for="pullTarget{{ b.id }}">
+                                            {{ b.name }}
+                                            <small class="text-muted">({{ b.node_name or 'no node' }})</small>
+                                            {% if b.status != 'healthy' %}
+                                            <span class="badge bg-warning text-dark">{{ b.status }}</span>
+                                            {% endif %}
+                                        </label>
+                                    </div>
+                                    {% else %}
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" disabled>
+                                        <label class="form-check-label text-muted">
+                                            {{ b.name }} <small>(no sidecar)</small>
+                                        </label>
+                                    </div>
+                                    {% endif %}
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <div class="col-md-2 d-flex align-items-end">
+                                <button class="btn btn-primary w-100" id="pullModelBtn" onclick="startPull()">
+                                    <i class="bi bi-download"></i> Pull
+                                </button>
+                            </div>
+                        </div>
+                        <hr class="my-3">
+                        <div class="d-flex align-items-center">
+                            <button class="btn btn-outline-secondary" id="repullAllBtn" onclick="startRepullAll()">
+                                <i class="bi bi-arrow-repeat"></i> Re-pull All Ollama Models
+                            </button>
+                            <small class="text-muted ms-3">Re-pulls every loaded model once per node (shared model folder).</small>
+                        </div>
+                        <div id="pullProgressArea" class="mt-3"></div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <p class="text-muted mb-3">{{ grouped_models|length }} unique model{{ 's' if grouped_models|length != 1 }} across all backends</p>
+
+            {% if grouped_models %}
+            <div class="table-responsive">
+                <table class="table table-hover table-sm align-middle mb-0" id="modelsTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="min-width:220px">Name</th>
+                            <th>Engine</th>
+                            <th class="text-center">Endpoints</th>
+                            <th class="text-end">Context</th>
+                            <th>Quant</th>
+                            <th class="text-center">Multimodal</th>
+                            <th class="text-center">Thinking</th>
+                            <th class="text-center">Link</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for model_name, instances in grouped_models.items() %}
+                        {% set first = instances[0] %}
+                        {% set engines = [] %}
+                        {% for m in instances %}
+                            {% if m.backend and m.backend.engine.value not in engines %}
+                                {% if engines.append(m.backend.engine.value) %}{% endif %}
+                            {% endif %}
+                        {% endfor %}
+                        <!-- Summary row -->
+                        <tr class="model-row" style="cursor:pointer" data-model-idx="{{ loop.index }}">
+                            <td>
+                                <code class="fw-semibold">{{ model_name }}</code>
+                                {% if first.description %}
+                                <br><small class="text-muted">{{ first.description[:80] }}{{ '...' if first.description|length > 80 }}</small>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% for eng in engines %}
+                                <span class="badge {{ 'bg-primary' if eng == 'ollama' else 'bg-info text-dark' }} me-1">{{ eng }}</span>
+                                {% endfor %}
+                            </td>
+                            <td class="text-center">
+                                <span class="badge bg-secondary">{{ instances|length }}</span>
+                            </td>
+                            <td class="text-end">
+                                {% if first.context_length %}{{ '{:,}'.format(first.context_length) }}{% else %}&mdash;{% endif %}
+                            </td>
+                            <td>{% if first.quantization %}{{ first.quantization }}{% else %}&mdash;{% endif %}</td>
+                            <td class="text-center">
+                                {% if first.supports_multimodal %}
+                                <i class="bi bi-check-circle-fill text-success"></i>
+                                {% else %}
+                                <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-center">
+                                {% if first.supports_thinking %}
+                                <i class="bi bi-check-circle-fill text-success"></i>
+                                {% else %}
+                                <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-center">
+                                {% if first.model_url %}
+                                <a href="{{ first.model_url }}" target="_blank" rel="noopener" class="text-decoration-none" onclick="event.stopPropagation()">
+                                    <i class="bi bi-box-arrow-up-right"></i>
+                                </a>
+                                {% else %}
+                                <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <!-- Expandable detail row -->
+                        <tr class="detail-row d-none" id="detail-{{ loop.index }}">
+                            <td colspan="8" class="p-0">
+                                <div class="bg-light border-top border-bottom p-3">
+                                    <!-- Description -->
+                                    <div class="row mb-3">
+                                        <div class="col-12">
+                                            {% if first.description %}
+                                            <p class="mb-1"><strong>Description:</strong> {{ first.description }}</p>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+
+                                    <div class="row mb-3">
+                                        <!-- Model Details -->
+                                        <div class="col-md-4">
+                                            <h6>Model Details</h6>
+                                            <dl class="row small mb-0">
+                                                <dt class="col-5">Family:</dt>
+                                                <dd class="col-7">{{ first.family or 'Unknown' }}{% if first.family_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                <dt class="col-5">Context:</dt>
+                                                <dd class="col-7">{{ '{:,}'.format(first.context_length) if first.context_length else 'Unknown' }}{% if first.context_length_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% if first.model_max_context and first.model_max_context != first.context_length %}
+                                                <dt class="col-5">Model Max:</dt>
+                                                <dd class="col-7">{{ '{:,}'.format(first.model_max_context) }}</dd>
+                                                {% endif %}
+                                                <dt class="col-5">Parameters:</dt>
+                                                <dd class="col-7">{{ first.parameter_count or 'Unknown' }}{% if first.parameter_count_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                <dt class="col-5">Quantization:</dt>
+                                                <dd class="col-7">{{ first.quantization or 'N/A' }}{% if first.quantization_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% if first.model_format %}
+                                                <dt class="col-5">Format:</dt>
+                                                <dd class="col-7">{{ first.model_format }}{% if first.model_format_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% endif %}
+                                                {% if first.parent_model %}
+                                                <dt class="col-5">Parent:</dt>
+                                                <dd class="col-7"><small>{{ first.parent_model }}</small>{% if first.parent_model_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% endif %}
+                                            </dl>
+                                        </div>
+
+                                        <!-- Architecture -->
+                                        <div class="col-md-4">
+                                            {% if first.embedding_length or first.head_count or first.layer_count or first.feed_forward_length %}
+                                            <h6>Architecture</h6>
+                                            <dl class="row small mb-0">
+                                                {% if first.embedding_length %}
+                                                <dt class="col-6">Embed Dim:</dt>
+                                                <dd class="col-6">{{ '{:,}'.format(first.embedding_length) }}{% if first.embedding_length_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% endif %}
+                                                {% if first.head_count %}
+                                                <dt class="col-6">Heads:</dt>
+                                                <dd class="col-6">{{ first.head_count }}{% if first.head_count_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% endif %}
+                                                {% if first.layer_count %}
+                                                <dt class="col-6">Layers:</dt>
+                                                <dd class="col-6">{{ first.layer_count }}{% if first.layer_count_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% endif %}
+                                                {% if first.feed_forward_length %}
+                                                <dt class="col-6">FFN:</dt>
+                                                <dd class="col-6">{{ '{:,}'.format(first.feed_forward_length) }}{% if first.feed_forward_length_override is not none %} <span class="badge bg-info" style="font-size:0.6rem">override</span>{% endif %}</dd>
+                                                {% endif %}
+                                            </dl>
+                                            {% endif %}
+
+                                            <!-- Capabilities badges -->
+                                            {% if first.capabilities %}
+                                            {% set cap_list = first.capabilities | fromjson if first.capabilities is string else [] %}
+                                            {% if cap_list %}
+                                            <h6 class="mt-2">Capabilities</h6>
+                                            <div>
+                                                {% for cap in cap_list %}
+                                                {% if cap == 'completion' %}
+                                                <span class="badge bg-primary me-1 mb-1">completion</span>
+                                                {% elif cap == 'vision' %}
+                                                <span class="badge bg-success me-1 mb-1">vision</span>
+                                                {% elif cap == 'tools' %}
+                                                <span class="badge me-1 mb-1" style="background-color: #6f42c1 !important;">tools</span>
+                                                {% elif cap == 'thinking' %}
+                                                <span class="badge bg-warning text-dark me-1 mb-1">thinking</span>
+                                                {% elif cap == 'embedding' %}
+                                                <span class="badge bg-info me-1 mb-1">embedding</span>
+                                                {% else %}
+                                                <span class="badge bg-secondary me-1 mb-1">{{ cap }}</span>
+                                                {% endif %}
+                                                {% endfor %}
+                                            </div>
+                                            {% endif %}
+                                            {% endif %}
+                                        </div>
+
+                                        <!-- Toggle Controls -->
+                                        <div class="col-md-4">
+                                            <h6>Multimodal</h6>
+                                            <div class="d-flex align-items-center gap-2 mb-2">
+                                                <span class="badge {{ 'bg-success' if first.supports_multimodal else 'bg-secondary' }}">{{ 'ON' if first.supports_multimodal else 'OFF' }}</span>
+                                                <span class="badge {{ 'bg-info' if first.multimodal_override is not none else 'bg-secondary' }}">{{ 'Override' if first.multimodal_override is not none else 'Auto' }}</span>
+                                                <form method="POST" action="/admin/models/toggle-multimodal" class="d-inline">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if first.supports_multimodal else 'btn-outline-success' }}">
+                                                        <i class="bi {{ 'bi-toggle-on' if first.supports_multimodal else 'bi-toggle-off' }}"></i>
+                                                    </button>
+                                                </form>
+                                                {% if first.multimodal_override is not none %}
+                                                <form method="POST" action="/admin/models/reset-multimodal" class="d-inline">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Reset to Auto">
+                                                        <i class="bi bi-arrow-counterclockwise"></i>
+                                                    </button>
+                                                </form>
+                                                {% endif %}
+                                            </div>
+
+                                            <h6>Thinking</h6>
+                                            <div class="d-flex align-items-center gap-2 mb-2">
+                                                <span class="badge {{ 'bg-success' if first.supports_thinking else 'bg-secondary' }}">{{ 'ON' if first.supports_thinking else 'OFF' }}</span>
+                                                <span class="badge {{ 'bg-info' if first.thinking_override is not none else 'bg-secondary' }}">{{ 'Override' if first.thinking_override is not none else 'Auto' }}</span>
+                                                <form method="POST" action="/admin/models/toggle-thinking" class="d-inline">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if first.supports_thinking else 'btn-outline-success' }}">
+                                                        <i class="bi {{ 'bi-toggle-on' if first.supports_thinking else 'bi-toggle-off' }}"></i>
+                                                    </button>
+                                                </form>
+                                                {% if first.thinking_override is not none %}
+                                                <form method="POST" action="/admin/models/reset-thinking" class="d-inline">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Reset to Auto">
+                                                        <i class="bi bi-arrow-counterclockwise"></i>
+                                                    </button>
+                                                </form>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Endpoints Table -->
+                                    <h6>Deployed Endpoints</h6>
+                                    <div class="table-responsive mb-3" style="max-height: 200px; overflow-y: auto;">
+                                        <table class="table table-sm table-bordered mb-0">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>Backend</th>
+                                                    <th>Engine</th>
+                                                    <th>URL</th>
+                                                    <th>Status</th>
+                                                    <th>Loaded</th>
+                                                    <th></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {% for m in instances %}
+                                                <tr>
+                                                    <td>{{ m.backend.name if m.backend else '-' }}</td>
+                                                    <td>
+                                                        {% if m.backend %}
+                                                        <span class="badge bg-primary">{{ m.backend.engine.value }}</span>
+                                                        {% else %}-{% endif %}
+                                                    </td>
+                                                    <td><small class="text-muted">{{ m.backend.url if m.backend else '-' }}</small></td>
+                                                    <td>
+                                                        {% if m.backend and m.backend.status.value == 'healthy' %}
+                                                        <span class="badge bg-success">Healthy</span>
+                                                        {% elif m.backend %}
+                                                        <span class="badge bg-danger">{{ m.backend.status.value }}</span>
+                                                        {% else %}
+                                                        <span class="badge bg-secondary">Unknown</span>
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>
+                                                        {% if m.is_loaded %}
+                                                        <span class="badge bg-success">Yes</span>
+                                                        {% else %}
+                                                        <span class="badge bg-secondary">No</span>
+                                                        {% endif %}
+                                                    </td>
+                                                    <td>
+                                                        {% if m.backend and m.backend.engine.value == 'ollama' and m.backend.node and m.backend.node.sidecar_url %}
+                                                        <button class="btn btn-sm btn-outline-danger" title="Delete model from this backend"
+                                                                onclick="event.stopPropagation(); deleteModel({{ m.backend.id }}, '{{ model_name|e }}')">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                        {% endif %}
+                                                    </td>
+                                                </tr>
+                                                {% endfor %}
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    <!-- Edit Metadata -->
+                                    {% set has_any_override = first.context_length_override is not none or first.embedding_length_override is not none or first.head_count_override is not none or first.layer_count_override is not none or first.feed_forward_length_override is not none or first.capabilities_override is not none or first.family_override is not none or first.parameter_count_override is not none or first.quantization_override is not none or first.model_format_override is not none or first.parent_model_override is not none or first.description or first.model_url %}
+                                    <div class="mb-2">
+                                        <button class="btn btn-sm btn-outline-primary" type="button"
+                                                data-bs-toggle="collapse" data-bs-target="#editMeta-{{ loop.index }}">
+                                            <i class="bi bi-pencil-square"></i> Edit Metadata
+                                            {% if has_any_override %}<span class="badge bg-info ms-1">overrides active</span>{% endif %}
+                                        </button>
+                                    </div>
+                                    <div class="collapse" id="editMeta-{{ loop.index }}">
+                                        <div class="card">
+                                            <div class="card-body">
+                                                <form method="POST" action="/admin/models/update-metadata">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <div class="row g-2">
+                                                        <div class="col-12">
+                                                            <label class="form-label small">Description</label>
+                                                            <textarea class="form-control form-control-sm" name="description" rows="2"
+                                                                      placeholder="Model description (admin-only)">{{ first.description or '' }}</textarea>
+                                                        </div>
+                                                        <div class="col-md-6">
+                                                            <label class="form-label small">Model URL</label>
+                                                            <input type="url" class="form-control form-control-sm"
+                                                                   name="model_url" value="{{ first.model_url or '' }}"
+                                                                   placeholder="https://huggingface.co/...">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Family</label>
+                                                            <input type="text" class="form-control form-control-sm{% if first.family_override is not none %} border-info{% endif %}"
+                                                                   name="family" value="{{ first.family_override if first.family_override is not none else (first.family or '') }}"
+                                                                   placeholder="e.g. llama, qwen">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Parameter Count</label>
+                                                            <input type="text" class="form-control form-control-sm{% if first.parameter_count_override is not none %} border-info{% endif %}"
+                                                                   name="parameter_count" value="{{ first.parameter_count_override if first.parameter_count_override is not none else (first.parameter_count or '') }}"
+                                                                   placeholder="e.g. 70B">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Quantization</label>
+                                                            <input type="text" class="form-control form-control-sm{% if first.quantization_override is not none %} border-info{% endif %}"
+                                                                   name="quantization" value="{{ first.quantization_override if first.quantization_override is not none else (first.quantization or '') }}"
+                                                                   placeholder="e.g. FP8, Q4_K_M">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Context Length</label>
+                                                            <input type="number" class="form-control form-control-sm{% if first.context_length_override is not none %} border-info{% endif %}"
+                                                                   name="context_length" value="{{ first.context_length_override if first.context_length_override is not none else (first.context_length or '') }}"
+                                                                   placeholder="e.g. 131072">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Embedding Dim</label>
+                                                            <input type="number" class="form-control form-control-sm{% if first.embedding_length_override is not none %} border-info{% endif %}"
+                                                                   name="embedding_length" value="{{ first.embedding_length_override if first.embedding_length_override is not none else (first.embedding_length or '') }}"
+                                                                   placeholder="e.g. 8192">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Attention Heads</label>
+                                                            <input type="number" class="form-control form-control-sm{% if first.head_count_override is not none %} border-info{% endif %}"
+                                                                   name="head_count" value="{{ first.head_count_override if first.head_count_override is not none else (first.head_count or '') }}"
+                                                                   placeholder="e.g. 64">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Layers</label>
+                                                            <input type="number" class="form-control form-control-sm{% if first.layer_count_override is not none %} border-info{% endif %}"
+                                                                   name="layer_count" value="{{ first.layer_count_override if first.layer_count_override is not none else (first.layer_count or '') }}"
+                                                                   placeholder="e.g. 80">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">FFN Size</label>
+                                                            <input type="number" class="form-control form-control-sm{% if first.feed_forward_length_override is not none %} border-info{% endif %}"
+                                                                   name="feed_forward_length" value="{{ first.feed_forward_length_override if first.feed_forward_length_override is not none else (first.feed_forward_length or '') }}"
+                                                                   placeholder="e.g. 28672">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Format</label>
+                                                            <input type="text" class="form-control form-control-sm{% if first.model_format_override is not none %} border-info{% endif %}"
+                                                                   name="model_format" value="{{ first.model_format_override if first.model_format_override is not none else (first.model_format or '') }}"
+                                                                   placeholder="e.g. gguf, safetensors">
+                                                        </div>
+                                                        <div class="col-md-3">
+                                                            <label class="form-label small">Parent Model</label>
+                                                            <input type="text" class="form-control form-control-sm{% if first.parent_model_override is not none %} border-info{% endif %}"
+                                                                   name="parent_model" value="{{ first.parent_model_override if first.parent_model_override is not none else (first.parent_model or '') }}"
+                                                                   placeholder="e.g. meta-llama/...">
+                                                        </div>
+                                                        <div class="col-md-6">
+                                                            <label class="form-label small">Capabilities <span class="text-muted">(comma-separated)</span></label>
+                                                            {% set cap_display = '' %}
+                                                            {% if first.capabilities_override is not none %}
+                                                                {% set cap_list = first.capabilities_override | fromjson if first.capabilities_override is string else [] %}
+                                                                {% set cap_display = cap_list | join(', ') %}
+                                                            {% elif first.capabilities %}
+                                                                {% set cap_list = first.capabilities | fromjson if first.capabilities is string else [] %}
+                                                                {% set cap_display = cap_list | join(', ') %}
+                                                            {% endif %}
+                                                            <input type="text" class="form-control form-control-sm{% if first.capabilities_override is not none %} border-info{% endif %}"
+                                                                   name="capabilities" value="{{ cap_display }}"
+                                                                   placeholder="e.g. completion, vision, tools">
+                                                        </div>
+                                                    </div>
+                                                    <div class="mt-3 d-flex gap-2">
+                                                        <button type="submit" class="btn btn-sm btn-primary">
+                                                            <i class="bi bi-save"></i> Save
+                                                        </button>
+                                                        {% if has_any_override %}
+                                                        <button type="button" class="btn btn-sm btn-outline-warning"
+                                                                onclick="document.getElementById('resetOverridesForm-{{ loop.index }}').submit()">
+                                                            <i class="bi bi-arrow-counterclockwise"></i> Reset All Overrides
+                                                        </button>
+                                                        {% endif %}
+                                                    </div>
+                                                </form>
+                                                {% if has_any_override %}
+                                                <form id="resetOverridesForm-{{ loop.index }}" method="POST" action="/admin/models/reset-overrides" style="display:none">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                </form>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> No models discovered yet. Models will appear here once backends are registered and polled.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Ollama Operation Modal -->
+<div class="modal fade" id="ollamaOpModal" tabindex="-1" aria-labelledby="ollamaOpModalLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="ollamaOpModalLabel">Operation</h5>
+            </div>
+            <div class="modal-body">
+                <div id="ollamaOpSpinner" class="text-center py-3">
+                    <div class="spinner-border text-primary" role="status" style="width:3rem; height:3rem;">
+                        <span class="visually-hidden">Working...</span>
+                    </div>
+                    <div id="ollamaOpStatus" class="mt-3 text-muted">Starting...</div>
+                </div>
+                <div id="ollamaOpProgress" class="d-none">
+                    <div class="progress mb-2" style="height:22px;">
+                        <div id="ollamaOpBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>
+                    </div>
+                    <small id="ollamaOpDetail" class="text-muted"></small>
+                </div>
+                <div id="ollamaOpResult" class="d-none"></div>
+            </div>
+            <div class="modal-footer d-none" id="ollamaOpFooter">
+                <button type="button" class="btn btn-primary" onclick="location.reload()">OK</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Toggle detail rows on click
+    document.querySelectorAll('.model-row').forEach(function(row) {
+        row.addEventListener('click', function() {
+            var idx = this.dataset.modelIdx;
+            var detail = document.getElementById('detail-' + idx);
+            if (detail.classList.contains('d-none')) {
+                document.querySelectorAll('.detail-row').forEach(function(r) {
+                    r.classList.add('d-none');
+                });
+                document.querySelectorAll('.model-row').forEach(function(r) {
+                    r.classList.remove('table-active');
+                });
+                detail.classList.remove('d-none');
+                this.classList.add('table-active');
+            } else {
+                detail.classList.add('d-none');
+                this.classList.remove('table-active');
+            }
+        });
+    });
+});
+
+// --- Ollama Pull / Delete ---
+
+var _activePolls = {};
+
+function startPull() {
+    var modelName = document.getElementById('pullModelName').value.trim();
+    if (!modelName) { alert('Enter a model name'); return; }
+
+    var checked = document.querySelectorAll('.pull-target-cb:checked');
+    if (checked.length === 0) { alert('Select at least one target backend'); return; }
+
+    document.getElementById('pullModelBtn').disabled = true;
+    _showOpModal('Pulling Model');
+    document.getElementById('ollamaOpStatus').textContent = 'Pulling "' + modelName + '"...';
+
+    // Build pull targets list inside the modal body
+    var resultEl = document.getElementById('ollamaOpResult');
+    resultEl.classList.remove('d-none');
+    resultEl.innerHTML = '';
+
+    checked.forEach(function(cb) {
+        var backendId = cb.value;
+        var label = cb.closest('.form-check').querySelector('label').textContent.trim();
+        var cardId = 'pull-' + backendId + '-' + Date.now();
+
+        resultEl.insertAdjacentHTML('beforeend',
+            '<div id="' + cardId + '" class="border rounded p-2 mb-2">' +
+            '<div class="d-flex justify-content-between align-items-center mb-1">' +
+            '<strong>' + label + '</strong>' +
+            '<span class="badge bg-info pull-status">starting...</span>' +
+            '</div>' +
+            '<div class="progress" style="height:20px;">' +
+            '<div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
+            '</div>' +
+            '<small class="text-muted pull-detail"></small>' +
+            '</div>'
+        );
+
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model: modelName})
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.job_id) {
+                pollPullProgress(backendId, data.job_id, cardId);
+            } else {
+                var el = document.getElementById(cardId);
+                el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+                el.querySelector('.pull-status').textContent = 'error';
+                el.querySelector('.pull-detail').textContent = data.detail || 'Unknown error';
+                checkAllPullsDone();
+            }
+        })
+        .catch(function(err) {
+            var el = document.getElementById(cardId);
+            el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+            el.querySelector('.pull-status').textContent = 'error';
+            el.querySelector('.pull-detail').textContent = err.toString();
+            checkAllPullsDone();
+        });
+    });
+}
+
+function pollPullProgress(backendId, jobId, cardId) {
+    var interval = setInterval(function() {
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull/' + jobId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var el = document.getElementById(cardId);
+            if (!el) { clearInterval(interval); return; }
+
+            var statusBadge = el.querySelector('.pull-status');
+            var bar = el.querySelector('.progress-bar');
+            var detail = el.querySelector('.pull-detail');
+
+            if (data.progress && data.progress.total && data.progress.completed) {
+                var pct = Math.round((data.progress.completed / data.progress.total) * 100);
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+            }
+            if (data.progress && data.progress.status) {
+                detail.textContent = data.progress.status;
+            }
+
+            if (data.status === 'success') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-success pull-status';
+                statusBadge.textContent = 'complete';
+                bar.style.width = '100%';
+                bar.textContent = '100%';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-success');
+                // Refresh backend discovery
+                fetch('/api/admin/backends/' + backendId + '/refresh', {method: 'POST'})
+                .then(function() { checkAllPullsDone(); });
+            } else if (data.status === 'error') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-danger pull-status';
+                statusBadge.textContent = 'error';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-danger');
+                detail.textContent = data.error || 'Unknown error';
+                checkAllPullsDone();
+            }
+        })
+        .catch(function() { /* ignore transient fetch errors */ });
+    }, 2000);
+
+    _activePolls[cardId] = interval;
+}
+
+function checkAllPullsDone() {
+    var anyActive = document.querySelectorAll('.pull-status');
+    var allDone = true;
+    anyActive.forEach(function(badge) {
+        var txt = badge.textContent;
+        if (txt !== 'complete' && txt !== 'error') allDone = false;
+    });
+    if (allDone) {
+        document.getElementById('pullModelBtn').disabled = false;
+        document.getElementById('ollamaOpSpinner').classList.add('d-none');
+        document.getElementById('ollamaOpFooter').classList.remove('d-none');
+    }
+}
+
+function _showOpModal(title) {
+    document.getElementById('ollamaOpModalLabel').textContent = title;
+    document.getElementById('ollamaOpSpinner').classList.remove('d-none');
+    document.getElementById('ollamaOpProgress').classList.add('d-none');
+    document.getElementById('ollamaOpResult').classList.add('d-none');
+    document.getElementById('ollamaOpResult').innerHTML = '';
+    document.getElementById('ollamaOpFooter').classList.add('d-none');
+    document.getElementById('ollamaOpStatus').textContent = 'Starting...';
+    var bar = document.getElementById('ollamaOpBar');
+    bar.style.width = '0%';
+    bar.textContent = '0%';
+    var modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('ollamaOpModal'));
+    modal.show();
+    return modal;
+}
+
+function _opDone(html, isError) {
+    document.getElementById('ollamaOpSpinner').classList.add('d-none');
+    document.getElementById('ollamaOpProgress').classList.add('d-none');
+    var result = document.getElementById('ollamaOpResult');
+    result.classList.remove('d-none');
+    result.innerHTML = '<div class="alert ' + (isError ? 'alert-danger' : 'alert-success') + ' mb-0">' + html + '</div>';
+    document.getElementById('ollamaOpFooter').classList.remove('d-none');
+}
+
+function startRepullAll() {
+    document.getElementById('repullAllBtn').disabled = true;
+    _showOpModal('Re-pull All Ollama Models');
+    document.getElementById('ollamaOpStatus').textContent = 'Fetching backend info...';
+
+    fetch('/api/admin/telemetry/latest')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var backends = (data.backends || []).filter(function(b) {
+            var models = b.all_models || b.loaded_models || [];
+            return b.engine === 'ollama' && models.length > 0;
+        });
+
+        if (backends.length === 0) {
+            _opDone('<i class="bi bi-info-circle"></i> No Ollama backends with models found.', true);
+            document.getElementById('repullAllBtn').disabled = false;
+            return;
+        }
+
+        // Group by node_name, pick first healthy (or first) backend per node
+        var nodeMap = {};
+        backends.forEach(function(b) {
+            var key = b.node_name || ('backend-' + b.id);
+            if (!nodeMap[key]) {
+                nodeMap[key] = b;
+            } else if (b.status === 'healthy' && nodeMap[key].status !== 'healthy') {
+                nodeMap[key] = b;
+            }
+        });
+
+        // Collect all models per node from all backends on that node
+        var nodeModels = {};
+        backends.forEach(function(b) {
+            var key = b.node_name || ('backend-' + b.id);
+            if (!nodeModels[key]) nodeModels[key] = new Set();
+            (b.all_models || b.loaded_models || []).forEach(function(m) { nodeModels[key].add(m); });
+        });
+
+        // Build per-node queues: [{backendId, backendName, nodeName, models: [...]}]
+        var nodeQueues = [];
+        var totalModels = 0;
+        Object.keys(nodeMap).sort().forEach(function(nodeKey) {
+            var b = nodeMap[nodeKey];
+            var models = Array.from(nodeModels[nodeKey]).sort();
+            totalModels += models.length;
+            nodeQueues.push({ backendId: b.id, backendName: b.name, nodeName: nodeKey, models: models });
+        });
+
+        if (totalModels === 0) {
+            _opDone('<i class="bi bi-info-circle"></i> No models to re-pull.', true);
+            document.getElementById('repullAllBtn').disabled = false;
+            return;
+        }
+
+        document.getElementById('ollamaOpStatus').textContent =
+            'Re-pulling ' + totalModels + ' model(s) across ' + nodeQueues.length + ' node(s) (sequential per node)...';
+
+        var resultEl = document.getElementById('ollamaOpResult');
+        resultEl.classList.remove('d-none');
+        resultEl.innerHTML = '';
+
+        // Overall summary bar
+        resultEl.insertAdjacentHTML('beforeend',
+            '<div id="repull-overall" class="mb-3 p-2 border rounded bg-light">' +
+            '<div class="d-flex justify-content-between mb-1">' +
+            '<strong>Overall Progress</strong>' +
+            '<span id="repull-overall-count">0 / ' + totalModels + '</span>' +
+            '</div>' +
+            '<div class="progress" style="height:20px;">' +
+            '<div id="repull-overall-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%">0%</div>' +
+            '</div>' +
+            '</div>'
+        );
+
+        // Create card elements for all models up front, grouped by node
+        var allCardIds = {};  // keyed by "nodeKey:model"
+        nodeQueues.forEach(function(nq) {
+            resultEl.insertAdjacentHTML('beforeend',
+                '<h6 class="mt-3 mb-2"><i class="bi bi-hdd-rack"></i> ' + nq.nodeName +
+                ' <small class="text-muted">via ' + nq.backendName + '</small></h6>');
+            nq.models.forEach(function(model) {
+                var cardId = 'repull-' + nq.backendId + '-' + model.replace(/[^a-zA-Z0-9]/g, '_');
+                allCardIds[nq.nodeName + ':' + model] = cardId;
+                resultEl.insertAdjacentHTML('beforeend',
+                    '<div id="' + cardId + '" class="border rounded p-2 mb-2"' +
+                    ' data-backend-id="' + nq.backendId + '" data-model="' + model + '">' +
+                    '<div class="d-flex justify-content-between align-items-center mb-1">' +
+                    '<span><strong>' + model + '</strong></span>' +
+                    '<span class="badge bg-secondary pull-status">queued</span>' +
+                    '</div>' +
+                    '<div class="progress" style="height:16px;">' +
+                    '<div class="progress-bar" role="progressbar" style="width:0%">0%</div>' +
+                    '</div>' +
+                    '<small class="text-muted pull-detail"></small>' +
+                    '</div>'
+                );
+            });
+        });
+
+        function updateOverall() {
+            _updateRepullOverallForRetry();
+        }
+
+        // Process each node's queue sequentially (but all nodes in parallel)
+        nodeQueues.forEach(function(nq) {
+            processNodeQueue(nq.backendId, nq.nodeName, nq.models, 0, allCardIds, updateOverall);
+        });
+    })
+    .catch(function(err) {
+        _opDone('<i class="bi bi-x-circle"></i> Failed to fetch backend info: ' + err.toString(), true);
+        document.getElementById('repullAllBtn').disabled = false;
+    });
+}
+
+function processNodeQueue(backendId, nodeName, models, idx, allCardIds, updateOverall) {
+    if (idx >= models.length) return;
+
+    var model = models[idx];
+    var cardId = allCardIds[nodeName + ':' + model];
+    var el = document.getElementById(cardId);
+
+    // Mark as pulling and add skip button
+    el.querySelector('.pull-status').className = 'badge bg-info pull-status';
+    el.querySelector('.pull-status').textContent = 'pulling...';
+    el.querySelector('.progress-bar').classList.add('progress-bar-striped', 'progress-bar-animated');
+    var skipBtn = document.createElement('button');
+    skipBtn.className = 'btn btn-outline-warning btn-sm ms-2 repull-skip-btn';
+    skipBtn.innerHTML = '<i class="bi bi-skip-forward"></i> Skip';
+    skipBtn.style.fontSize = '0.7rem';
+    skipBtn.style.padding = '0 6px';
+    el.querySelector('.pull-status').after(skipBtn);
+
+    fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model: model})
+    })
+    .then(function(r) {
+        if (!r.ok) {
+            return r.json().then(function(d) { throw new Error(d.detail || 'HTTP ' + r.status); });
+        }
+        return r.json();
+    })
+    .then(function(data) {
+        if (data.job_id) {
+            pollRepullProgress(backendId, data.job_id, cardId, function() {
+                updateOverall();
+                processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
+            });
+        } else {
+            el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+            el.querySelector('.pull-status').textContent = 'error';
+            el.querySelector('.pull-detail').textContent = data.detail || data.error || 'No job_id returned';
+            addRetryButton(cardId, backendId, model);
+            updateOverall();
+            processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
+        }
+    })
+    .catch(function(err) {
+        el.querySelector('.pull-status').className = 'badge bg-danger pull-status';
+        el.querySelector('.pull-status').textContent = 'error';
+        el.querySelector('.progress-bar').classList.remove('progress-bar-striped', 'progress-bar-animated');
+        el.querySelector('.pull-detail').textContent = err.message || err.toString();
+        addRetryButton(cardId, backendId, model);
+        updateOverall();
+        processNodeQueue(backendId, nodeName, models, idx + 1, allCardIds, updateOverall);
+    });
+}
+
+var REPULL_STALE_TIMEOUT_MS = 120000;  // 2 minutes with no progress change → auto-skip
+
+function pollRepullProgress(backendId, jobId, cardId, onDone) {
+    var lastProgressStr = '';
+    var lastChangeTime = Date.now();
+    var skipped = false;
+
+    function doSkip(reason) {
+        if (skipped) return;
+        skipped = true;
+        clearInterval(interval);
+        var el = document.getElementById(cardId);
+        if (el) {
+            el.querySelector('.pull-status').className = 'badge bg-warning text-dark pull-status';
+            el.querySelector('.pull-status').textContent = 'skipped';
+            el.querySelector('.progress-bar').classList.remove('progress-bar-striped', 'progress-bar-animated');
+            el.querySelector('.pull-detail').textContent = reason;
+            var btn = el.querySelector('.repull-skip-btn');
+            if (btn) btn.remove();
+            addRetryButton(cardId, el.dataset.backendId, el.dataset.model);
+        }
+        onDone();
+    }
+
+    // Wire up the skip button
+    var el = document.getElementById(cardId);
+    if (el) {
+        var skipBtn = el.querySelector('.repull-skip-btn');
+        if (skipBtn) {
+            skipBtn.addEventListener('click', function() { doSkip('Manually skipped'); });
+        }
+    }
+
+    var interval = setInterval(function() {
+        // Check for staleness
+        if (Date.now() - lastChangeTime > REPULL_STALE_TIMEOUT_MS) {
+            doSkip('Auto-skipped: no progress for 2 minutes');
+            return;
+        }
+
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull/' + jobId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (skipped) return;
+            var el = document.getElementById(cardId);
+            if (!el) { clearInterval(interval); return; }
+
+            var statusBadge = el.querySelector('.pull-status');
+            var bar = el.querySelector('.progress-bar');
+            var detail = el.querySelector('.pull-detail');
+
+            // Track progress changes for staleness detection
+            var curProgressStr = JSON.stringify(data.progress || {});
+            if (curProgressStr !== lastProgressStr) {
+                lastProgressStr = curProgressStr;
+                lastChangeTime = Date.now();
+            }
+
+            if (data.progress && data.progress.total && data.progress.completed) {
+                var pct = Math.round((data.progress.completed / data.progress.total) * 100);
+                bar.style.width = pct + '%';
+                bar.textContent = pct + '%';
+            }
+            if (data.progress && data.progress.status) {
+                detail.textContent = data.progress.status;
+            }
+
+            if (data.status === 'success') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-success pull-status';
+                statusBadge.textContent = 'complete';
+                bar.style.width = '100%';
+                bar.textContent = '100%';
+                bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+                bar.classList.add('bg-success');
+                var btn = el.querySelector('.repull-skip-btn');
+                if (btn) btn.remove();
+                onDone();
+            } else if (data.status === 'error') {
+                clearInterval(interval);
+                statusBadge.className = 'badge bg-danger pull-status';
+                statusBadge.textContent = 'error';
+                bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+                bar.classList.add('bg-danger');
+                detail.textContent = data.error || 'Pull failed';
+                var btn = el.querySelector('.repull-skip-btn');
+                if (btn) btn.remove();
+                addRetryButton(cardId, el.dataset.backendId, el.dataset.model);
+                onDone();
+            }
+        })
+        .catch(function() { /* ignore transient */ });
+    }, 2000);
+}
+
+function addRetryButton(cardId, backendId, model) {
+    var el = document.getElementById(cardId);
+    if (!el) return;
+    // Remove existing retry button if any
+    var existing = el.querySelector('.repull-retry-btn');
+    if (existing) existing.remove();
+
+    var btn = document.createElement('button');
+    btn.className = 'btn btn-outline-primary btn-sm ms-2 repull-retry-btn';
+    btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> Retry';
+    btn.style.fontSize = '0.7rem';
+    btn.style.padding = '0 6px';
+    btn.addEventListener('click', function() {
+        btn.remove();
+        var statusBadge = el.querySelector('.pull-status');
+        var bar = el.querySelector('.progress-bar');
+        var detail = el.querySelector('.pull-detail');
+
+        // Reset card to pulling state
+        statusBadge.className = 'badge bg-info pull-status';
+        statusBadge.textContent = 'retrying...';
+        bar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+        bar.style.width = '0%';
+        bar.textContent = '0%';
+        detail.textContent = '';
+
+        // Add skip button
+        var skipBtn = document.createElement('button');
+        skipBtn.className = 'btn btn-outline-warning btn-sm ms-2 repull-skip-btn';
+        skipBtn.innerHTML = '<i class="bi bi-skip-forward"></i> Skip';
+        skipBtn.style.fontSize = '0.7rem';
+        skipBtn.style.padding = '0 6px';
+        statusBadge.after(skipBtn);
+
+        fetch('/api/admin/backends/' + backendId + '/ollama/pull', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({model: model})
+        })
+        .then(function(r) {
+            if (!r.ok) {
+                return r.json().then(function(d) { throw new Error(d.detail || 'HTTP ' + r.status); });
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            if (data.job_id) {
+                pollRepullProgress(backendId, data.job_id, cardId, function() {
+                    // Update overall count on success/error
+                    _updateRepullOverallForRetry();
+                });
+            } else {
+                statusBadge.className = 'badge bg-danger pull-status';
+                statusBadge.textContent = 'error';
+                detail.textContent = data.detail || data.error || 'No job_id returned';
+                var skip = el.querySelector('.repull-skip-btn');
+                if (skip) skip.remove();
+                addRetryButton(cardId, backendId, model);
+            }
+        })
+        .catch(function(err) {
+            statusBadge.className = 'badge bg-danger pull-status';
+            statusBadge.textContent = 'error';
+            bar.classList.remove('progress-bar-striped', 'progress-bar-animated');
+            detail.textContent = err.message || err.toString();
+            var skip = el.querySelector('.repull-skip-btn');
+            if (skip) skip.remove();
+            addRetryButton(cardId, backendId, model);
+        });
+    });
+    el.querySelector('.pull-status').after(btn);
+}
+
+function _updateRepullOverallForRetry() {
+    // Single source of truth: recount from DOM badges
+    var allStatuses = document.querySelectorAll('#ollamaOpResult .pull-status');
+    var done = 0;
+    var total = 0;
+    allStatuses.forEach(function(badge) {
+        total++;
+        var txt = badge.textContent;
+        if (txt === 'complete' || txt === 'error' || txt === 'skipped') done++;
+    });
+    var bar = document.getElementById('repull-overall-bar');
+    var countEl = document.getElementById('repull-overall-count');
+    if (bar && countEl) {
+        var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        bar.style.width = pct + '%';
+        bar.textContent = pct + '%';
+        countEl.textContent = done + ' / ' + total;
+        if (done >= total) {
+            bar.classList.remove('progress-bar-animated');
+            bar.classList.add('bg-success');
+            document.getElementById('ollamaOpSpinner').classList.add('d-none');
+            document.getElementById('ollamaOpFooter').classList.remove('d-none');
+            document.getElementById('repullAllBtn').disabled = false;
+        } else {
+            bar.classList.remove('bg-success');
+            bar.classList.add('progress-bar-animated');
+        }
+    }
+}
+
+function deleteModel(backendId, modelName) {
+    if (!confirm('Delete "' + modelName + '" from backend #' + backendId + '?\n\nThis cannot be undone.')) return;
+
+    _showOpModal('Deleting Model');
+    document.getElementById('ollamaOpStatus').textContent = 'Deleting "' + modelName + '" from backend #' + backendId + '...';
+
+    fetch('/api/admin/backends/' + backendId + '/ollama/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({model: modelName})
+    })
+    .then(function(r) {
+        if (r.ok) return r.json();
+        return r.json().then(function(d) { throw new Error(d.detail || 'Delete failed'); });
+    })
+    .then(function() {
+        _opDone('<i class="bi bi-check-circle"></i> Successfully deleted <strong>' + modelName + '</strong> from backend #' + backendId + '.', false);
+    })
+    .catch(function(err) {
+        _opDone('<i class="bi bi-x-circle"></i> Delete failed: ' + err.message, true);
+    });
+}
+</script>
+{% endblock %}

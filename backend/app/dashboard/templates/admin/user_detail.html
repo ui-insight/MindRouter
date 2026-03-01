@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+
+{% block title %}{{ detail_user.username }} - User Detail - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "users" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h1><i class="bi bi-person"></i> {{ detail_user.username }}</h1>
+                    <p class="text-muted mb-0">{{ detail_user.email }}</p>
+                </div>
+                <div>
+                    <form method="post" action="/admin/masquerade/{{ detail_user.id }}" class="d-inline me-2">
+                        <button type="submit" class="btn btn-outline-warning" title="View the dashboard and chat as this user">
+                            <i class="bi bi-eye"></i> Masquerade
+                        </button>
+                    </form>
+                    <a href="/admin/users" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Back to Users</a>
+                </div>
+            </div>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                User {{ success }} successfully.
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <div class="row mb-4">
+                <!-- Profile Card -->
+                <div class="col-md-6 mb-3">
+                    <div class="card h-100">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span><i class="bi bi-person-badge"></i> Profile</span>
+                            <button class="btn btn-sm btn-outline-primary" data-bs-toggle="collapse" data-bs-target="#editProfile" aria-expanded="false" aria-controls="editProfile">
+                                <i class="bi bi-pencil"></i> Edit
+                            </button>
+                        </div>
+                        <div class="card-body">
+                            <dl class="row mb-0">
+                                <dt class="col-sm-4">Full Name</dt>
+                                <dd class="col-sm-8">{{ detail_user.full_name or '-' }}</dd>
+                                <dt class="col-sm-4">Username</dt>
+                                <dd class="col-sm-8">{{ detail_user.username }}</dd>
+                                <dt class="col-sm-4">Email</dt>
+                                <dd class="col-sm-8">{{ detail_user.email }}</dd>
+                                <dt class="col-sm-4">Group</dt>
+                                <dd class="col-sm-8">
+                                    {% if detail_user.group %}
+                                    <span class="badge {% if detail_user.group.is_admin %}bg-danger{% else %}bg-primary{% endif %}">{{ detail_user.group.display_name }}</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary">None</span>
+                                    {% endif %}
+                                </dd>
+                                <dt class="col-sm-4">College</dt>
+                                <dd class="col-sm-8">{{ detail_user.college or '-' }}</dd>
+                                <dt class="col-sm-4">Department</dt>
+                                <dd class="col-sm-8">{{ detail_user.department or '-' }}</dd>
+                                <dt class="col-sm-4">Intended Use</dt>
+                                <dd class="col-sm-8">{{ detail_user.intended_use or '-' }}</dd>
+                                <dt class="col-sm-4">Status</dt>
+                                <dd class="col-sm-8">
+                                    <span class="badge {% if detail_user.is_active %}bg-success{% else %}bg-secondary{% endif %}">
+                                        {{ 'Active' if detail_user.is_active else 'Inactive' }}
+                                    </span>
+                                </dd>
+                                <dt class="col-sm-4">Created</dt>
+                                <dd class="col-sm-8">{{ detail_user.created_at|localtime }}</dd>
+                                <dt class="col-sm-4">Last Login</dt>
+                                <dd class="col-sm-8">{{ detail_user.last_login_at|localtime if detail_user.last_login_at else 'Never' }}</dd>
+                            </dl>
+                        </div>
+
+                        <!-- Edit Profile Form (collapsed) -->
+                        <div class="collapse" id="editProfile">
+                            <div class="card-body border-top">
+                                <form method="POST" action="/admin/users/{{ detail_user.id }}/edit">
+                                    <div class="mb-3">
+                                        <label for="group_id" class="form-label">Group</label>
+                                        <select class="form-select" id="group_id" name="group_id">
+                                            {% for g in groups %}
+                                            <option value="{{ g.id }}" {% if detail_user.group_id == g.id %}selected{% endif %}>{{ g.display_name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="full_name" class="form-label">Full Name</label>
+                                        <input type="text" class="form-control" id="full_name" name="full_name" value="{{ detail_user.full_name or '' }}">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="college" class="form-label">College</label>
+                                        <input type="text" class="form-control" id="college" name="college" value="{{ detail_user.college or '' }}">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="department" class="form-label">Department</label>
+                                        <input type="text" class="form-control" id="department" name="department" value="{{ detail_user.department or '' }}">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="intended_use" class="form-label">Intended Use</label>
+                                        <textarea class="form-control" id="intended_use" name="intended_use" rows="2">{{ detail_user.intended_use or '' }}</textarea>
+                                    </div>
+                                    {% if stats.quota %}
+                                    <hr>
+                                    <h6>Quota Overrides</h6>
+                                    <div class="row">
+                                        <div class="col-md-6 mb-3">
+                                            <label for="rpm_limit" class="form-label">RPM Limit</label>
+                                            <input type="number" class="form-control" id="rpm_limit" name="rpm_limit" value="{{ stats.quota.rpm_limit }}">
+                                        </div>
+                                        <div class="col-md-6 mb-3">
+                                            <label for="max_concurrent" class="form-label">Max Concurrent</label>
+                                            <input type="number" class="form-control" id="max_concurrent" name="max_concurrent" value="{{ stats.quota.max_concurrent }}">
+                                        </div>
+                                        <div class="col-md-6 mb-3">
+                                            <label for="weight_override" class="form-label">Weight Override</label>
+                                            <input type="number" class="form-control" id="weight_override" name="weight_override" value="{{ stats.quota.weight_override or '' }}" placeholder="Leave blank for group default">
+                                        </div>
+                                    </div>
+                                    {% endif %}
+                                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Usage Stats -->
+                <div class="col-md-6 mb-3">
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <div class="card card-stat primary h-100">
+                                <div class="card-body">
+                                    <h2 class="card-subtitle h6 mb-2 text-muted">Lifetime Token Usage</h2>
+                                    <p class="card-title h3 mb-0">{{ "{:,}".format(stats.total_tokens) }}</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <div class="card card-stat success h-100">
+                                <div class="card-body">
+                                    <h2 class="card-subtitle h6 mb-2 text-muted">Total Requests</h2>
+                                    <p class="card-title h3 mb-0">{{ "{:,}".format(stats.request_count) }}</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <div class="card card-stat warning h-100">
+                                <div class="card-body">
+                                    <h2 class="card-subtitle h6 mb-2 text-muted">API Keys</h2>
+                                    <p class="card-title h3 mb-0">{{ stats.api_key_count }}</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <div class="card h-100">
+                                <div class="card-body">
+                                    <h2 class="card-subtitle h6 mb-2 text-muted">Quota Token Usage</h2>
+                                    {% if stats.quota %}
+                                    {% set grp_budget = detail_user.group.token_budget if detail_user.group else 0 %}
+                                    {% if grp_budget == 0 %}
+                                    <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / Unlimited</p>
+                                    {% else %}
+                                    {% set usage_pct = (stats.quota.tokens_used / grp_budget * 100) if grp_budget > 0 else 0 %}
+                                    <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / {{ "{:,}".format(grp_budget) }}</p>
+                                    <div class="progress" style="height: 6px;">
+                                        <div class="progress-bar {% if usage_pct >= 90 %}bg-danger{% elif usage_pct >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_pct }}%" aria-valuenow="{{ usage_pct }}" aria-valuemin="0" aria-valuemax="100" aria-label="Quota usage"></div>
+                                    </div>
+                                    {% endif %}
+                                    {% else %}
+                                    <p class="text-muted mb-0">No quota</p>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Favorite Models -->
+                    {% if stats.favorite_models %}
+                    <div class="card">
+                        <div class="card-header"><i class="bi bi-star"></i> Top Models</div>
+                        <div class="card-body">
+                            <ul class="list-group list-group-flush">
+                                {% for model, count in stats.favorite_models %}
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span>{{ model }}</span>
+                                    <span class="badge bg-primary rounded-pill">{{ count }}</span>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- API Keys -->
+            <div class="card mb-4">
+                <div class="card-header"><i class="bi bi-key"></i> API Keys</div>
+                <div class="card-body">
+                    {% if stats.api_keys %}
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <caption class="sr-only">User API keys</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Prefix</th>
+                                    <th scope="col">Name</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Last Used</th>
+                                    <th scope="col">Usage Count</th>
+                                    <th scope="col">Created</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for k in stats.api_keys %}
+                                <tr>
+                                    <td><code>{{ k.key_prefix }}...</code></td>
+                                    <td>{{ k.name }}</td>
+                                    <td><span class="badge {% if k.status.value == 'active' %}bg-success{% else %}bg-secondary{% endif %}">{{ k.status.value }}</span></td>
+                                    <td>{{ k.last_used_at|localtime if k.last_used_at else 'Never' }}</td>
+                                    <td>{{ "{:,}".format(k.usage_count) }}</td>
+                                    <td>{{ k.created_at|localtime('%Y-%m-%d') }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted mb-0">No API keys.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Recent IPs -->
+            {% if recent_ips %}
+            <div class="card mb-4">
+                <div class="card-header"><i class="bi bi-globe"></i> Recent IP Addresses (90 days)</div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <caption class="sr-only">Recent IP addresses</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">IP Address</th>
+                                    <th scope="col">Last Seen</th>
+                                    <th scope="col">Request Count</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for ip, last_seen, count in recent_ips %}
+                                <tr>
+                                    <td><code>{{ ip }}</code></td>
+                                    <td>{{ last_seen|localtime }}</td>
+                                    <td>{{ "{:,}".format(count) }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Monthly Usage Chart -->
+            {% if monthly_usage %}
+            <div class="card mb-4">
+                <div class="card-header"><i class="bi bi-bar-chart"></i> Monthly Token Usage</div>
+                <div class="card-body">
+                    <canvas id="usageChart" height="80" aria-label="Monthly token usage chart" role="img"></canvas>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+</script>
+{% if monthly_usage %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const ctx = document.getElementById('usageChart').getContext('2d');
+new Chart(ctx, {
+    type: 'bar',
+    data: {
+        labels: {{ monthly_usage|map(attribute='month')|list|tojson }},
+        datasets: [{
+            label: 'Tokens',
+            data: {{ monthly_usage|map(attribute='tokens')|list|tojson }},
+            backgroundColor: 'rgba(13, 110, 253, 0.5)',
+            borderColor: 'rgba(13, 110, 253, 1)',
+            borderWidth: 1,
+        }]
+    },
+    options: {
+        responsive: true,
+        scales: {
+            y: {
+                beginAtZero: true,
+                ticks: {
+                    callback: function(v) { return v.toLocaleString(); }
+                }
+            }
+        },
+        plugins: {
+            tooltip: {
+                callbacks: {
+                    label: function(ctx) { return ctx.parsed.y.toLocaleString() + ' tokens'; }
+                }
+            }
+        }
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

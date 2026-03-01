@@ -1,0 +1,75 @@
+<div class="col-md-2 sidebar py-3" style="background: var(--mr-sidebar-bg);">
+    <h6 class="px-3 text-muted">Admin Menu</h6>
+    <ul class="nav flex-column" role="navigation" aria-label="Admin navigation">
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'overview' %}active{% endif %}" href="/admin" {% if active == 'overview' %}aria-current="page"{% endif %}>
+                <i class="bi bi-speedometer2"></i> Overview
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'backends' %}active{% endif %}" href="/admin/backends" {% if active == 'backends' %}aria-current="page"{% endif %}>
+                <i class="bi bi-server"></i> Backends
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'models' %}active{% endif %}" href="/admin/models" {% if active == 'models' %}aria-current="page"{% endif %}>
+                <i class="bi bi-boxes"></i> Models
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'nodes' %}active{% endif %}" href="/admin/nodes" {% if active == 'nodes' %}aria-current="page"{% endif %}>
+                <i class="bi bi-hdd-rack"></i> Nodes
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'metrics' %}active{% endif %}" href="/admin/metrics" {% if active == 'metrics' %}aria-current="page"{% endif %}>
+                <i class="bi bi-gpu-card"></i> GPU Metrics
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'users' %}active{% endif %}" href="/admin/users" {% if active == 'users' %}aria-current="page"{% endif %}>
+                <i class="bi bi-people"></i> Users
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'groups' %}active{% endif %}" href="/admin/groups" {% if active == 'groups' %}aria-current="page"{% endif %}>
+                <i class="bi bi-collection"></i> Groups
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'api_keys' %}active{% endif %}" href="/admin/api-keys" {% if active == 'api_keys' %}aria-current="page"{% endif %}>
+                <i class="bi bi-key"></i> API Keys
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'requests' %}active{% endif %}" href="/admin/requests" {% if active == 'requests' %}aria-current="page"{% endif %}>
+                <i class="bi bi-inbox"></i> Requests
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'audit' %}active{% endif %}" href="/admin/audit" {% if active == 'audit' %}aria-current="page"{% endif %}>
+                <i class="bi bi-journal-text"></i> Audit Log
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'conversations' %}active{% endif %}" href="/admin/conversations" {% if active == 'conversations' %}aria-current="page"{% endif %}>
+                <i class="bi bi-chat-dots"></i> Conversations
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'chat_config' %}active{% endif %}" href="/admin/chat-config" {% if active == 'chat_config' %}aria-current="page"{% endif %}>
+                <i class="bi bi-chat-square-text"></i> Chat Config
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'blog' %}active{% endif %}" href="/admin/blog" {% if active == 'blog' %}aria-current="page"{% endif %}>
+                <i class="bi bi-pencil-square"></i> Blog Posts
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if active == 'settings' %}active{% endif %}" href="/admin/settings" {% if active == 'settings' %}aria-current="page"{% endif %}>
+                <i class="bi bi-gear"></i> Settings
+            </a>
+        </li>
+    </ul>
+</div>

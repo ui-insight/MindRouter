@@ -1,0 +1,143 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=mysql+pymysql://mindrouter:${MYSQL_PASSWORD:-mindrouter_password}@mariadb:3306/mindrouter
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
+      - ARTIFACT_STORAGE_PATH=/data/artifacts
+      - CHAT_FILES_PATH=/data/chat_files
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG=${DEBUG:-false}
+      - AZURE_AD_CLIENT_ID=${AZURE_AD_CLIENT_ID:-}
+      - AZURE_AD_CLIENT_SECRET=${AZURE_AD_CLIENT_SECRET:-}
+      - AZURE_AD_TENANT_ID=${AZURE_AD_TENANT_ID:-}
+      - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
+    volumes:
+      - artifact_data:/data/artifacts
+      - chat_data:/data/chat_files
+      - ./backend:/app/backend:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - mindrouter_network
+
+  mariadb:
+    image: mariadb:11.2
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-root_password}
+      - MYSQL_DATABASE=mindrouter
+      - MYSQL_USER=mindrouter
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-mindrouter_password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./mariadb/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - mindrouter_network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    networks:
+      - mindrouter_network
+
+  # Mock Ollama backend for development/testing
+  mock-ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    ports:
+      - "11434:11434"
+    environment:
+      - MOCK_ENGINE=ollama
+      - MOCK_PORT=11434
+    networks:
+      - mindrouter_network
+    profiles:
+      - dev
+
+  # Mock vLLM backend for development/testing
+  mock-vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    ports:
+      - "8001:8001"
+    environment:
+      - MOCK_ENGINE=vllm
+      - MOCK_PORT=8001
+    networks:
+      - mindrouter_network
+    profiles:
+      - dev
+
+  # GPU sidecar agent for per-GPU hardware metrics
+  gpu-sidecar:
+    build:
+      context: ./sidecar
+      dockerfile: Dockerfile.sidecar
+    ports:
+      - "8007:8007"
+    environment:
+      - GPU_AGENT_PORT=8007
+      - GPU_AGENT_HOST=0.0.0.0
+      - SIDECAR_SECRET_KEY=${SIDECAR_SECRET_KEY}
+    networks:
+      - mindrouter_network
+    profiles:
+      - gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  mariadb_data:
+  redis_data:
+  artifact_data:
+  chat_data:
+
+networks:
+  mindrouter_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.0.0/16
+          gateway: 10.101.0.1

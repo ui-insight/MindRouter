@@ -1,0 +1,1668 @@
+{% extends "base.html" %}
+
+{% block title %}Documentation - MindRouter2{% endblock %}
+
+{% block extra_css %}
+<style>
+    .docs-sidebar {
+        position: sticky;
+        top: 56px;
+        height: calc(100vh - 56px);
+        overflow-y: auto;
+        border-right: 1px solid #dee2e6;
+    }
+    .docs-sidebar .nav-link {
+        padding: 0.3rem 1rem;
+        font-size: 0.875rem;
+        color: #495057;
+    }
+    .docs-sidebar .nav-link:hover,
+    .docs-sidebar .nav-link.active {
+        color: #0d6efd;
+        font-weight: 500;
+    }
+    .docs-content h2 {
+        padding-top: 1rem;
+        margin-top: 2rem;
+        border-bottom: 1px solid #dee2e6;
+        padding-bottom: 0.5rem;
+    }
+    .docs-content h3 {
+        margin-top: 1.5rem;
+    }
+    .docs-content pre {
+        background: #1e1e1e;
+        color: #d4d4d4;
+        padding: 1rem;
+        border-radius: 0.375rem;
+        overflow-x: auto;
+    }
+    .docs-content table {
+        margin-bottom: 1rem;
+    }
+    .docs-content section:first-of-type h2 {
+        margin-top: 0;
+    }
+    .arch-diagram {
+        font-family: monospace;
+        font-size: 0.8rem;
+        line-height: 1.4;
+        white-space: pre;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-0">
+    <div class="row">
+        <!-- Sidebar TOC -->
+        <nav class="col-md-2 docs-sidebar bg-light py-3" aria-label="Documentation navigation">
+            <h6 class="px-3 text-muted mb-3"><i class="bi bi-book"></i> Contents</h6>
+            <ul class="nav flex-column">
+                <li class="nav-item"><a class="nav-link" href="#overview">Overview</a></li>
+                <li class="nav-item"><a class="nav-link" href="#architecture">Architecture</a></li>
+                <li class="nav-item"><a class="nav-link" href="#getting-started">Getting Started</a></li>
+                <li class="nav-item"><a class="nav-link" href="#api-reference">API Reference</a></li>
+                <li class="nav-item"><a class="nav-link" href="#web-dashboard">Web Dashboard</a></li>
+                <li class="nav-item"><a class="nav-link" href="#users-groups-quotas">Users, Groups &amp; Quotas</a></li>
+                <li class="nav-item"><a class="nav-link" href="#backend-management">Backend Management</a></li>
+                <li class="nav-item"><a class="nav-link" href="#scheduling-fair-share">Scheduling &amp; Fair Share</a></li>
+                <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
+                <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
+                <li class="nav-item"><a class="nav-link" href="#chat-system">Chat System</a></li>
+                <li class="nav-item"><a class="nav-link" href="#configuration-reference">Configuration Reference</a></li>
+                <li class="nav-item"><a class="nav-link" href="#deployment">Deployment</a></li>
+                <li class="nav-item"><a class="nav-link" href="#testing">Testing</a></li>
+            </ul>
+        </nav>
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-4 px-4 docs-content">
+            <h1 class="mb-3"><i class="bi bi-book"></i> MindRouter2 Documentation</h1>
+            <p class="lead">MindRouter2 is a production-ready <strong>LLM inference load balancer and translation layer</strong> that fronts a heterogeneous cluster of <strong>Ollama</strong> and <strong>vLLM</strong> inference backends. It provides a unified OpenAI-compatible API surface with native Ollama compatibility, fair-share scheduling, per-user quotas, full audit logging, and real-time GPU telemetry.</p>
+            <p class="text-muted"><strong>Developed by</strong> Luke Sheneman, Research Computing and Data Services (RCDS), Institute for Interdisciplinary Data Sciences (IIDS), University of Idaho.</p>
+
+            <hr>
+
+            <!-- Section 1: Overview -->
+            <section id="overview">
+                <h2>Overview</h2>
+                <p>MindRouter2 sits between API consumers and GPU inference servers, providing:</p>
+                <ul>
+                    <li><strong>Unified API Gateway</strong> &mdash; OpenAI-compatible <code>/v1/*</code>, Ollama-compatible <code>/api/*</code>, and Anthropic-compatible <code>/anthropic/v1/*</code> endpoints, all backed by the same pool of inference servers.</li>
+                    <li><strong>Cross-Engine Routing</strong> &mdash; A request arriving in OpenAI, Ollama, or Anthropic format can be served by any backend. The translation layer handles all protocol conversion transparently.</li>
+                    <li><strong>Fair-Share Scheduling</strong> &mdash; Weighted Deficit Round Robin (WDRR) ensures equitable GPU access across users in different groups with configurable priorities.</li>
+                    <li><strong>Multi-Modal Support</strong> &mdash; Text chat, text completion, embeddings, multimodal models, structured JSON outputs, and tool calling (function calling).</li>
+                    <li><strong>Per-User Quotas</strong> &mdash; Token budgets, requests-per-minute limits, and concurrent request caps, with defaults inherited from the user's group.</li>
+                    <li><strong>Full Audit Logging</strong> &mdash; Every prompt, response, and token count is recorded for compliance and review.</li>
+                    <li><strong>Real-Time GPU Telemetry</strong> &mdash; Per-GPU utilization, memory, temperature, and power metrics via lightweight sidecar agents.</li>
+                    <li><strong>Web Dashboards</strong> &mdash; Public status page, user self-service dashboard, admin control panel, and built-in chat interface.</li>
+                </ul>
+
+                <h3>Who It's For</h3>
+                <ul>
+                    <li><strong>Research computing centers</strong> managing shared GPU clusters for multiple user groups</li>
+                    <li><strong>Universities</strong> providing LLM access to students, staff, and faculty with differentiated quotas</li>
+                    <li><strong>Organizations</strong> needing a unified API gateway across mixed Ollama/vLLM infrastructure</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Section 2: Architecture -->
+            <section id="architecture">
+                <h2>Architecture</h2>
+                <p>MindRouter2 follows a layered architecture:</p>
+                <pre><code class="arch-diagram">Client Request (OpenAI, Ollama, or Anthropic format)
+        |
+        v
++-----------------------------+
+|     API Gateway Layer       |  &larr; /v1/*, /api/*, /anthropic/*, /api/admin/*
++-----------------------------+
+|  Authentication &amp; Quotas    |  &larr; API key verification, rate limiting
++-----------------------------+
+|    Translation Layer        |  &larr; OpenAI/Ollama/Anthropic &harr; Canonical &harr; Ollama/vLLM
++-----------------------------+
+|   Fair-Share Scheduler      |  &larr; WDRR with per-user deficit counters
++-----------------------------+
+|    Backend Registry         |  &larr; Health monitoring, model tracking
++-----------------------------+
+        |
+        v
++---------------+-------------+
+|  GPU Node 1   |  GPU Node 2 |  ...
+|  +---------+  |  +--------+ |
+|  | Sidecar |  |  |Sidecar | |  &larr; Per-node GPU metrics agent
+|  +---------+  |  +--------+ |
+|  | Ollama  |  |  |  vLLM  | |  &larr; Inference engines
+|  +---------+  |  +--------+ |
++---------------+-------------+</code></pre>
+
+                <p><strong>Key concepts:</strong></p>
+                <ul>
+                    <li>A <strong>Node</strong> is a physical GPU server running a sidecar agent.</li>
+                    <li>A <strong>Backend</strong> is an inference endpoint (Ollama or vLLM instance) running on a node. Multiple backends can share a node, each assigned specific GPUs via <code>gpu_indices</code>.</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Section 3: Getting Started -->
+            <section id="getting-started">
+                <h2>Getting Started</h2>
+
+                <h3>Prerequisites</h3>
+                <ul>
+                    <li>Docker and Docker Compose</li>
+                    <li>Python 3.11+ (for local development)</li>
+                </ul>
+
+                <h3>Quickstart with Docker Compose</h3>
+                <pre><code># 1. Clone and configure
+git clone &lt;repository-url&gt;
+cd mindrouter2
+cp .env.example .env
+nano .env  # Set DATABASE_URL, SECRET_KEY, etc.
+
+# 2. Start all services
+docker compose up --build
+
+# 3. Run database migrations
+docker compose exec app alembic upgrade head
+
+# 4. Seed development data (creates users, quotas, API keys)
+docker compose exec app python scripts/seed_dev_data.py</code></pre>
+
+                <h3>Default Development Credentials</h3>
+                <p>After running the seed script:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Username</th><th>Password</th><th>Group</th><th>Scheduler Weight</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>admin</code></td><td><code>admin123</code></td><td>Admin</td><td>10</td></tr>
+                        <tr><td><code>faculty1</code></td><td><code>faculty123</code></td><td>Faculty</td><td>3</td></tr>
+                        <tr><td><code>staff1</code></td><td><code>staff123</code></td><td>Staff</td><td>2</td></tr>
+                        <tr><td><code>student1</code></td><td><code>student123</code></td><td>Students</td><td>1</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Accessing the Application</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>URL</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>http://localhost:8000/</code></td><td>Public status page</td></tr>
+                        <tr><td><code>http://localhost:8000/dashboard</code></td><td>User dashboard (login required)</td></tr>
+                        <tr><td><code>http://localhost:8000/admin</code></td><td>Admin dashboard (admin group required)</td></tr>
+                        <tr><td><code>http://localhost:8000/chat</code></td><td>Chat interface (login required)</td></tr>
+                        <tr><td><code>http://localhost:8000/docs</code></td><td>Interactive API docs (Swagger UI)</td></tr>
+                        <tr><td><code>http://localhost:8000/redoc</code></td><td>API reference (ReDoc)</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <hr>
+
+            <!-- Section 4: API Reference -->
+            <section id="api-reference">
+                <h2>API Reference</h2>
+
+                <h3>Interactive API Documentation</h3>
+                <p>MindRouter2 includes built-in interactive API documentation powered by FastAPI:</p>
+                <ul>
+                    <li><strong>Swagger UI</strong> at <a href="/docs"><code>/docs</code></a> &mdash; Interactive API explorer where you can try endpoints directly from your browser. Supports authentication via the "Authorize" button (enter your API key as a Bearer token).</li>
+                    <li><strong>ReDoc</strong> at <a href="/redoc"><code>/redoc</code></a> &mdash; Clean, readable API reference with request/response schemas and examples.</li>
+                </ul>
+                <p>Both are auto-generated from the application's route definitions and Pydantic models, so they always reflect the current API surface.</p>
+
+                <h3>Authentication</h3>
+                <p>All inference and admin endpoints require authentication. MindRouter2 supports two methods:</p>
+
+                <p><strong>API Key (Bearer Token):</strong></p>
+                <pre><code>curl -H "Authorization: Bearer mr2_your-api-key" http://localhost:8000/v1/models</code></pre>
+
+                <p><strong>API Key (Header):</strong></p>
+                <pre><code>curl -H "X-API-Key: mr2_your-api-key" http://localhost:8000/v1/models</code></pre>
+
+                <p><strong>Session Cookie</strong> (dashboard/admin AJAX only): Browser-based dashboard calls authenticate via the <code>mindrouter_session</code> cookie set at login. This is used internally by the web UI and is not intended for programmatic access.</p>
+
+                <h3>Error Responses</h3>
+                <p>All error responses follow a consistent format:</p>
+                <pre><code>{
+  "detail": "Human-readable error message"
+}</code></pre>
+                <p>Common HTTP status codes:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Code</th><th>Meaning</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>400</td><td>Invalid request body or parameters</td></tr>
+                        <tr><td>401</td><td>Missing or invalid API key</td></tr>
+                        <tr><td>403</td><td>Insufficient permissions (e.g., non-admin accessing admin endpoint)</td></tr>
+                        <tr><td>404</td><td>Resource not found</td></tr>
+                        <tr><td>409</td><td>Conflict (duplicate name, URL, etc.)</td></tr>
+                        <tr><td>429</td><td>Rate limit exceeded</td></tr>
+                        <tr><td>500</td><td>Internal server error</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>OpenAI-Compatible Endpoints</h3>
+                <p>These endpoints accept and return data in the OpenAI API format. Any OpenAI-compatible client or SDK can be pointed at MindRouter2 by changing the base URL.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/v1/chat/completions</code></td><td>API Key</td><td>Chat completions (streaming and non-streaming)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/completions</code></td><td>API Key</td><td>Text completions (legacy)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/embeddings</code></td><td>API Key</td><td>Generate embeddings</td></tr>
+                        <tr><td>POST</td><td><code>/v1/rerank</code></td><td>API Key</td><td>Rerank documents against a query</td></tr>
+                        <tr><td>POST</td><td><code>/v1/score</code></td><td>API Key</td><td>Score similarity between text pairs</td></tr>
+                        <tr><td>GET</td><td><code>/v1/models</code></td><td>API Key</td><td>List available models</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Chat Completions</h4>
+                <pre><code>curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3.2",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hello!"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 500,
+    "stream": false
+  }'</code></pre>
+
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "id": "chatcmpl-abc123...",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "llama3.2",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 10,
+    "total_tokens": 35
+  }
+}</code></pre>
+
+                <p><strong>Streaming</strong> &mdash; Set <code>"stream": true</code> to receive Server-Sent Events (SSE):</p>
+                <pre><code>curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'</code></pre>
+
+                <p><strong>Thinking/Reasoning Mode:</strong></p>
+                <p>MindRouter supports multiple formats for controlling thinking/reasoning on models that support it (qwen3.5, qwen3, gpt-oss):</p>
+                <pre><code>// gpt-oss: control reasoning depth
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [{"role": "user", "content": "Solve this step by step"}],
+  "reasoning_effort": "high",
+  "max_completion_tokens": 16384
+}
+
+// Qwen-style: toggle thinking on/off
+{
+  "model": "qwen/qwen3.5-400b",
+  "messages": [{"role": "user", "content": "Explain quantum computing"}],
+  "chat_template_kwargs": {"enable_thinking": true},
+  "max_completion_tokens": 16384
+}</code></pre>
+                <p>When thinking is enabled, the response includes <code>reasoning_content</code> alongside <code>content</code>.</p>
+                <div class="alert alert-warning">
+                    <strong>Important:</strong> Thinking models can consume large numbers of output tokens for reasoning. Use <code>max_completion_tokens</code> (or <code>max_tokens</code>) to set an adequate budget &mdash; 16384 is recommended for qwen3.5-400b with thinking enabled.
+                </div>
+
+                <p><strong>Output Token Limits:</strong></p>
+                <p>MindRouter accepts both <code>max_completion_tokens</code> (preferred, current OpenAI standard) and <code>max_tokens</code> (legacy). If both are provided, <code>max_completion_tokens</code> takes priority.</p>
+
+                <p><strong>Structured Output (JSON Mode):</strong></p>
+                <pre><code>{
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "List 3 colors as JSON"}],
+  "response_format": {"type": "json_object"}
+}</code></pre>
+
+                <p><strong>Structured Output (JSON Schema):</strong></p>
+                <pre><code>{
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "List 3 colors"}],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "colors",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "colors": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}</code></pre>
+
+                <p><strong>Vision (Multimodal):</strong></p>
+                <pre><code>{
+  "model": "llava",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What's in this image?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+      ]
+    }
+  ]
+}</code></pre>
+
+                <p><strong>Tool Calling (Function Calling):</strong></p>
+                <pre><code>{
+  "model": "llama3.2",
+  "messages": [{"role": "user", "content": "What's the weather in Seattle?"}],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "Get the current weather",
+      "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+      }
+    }
+  }],
+  "tool_choice": "auto"
+}</code></pre>
+                <p>When the model decides to call a tool, the response includes <code>tool_calls</code> with <code>finish_reason: "tool_calls"</code>. Submit the tool result back as a <code>role: "tool"</code> message with the matching <code>tool_call_id</code>.</p>
+
+                <h4>Embeddings</h4>
+                <pre><code>curl -X POST http://localhost:8000/v1/embeddings \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "nomic-embed-text", "input": "Hello world"}'</code></pre>
+
+                <h4>Reranking</h4>
+                <pre><code>curl -X POST http://localhost:8000/v1/rerank \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-Reranker-8B",
+    "query": "What is machine learning?",
+    "documents": [
+      "Machine learning is a subset of AI.",
+      "The weather is sunny today.",
+      "Deep learning uses neural networks."
+    ],
+    "top_n": 2
+  }'</code></pre>
+
+                <h4>Scoring</h4>
+                <pre><code>curl -X POST http://localhost:8000/v1/score \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-Reranker-8B",
+    "text_1": "What is machine learning?",
+    "text_2": ["Machine learning is a subset of AI.", "The weather is sunny today."]
+  }'</code></pre>
+
+                <h4>List Models</h4>
+                <pre><code>curl http://localhost:8000/v1/models \
+  -H "Authorization: Bearer mr2_your-api-key"</code></pre>
+
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "object": "list",
+  "data": [
+    {
+      "id": "llama3.3:70b",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "mindrouter",
+      "capabilities": {
+        "multimodal": false,
+        "embeddings": false,
+        "structured_output": true,
+        "thinking": false
+      },
+      "backends": ["node1-gpu0", "node1-gpu2"],
+      "context_length": 32768,
+      "model_max_context": 131072,
+      "parameter_count": "70B",
+      "quantization": "Q4_K_M",
+      "family": "llama"
+    }
+  ]
+}</code></pre>
+                <p>Fields include:</p>
+                <ul>
+                    <li><code>context_length</code> &mdash; effective context window (num_ctx injected per request)</li>
+                    <li><code>model_max_context</code> &mdash; architectural maximum context the model supports</li>
+                    <li><code>parameter_count</code> &mdash; model size (e.g. "7B", "70B")</li>
+                    <li><code>quantization</code> &mdash; quantization level (e.g. "Q4_K_M", "FP16")</li>
+                    <li><code>family</code> &mdash; model family (e.g. "llama", "qwen2")</li>
+                    <li><code>capabilities.thinking</code> &mdash; whether the model supports thinking/reasoning mode</li>
+                </ul>
+
+                <h3>Ollama-Compatible Endpoints</h3>
+                <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter2 as a drop-in replacement.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/api/chat</code></td><td>API Key</td><td>Ollama chat (streaming by default)</td></tr>
+                        <tr><td>POST</td><td><code>/api/generate</code></td><td>API Key</td><td>Ollama text generation</td></tr>
+                        <tr><td>POST</td><td><code>/api/embeddings</code></td><td>API Key</td><td>Ollama embeddings</td></tr>
+                        <tr><td>GET</td><td><code>/api/tags</code></td><td>API Key</td><td>List models (Ollama format)</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>List Models (Ollama Format)</h4>
+                <pre><code>curl http://localhost:8000/api/tags \
+  -H "Authorization: Bearer mr2_your-api-key"</code></pre>
+
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "models": [
+    {
+      "name": "llama3.3:70b",
+      "model": "llama3.3:70b",
+      "modified_at": "2026-02-28T12:00:00",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "llama",
+        "parameter_size": "70B",
+        "quantization_level": "Q4_K_M"
+      },
+      "context_length": 32768,
+      "model_max_context": 131072
+    }
+  ]
+}</code></pre>
+
+                <h4>Ollama Chat</h4>
+                <pre><code>curl -X POST http://localhost:8000/api/chat \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3.2",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": false
+  }'</code></pre>
+                <p><strong>Note:</strong> Ollama defaults to <code>stream: true</code>. Set <code>"stream": false</code> explicitly for non-streaming responses.</p>
+
+                <p><strong>Thinking/Reasoning Mode (Ollama):</strong></p>
+                <p>Use the <code>think</code> field at the top level:</p>
+                <pre><code>// Qwen-style: boolean toggle
+{"model": "qwen3-32k:32b", "messages": [...], "think": true, "stream": false}
+
+// gpt-oss: string effort level
+{"model": "gpt-oss-32k:120b", "messages": [...], "think": "high", "stream": false}</code></pre>
+                <p>The response includes a <code>thinking</code> field in the message. For <code>/api/generate</code>, thinking content appears as a top-level <code>thinking</code> field alongside <code>response</code>.</p>
+
+                <h4>Ollama Generate</h4>
+                <pre><code>curl -X POST http://localhost:8000/api/generate \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2", "prompt": "Why is the sky blue?"}'</code></pre>
+
+                <h3>Anthropic-Compatible Endpoint</h3>
+                <p>This endpoint accepts and returns data in the Anthropic Messages API format. Anthropic SDK clients (Python, TypeScript) can be pointed at MindRouter2 by setting <code>base_url</code>.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/anthropic/v1/messages</code></td><td>API Key</td><td>Anthropic Messages API (streaming and non-streaming)</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Messages</h4>
+                <pre><code>curl -X POST http://localhost:8000/anthropic/v1/messages \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3.2",
+    "max_tokens": 500,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'</code></pre>
+
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "id": "msg_abc123...",
+  "type": "message",
+  "role": "assistant",
+  "model": "llama3.2",
+  "content": [
+    {"type": "text", "text": "Hello! How can I help you today?"}
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 12
+  }
+}</code></pre>
+
+                <p><strong>Streaming</strong> &mdash; Set <code>"stream": true</code> to receive Anthropic SSE events (<code>message_start</code>, <code>content_block_delta</code>, <code>message_stop</code>, etc.):</p>
+                <pre><code>curl -X POST http://localhost:8000/anthropic/v1/messages \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "llama3.2", "max_tokens": 500, "messages": [{"role": "user", "content": "Hi"}], "stream": true}'</code></pre>
+
+                <p><strong>System Prompt:</strong></p>
+                <pre><code>{
+  "model": "llama3.2",
+  "max_tokens": 500,
+  "system": "You are a helpful assistant.",
+  "messages": [{"role": "user", "content": "Hello!"}]
+}</code></pre>
+
+                <h4>SDK Usage (Python)</h4>
+                <pre><code>import anthropic
+client = anthropic.Anthropic(
+    base_url="http://localhost:8000/anthropic",
+    api_key="mr2_your-api-key",
+)
+message = client.messages.create(
+    model="llama3.2",
+    max_tokens=500,
+    messages=[{"role": "user", "content": "Hello!"}],
+)</code></pre>
+
+                <p><strong>Supported features:</strong></p>
+                <ul>
+                    <li>System prompts (string or content block array)</li>
+                    <li>Multimodal inputs (base64 and URL images)</li>
+                    <li>Tool calling &mdash; <code>tools</code> with <code>input_schema</code>, <code>tool_choice</code> (<code>auto</code>/<code>any</code>/<code>tool</code>), <code>tool_use</code>/<code>tool_result</code> content blocks, streaming tool use with <code>input_json_delta</code></li>
+                    <li>Thinking/reasoning mode (<code>thinking.type</code>: <code>enabled</code>, <code>adaptive</code>, <code>disabled</code>)</li>
+                    <li>Structured output via <code>output_config.format</code> with <code>type: "json_schema"</code></li>
+                    <li>Parameters: <code>max_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>stop_sequences</code>, <code>stream</code></li>
+                    <li><code>metadata.user_id</code> mapping</li>
+                </ul>
+                <p><strong>Note:</strong> This is inbound-only &mdash; there are no Anthropic backends. Requests are translated to canonical format and routed to Ollama/vLLM backends like any other request.</p>
+
+                <h3>Health &amp; Metrics Endpoints</h3>
+                <p>These endpoints are unauthenticated and intended for monitoring infrastructure.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/healthz</code></td><td>None</td><td>Liveness probe (always 200 if app is running)</td></tr>
+                        <tr><td>GET</td><td><code>/readyz</code></td><td>None</td><td>Readiness probe (checks DB + healthy backends)</td></tr>
+                        <tr><td>GET</td><td><code>/metrics</code></td><td>None</td><td>Prometheus metrics (text format)</td></tr>
+                        <tr><td>GET</td><td><code>/status</code></td><td>None</td><td>Cluster status summary (JSON)</td></tr>
+                        <tr><td>GET</td><td><code>/api/cluster/total-tokens</code></td><td>None</td><td>Total tokens ever served (cached 10s)</td></tr>
+                        <tr><td>GET</td><td><code>/api/cluster/trends</code></td><td>None</td><td>Token and active-user trends (<code>?range=hour|day|week|month|year</code>)</td></tr>
+                        <tr><td>GET</td><td><code>/api/cluster/throughput</code></td><td>None</td><td>Token throughput, requests/min, active requests</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Prometheus Metrics</h4>
+                <p>The <code>/metrics</code> endpoint exposes the following Prometheus metrics:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Metric</th><th>Type</th><th>Labels</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>mindrouter_requests_total</code></td><td>Counter</td><td><code>endpoint</code>, <code>status</code></td><td>Total requests processed</td></tr>
+                        <tr><td><code>mindrouter_request_latency_seconds</code></td><td>Histogram</td><td><code>endpoint</code></td><td>Request latency</td></tr>
+                        <tr><td><code>mindrouter_queue_size</code></td><td>Gauge</td><td>&mdash;</td><td>Current scheduler queue depth</td></tr>
+                        <tr><td><code>mindrouter_active_backends</code></td><td>Gauge</td><td>&mdash;</td><td>Number of healthy backends</td></tr>
+                        <tr><td><code>mindrouter_tokens_total</code></td><td>Counter</td><td><code>type</code> (prompt/completion)</td><td>Total tokens processed</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Admin API Endpoints</h3>
+                <p>All admin endpoints require membership in a group with <code>is_admin = true</code>. They are mounted under <code>/api/admin/</code>.</p>
+
+                <h4>Backend Management</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/api/admin/backends/register</code></td><td>Register a new inference backend</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/backends</code></td><td>List all backends</td></tr>
+                        <tr><td>PATCH</td><td><code>/api/admin/backends/{id}</code></td><td>Update backend properties</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/disable</code></td><td>Disable a backend</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/enable</code></td><td>Enable a disabled backend</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/refresh</code></td><td>Force-refresh capabilities and models</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/ollama/pull</code></td><td>Start pulling a model to an Ollama backend</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/backends/{id}/ollama/pull/{job_id}</code></td><td>Poll progress of an Ollama model pull</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/backends/{id}/ollama/delete</code></td><td>Delete a model from an Ollama backend</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Node Management</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/api/admin/nodes/register</code></td><td>Register a new GPU node</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/nodes</code></td><td>List all nodes</td></tr>
+                        <tr><td>PATCH</td><td><code>/api/admin/nodes/{id}</code></td><td>Update node properties</td></tr>
+                        <tr><td>DELETE</td><td><code>/api/admin/nodes/{id}</code></td><td>Delete a node (fails if backends reference it)</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/nodes/{id}/refresh</code></td><td>Force-refresh sidecar data</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>User Management</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/api/admin/users</code></td><td>List users (filterable by group, searchable by name/email)</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/users</code></td><td>Create a new user with group-based quota defaults</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/users/{id}</code></td><td>User detail with usage stats, API keys, monthly usage</td></tr>
+                        <tr><td>PATCH</td><td><code>/api/admin/users/{id}</code></td><td>Update user profile, group, and quota overrides</td></tr>
+                        <tr><td>DELETE</td><td><code>/api/admin/users/{id}</code></td><td>Hard-delete a user and all associated data</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/users/{id}/api-keys</code></td><td>Create an API key for a user</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Group Management</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/api/admin/groups</code></td><td>List all groups with user counts</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/groups</code></td><td>Create a new group with quota defaults</td></tr>
+                        <tr><td>PATCH</td><td><code>/api/admin/groups/{id}</code></td><td>Update group defaults (token budget, RPM, weight, etc.)</td></tr>
+                        <tr><td>DELETE</td><td><code>/api/admin/groups/{id}</code></td><td>Delete a group (fails if users are assigned)</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>API Key Management</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/api/admin/api-keys</code></td><td>List all API keys across users (searchable, filterable by status)</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Quota Management</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/api/admin/quota-requests</code></td><td>List pending quota increase requests</td></tr>
+                        <tr><td>POST</td><td><code>/api/admin/quota-requests/{id}/review</code></td><td>Approve or deny a quota request</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Conversations</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/admin/conversations/export</code></td><td>Export conversations as CSV or JSON (form-based, filterable)</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/conversations/export</code></td><td>Bulk API export (JSON with content, for programmatic access)</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Queue &amp; Audit</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/api/admin/queue</code></td><td>Scheduler queue statistics</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/audit/search</code></td><td>Search audit logs (filter by user, model, status, date, text)</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/audit/{id}</code></td><td>Full audit detail including prompt and response content</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Telemetry</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>GET</td><td><code>/api/admin/telemetry/overview</code></td><td>Cluster-wide telemetry (nodes, backends, GPUs)</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/telemetry/latest</code></td><td>Lightweight polling endpoint for dashboard</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/telemetry/backends/{id}/history</code></td><td>Time-series telemetry for a backend</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/telemetry/gpus/{id}/history</code></td><td>Time-series telemetry for a GPU device</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/telemetry/nodes/{id}/history</code></td><td>Aggregated time-series for a node (all GPUs)</td></tr>
+                        <tr><td>GET</td><td><code>/api/admin/telemetry/export</code></td><td>Export raw telemetry as JSON or CSV</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <hr>
+
+            <!-- Section 5: Web Dashboard -->
+            <section id="web-dashboard">
+                <h2>Web Dashboard</h2>
+                <p>MindRouter2 includes a full web dashboard built with Bootstrap 5. All pages extend a common base template with navigation and accessibility features (WCAG 2.1 Level AA).</p>
+
+                <h3>Public Pages</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Page</th><th>URL</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Cluster Status</td><td><code>/</code></td><td>Shows healthy backend count, available models, queue size, and overall cluster status</td></tr>
+                        <tr><td>Login</td><td><code>/login</code></td><td>Username/password authentication (Azure AD SSO when configured)</td></tr>
+                        <tr><td>Request API Key</td><td><code>/request-api-key</code></td><td>Form for unauthenticated users to request an API key</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>User Dashboard</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Page</th><th>URL</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Dashboard</td><td><code>/dashboard</code></td><td>Token usage progress bar, active API keys, quota usage history</td></tr>
+                        <tr><td>Request Quota</td><td><code>/dashboard/request-quota</code></td><td>Submit a quota increase request with justification</td></tr>
+                        <tr><td>Key Created</td><td>(after creation)</td><td>Displays the full API key once (copy-to-clipboard)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Admin Dashboard</h3>
+                <p>The admin dashboard has a persistent sidebar with links to all admin pages. Access requires membership in a group with <code>is_admin = true</code>.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Page</th><th>URL</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Overview</td><td><code>/admin</code></td><td>System metrics overview, health alert banner for unhealthy backends/offline nodes, pending request badges</td></tr>
+                        <tr><td>Backends</td><td><code>/admin/backends</code></td><td>Backend health, models, enable/disable/drain controls</td></tr>
+                        <tr><td>Nodes</td><td><code>/admin/nodes</code></td><td>GPU node management, sidecar status, hardware specs</td></tr>
+                        <tr><td>GPU Metrics</td><td><code>/admin/metrics</code></td><td>Real-time GPU utilization, memory, temperature, power charts with time range controls</td></tr>
+                        <tr><td>Users</td><td><code>/admin/users</code></td><td>User accounts with search, group filter, and pagination</td></tr>
+                        <tr><td>User Detail</td><td><code>/admin/users/{id}</code></td><td>Individual user profile, usage stats, API keys, monthly usage chart, quota overrides, masquerade (view dashboard as user)</td></tr>
+                        <tr><td>Groups</td><td><code>/admin/groups</code></td><td>Group management: create, edit, delete groups with quota defaults and scheduler weights</td></tr>
+                        <tr><td>API Keys</td><td><code>/admin/api-keys</code></td><td>All API keys across users with search, status filter, and pagination</td></tr>
+                        <tr><td>Requests</td><td><code>/admin/requests</code></td><td>Pending API key and quota increase requests, approve/deny</td></tr>
+                        <tr><td>Audit Log</td><td><code>/admin/audit</code></td><td>Inference request history with filtering and search</td></tr>
+                        <tr><td>Conversations</td><td><code>/admin/conversations</code></td><td>Browse and export all user conversations</td></tr>
+                        <tr><td>Site Settings</td><td><code>/admin/settings</code></td><td>Global settings: display timezone, Ollama context length enforcement</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Chat Interface</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Page</th><th>URL</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Chat</td><td><code>/chat</code></td><td>Full-featured chat UI with model selection, streaming, file upload, multimodal support</td></tr>
+                    </tbody>
+                </table>
+                <p>The chat interface supports:</p>
+                <ul>
+                    <li>Collapsible conversation sidebar</li>
+                    <li>Model and backend selection</li>
+                    <li>Real-time streaming responses</li>
+                    <li>File upload via button or drag-and-drop anywhere in the chat window (images, PDFs, DOCX, XLSX, CSV, JSON, Markdown, etc.)</li>
+                    <li>Vision model support with automatic image handling</li>
+                    <li>Web search toggle &mdash; when enabled, queries the Brave Search API and injects results as context into the system prompt (requires <code>BRAVE_SEARCH_API_KEY</code>)</li>
+                    <li>Code syntax highlighting</li>
+                    <li>LaTeX rendering</li>
+                    <li>Message editing and deletion</li>
+                    <li>Dark mode toggle (stored in browser localStorage)</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Section 6: Users, Groups & Quotas -->
+            <section id="users-groups-quotas">
+                <h2>Users, Groups &amp; Quotas</h2>
+
+                <h3>Group System</h3>
+                <p>MindRouter2 uses a <strong>database-driven group system</strong> for authorization, quota defaults, and scheduler weights. Each user belongs to exactly one group. Groups are fully manageable via the admin UI at <code>/admin/groups</code>.</p>
+                <p>Admin privileges are determined by the group's <code>is_admin</code> flag. Users in an admin group can access the admin dashboard and admin API endpoints.</p>
+
+                <h3>Default Groups</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Group</th><th>Token Budget</th><th>RPM</th><th>Max Concurrent</th><th>Sched. Weight</th><th>Admin</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>students</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>No</td></tr>
+                        <tr><td><code>staff</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>No</td></tr>
+                        <tr><td><code>faculty</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>No</td></tr>
+                        <tr><td><code>researchers</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>No</td></tr>
+                        <tr><td><code>admin</code></td><td>10,000,000</td><td>1,000</td><td>50</td><td>10</td><td>Yes</td></tr>
+                        <tr><td><code>nerds</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>No</td></tr>
+                        <tr><td><code>other</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>No</td></tr>
+                    </tbody>
+                </table>
+                <p>These 7 groups are created automatically by the database migration. Admins can create additional groups, edit defaults, or delete empty groups via the admin UI or API.</p>
+
+                <h3>User Profiles</h3>
+                <p>Each user has the following profile fields (editable by admins at <code>/admin/users/{id}</code>):</p>
+                <ul>
+                    <li><strong>Username</strong> and <strong>Email</strong> &mdash; unique identifiers</li>
+                    <li><strong>Full Name</strong> &mdash; display name</li>
+                    <li><strong>Group</strong> &mdash; determines default quotas, scheduler weight, and admin access</li>
+                    <li><strong>College</strong> and <strong>Department</strong> &mdash; organizational affiliation</li>
+                    <li><strong>Intended Use</strong> &mdash; free-text description of how the user plans to use the service</li>
+                </ul>
+
+                <h3>Quota Inheritance &amp; Overrides</h3>
+                <p>When a user is created, their quota defaults are inherited from their group. Admins can override any quota value per-user:</p>
+                <ul>
+                    <li><strong>Token budget</strong> &mdash; inherited from group, overridable per user</li>
+                    <li><strong>RPM limit</strong> &mdash; inherited from group, overridable per user</li>
+                    <li><strong>Max concurrent</strong> &mdash; inherited from group, overridable per user</li>
+                    <li><strong>Weight override</strong> &mdash; if set, overrides the group's scheduler weight for this user</li>
+                </ul>
+
+                <h3>API Key Lifecycle</h3>
+                <ol>
+                    <li><strong>Generation</strong> &mdash; Keys use the format <code>mr2_&lt;random_urlsafe_base64&gt;</code> (48+ characters total).</li>
+                    <li><strong>Storage</strong> &mdash; The raw key is shown once at creation. Only the Argon2 hash and a prefix (<code>mr2_&lt;first 8 chars&gt;</code>) are stored in the database.</li>
+                    <li><strong>Verification</strong> &mdash; Lookup by prefix (fast), then full Argon2 hash verification.</li>
+                    <li><strong>Expiration</strong> &mdash; Optional <code>expires_at</code> timestamp.</li>
+                    <li><strong>Revocation</strong> &mdash; Keys can be revoked (soft-delete) without deleting the audit trail.</li>
+                    <li><strong>Usage tracking</strong> &mdash; <code>last_used_at</code> and <code>usage_count</code> updated atomically on each request.</li>
+                </ol>
+
+                <h3>Quota System</h3>
+                <p>Each user has a quota record with:</p>
+                <ul>
+                    <li><strong>Token budget</strong> &mdash; Total tokens allowed per period. Deducted on each completed request (prompt + completion tokens).</li>
+                    <li><strong>RPM limit</strong> &mdash; Maximum requests per minute.</li>
+                    <li><strong>Max concurrent</strong> &mdash; Maximum simultaneous in-flight requests.</li>
+                </ul>
+                <p>When a quota is exceeded, the request is rejected with HTTP 429.</p>
+
+                <h3>Quota Increase Requests</h3>
+                <p>Users can submit quota increase requests via the dashboard (<code>/dashboard/request-quota</code>). The request includes:</p>
+                <ul>
+                    <li>Desired token budget</li>
+                    <li>Written justification</li>
+                </ul>
+                <p>Admins review requests at <code>/admin/requests</code> or via <code>POST /api/admin/quota-requests/{id}/review</code>, which can approve (with a custom granted token amount) or deny the request.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 7: Backend Management -->
+            <section id="backend-management">
+                <h2>Backend Management</h2>
+
+                <h3>Node/Backend Model</h3>
+                <p>MindRouter2 separates the concept of physical GPU servers (<strong>Nodes</strong>) from inference endpoints (<strong>Backends</strong>):</p>
+                <ul>
+                    <li>A <strong>Node</strong> represents a physical server with GPUs and a sidecar agent.</li>
+                    <li>A <strong>Backend</strong> is an Ollama or vLLM instance running on a node.</li>
+                    <li>One node can host multiple backends, each assigned specific GPUs via <code>gpu_indices</code>.</li>
+                    <li>Backends without a <code>node_id</code> work as standalone endpoints (no GPU telemetry).</li>
+                </ul>
+                <pre><code>Node: gpu-server-1 (4x A100-80GB, sidecar at :8007)
++-- Backend: vllm-large  (gpu_indices: [0, 1])  &larr; uses GPUs 0-1
++-- Backend: vllm-small  (gpu_indices: [2])      &larr; uses GPU 2
++-- Backend: ollama-misc (gpu_indices: [3])      &larr; uses GPU 3</code></pre>
+
+                <h3>Supported Engines</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Engine</th><th>Health Check</th><th>Model Discovery</th><th>Telemetry Source</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><strong>Ollama</strong></td><td><code>GET /api/tags</code></td><td><code>GET /api/tags</code> + <code>POST /api/ps</code> (loaded models)</td><td>Sidecar agent</td></tr>
+                        <tr><td><strong>vLLM</strong></td><td><code>GET /health</code> (fallback: <code>GET /v1/models</code>)</td><td><code>GET /v1/models</code></td><td><code>GET /metrics</code> (Prometheus format)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Registration</h3>
+                <p><strong>Register a node:</strong></p>
+                <pre><code>curl -X POST http://localhost:8000/api/admin/nodes/register \
+  -H "Authorization: Bearer admin-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "gpu-server-1",
+    "hostname": "gpu1.example.com",
+    "sidecar_url": "http://gpu1.example.com:8007",
+    "sidecar_key": "your-sidecar-secret-key"
+  }'</code></pre>
+
+                <p><strong>Register a backend on that node:</strong></p>
+                <pre><code>curl -X POST http://localhost:8000/api/admin/backends/register \
+  -H "Authorization: Bearer admin-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "ollama-gpu1",
+    "url": "http://gpu1.example.com:11434",
+    "engine": "ollama",
+    "max_concurrent": 4,
+    "node_id": 1,
+    "gpu_indices": [0, 1]
+  }'</code></pre>
+
+                <h3>Enable/Disable/Drain/Refresh</h3>
+                <ul>
+                    <li><strong>Disable</strong> a backend to take it out of rotation without deleting it: <code>POST /api/admin/backends/{id}/disable</code></li>
+                    <li><strong>Enable</strong> to bring it back: <code>POST /api/admin/backends/{id}/enable</code></li>
+                    <li><strong>Drain</strong> for graceful offline maintenance: <code>POST /api/admin/backends/{id}/drain</code></li>
+                    <li><strong>Refresh</strong> to force re-discovery of models and capabilities: <code>POST /api/admin/backends/{id}/refresh</code></li>
+                </ul>
+
+                <h3>Drain Mode</h3>
+                <p><strong>Drain mode</strong> provides graceful backend shutdown for maintenance. When a backend is set to draining:</p>
+                <ol>
+                    <li>The scheduler stops routing <strong>new</strong> requests to the backend.</li>
+                    <li>All <strong>in-flight</strong> requests are allowed to complete normally.</li>
+                    <li>When the backend's queue depth reaches 0, it automatically transitions to <strong>disabled</strong>.</li>
+                </ol>
+                <p>This avoids abruptly killing active requests when you need to restart an inference engine, upgrade models, or perform node maintenance. Use it before upgrading vLLM, restarting Ollama, or taking a GPU node offline.</p>
+
+                <h3>Concurrency Alignment</h3>
+                <p>The <code>max_concurrent</code> value registered in MindRouter <strong>must match</strong> the concurrency limit on the inference engine:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Engine</th><th>Engine Setting</th><th>MindRouter Setting</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>vLLM</td><td><code>--max-num-seqs N</code></td><td><code>"max_concurrent": N</code></td></tr>
+                        <tr><td>Ollama</td><td><code>OLLAMA_NUM_PARALLEL=N</code></td><td><code>"max_concurrent": N</code></td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Why this matters:</strong> MindRouter uses <code>max_concurrent</code> to decide how many requests to route to a backend. If MindRouter thinks a backend can handle 8 concurrent requests but vLLM is configured with <code>--max-num-seqs 4</code>, the extra requests queue silently inside vLLM. MindRouter cannot see this hidden queue, so it continues routing requests there instead of spreading load to other backends. The result is uneven load distribution and unpredictable latency &mdash; the fair-share scheduler is effectively bypassed for those excess requests.</p>
+
+                <h3>Context Length (num_ctx)</h3>
+                <p>MindRouter automatically manages context length for Ollama backends:</p>
+                <ul>
+                    <li><strong>Auto-discovery</strong> &mdash; During model discovery, <code>context_length</code> is set to <code>min(model_max_context, 32768)</code> to prevent small models from consuming excessive VRAM. The architectural maximum is stored separately as <code>model_max_context</code>.</li>
+                    <li><strong>num_ctx injection</strong> &mdash; For every Ollama request, MindRouter injects <code>num_ctx</code> matching the model's configured <code>context_length</code>.</li>
+                    <li><strong>Enforcement toggle</strong> &mdash; By default, MindRouter overrides any user-supplied <code>num_ctx</code> to prevent GPU memory oversubscription. Admins can toggle this in Site Settings (<code>/admin/settings</code>) to allow users to set their own <code>num_ctx</code>.</li>
+                    <li><strong>Manual override</strong> &mdash; Admins can set <code>context_length_override</code> per model via the admin UI to use a custom value instead of the auto-discovered one.</li>
+                    <li><strong>Ollama 0.17+</strong> &mdash; Ollama automatically adjusts <code>num_ctx</code> downward if the requested value doesn't fit in GPU memory.</li>
+                </ul>
+                <p>vLLM backends handle context length natively via <code>--max-model-len</code> and do not need <code>num_ctx</code> injection.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 8: Scheduling & Fair Share -->
+            <section id="scheduling-fair-share">
+                <h2>Scheduling &amp; Fair Share</h2>
+                <p>MindRouter2 implements <strong>Weighted Deficit Round Robin (WDRR)</strong> to ensure fair GPU access across users.</p>
+
+                <h3>How It Works</h3>
+                <ol>
+                    <li><strong>Share weights</strong> are determined by the user's group (e.g., students=1, staff=2, faculty=3, admin=10). Per-user weight overrides are supported via the quota system.</li>
+                    <li>Each user has a <strong>deficit counter</strong> that tracks how much service debt they've accrued.</li>
+                    <li>On each scheduling round, users with the highest deficit (most underserved) are served first.</li>
+                    <li><strong>Burst credits</strong> allow full cluster utilization when the cluster is idle.</li>
+                    <li><strong>Heavy user deprioritization</strong> kicks in when a user exceeds their fair share within the fairness window.</li>
+                </ol>
+
+                <h3>Backend Scoring</h3>
+                <p>When multiple backends can serve a request, the scheduler scores them on:</p>
+                <ul>
+                    <li><strong>Model already loaded</strong> (+100 points) &mdash; avoids cold-loading the model</li>
+                    <li><strong>Low GPU utilization</strong> (+50 points) &mdash; prefers idle GPUs</li>
+                    <li><strong>Low latency</strong> (+40 points) &mdash; based on EMA of recent response times</li>
+                    <li><strong>Short queue</strong> (+30 points) &mdash; prefers backends with fewer queued requests</li>
+                    <li><strong>High throughput</strong> (+20 points) &mdash; based on recent tokens/second</li>
+                </ul>
+                <p>Hard constraints (multimodal capability, embedding support, model availability) are checked before soft scoring.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 9: Translation Layer -->
+            <section id="translation-layer">
+                <h2>Translation Layer</h2>
+                <p>MindRouter2's translation layer enables cross-engine routing: a request arriving in OpenAI, Ollama, or Anthropic format can be served by any Ollama or vLLM backend. All translation passes through a <strong>canonical internal schema</strong>.</p>
+
+                <h3>Request Flow</h3>
+                <pre><code>OpenAI Request    --&gt; OpenAIInTranslator    --&gt; CanonicalChatRequest
+                                                       |
+Ollama Request    --&gt; OllamaInTranslator    --&gt; CanonicalChatRequest
+                                                       |
+Anthropic Request --&gt; AnthropicInTranslator --&gt; CanonicalChatRequest
+                                                       |
+                                                       v
+                                                [Scheduler selects backend]
+                                                       |
+                           +---------------------------+-------------------+
+                           v                                               v
+                 OllamaOutTranslator                             VLLMOutTranslator
+                 (Ollama backend)                                (vLLM backend, OpenAI format)</code></pre>
+
+                <h3>Canonical Schemas</h3>
+                <p>The canonical internal representation (<code>backend/app/core/canonical_schemas.py</code>) includes:</p>
+                <ul>
+                    <li><strong>CanonicalChatRequest</strong> &mdash; model, messages, temperature, top_p, max_tokens, stream, tools, tool_choice, response_format, think (bool or string), reasoning_effort, etc.</li>
+                    <li><strong>CanonicalMessage</strong> &mdash; role (system/user/assistant/tool), content (text or multimodal content blocks, nullable), tool_calls, tool_call_id</li>
+                    <li><strong>ContentBlock</strong> &mdash; TextContent, ImageUrlContent, or ImageBase64Content</li>
+                    <li><strong>CanonicalToolCall</strong> / <strong>CanonicalFunctionCall</strong> &mdash; tool call with id, function name, and arguments (JSON string)</li>
+                    <li><strong>CanonicalToolDefinition</strong> &mdash; tool definition with function name, description, and parameters schema</li>
+                    <li><strong>CanonicalEmbeddingRequest</strong> &mdash; model, input, encoding_format, dimensions</li>
+                    <li><strong>CanonicalChatResponse</strong> / <strong>CanonicalStreamChunk</strong> &mdash; response and streaming types (including tool call deltas)</li>
+                </ul>
+
+                <h3>Key Translation Mappings</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Concept</th><th>OpenAI</th><th>Ollama</th><th>Anthropic</th><th>Canonical</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Max tokens</td><td><code>max_completion_tokens</code> or <code>max_tokens</code></td><td><code>options.num_predict</code></td><td><code>max_tokens</code> (required)</td><td><code>max_tokens</code></td></tr>
+                        <tr><td>Stream default</td><td><code>false</code></td><td><code>true</code></td><td><code>false</code></td><td>&mdash;</td></tr>
+                        <tr><td>System prompt</td><td><code>messages</code> with <code>role: system</code></td><td><code>messages</code> with <code>role: system</code></td><td>Top-level <code>system</code> field</td><td><code>CanonicalMessage(role=SYSTEM)</code></td></tr>
+                        <tr><td>Stop sequences</td><td><code>stop</code></td><td><code>options.stop</code></td><td><code>stop_sequences</code></td><td><code>stop</code></td></tr>
+                        <tr><td>JSON schema</td><td><code>response_format</code></td><td><code>format: {schema}</code></td><td><code>output_config.format</code></td><td><code>response_format</code></td></tr>
+                        <tr><td>Parameters</td><td>Top-level fields</td><td><code>options</code> dict</td><td>Top-level fields</td><td>Top-level fields</td></tr>
+                        <tr><td>Images</td><td><code>image_url</code> block</td><td><code>images</code> array (base64)</td><td><code>image</code> block with <code>source</code></td><td><code>ImageBase64Content</code> / <code>ImageUrlContent</code></td></tr>
+                        <tr><td>Tool definitions</td><td><code>tools</code></td><td><code>tools</code></td><td><code>tools</code> (with <code>input_schema</code>)</td><td><code>tools</code> (<code>CanonicalToolDefinition</code>)</td></tr>
+                        <tr><td>Tool choice</td><td><code>tool_choice</code></td><td>&mdash;</td><td><code>tool_choice</code> (<code>auto</code>/<code>any</code>/<code>tool</code>)</td><td><code>tool_choice</code></td></tr>
+                        <tr><td>Tool calls</td><td><code>tool_calls</code> (JSON string args)</td><td><code>tool_calls</code> (dict args)</td><td><code>tool_use</code> content blocks</td><td><code>CanonicalToolCall</code> (JSON string args)</td></tr>
+                        <tr><td>Tool results</td><td><code>role: "tool"</code> + <code>tool_call_id</code></td><td>&mdash;</td><td><code>tool_result</code> content blocks</td><td><code>CanonicalMessage(role=TOOL, tool_call_id)</code></td></tr>
+                        <tr><td>Thinking mode</td><td><code>think</code>, <code>thinking.type</code>, <code>chat_template_kwargs</code>, <code>reasoning_effort</code></td><td><code>think</code> (bool or <code>"low"</code>/<code>"medium"</code>/<code>"high"</code>)</td><td><code>thinking.type</code> (enabled/disabled)</td><td><code>think</code> (bool or string)</td></tr>
+                        <tr><td>User ID</td><td><code>user</code></td><td>&mdash;</td><td><code>metadata.user_id</code></td><td><code>user</code></td></tr>
+                        <tr><td>Stream format</td><td>SSE (<code>data: {...}</code>)</td><td>NDJSON</td><td>SSE (Anthropic events)</td><td><code>CanonicalStreamChunk</code></td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Translators</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Translator</th><th>Direction</th><th>Purpose</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>OpenAIInTranslator</code></td><td>API &rarr; Canonical</td><td>Translates incoming OpenAI-format requests</td></tr>
+                        <tr><td><code>OllamaInTranslator</code></td><td>API &rarr; Canonical</td><td>Translates incoming Ollama-format requests</td></tr>
+                        <tr><td><code>AnthropicInTranslator</code></td><td>API &rarr; Canonical</td><td>Translates incoming Anthropic Messages API requests; also formats responses and SSE stream events back to Anthropic format</td></tr>
+                        <tr><td><code>OllamaOutTranslator</code></td><td>Canonical &rarr; Backend</td><td>Translates outgoing requests to Ollama backends</td></tr>
+                        <tr><td><code>VLLMOutTranslator</code></td><td>Canonical &rarr; Backend</td><td>Translates outgoing requests to vLLM backends</td></tr>
+                    </tbody>
+                </table>
+                <p>All translators use static methods &mdash; no instantiation needed.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 10: Telemetry & Monitoring -->
+            <section id="telemetry-monitoring">
+                <h2>Telemetry &amp; Monitoring</h2>
+
+                <h3>GPU Sidecar Agent</h3>
+                <p>Each GPU node runs a lightweight FastAPI sidecar agent (<code>sidecar/gpu_agent.py</code>) that exposes per-GPU hardware metrics:</p>
+                <p><strong>Collected metrics per GPU:</strong></p>
+                <ul>
+                    <li>Utilization (GPU % and memory %)</li>
+                    <li>Memory (used/free/total GB)</li>
+                    <li>Temperature (GPU and memory)</li>
+                    <li>Power draw and limit (watts)</li>
+                    <li>Fan speed, SM/memory clocks</li>
+                    <li>Running processes (PID + memory)</li>
+                    <li>Device identity (name, UUID, compute capability)</li>
+                    <li>Driver and CUDA versions</li>
+                </ul>
+                <p><strong>Authentication:</strong> Requires <code>SIDECAR_SECRET_KEY</code> env var. All requests must include <code>X-Sidecar-Key</code> header (constant-time comparison).</p>
+
+                <p><strong>Prerequisites:</strong> Each GPU node must have NVIDIA drivers and the
+                <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">NVIDIA Container Toolkit</a>
+                installed so Docker can access GPUs via <code>--gpus all</code>:</p>
+<pre><code># RHEL/Rocky Linux
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+  | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+sudo dnf install -y nvidia-container-toolkit
+
+# Debian/Ubuntu
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+
+# Configure and restart Docker
+sudo nvidia-ctk runtime configure --driver=docker
+sudo systemctl restart docker
+
+# Verify GPU access
+docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code></pre>
+
+                <p><strong>Deployment options:</strong></p>
+                <ol>
+                    <li><strong>Docker Compose</strong> &mdash; <code>docker compose --profile gpu up gpu-sidecar</code></li>
+                    <li><strong>Standalone Docker</strong> &mdash; Build from <code>sidecar/Dockerfile.sidecar</code>, run with <code>--gpus all</code></li>
+                    <li><strong>Direct Python</strong> &mdash; <code>pip install fastapi uvicorn nvidia-ml-py &amp;&amp; python sidecar/gpu_agent.py</code></li>
+                </ol>
+
+                <h3>Health Polling</h3>
+                <p>The Backend Registry runs an adaptive polling loop:</p>
+                <ul>
+                    <li><strong>Startup fast polls:</strong> On container start, two immediate full poll cycles run (with a 5-second gap) so backends and nodes are marked healthy within seconds of a restart instead of waiting for the normal 30-second cycle.</li>
+                    <li><strong>Normal interval:</strong> 30 seconds (configurable via <code>BACKEND_POLL_INTERVAL</code>)</li>
+                    <li><strong>Fast interval:</strong> 10 seconds after a backend becomes unhealthy (configurable)</li>
+                    <li><strong>Fast duration:</strong> 120 seconds before returning to normal polling</li>
+                </ul>
+                <p>Each poll cycle has two phases:</p>
+                <ol>
+                    <li>Poll sidecar agents (one per physical node) for GPU snapshots</li>
+                    <li>Poll each backend adapter for health, models, and engine-specific telemetry</li>
+                </ol>
+
+                <h3>Health Alerts</h3>
+                <p>The admin dashboard (<code>/admin</code>) displays a prominent warning banner when any backend is unhealthy/unknown or any node is offline/unknown. The alert includes counts and names of affected items with direct links to the backends or nodes management pages. Intentionally <strong>disabled</strong> backends are excluded from the alert &mdash; only unexpected health issues are flagged.</p>
+
+                <h3>Circuit Breaker</h3>
+                <p>Per-backend circuit breaker protects against cascading failures:</p>
+                <ul>
+                    <li><strong>Threshold:</strong> 3 consecutive failures before opening (configurable via <code>BACKEND_CIRCUIT_BREAKER_THRESHOLD</code>)</li>
+                    <li><strong>Recovery:</strong> 30 seconds before allowing a probe request (<code>BACKEND_CIRCUIT_BREAKER_RECOVERY_SECONDS</code>)</li>
+                    <li><strong>States:</strong> Closed (healthy) &rarr; Open (failing) &rarr; Half-Open (probe) &rarr; Closed (recovered)</li>
+                </ul>
+
+                <h3>Latency Tracking</h3>
+                <p>Exponential Moving Average (EMA) tracks per-backend latency:</p>
+                <ul>
+                    <li><strong>Alpha:</strong> 0.3 (30% current observation, 70% history)</li>
+                    <li><strong>Metrics:</strong> Total latency EMA and TTFT (time-to-first-token) EMA</li>
+                    <li><strong>Throughput score:</strong> <code>1.0 / (1.0 + latency_ms / 5000.0)</code> &mdash; used in backend scoring</li>
+                    <li><strong>Persistence:</strong> EMAs are periodically saved to the database for recovery after restart</li>
+                </ul>
+
+                <h3>Prometheus Metrics</h3>
+                <p>Scrape <code>/metrics</code> for Prometheus-compatible metrics. See the <a href="#api-reference">Health &amp; Metrics Endpoints</a> section for the full list.</p>
+
+                <h3>Telemetry API</h3>
+                <p>Admin users can access detailed telemetry via the API:</p>
+                <ul>
+                    <li><strong>Cluster overview</strong> &mdash; All nodes, backends, GPUs with current metrics</li>
+                    <li><strong>Historical data</strong> &mdash; Time-series with configurable resolution (1m, 5m, 15m, 1h, 6h, 1d)</li>
+                    <li><strong>Per-GPU history</strong> &mdash; Individual GPU device telemetry over time</li>
+                    <li><strong>Export</strong> &mdash; Download telemetry data as JSON or CSV</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Section 11: Chat System -->
+            <section id="chat-system">
+                <h2>Chat System</h2>
+                <p>MindRouter2 includes a built-in chat interface at <code>/chat</code> with full conversation management.</p>
+
+                <h3>Conversations</h3>
+                <ul>
+                    <li>Each user has their own conversation history</li>
+                    <li>Conversations store: title, selected model, creation/update timestamps</li>
+                    <li>Users can rename, switch models, or delete conversations</li>
+                    <li>Up to 50 conversations shown in the sidebar (most recent first)</li>
+                </ul>
+
+                <h3>Messages</h3>
+                <ul>
+                    <li>Messages include role (user/assistant/system) and content</li>
+                    <li>Assistant messages are streamed in real-time</li>
+                    <li>Messages can be edited or deleted after creation</li>
+                    <li>Attachments are linked to individual messages</li>
+                </ul>
+
+                <h3>File Upload</h3>
+                <p>Supported file types and processing:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Category</th><th>Extensions</th><th>Processing</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Images</td><td><code>.jpg</code>, <code>.jpeg</code>, <code>.png</code>, <code>.gif</code>, <code>.webp</code></td><td>Resized to max 1536px, compressed JPEG q85, thumbnail generated</td></tr>
+                        <tr><td>Documents</td><td><code>.pdf</code></td><td>Text extracted from all pages, first-page thumbnail generated</td></tr>
+                        <tr><td>Documents</td><td><code>.docx</code></td><td>Text extracted from all paragraphs</td></tr>
+                        <tr><td>Spreadsheets</td><td><code>.xlsx</code></td><td>All sheets read, formatted as tab-separated text</td></tr>
+                        <tr><td>Text files</td><td><code>.txt</code>, <code>.md</code>, <code>.csv</code>, <code>.json</code>, <code>.html</code>, <code>.htm</code>, <code>.log</code></td><td>Read as-is</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Limits:</strong></p>
+                <ul>
+                    <li>Max upload size: 10 MB (configurable via <code>CHAT_UPLOAD_MAX_SIZE_MB</code>)</li>
+                    <li>Artifact storage path: <code>/data/artifacts</code> (configurable via <code>ARTIFACT_STORAGE_PATH</code>)</li>
+                    <li>Artifact max size: 50 MB (configurable via <code>ARTIFACT_MAX_SIZE_MB</code>)</li>
+                    <li>Artifact retention: 365 days</li>
+                </ul>
+
+                <p><strong>Storage layout:</strong></p>
+                <pre><code>/artifacts/YYYY/MM/DD/&lt;sha256_prefix&gt;/&lt;full_sha256&gt;_&lt;uuid&gt;.&lt;ext&gt;</code></pre>
+
+                <h3>Multimodal Model Support</h3>
+                <ul>
+                    <li>Models with multimodal capability are automatically detected by name patterns (e.g., <code>llava</code>, <code>-vl-</code>, <code>vision</code>)</li>
+                    <li>When images are sent to a multimodal model, they are included as base64-encoded content blocks</li>
+                    <li>When images are sent to a non-multimodal model, they are replaced with a placeholder: <code>[Image omitted -- model does not support multimodal input: filename]</code></li>
+                    <li>A warning modal is shown in the chat UI when uploading images to a non-multimodal model</li>
+                    <li>Admins can override multimodal detection per model via the Models admin page</li>
+                </ul>
+
+                <h3>Streaming</h3>
+                <p>Chat responses are streamed in real-time:</p>
+                <ul>
+                    <li>Backend streaming uses NDJSON (Ollama) or SSE (vLLM/OpenAI)</li>
+                    <li>The chat UI renders tokens as they arrive</li>
+                    <li>TTFT (time-to-first-token) is tracked for latency monitoring</li>
+                    <li>If the client disconnects, the backend request is not cancelled (to prevent DB corruption)</li>
+                </ul>
+            </section>
+
+            <hr>
+
+            <!-- Section 12: Configuration Reference -->
+            <section id="configuration-reference">
+                <h2>Configuration Reference</h2>
+                <p>All settings are loaded from environment variables or <code>.env</code> / <code>.env.prod</code> files. Variable names are case-insensitive.</p>
+
+                <h3>Application</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>APP_NAME</code></td><td>str</td><td><code>MindRouter2</code></td><td>Application name</td></tr>
+                        <tr><td><code>APP_VERSION</code></td><td>str</td><td><code>1.0.0</code></td><td>Application version</td></tr>
+                        <tr><td><code>DEBUG</code></td><td>bool</td><td><code>false</code></td><td>Enable debug mode</td></tr>
+                        <tr><td><code>RELOAD</code></td><td>bool</td><td><code>false</code></td><td>Auto-reload on code changes (development)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Database</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>DATABASE_URL</code></td><td>str</td><td><code>mysql+pymysql://...</code></td><td>MariaDB/MySQL connection string</td></tr>
+                        <tr><td><code>DATABASE_POOL_SIZE</code></td><td>int</td><td><code>20</code></td><td>Connection pool size</td></tr>
+                        <tr><td><code>DATABASE_MAX_OVERFLOW</code></td><td>int</td><td><code>10</code></td><td>Max overflow connections beyond pool</td></tr>
+                        <tr><td><code>DATABASE_ECHO</code></td><td>bool</td><td><code>false</code></td><td>Log SQL queries</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Cache</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>REDIS_URL</code></td><td>str</td><td><code>None</code></td><td>Redis connection string (optional)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Security</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>SECRET_KEY</code></td><td>str</td><td><code>dev-secret-key-...</code></td><td>JWT/session signing key (<strong>change in production</strong>)</td></tr>
+                        <tr><td><code>JWT_ALGORITHM</code></td><td>str</td><td><code>HS256</code></td><td>JWT signing algorithm</td></tr>
+                        <tr><td><code>JWT_EXPIRATION_HOURS</code></td><td>int</td><td><code>24</code></td><td>JWT token lifetime</td></tr>
+                        <tr><td><code>SESSION_COOKIE_NAME</code></td><td>str</td><td><code>mindrouter_session</code></td><td>Session cookie name</td></tr>
+                        <tr><td><code>SESSION_COOKIE_SECURE</code></td><td>bool</td><td><code>false</code></td><td>HTTPS-only cookies</td></tr>
+                        <tr><td><code>SESSION_COOKIE_HTTPONLY</code></td><td>bool</td><td><code>true</code></td><td>JavaScript-inaccessible cookies</td></tr>
+                        <tr><td><code>SESSION_COOKIE_SAMESITE</code></td><td>str</td><td><code>lax</code></td><td>SameSite cookie policy</td></tr>
+                        <tr><td><code>API_KEY_HASH_ALGORITHM</code></td><td>str</td><td><code>argon2</code></td><td>API key hashing algorithm</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Azure AD SSO (Optional)</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>AZURE_AD_CLIENT_ID</code></td><td>str</td><td><code>None</code></td><td>Azure AD application (client) ID</td></tr>
+                        <tr><td><code>AZURE_AD_CLIENT_SECRET</code></td><td>str</td><td><code>None</code></td><td>Azure AD client secret</td></tr>
+                        <tr><td><code>AZURE_AD_TENANT_ID</code></td><td>str</td><td><code>None</code></td><td>Azure AD tenant ID</td></tr>
+                        <tr><td><code>AZURE_AD_REDIRECT_URI</code></td><td>str</td><td><code>https://&lt;host&gt;/login/azure/authorized</code></td><td>OAuth2 redirect URI</td></tr>
+                        <tr><td><code>AZURE_AD_DEFAULT_GROUP</code></td><td>str</td><td><code>other</code></td><td>Default group for new Azure AD users</td></tr>
+                    </tbody>
+                </table>
+                <p>When <code>AZURE_AD_CLIENT_ID</code> and <code>AZURE_AD_CLIENT_SECRET</code> are set, a "Sign in with Microsoft" button appears on the login page. Users are JIT-provisioned on first login &mdash; their <code>jobTitle</code> from Microsoft Graph determines group assignment (student/faculty/staff/other). Pre-existing accounts are linked by email.</p>
+
+                <h3>Web Search (Optional)</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>BRAVE_SEARCH_API_KEY</code></td><td>str</td><td><code>None</code></td><td>Brave Search API key (enables web search in chat)</td></tr>
+                        <tr><td><code>BRAVE_SEARCH_MAX_RESULTS</code></td><td>int</td><td><code>5</code></td><td>Maximum search results to inject as context</td></tr>
+                    </tbody>
+                </table>
+                <p>When configured, a search toggle appears in the chat input area. Enabling it queries the Brave Search API with the user's message and injects results into the system prompt as additional context.</p>
+
+                <h3>Conversation Retention</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>CONVERSATION_RETENTION_DAYS</code></td><td>int</td><td><code>730</code></td><td>Conversation retention period (2 years)</td></tr>
+                        <tr><td><code>CONVERSATION_CLEANUP_INTERVAL</code></td><td>int</td><td><code>86400</code></td><td>Cleanup interval in seconds (24 hours)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Artifact Storage</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>ARTIFACT_STORAGE_PATH</code></td><td>str</td><td><code>/data/artifacts</code></td><td>File storage directory</td></tr>
+                        <tr><td><code>ARTIFACT_MAX_SIZE_MB</code></td><td>int</td><td><code>50</code></td><td>Max artifact file size</td></tr>
+                        <tr><td><code>ARTIFACT_RETENTION_DAYS</code></td><td>int</td><td><code>365</code></td><td>Artifact retention period</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Quotas</h3>
+                <p>Quota defaults are now managed per-group in the database via <code>/admin/groups</code>. The environment variables below are <strong>deprecated</strong> (used only for initial migration seeding) and will be removed in a future release.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>DEFAULT_TOKEN_BUDGET_STUDENT</code></td><td>int</td><td><code>100000</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_TOKEN_BUDGET_STAFF</code></td><td>int</td><td><code>500000</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_TOKEN_BUDGET_FACULTY</code></td><td>int</td><td><code>1000000</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_TOKEN_BUDGET_ADMIN</code></td><td>int</td><td><code>10000000</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_RPM_STUDENT</code></td><td>int</td><td><code>30</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_RPM_STAFF</code></td><td>int</td><td><code>60</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_RPM_FACULTY</code></td><td>int</td><td><code>120</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_RPM_ADMIN</code></td><td>int</td><td><code>1000</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_MAX_CONCURRENT_STUDENT</code></td><td>int</td><td><code>2</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_MAX_CONCURRENT_STAFF</code></td><td>int</td><td><code>4</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_MAX_CONCURRENT_FACULTY</code></td><td>int</td><td><code>8</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                        <tr><td><code>DEFAULT_MAX_CONCURRENT_ADMIN</code></td><td>int</td><td><code>50</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Scheduler</h3>
+                <p>Scheduler weights are now managed per-group in the database. The per-role weight variables below are <strong>deprecated</strong> and will be removed in a future release.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>SCHEDULER_WEIGHT_STUDENT</code></td><td>int</td><td><code>1</code></td><td><em>Deprecated</em> &mdash; use group scheduler_weight</td></tr>
+                        <tr><td><code>SCHEDULER_WEIGHT_STAFF</code></td><td>int</td><td><code>2</code></td><td><em>Deprecated</em> &mdash; use group scheduler_weight</td></tr>
+                        <tr><td><code>SCHEDULER_WEIGHT_FACULTY</code></td><td>int</td><td><code>3</code></td><td><em>Deprecated</em> &mdash; use group scheduler_weight</td></tr>
+                        <tr><td><code>SCHEDULER_WEIGHT_ADMIN</code></td><td>int</td><td><code>10</code></td><td><em>Deprecated</em> &mdash; use group scheduler_weight</td></tr>
+                        <tr><td><code>SCHEDULER_FAIRNESS_WINDOW</code></td><td>int</td><td><code>300</code></td><td>Fairness tracking window (seconds)</td></tr>
+                        <tr><td><code>SCHEDULER_DEPRIORITIZE_THRESHOLD</code></td><td>float</td><td><code>0.5</code></td><td>Usage threshold for deprioritization</td></tr>
+                        <tr><td><code>SCHEDULER_SCORE_MODEL_LOADED</code></td><td>int</td><td><code>100</code></td><td>Score bonus for pre-loaded model</td></tr>
+                        <tr><td><code>SCHEDULER_SCORE_LOW_UTILIZATION</code></td><td>int</td><td><code>50</code></td><td>Score bonus for low GPU utilization</td></tr>
+                        <tr><td><code>SCHEDULER_SCORE_LATENCY</code></td><td>int</td><td><code>40</code></td><td>Score factor for low latency</td></tr>
+                        <tr><td><code>SCHEDULER_SCORE_SHORT_QUEUE</code></td><td>int</td><td><code>30</code></td><td>Score factor for short queue</td></tr>
+                        <tr><td><code>SCHEDULER_SCORE_HIGH_THROUGHPUT</code></td><td>int</td><td><code>20</code></td><td>Score factor for high throughput</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Latency Tracking</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>LATENCY_EMA_ALPHA</code></td><td>float</td><td><code>0.3</code></td><td>EMA smoothing factor</td></tr>
+                        <tr><td><code>LATENCY_EMA_PERSIST_INTERVAL</code></td><td>int</td><td><code>30</code></td><td>EMA persistence interval (seconds)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Backend Registry</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>BACKEND_POLL_INTERVAL</code></td><td>int</td><td><code>30</code></td><td>Health check interval (seconds)</td></tr>
+                        <tr><td><code>BACKEND_HEALTH_TIMEOUT</code></td><td>int</td><td><code>5</code></td><td>Health check timeout (seconds)</td></tr>
+                        <tr><td><code>BACKEND_UNHEALTHY_THRESHOLD</code></td><td>int</td><td><code>3</code></td><td>Failed checks before marking unhealthy</td></tr>
+                        <tr><td><code>BACKEND_CIRCUIT_BREAKER_THRESHOLD</code></td><td>int</td><td><code>3</code></td><td>Failures before circuit opens</td></tr>
+                        <tr><td><code>BACKEND_CIRCUIT_BREAKER_RECOVERY_SECONDS</code></td><td>int</td><td><code>30</code></td><td>Circuit breaker recovery time</td></tr>
+                        <tr><td><code>BACKEND_ADAPTIVE_POLL_FAST_INTERVAL</code></td><td>int</td><td><code>10</code></td><td>Fast poll interval after unhealthy</td></tr>
+                        <tr><td><code>BACKEND_ADAPTIVE_POLL_FAST_DURATION</code></td><td>int</td><td><code>120</code></td><td>Duration of fast polling (seconds)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Request Handling</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>MAX_REQUEST_SIZE</code></td><td>int</td><td><code>52428800</code></td><td>Max HTTP request body (50 MB)</td></tr>
+                        <tr><td><code>BACKEND_REQUEST_TIMEOUT</code></td><td>int</td><td><code>300</code></td><td>Total request timeout (seconds)</td></tr>
+                        <tr><td><code>BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT</code></td><td>int</td><td><code>180</code></td><td>Per-attempt timeout (seconds, high for large model prefills)</td></tr>
+                        <tr><td><code>BACKEND_RETRY_MAX_ATTEMPTS</code></td><td>int</td><td><code>3</code></td><td>Max total retry attempts</td></tr>
+                        <tr><td><code>BACKEND_RETRY_ATTEMPTS</code></td><td>int</td><td><code>2</code></td><td>Default retry attempts</td></tr>
+                        <tr><td><code>BACKEND_RETRY_BACKOFF</code></td><td>float</td><td><code>1.0</code></td><td>Retry backoff multiplier</td></tr>
+                        <tr><td><code>STRUCTURED_OUTPUT_RETRY_ON_INVALID</code></td><td>bool</td><td><code>true</code></td><td>Retry on invalid structured output</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Logging</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>LOG_LEVEL</code></td><td>str</td><td><code>INFO</code></td><td>Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)</td></tr>
+                        <tr><td><code>LOG_FORMAT</code></td><td>str</td><td><code>json</code></td><td>Log format (<code>json</code> or <code>text</code>)</td></tr>
+                        <tr><td><code>LOG_FILE</code></td><td>str</td><td><code>None</code></td><td>Log file path (optional, stdout if not set)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Audit Logging</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>AUDIT_LOG_ENABLED</code></td><td>bool</td><td><code>true</code></td><td>Enable audit logging</td></tr>
+                        <tr><td><code>AUDIT_LOG_PROMPTS</code></td><td>bool</td><td><code>true</code></td><td>Log user prompts</td></tr>
+                        <tr><td><code>AUDIT_LOG_RESPONSES</code></td><td>bool</td><td><code>true</code></td><td>Log LLM responses</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Telemetry &amp; GPU</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>TELEMETRY_RETENTION_DAYS</code></td><td>int</td><td><code>30</code></td><td>Telemetry data retention period</td></tr>
+                        <tr><td><code>TELEMETRY_CLEANUP_INTERVAL</code></td><td>int</td><td><code>3600</code></td><td>Cleanup interval (seconds)</td></tr>
+                        <tr><td><code>SIDECAR_TIMEOUT</code></td><td>int</td><td><code>5</code></td><td>Sidecar HTTP call timeout (seconds)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Observability</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>METRICS_ENABLED</code></td><td>bool</td><td><code>true</code></td><td>Enable Prometheus metrics</td></tr>
+                        <tr><td><code>METRICS_PREFIX</code></td><td>str</td><td><code>mindrouter</code></td><td>Metrics name prefix</td></tr>
+                        <tr><td><code>OTEL_ENABLED</code></td><td>bool</td><td><code>false</code></td><td>Enable OpenTelemetry</td></tr>
+                        <tr><td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></td><td>str</td><td><code>None</code></td><td>OpenTelemetry exporter endpoint</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>CORS</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>CORS_ORIGINS</code></td><td>list</td><td><code>["http://localhost:3000", "http://localhost:8000"]</code></td><td>Allowed origins (JSON array or comma-separated)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Chat UI</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>CHAT_FILES_PATH</code></td><td>str</td><td><code>/data/chat_files</code></td><td>Chat file upload directory</td></tr>
+                        <tr><td><code>CHAT_UPLOAD_MAX_SIZE_MB</code></td><td>int</td><td><code>10</code></td><td>Max upload file size (MB)</td></tr>
+                        <tr><td><code>CHAT_UPLOAD_ALLOWED_EXTENSIONS</code></td><td>list</td><td>See below</td><td>Allowed upload file extensions</td></tr>
+                    </tbody>
+                </table>
+                <p>Default allowed extensions: <code>.txt</code>, <code>.md</code>, <code>.csv</code>, <code>.json</code>, <code>.html</code>, <code>.htm</code>, <code>.log</code>, <code>.docx</code>, <code>.xlsx</code>, <code>.pdf</code>, <code>.jpg</code>, <code>.jpeg</code>, <code>.png</code>, <code>.gif</code>, <code>.webp</code></p>
+
+                <h3>Tokenizer</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>DEFAULT_TOKENIZER</code></td><td>str</td><td><code>cl100k_base</code></td><td>Default tokenizer encoding</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <hr>
+
+            <!-- Section 13: Deployment -->
+            <section id="deployment">
+                <h2>Deployment</h2>
+                <p>MindRouter2 is designed for deployment on Linux servers with NVIDIA GPUs. The full deployment guide covers:</p>
+                <ul>
+                    <li>Rocky Linux 8 prerequisites and dependency installation</li>
+                    <li>SSL/TLS configuration (self-signed and Let's Encrypt)</li>
+                    <li>Apache reverse proxy setup</li>
+                    <li>Firewall and SELinux configuration</li>
+                    <li>Docker Compose production stack</li>
+                    <li>Database migrations</li>
+                    <li>GPU sidecar agent deployment</li>
+                    <li>Node and backend registration</li>
+                    <li>Verification and ongoing operations</li>
+                </ul>
+
+                <h3>GPU Sidecar Deployment</h3>
+                <p>The GPU sidecar agent runs on each inference node to expose per-GPU hardware metrics and enable auto-discovery of inference endpoints.
+                   Build and deploy directly from GitHub — no need to clone the repository.</p>
+
+                <h4>Create the env file (once per node)</h4>
+<pre><code>sudo mkdir -p /etc/mindrouter
+python3 -c "import secrets; print('SIDECAR_SECRET_KEY=' + secrets.token_hex(32))" | sudo tee /etc/mindrouter/sidecar.env
+sudo chmod 600 /etc/mindrouter/sidecar.env</code></pre>
+
+                <h4>Build a specific version</h4>
+<pre><code>docker build -t mindrouter-sidecar:v0.19.1 \
+  -f Dockerfile.sidecar \
+  https://github.com/sheneman/mindrouter2.git#v0.19.1:sidecar</code></pre>
+
+                <h4>Build latest from master</h4>
+<pre><code>docker build -t mindrouter-sidecar:latest \
+  -f Dockerfile.sidecar \
+  https://github.com/sheneman/mindrouter2.git:sidecar</code></pre>
+
+                <h4>Run the sidecar</h4>
+<pre><code># Run bound to localhost only (nginx will proxy external traffic)
+docker run -d --name gpu-sidecar \
+  --gpus all \
+  -p 127.0.0.1:18007:8007 \
+  --env-file /etc/mindrouter/sidecar.env \
+  --restart unless-stopped \
+  mindrouter-sidecar:v0.19.1</code></pre>
+
+                <h4>Upgrade to a new version</h4>
+<pre><code>docker build -t mindrouter-sidecar:v0.19.1 \
+  -f Dockerfile.sidecar \
+  https://github.com/sheneman/mindrouter2.git#v0.19.1:sidecar
+docker stop gpu-sidecar && docker rm gpu-sidecar
+docker run -d --name gpu-sidecar \
+  --gpus all \
+  -p 127.0.0.1:18007:8007 \
+  --env-file /etc/mindrouter/sidecar.env \
+  --restart unless-stopped \
+  mindrouter-sidecar:v0.19.1</code></pre>
+
+                <p>In production, bind the sidecar to localhost only (as shown above) and use an nginx reverse proxy on port 8007 to handle external traffic.
+                   The env file at <code>/etc/mindrouter/sidecar.env</code> persists the secret key across upgrades — generate it once per node and it's reused automatically.</p>
+            </section>
+
+            <hr>
+
+            <!-- Section 14: Testing -->
+            <section id="testing">
+                <h2>Testing</h2>
+                <p>MindRouter2 has a comprehensive test suite covering unit, integration, end-to-end, smoke, stress, and accessibility tests.</p>
+
+                <h3>Quick Reference</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Command</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>make test-unit</code></td><td>Run unit tests (525+ tests)</td></tr>
+                        <tr><td><code>make test-int</code></td><td>Integration tests (requires live backends)</td></tr>
+                        <tr><td><code>make test-e2e</code></td><td>End-to-end tests</td></tr>
+                        <tr><td><code>make test-smoke</code></td><td>Smoke tests (full API surface)</td></tr>
+                        <tr><td><code>make test-stress</code></td><td>Load/stress tests</td></tr>
+                        <tr><td><code>make test-a11y</code></td><td>WCAG 2.1 accessibility tests</td></tr>
+                        <tr><td><code>make test-sidecar</code></td><td>GPU sidecar agent tests</td></tr>
+                        <tr><td><code>make test-all</code></td><td>Run all test suites</td></tr>
+                    </tbody>
+                </table>
+            </section>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    // Simple scroll-spy: highlight TOC link for the section currently in view
+    const sections = document.querySelectorAll('.docs-content section[id]');
+    const tocLinks = document.querySelectorAll('.docs-sidebar .nav-link');
+
+    if (!sections.length || !tocLinks.length) return;
+
+    const observer = new IntersectionObserver(function(entries) {
+        entries.forEach(function(entry) {
+            if (entry.isIntersecting) {
+                tocLinks.forEach(function(link) { link.classList.remove('active'); });
+                const active = document.querySelector('.docs-sidebar a[href="#' + entry.target.id + '"]');
+                if (active) active.classList.add('active');
+            }
+        });
+    }, { rootMargin: '-20% 0px -80% 0px' });
+
+    sections.forEach(function(section) { observer.observe(section); });
+})();
+</script>
+{% endblock %}

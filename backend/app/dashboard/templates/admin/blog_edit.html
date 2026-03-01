@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+
+{% block title %}{{ 'Edit' if post else 'New' }} Blog Post - Admin - MindRouter2{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pygments-css@1.0.0/github.min.css">
+<style>
+    .preview-pane { min-height: 300px; border: 1px solid #dee2e6; border-radius: 0.25rem; padding: 1rem; background: #fff; }
+    .preview-pane pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .preview-pane code { font-size: 0.9em; }
+    .preview-pane p code { background: #f6f8fa; padding: 0.2em 0.4em; border-radius: 3px; }
+    .preview-pane table { width: 100%; margin-bottom: 1rem; }
+    .preview-pane table th, .preview-pane table td { padding: 0.5rem; border: 1px solid #dee2e6; }
+    .preview-pane table th { background: #f8f9fa; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        {% include "admin/_sidebar.html" %}
+        <div class="col-md-10 py-3">
+            <h2>{{ 'Edit' if post else 'New' }} Blog Post</h2>
+
+            <form method="post" action="{{ '/admin/blog/' ~ post.id ~ '/edit' if post else '/admin/blog/new' }}">
+                <div class="row">
+                    <div class="col-md-8 mb-3">
+                        <label for="title" class="form-label">Title</label>
+                        <input type="text" class="form-control" id="title" name="title"
+                               value="{{ post.title if post else '' }}" required>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <label for="slug" class="form-label">Slug</label>
+                        <input type="text" class="form-control" id="slug" name="slug"
+                               value="{{ post.slug if post else '' }}" required
+                               pattern="[a-z0-9]+(?:-[a-z0-9]+)*">
+                        <div class="form-text">URL-friendly identifier (auto-generated from title)</div>
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="excerpt" class="form-label">Excerpt</label>
+                    <input type="text" class="form-control" id="excerpt" name="excerpt"
+                           value="{{ post.excerpt if post and post.excerpt else '' }}"
+                           maxlength="500" placeholder="Brief summary for the listing page">
+                </div>
+
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label for="content" class="form-label mb-0">Content (Markdown)</label>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="togglePreview">
+                            Show Preview
+                        </button>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-12" id="editorCol">
+                            <textarea class="form-control font-monospace" id="content" name="content"
+                                      rows="20" required>{{ post.content if post else '' }}</textarea>
+                        </div>
+                        <div class="col-md-6 d-none" id="previewCol">
+                            <div class="preview-pane" id="previewPane"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mb-3 form-check">
+                    <input type="checkbox" class="form-check-input" id="is_published" name="is_published"
+                           {{ 'checked' if post and post.is_published else '' }}>
+                    <label class="form-check-label" for="is_published">Published</label>
+                </div>
+
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary">
+                        {{ 'Update' if post else 'Create' }} Post
+                    </button>
+                    <a href="/admin/blog" class="btn btn-outline-secondary">Cancel</a>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+    // Auto-generate slug from title
+    const titleInput = document.getElementById('title');
+    const slugInput = document.getElementById('slug');
+    let slugManuallyEdited = {{ 'true' if post else 'false' }};
+
+    slugInput.addEventListener('input', function() {
+        slugManuallyEdited = true;
+    });
+
+    titleInput.addEventListener('input', function() {
+        if (!slugManuallyEdited) {
+            slugInput.value = titleInput.value
+                .toLowerCase()
+                .trim()
+                .replace(/[^\w\s-]/g, '')
+                .replace(/[-\s]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+        }
+    });
+
+    // Live preview toggle
+    const toggleBtn = document.getElementById('togglePreview');
+    const editorCol = document.getElementById('editorCol');
+    const previewCol = document.getElementById('previewCol');
+    const previewPane = document.getElementById('previewPane');
+    const contentArea = document.getElementById('content');
+    let previewVisible = false;
+
+    toggleBtn.addEventListener('click', function() {
+        previewVisible = !previewVisible;
+        if (previewVisible) {
+            editorCol.classList.remove('col-md-12');
+            editorCol.classList.add('col-md-6');
+            previewCol.classList.remove('d-none');
+            toggleBtn.textContent = 'Hide Preview';
+            updatePreview();
+        } else {
+            editorCol.classList.remove('col-md-6');
+            editorCol.classList.add('col-md-12');
+            previewCol.classList.add('d-none');
+            toggleBtn.textContent = 'Show Preview';
+        }
+    });
+
+    contentArea.addEventListener('input', function() {
+        if (previewVisible) {
+            updatePreview();
+        }
+    });
+
+    function updatePreview() {
+        previewPane.innerHTML = marked.parse(contentArea.value);
+    }
+</script>
+{% endblock %}

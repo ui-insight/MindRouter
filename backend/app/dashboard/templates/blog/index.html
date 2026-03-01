@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Blog - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <h1 class="mb-4">Blog</h1>
+
+    {% if posts %}
+    <div class="row">
+        {% for post in posts %}
+        <div class="col-md-8 mx-auto mb-4">
+            <div class="card">
+                <div class="card-body">
+                    <h2 class="card-title h4">
+                        <a href="/blog/{{ post.slug }}" class="text-decoration-none">{{ post.title }}</a>
+                    </h2>
+                    <p class="text-muted small mb-2">
+                        By {{ post.author.full_name or post.author.username }}
+                        &middot;
+                        {{ post.published_at|localtime('%B %d, %Y') if post.published_at else '' }}
+                    </p>
+                    {% if post.excerpt %}
+                    <p class="card-text">{{ post.excerpt }}</p>
+                    {% endif %}
+                    <a href="/blog/{{ post.slug }}" class="btn btn-outline-primary btn-sm">Read more</a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="col-md-8 mx-auto">
+        <p class="text-muted">No blog posts yet. Check back soon!</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY backend/app/tests/mocks/ ./mocks/
+
+RUN pip install fastapi uvicorn httpx
+
+CMD ["python", "-m", "mocks.server"]

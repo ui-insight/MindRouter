@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Blog Posts - Admin - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        {% include "admin/_sidebar.html" %}
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2>Blog Posts</h2>
+                <a href="/admin/blog/new" class="btn btn-primary"><i class="bi bi-plus-lg"></i> New Post</a>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>Author</th>
+                            <th>Status</th>
+                            <th>Published</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for post in posts %}
+                        <tr>
+                            <td>
+                                <a href="/blog/{{ post.slug }}" target="_blank">{{ post.title }}</a>
+                            </td>
+                            <td>{{ post.author.full_name or post.author.username }}</td>
+                            <td>
+                                {% if post.is_published %}
+                                <span class="badge bg-success">Published</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Draft</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ post.published_at|localtime('%Y-%m-%d') if post.published_at else '-' }}</td>
+                            <td>{{ post.created_at|localtime('%Y-%m-%d') }}</td>
+                            <td>
+                                <a href="/admin/blog/{{ post.id }}/edit" class="btn btn-sm btn-outline-primary">Edit</a>
+                                <form method="post" action="/admin/blog/{{ post.id }}/publish" class="d-inline">
+                                    <button type="submit" class="btn btn-sm btn-outline-{{ 'warning' if post.is_published else 'success' }}">
+                                        {{ 'Unpublish' if post.is_published else 'Publish' }}
+                                    </button>
+                                </form>
+                                <form method="post" action="/admin/blog/{{ post.id }}/delete" class="d-inline" onsubmit="return confirm('Delete this post?')">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="text-muted text-center">No blog posts yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

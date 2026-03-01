@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+
+{% block title %}User Management - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "users" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-people"></i> User Management</h1>
+                <span class="text-muted">{{ total }} user{{ 's' if total != 1 else '' }}</span>
+            </div>
+
+            <!-- Search and Filter -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="GET" action="/admin/users" class="row g-3">
+                        <div class="col-md-4">
+                            <label for="search" class="form-label">Search</label>
+                            <input type="text" class="form-control" id="search" name="search" value="{{ search }}" placeholder="Username, email, or name...">
+                        </div>
+                        <div class="col-md-3">
+                            <label for="group_id" class="form-label">Group</label>
+                            <select class="form-select" id="group_id" name="group_id">
+                                <option value="">All Groups</option>
+                                {% for g in groups %}
+                                <option value="{{ g.id }}" {% if group_id == g.id %}selected{% endif %}>{{ g.display_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="sort_select" class="form-label">Sort</label>
+                            <select class="form-select" id="sort_select" onchange="applySortUsers(this.value)">
+                                <option value="created|desc" {% if sort == 'created' and dir == 'desc' or (not sort) %}selected{% endif %}>Newest</option>
+                                <option value="created|asc" {% if sort == 'created' and dir == 'asc' %}selected{% endif %}>Oldest</option>
+                                <option value="last_login|desc" {% if sort == 'last_login' and dir == 'desc' %}selected{% endif %}>Recently Active</option>
+                                <option value="last_login|asc" {% if sort == 'last_login' and dir == 'asc' %}selected{% endif %}>Least Recently Active</option>
+                                <option value="tokens|desc" {% if sort == 'tokens' and dir == 'desc' %}selected{% endif %}>Most Tokens</option>
+                                <option value="tokens|asc" {% if sort == 'tokens' and dir == 'asc' %}selected{% endif %}>Least Tokens</option>
+                                <option value="name|asc" {% if sort == 'name' and dir == 'asc' %}selected{% endif %}>Name A-Z</option>
+                                <option value="name|desc" {% if sort == 'name' and dir == 'desc' %}selected{% endif %}>Name Z-A</option>
+                            </select>
+                            <input type="hidden" id="sort_field" name="sort" value="{{ sort }}">
+                            <input type="hidden" id="sort_dir" name="dir" value="{{ dir }}">
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button type="submit" class="btn btn-primary me-2">Filter</button>
+                            <a href="/admin/users" class="btn btn-outline-secondary">Clear</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Users Table -->
+            <div class="card">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <caption class="sr-only">User accounts</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Username</th>
+                                    <th scope="col">Email</th>
+                                    <th scope="col">Group</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Created</th>
+                                    <th scope="col">Last Login</th>
+                                    <th scope="col">Quota Tokens</th>
+                                    <th scope="col">Lifetime Tokens</th>
+                                    <th scope="col">Detail</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for u in users %}
+                                <tr>
+                                    <td>
+                                        <a href="/admin/users/{{ u.id }}">{{ u.username }}</a>
+                                    </td>
+                                    <td>{{ u.email }}</td>
+                                    <td>
+                                        {% if u.group %}
+                                        <span class="badge {% if u.group.is_admin %}bg-danger{% else %}bg-primary{% endif %}">{{ u.group.display_name }}</span>
+                                        {% else %}
+                                        <span class="badge bg-secondary">None</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <span class="badge {% if u.is_active %}bg-success{% else %}bg-secondary{% endif %}">
+                                            {{ 'Active' if u.is_active else 'Inactive' }}
+                                        </span>
+                                    </td>
+                                    <td>{{ u.created_at|localtime('%Y-%m-%d') }}</td>
+                                    <td>{{ u.last_login_at|localtime if u.last_login_at else 'Never' }}</td>
+                                    <td>{{ "{:,}".format(user_quota_tokens.get(u.id, 0)) }}</td>
+                                    <td>{{ "{:,}".format(user_tokens.get(u.id, 0)) }}</td>
+                                    <td>
+                                        <a href="/admin/users/{{ u.id }}" class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-eye"></i>
+                                        </a>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination -->
+                    {% if total_pages > 1 %}
+                    <nav aria-label="User pagination">
+                        <ul class="pagination justify-content-center mb-0">
+                            <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/users?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if group_id %}&group_id={{ group_id }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Previous</a>
+                            </li>
+                            {% for p in range(1, total_pages + 1) %}
+                            {% if p == page or (p >= page - 2 and p <= page + 2) or p == 1 or p == total_pages %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="/admin/users?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if group_id %}&group_id={{ group_id }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">{{ p }}</a>
+                            </li>
+                            {% elif p == page - 3 or p == page + 3 %}
+                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                            {% endif %}
+                            {% endfor %}
+                            <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/users?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if group_id %}&group_id={{ group_id }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function applySortUsers(val) {
+    var parts = val.split('|');
+    document.getElementById('sort_field').value = parts[0];
+    document.getElementById('sort_dir').value = parts[1];
+}
+</script>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}API Key Created - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card shadow">
+                <div class="card-body p-4">
+                    <h1 class="card-title text-center mb-4 h3">
+                        <i class="bi bi-check-circle text-success" aria-hidden="true"></i> API Key Created
+                    </h1>
+
+                    <div class="alert alert-warning" role="alert">
+                        <strong><i class="bi bi-exclamation-triangle" aria-hidden="true"></i> Important:</strong>
+                        This is the only time you will see this key. Copy it now and store it securely.
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Key Name</label>
+                        <p class="form-control-plaintext">{{ key_name }}</p>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">API Key</label>
+                        <div class="api-key-display" id="apiKey">{{ api_key }}</div>
+                        <button class="btn btn-outline-secondary btn-sm mt-2" onclick="copyToClipboard()">
+                            <i class="bi bi-clipboard"></i> Copy to Clipboard
+                        </button>
+                    </div>
+
+                    {% if expires_at %}
+                    <div class="mb-4">
+                        <label class="form-label">Expires</label>
+                        <p class="form-control-plaintext">{{ expires_at|localtime('%Y-%m-%d %H:%M %Z') }}</p>
+                    </div>
+                    {% endif %}
+
+                    <div class="text-center">
+                        <a href="/dashboard" class="btn btn-primary">
+                            <i class="bi bi-arrow-left"></i> Return to Dashboard
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function copyToClipboard() {
+    const text = document.getElementById('apiKey').innerText;
+    navigator.clipboard.writeText(text).then(() => {
+        alert('API key copied to clipboard!');
+    });
+}
+</script>
+{% endblock %}

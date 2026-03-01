@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}{{ post.title }} - MindRouter2 Blog{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pygments-css@1.0.0/github.min.css">
+<style>
+    .blog-content { max-width: 800px; line-height: 1.8; }
+    .blog-content h1, .blog-content h2, .blog-content h3 { margin-top: 1.5em; margin-bottom: 0.5em; }
+    .blog-content pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .blog-content code { font-size: 0.9em; }
+    .blog-content p code { background: #f6f8fa; padding: 0.2em 0.4em; border-radius: 3px; }
+    .blog-content img { max-width: 100%; height: auto; }
+    .blog-content table { width: 100%; margin-bottom: 1rem; }
+    .blog-content table th, .blog-content table td { padding: 0.5rem; border: 1px solid #dee2e6; }
+    .blog-content table th { background: #f8f9fa; }
+    .codehilite { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row">
+        <div class="col-md-8 mx-auto">
+            <a href="/blog" class="text-decoration-none mb-3 d-inline-block">&larr; Back to Blog</a>
+            <h1 class="mb-2">{{ post.title }}</h1>
+            <p class="text-muted mb-4">
+                By {{ post.author.full_name or post.author.username }}
+                &middot;
+                {{ post.published_at|localtime('%B %d, %Y') if post.published_at else '' }}
+            </p>
+            <div class="blog-content">
+                {{ content_html | safe }}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

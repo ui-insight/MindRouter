@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}API Keys - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "api_keys" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-key"></i> API Keys</h1>
+                <span class="text-muted">{{ total }} key{{ 's' if total != 1 else '' }}</span>
+            </div>
+
+            <!-- Search and Filter -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="GET" action="/admin/api-keys" class="row g-3">
+                        <div class="col-md-4">
+                            <label for="search" class="form-label">Search</label>
+                            <input type="text" class="form-control" id="search" name="search" value="{{ search }}" placeholder="Key name, prefix, username, or email...">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="key_status" class="form-label">Status</label>
+                            <select class="form-select" id="key_status" name="key_status">
+                                <option value="">All</option>
+                                <option value="active" {% if key_status == 'active' %}selected{% endif %}>Active</option>
+                                <option value="revoked" {% if key_status == 'revoked' %}selected{% endif %}>Revoked</option>
+                                <option value="expired" {% if key_status == 'expired' %}selected{% endif %}>Expired</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="sort_select" class="form-label">Sort</label>
+                            <select class="form-select" id="sort_select" onchange="applySortKeys(this.value)">
+                                <option value="created|desc" {% if sort == 'created' and dir == 'desc' or (not sort) %}selected{% endif %}>Newest</option>
+                                <option value="created|asc" {% if sort == 'created' and dir == 'asc' %}selected{% endif %}>Oldest</option>
+                                <option value="last_used|desc" {% if sort == 'last_used' and dir == 'desc' %}selected{% endif %}>Recently Used</option>
+                                <option value="last_used|asc" {% if sort == 'last_used' and dir == 'asc' %}selected{% endif %}>Least Recently Used</option>
+                                <option value="usage|desc" {% if sort == 'usage' and dir == 'desc' %}selected{% endif %}>Most Used</option>
+                                <option value="usage|asc" {% if sort == 'usage' and dir == 'asc' %}selected{% endif %}>Least Used</option>
+                            </select>
+                            <input type="hidden" id="sort_field" name="sort" value="{{ sort }}">
+                            <input type="hidden" id="sort_dir" name="dir" value="{{ dir }}">
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button type="submit" class="btn btn-primary me-2">Filter</button>
+                            <a href="/admin/api-keys" class="btn btn-outline-secondary">Clear</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Keys Table -->
+            <div class="card">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <caption class="sr-only">API keys</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Prefix</th>
+                                    <th scope="col">Name</th>
+                                    <th scope="col">User</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Expires</th>
+                                    <th scope="col">Last Used</th>
+                                    <th scope="col">Usage</th>
+                                    <th scope="col">Last IP</th>
+                                    <th scope="col">Created</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for k in api_keys %}
+                                <tr>
+                                    <td><code>{{ k.key_prefix }}...</code></td>
+                                    <td>{{ k.name }}</td>
+                                    <td>
+                                        {% if k.user %}
+                                        <a href="/admin/users/{{ k.user_id }}">{{ k.user.username }}</a>
+                                        {% else %}
+                                        <span class="text-muted">Unknown</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if k.expires_at and k.expires_at.replace(tzinfo=None) < now_utc.replace(tzinfo=None) %}
+                                        <span class="badge bg-warning text-dark">expired</span>
+                                        {% elif k.status.value == 'active' %}
+                                        <span class="badge bg-success">active</span>
+                                        {% elif k.status.value == 'revoked' %}
+                                        <span class="badge bg-danger">revoked</span>
+                                        {% else %}
+                                        <span class="badge bg-secondary">{{ k.status.value }}</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if k.expires_at %}
+                                        {{ k.expires_at|localtime('%Y-%m-%d') }}
+                                        {% else %}
+                                        <span class="text-muted">Never</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ k.last_used_at|localtime if k.last_used_at else 'Never' }}</td>
+                                    <td>{{ "{:,}".format(k.usage_count) }}</td>
+                                    <td><code class="text-muted">{{ key_last_ips.get(k.id, '—') }}</code></td>
+                                    <td>{{ k.created_at|localtime('%Y-%m-%d') }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination -->
+                    {% if total_pages > 1 %}
+                    <nav aria-label="API key pagination">
+                        <ul class="pagination justify-content-center mb-0">
+                            <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/api-keys?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Previous</a>
+                            </li>
+                            {% for p in range(1, total_pages + 1) %}
+                            {% if p == page or (p >= page - 2 and p <= page + 2) or p == 1 or p == total_pages %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="/admin/api-keys?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">{{ p }}</a>
+                            </li>
+                            {% elif p == page - 3 or p == page + 3 %}
+                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                            {% endif %}
+                            {% endfor %}
+                            <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/api-keys?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function applySortKeys(val) {
+    var parts = val.split('|');
+    document.getElementById('sort_field').value = parts[0];
+    document.getElementById('sort_dir').value = parts[1];
+}
+</script>
+{% endblock %}

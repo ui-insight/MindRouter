@@ -1,0 +1,178 @@
+/* MindRouter2 Dashboard Styles */
+
+:root {
+    --mindrouter-primary: #0d6efd;
+    --mindrouter-dark: #212529;
+
+    /* Light theme (default) */
+    --mr-body-bg: #fff;
+    --mr-sidebar-bg: #f8f9fa;
+    --mr-sidebar-border: #dee2e6;
+    --mr-sidebar-text: #495057;
+    --mr-sidebar-hover: #e9ecef;
+    --mr-border-color: #dee2e6;
+    --mr-code-bg: #f6f8fa;
+    --mr-code-border: #e1e4e8;
+    --mr-input-bg: #f9f9fb;
+    --mr-input-bg-focus: #fff;
+    --mr-text-primary: #333;
+    --mr-text-secondary: #666;
+    --mr-text-muted: #888;
+    --mr-api-key-bg: #f8f9fa;
+    --mr-msg-assistant-bg: #f7f7f8;
+    --mr-chat-input-bg: #fff;
+    --mr-file-chip-bg: #f0f0f0;
+    --mr-file-chip-border: #ddd;
+    --mr-doc-icon-bg: #f0f4f8;
+    --mr-conv-active-bg: #d4e5ff;
+    --mr-copy-btn-bg: #f6f8fa;
+    --mr-copy-btn-border: #d0d7de;
+    --mr-modal-close-bg: #fff;
+    --mr-modal-close-color: #333;
+    --mr-upload-overlay-bg: rgba(255,255,255,0.7);
+    --mr-table-hover-bg: rgba(0, 123, 255, 0.05);
+    --mr-thinking-bg: #fefce8;
+    --mr-thinking-text: #92400e;
+    --mr-thinking-hover: #fef9c3;
+    --mr-thinking-content-text: #78350f;
+}
+
+[data-bs-theme="dark"] {
+    --mr-body-bg: #1a1d21;
+    --mr-sidebar-bg: #212529;
+    --mr-sidebar-border: #373b3e;
+    --mr-sidebar-text: #adb5bd;
+    --mr-sidebar-hover: #2c3034;
+    --mr-border-color: #373b3e;
+    --mr-code-bg: #2b3035;
+    --mr-code-border: #373b3e;
+    --mr-input-bg: #2b3035;
+    --mr-input-bg-focus: #212529;
+    --mr-text-primary: #e9ecef;
+    --mr-text-secondary: #adb5bd;
+    --mr-text-muted: #8b929a;
+    --mr-api-key-bg: #2b3035;
+    --mr-msg-assistant-bg: #212529;
+    --mr-chat-input-bg: #2b3035;
+    --mr-file-chip-bg: #2b3035;
+    --mr-file-chip-border: #495057;
+    --mr-doc-icon-bg: #2b3035;
+    --mr-conv-active-bg: #1a3a5c;
+    --mr-copy-btn-bg: #2b3035;
+    --mr-copy-btn-border: #495057;
+    --mr-modal-close-bg: #2b3035;
+    --mr-modal-close-color: #e9ecef;
+    --mr-upload-overlay-bg: rgba(0,0,0,0.7);
+    --mr-table-hover-bg: rgba(100, 160, 255, 0.08);
+    --mr-thinking-bg: #332d1a;
+    --mr-thinking-text: #d4a843;
+    --mr-thinking-hover: #3d3520;
+    --mr-thinking-content-text: #c9a03d;
+}
+
+/* General */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Navbar */
+.navbar-brand {
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+
+/* Sidebar */
+.sidebar {
+    min-height: calc(100vh - 56px);
+    border-right: 1px solid var(--mr-border-color);
+    background: var(--mr-sidebar-bg);
+}
+
+.sidebar .nav-link {
+    color: var(--mr-sidebar-text);
+    padding: 0.5rem 1rem;
+}
+
+.sidebar .nav-link:hover {
+    background-color: var(--mr-sidebar-hover);
+}
+
+.sidebar .nav-link.active {
+    background-color: #0d6efd;
+    color: white;
+    border-radius: 0.25rem;
+}
+
+/* Cards */
+.card-stat {
+    border-left: 4px solid;
+    transition: transform 0.2s;
+}
+
+.card-stat:hover {
+    transform: translateY(-2px);
+}
+
+.card-stat.primary { border-left-color: #0d6efd; }
+.card-stat.success { border-left-color: #198754; }
+.card-stat.warning { border-left-color: #ffc107; }
+.card-stat.danger { border-left-color: #dc3545; }
+
+/* API Key Display */
+.api-key-display {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    background-color: var(--mr-api-key-bg);
+    padding: 1rem;
+    border-radius: 0.25rem;
+    word-break: break-all;
+    border: 1px solid var(--mr-border-color);
+}
+
+/* Status Badges */
+.status-badge {
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+
+/* Tables */
+.table-hover tbody tr:hover {
+    background-color: var(--mr-table-hover-bg);
+}
+
+/* Progress Bars */
+.progress {
+    height: 6px;
+    border-radius: 3px;
+}
+
+/* Code blocks */
+pre {
+    margin: 0;
+}
+
+pre code {
+    font-size: 0.875rem;
+}
+
+/* Theme toggle button */
+.theme-toggle {
+    background: none;
+    border: none;
+    color: rgba(255,255,255,0.7);
+    font-size: 1.1rem;
+    padding: 0.25rem 0.5rem;
+    cursor: pointer;
+    transition: color 0.15s;
+}
+.theme-toggle:hover {
+    color: #fff;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .sidebar {
+        min-height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--mr-border-color);
+    }
+}

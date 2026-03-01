@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>{% block title %}MindRouter2{% endblock %}</title>
+    <script>
+    (function() {
+        var t = localStorage.getItem('mr-theme') ||
+                (matchMedia('(prefers-color-scheme:dark)').matches ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-bs-theme', t);
+    })();
+    </script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="/static/css/style.css" rel="stylesheet">
+    <style>
+        .navbar-brand { font-weight: bold; }
+        .card-stat { border-left: 4px solid; }
+        .card-stat.primary { border-left-color: #0d6efd; }
+        .card-stat.success { border-left-color: #198754; }
+        .card-stat.warning { border-left-color: #ffc107; }
+        .card-stat.danger { border-left-color: #dc3545; }
+        .sidebar { min-height: calc(100vh - 56px); }
+        .api-key-display { font-family: monospace; background: var(--mr-api-key-bg); padding: 1rem; border-radius: 0.25rem; word-break: break-all; }
+        .status-badge { font-size: 0.75rem; }
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+        .skip-link { position: absolute; top: -40px; left: 0; background: #0d6efd; color: #fff; padding: 8px 16px; z-index: 9999; text-decoration: none; font-weight: 600; }
+        .skip-link:focus { top: 0; }
+    </style>
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark" aria-label="Main navigation">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="bi bi-router"></i> MindRouter2 <small style="font-size:0.55rem; vertical-align:super; color:rgba(255,255,255,0.35); font-weight:400;">v{{ version }}</small>
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">Status</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/documentation"><i class="bi bi-book"></i> Docs</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/blog"><i class="bi bi-pencil-square"></i> Blog</a>
+                    </li>
+                    {% if user %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="/chat">Chat</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/dashboard">Dashboard</a>
+                    </li>
+                    {% if user.group and user.group.is_admin %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="/admin">Admin</a>
+                    </li>
+                    {% endif %}
+                    {% endif %}
+                </ul>
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <button class="theme-toggle nav-link" id="themeToggleBtn" title="Toggle dark mode" aria-label="Toggle dark mode">
+                            <i class="bi bi-sun-fill"></i>
+                        </button>
+                    </li>
+                    {% if user %}
+                    <li class="nav-item">
+                        <span class="nav-link text-light">{{ user.username }} ({{ user.group.display_name if user.group else user.role.value }})</span>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/logout">Logout</a>
+                    </li>
+                    {% else %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="/login">Login</a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    {% if masquerade_user %}
+    <div class="bg-warning text-dark text-center py-2 fw-bold" style="position: sticky; top: 0; z-index: 1050;">
+        Viewing as {{ masquerade_user.username }} ({{ masquerade_user.email }})
+        <form method="post" action="/admin/masquerade/stop" class="d-inline ms-3">
+            <button type="submit" class="btn btn-sm btn-dark">Stop Masquerading</button>
+        </form>
+    </div>
+    {% endif %}
+
+    <main id="main-content">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="py-3 mt-5" style="background: var(--mr-sidebar-bg);">
+        <div class="container text-center text-muted">
+            <small>MindRouter2 - LLM Inference Load Balancer</small><br>
+            <small>Powered by <a href="https://hpc.uidaho.edu" class="text-muted">RCDS</a></small><br>
+            <small class="d-inline-flex align-items-center gap-1 mt-1">
+                <img src="https://www.nsf.gov/policies/images/NSF_Official_logo_High_Res_1200ppi.png" alt="NSF" height="16">
+                This project was developed with support from the National Science Foundation
+                (<a href="https://www.nsf.gov/awardsearch/show-award?AWD_ID=2427549" class="text-muted">NSF Award #2427549</a>)
+            </small>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    (function() {
+        var btn = document.getElementById('themeToggleBtn');
+        var icon = btn.querySelector('i');
+        function updateIcon() {
+            var isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+            icon.className = isDark ? 'bi bi-moon-fill' : 'bi bi-sun-fill';
+        }
+        updateIcon();
+        btn.addEventListener('click', function() {
+            var current = document.documentElement.getAttribute('data-bs-theme');
+            var next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-bs-theme', next);
+            localStorage.setItem('mr-theme', next);
+            updateIcon();
+            // Notify chat page if hljs theme swap is needed
+            document.dispatchEvent(new CustomEvent('mr-theme-changed', {detail: {theme: next}}));
+        });
+    })();
+    </script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

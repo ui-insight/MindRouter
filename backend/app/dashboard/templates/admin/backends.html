@@ -1,0 +1,318 @@
+{% extends "base.html" %}
+
+{% block title %}Backend Management - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "backends" %}{% include "admin/_sidebar.html" %}
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-3">
+            <h1 class="mb-4"><i class="bi bi-server"></i> Backend Management</h1>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                <i class="bi bi-check-circle"></i>
+                {% if success == 'registered' %}Backend registered successfully.
+                {% elif success == 'updated' %}Backend updated successfully.
+                {% elif success == 'disabled' %}Backend disabled.
+                {% elif success == 'enabled' %}Backend enabled.
+                {% elif success == 'draining' %}Backend is now draining. It will auto-disable when in-flight requests finish.
+                {% elif success == 'refreshed' %}Backend capabilities refreshed.
+                {% elif success == 'removed' %}Backend removed successfully.
+                {% else %}Operation completed successfully.{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                <i class="bi bi-exclamation-triangle"></i> {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+
+            <!-- Register New Backend -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-plus-circle"></i> Register New Backend
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="/admin/backends/register">
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label for="reg_name" class="form-label">Name</label>
+                                <input type="text" class="form-control" id="reg_name" name="name" required
+                                       placeholder="e.g., gpu-server-1">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label for="reg_url" class="form-label">URL</label>
+                                <input type="text" class="form-control" id="reg_url" name="url" required
+                                       placeholder="http://host:port">
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label for="reg_engine" class="form-label">Engine</label>
+                                <select class="form-select" id="reg_engine" name="engine" required>
+                                    <option value="ollama">Ollama</option>
+                                    <option value="vllm">vLLM</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_max_concurrent" class="form-label">Max Concurrent</label>
+                                <input type="number" class="form-control" id="reg_max_concurrent" name="max_concurrent"
+                                       value="4" min="1">
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_gpu_memory_gb" class="form-label">GPU Memory (GB)</label>
+                                <input type="number" class="form-control" id="reg_gpu_memory_gb" name="gpu_memory_gb"
+                                       step="0.1" placeholder="Optional">
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_gpu_type" class="form-label">GPU Type</label>
+                                <input type="text" class="form-control" id="reg_gpu_type" name="gpu_type"
+                                       placeholder="e.g., NVIDIA A100">
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-4 mb-3">
+                                <label for="reg_node_id" class="form-label">Node</label>
+                                <select class="form-select" id="reg_node_id" name="node_id">
+                                    <option value="">None (standalone)</option>
+                                    {% if nodes %}
+                                    {% for node in nodes %}
+                                    <option value="{{ node.id }}">{{ node.name }}{% if node.hostname %} ({{ node.hostname }}){% endif %}</option>
+                                    {% endfor %}
+                                    {% endif %}
+                                </select>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label for="reg_gpu_indices" class="form-label">GPU Indices</label>
+                                <input type="text" class="form-control" id="reg_gpu_indices" name="gpu_indices"
+                                       placeholder="e.g., 0,1,2 (blank = all)">
+                                <div class="form-text">Comma-separated GPU indices, or leave blank for all GPUs on the node.</div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-plus-lg"></i> Register Backend
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Registered Backends -->
+            {% if backends %}
+            {% for item in backends %}
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>
+                        <strong>{{ item.backend.name }}</strong>
+                        <span class="badge {% if item.backend.status.value == 'healthy' %}bg-success{% elif item.backend.status.value == 'unhealthy' %}bg-danger{% elif item.backend.status.value == 'disabled' %}bg-warning text-dark{% elif item.backend.status.value == 'draining' %}bg-info text-dark{% else %}bg-secondary{% endif %} ms-2">
+                            {{ item.backend.status.value }}
+                        </span>
+                        <span class="badge bg-info ms-1">{{ item.backend.engine.value }}</span>
+                    </span>
+                    <span>
+                        <span class="text-muted me-3">{{ item.backend.url }}</span>
+                        <button class="btn btn-sm btn-outline-secondary" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#edit-backend-{{ item.backend.id }}"
+                                title="Edit backend">
+                            <i class="bi bi-pencil"></i> Edit
+                        </button>
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/refresh" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-primary" title="Refresh capabilities">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                        </form>
+                        {% if item.backend.status.value == 'draining' %}
+                        <button class="btn btn-sm btn-info" disabled title="Backend is draining">
+                            <i class="bi bi-hourglass-split"></i> Draining...
+                        </button>
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/disable" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-warning" title="Force disable (skip drain)">
+                                <i class="bi bi-pause-circle"></i> Force Disable
+                            </button>
+                        </form>
+                        {% elif item.backend.status.value == 'disabled' %}
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/enable" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-success" title="Enable backend">
+                                <i class="bi bi-play-circle"></i> Enable
+                            </button>
+                        </form>
+                        {% else %}
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/drain" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-info" title="Drain backend (graceful offline)">
+                                <i class="bi bi-hourglass-split"></i> Drain
+                            </button>
+                        </form>
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/disable" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-warning" title="Disable backend">
+                                <i class="bi bi-pause-circle"></i> Disable
+                            </button>
+                        </form>
+                        {% endif %}
+                        <form method="POST" action="/admin/backends/{{ item.backend.id }}/remove" class="d-inline"
+                              onsubmit="return confirm('Remove backend {{ item.backend.name }}? This will delete all associated model records.')">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" title="Remove backend">
+                                <i class="bi bi-trash"></i> Remove
+                            </button>
+                        </form>
+                    </span>
+                </div>
+                <div class="card-body">
+                    <!-- Collapsible Edit Form -->
+                    <div class="collapse mb-3" id="edit-backend-{{ item.backend.id }}">
+                        <div class="card card-body bg-light">
+                            <h6><i class="bi bi-pencil"></i> Edit Backend</h6>
+                            <form method="POST" action="/admin/backends/{{ item.backend.id }}/edit">
+                                <div class="row">
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Name</label>
+                                        <input type="text" class="form-control" name="name"
+                                               value="{{ item.backend.name }}" required>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">URL</label>
+                                        <input type="text" class="form-control" name="url"
+                                               value="{{ item.backend.url }}" required>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Engine</label>
+                                        <select class="form-select" name="engine" required>
+                                            <option value="ollama" {% if item.backend.engine.value == 'ollama' %}selected{% endif %}>Ollama</option>
+                                            <option value="vllm" {% if item.backend.engine.value == 'vllm' %}selected{% endif %}>vLLM</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">Max Concurrent</label>
+                                        <input type="number" class="form-control" name="max_concurrent"
+                                               value="{{ item.backend.max_concurrent }}" min="1">
+                                    </div>
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">GPU Memory (GB)</label>
+                                        <input type="number" class="form-control" name="gpu_memory_gb"
+                                               step="0.1" value="{{ item.backend.gpu_memory_gb or '' }}">
+                                    </div>
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">GPU Type</label>
+                                        <input type="text" class="form-control" name="gpu_type"
+                                               value="{{ item.backend.gpu_type or '' }}">
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Node</label>
+                                        <select class="form-select" name="node_id">
+                                            <option value="">None (standalone)</option>
+                                            {% if nodes %}
+                                            {% for node in nodes %}
+                                            <option value="{{ node.id }}" {% if item.backend.node_id == node.id %}selected{% endif %}>
+                                                {{ node.name }}{% if node.hostname %} ({{ node.hostname }}){% endif %}
+                                            </option>
+                                            {% endfor %}
+                                            {% endif %}
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">GPU Indices</label>
+                                        <input type="text" class="form-control" name="gpu_indices"
+                                               value="{{ item.backend.gpu_indices | join(', ') if item.backend.gpu_indices else '' }}"
+                                               placeholder="e.g., 0,1,2 (blank = all)">
+                                    </div>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-check-lg"></i> Save Changes
+                                </button>
+                                <button type="button" class="btn btn-secondary btn-sm"
+                                        data-bs-toggle="collapse" data-bs-target="#edit-backend-{{ item.backend.id }}">
+                                    Cancel
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-4">
+                            <h6>Configuration</h6>
+                            <dl class="row small">
+                                <dt class="col-6">Max Concurrent:</dt>
+                                <dd class="col-6">{{ item.backend.max_concurrent }}</dd>
+                                <dt class="col-6">Current:</dt>
+                                <dd class="col-6">{{ item.backend.current_concurrent }}</dd>
+                                <dt class="col-6">GPU Memory:</dt>
+                                <dd class="col-6">{{ item.backend.gpu_memory_gb or 'N/A' }} GB</dd>
+                                <dt class="col-6">Node:</dt>
+                                <dd class="col-6">
+                                    {% if item.backend.node %}
+                                    <a href="/admin/nodes">{{ item.backend.node.name }}</a>
+                                    {% else %}
+                                    <span class="text-muted">None</span>
+                                    {% endif %}
+                                </dd>
+                                <dt class="col-6">GPUs:</dt>
+                                <dd class="col-6">
+                                    {% if item.backend.gpu_indices %}
+                                    {{ item.backend.gpu_indices | join(', ') }}
+                                    {% elif item.backend.node %}
+                                    All
+                                    {% else %}
+                                    N/A
+                                    {% endif %}
+                                </dd>
+                                <dt class="col-6">Version:</dt>
+                                <dd class="col-6">{{ item.backend.version or 'Unknown' }}</dd>
+                            </dl>
+                        </div>
+                        <div class="col-md-4">
+                            <h6>Capabilities</h6>
+                            <dl class="row small">
+                                <dt class="col-6">Multimodal:</dt>
+                                <dd class="col-6">{{ 'Yes' if item.backend.supports_multimodal else 'No' }}</dd>
+                                <dt class="col-6">Embeddings:</dt>
+                                <dd class="col-6">{{ 'Yes' if item.backend.supports_embeddings else 'No' }}</dd>
+                                <dt class="col-6">Structured:</dt>
+                                <dd class="col-6">{{ 'Yes' if item.backend.supports_structured_output else 'No' }}</dd>
+                            </dl>
+                        </div>
+                        <div class="col-md-4">
+                            <h6>Telemetry</h6>
+                            {% if item.telemetry %}
+                            <dl class="row small">
+                                <dt class="col-6">GPU Util:</dt>
+                                <dd class="col-6">{{ '%.1f'|format(item.telemetry.gpu_utilization) if item.telemetry.gpu_utilization is not none else 'N/A' }}%</dd>
+                                <dt class="col-6">Active:</dt>
+                                <dd class="col-6">{{ item.telemetry.active_requests }}</dd>
+                                <dt class="col-6">Loaded Models:</dt>
+                                <dd class="col-6">{{ item.telemetry.loaded_models|length }}</dd>
+                            </dl>
+                            {% else %}
+                            <p class="text-muted small">No telemetry available</p>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <h6 class="mt-3">Models ({{ item.models|length }})</h6>
+                    <div class="row">
+                        {% for model in item.models %}
+                        <div class="col-md-3 mb-2">
+                            <span class="badge {% if model.is_loaded %}bg-success{% else %}bg-secondary{% endif %}">
+                                {{ model.name }}
+                            </span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> No backends registered. Use the form above to register your first Ollama or vLLM backend.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}Group Management - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "groups" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-collection"></i> Group Management</h1>
+                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createGroupModal">
+                    <i class="bi bi-plus"></i> Create Group
+                </button>
+            </div>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                Group {{ success }} successfully.
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <div class="row">
+                {% for group, user_count in groups %}
+                <div class="col-md-6 col-lg-4 mb-4">
+                    <div class="card h-100">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>
+                                <strong>{{ group.display_name }}</strong>
+                                {% if group.is_admin %}
+                                <span class="badge bg-danger ms-1">Admin</span>
+                                {% endif %}
+                            </span>
+                            <span class="badge bg-secondary">{{ user_count }} user{{ 's' if user_count != 1 else '' }}</span>
+                        </div>
+                        <div class="card-body">
+                            <p class="text-muted small mb-3">{{ group.description or 'No description' }}</p>
+                            <dl class="row mb-0 small">
+                                <dt class="col-6">Slug</dt>
+                                <dd class="col-6"><code>{{ group.name }}</code></dd>
+                                <dt class="col-6">Token Budget</dt>
+                                <dd class="col-6">{% if group.token_budget == 0 %}<span class="badge bg-info">Unlimited</span>{% else %}{{ "{:,}".format(group.token_budget) }}{% endif %}</dd>
+                                <dt class="col-6">RPM Limit</dt>
+                                <dd class="col-6">{{ group.rpm_limit }}</dd>
+                                <dt class="col-6">Max Concurrent</dt>
+                                <dd class="col-6">{{ group.max_concurrent }}</dd>
+                                <dt class="col-6">Sched. Weight</dt>
+                                <dd class="col-6">{{ group.scheduler_weight }}</dd>
+                                <dt class="col-6">Key Expiry</dt>
+                                <dd class="col-6">{{ group.api_key_expiry_days }} days</dd>
+                                <dt class="col-6">Max API Keys</dt>
+                                <dd class="col-6">{{ group.max_api_keys }}</dd>
+                            </dl>
+                        </div>
+                        <div class="card-footer d-flex justify-content-between">
+                            <button class="btn btn-sm btn-outline-primary" data-bs-toggle="collapse" data-bs-target="#editGroup{{ group.id }}" aria-expanded="false" aria-controls="editGroup{{ group.id }}">
+                                <i class="bi bi-pencil"></i> Edit
+                            </button>
+                            {% if user_count == 0 %}
+                            <form method="POST" action="/admin/groups/{{ group.id }}/delete" style="display: inline;">
+                                <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Delete group {{ group.display_name }}?')">
+                                    <i class="bi bi-trash"></i> Delete
+                                </button>
+                            </form>
+                            {% else %}
+                            <button class="btn btn-sm btn-outline-danger" disabled title="Cannot delete group with users">
+                                <i class="bi bi-trash"></i> Delete
+                            </button>
+                            {% endif %}
+                        </div>
+
+                        <!-- Edit Form (collapsed) -->
+                        <div class="collapse" id="editGroup{{ group.id }}">
+                            <div class="card-body border-top">
+                                <form method="POST" action="/admin/groups/{{ group.id }}/edit">
+                                    <div class="mb-2">
+                                        <label class="form-label small">Display Name</label>
+                                        <input type="text" class="form-control form-control-sm" name="display_name" value="{{ group.display_name }}" required>
+                                    </div>
+                                    <div class="mb-2">
+                                        <label class="form-label small">Description</label>
+                                        <input type="text" class="form-control form-control-sm" name="description" value="{{ group.description or '' }}">
+                                    </div>
+                                    <div class="row">
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Token Budget</label>
+                                            <div class="form-check mb-1">
+                                                <input class="form-check-input unlimited-toggle" type="checkbox" id="unlimited_edit_{{ group.id }}" {% if group.token_budget == 0 %}checked{% endif %} data-target="token_budget_edit_{{ group.id }}">
+                                                <label class="form-check-label small" for="unlimited_edit_{{ group.id }}">Unlimited</label>
+                                            </div>
+                                            <input type="number" class="form-control form-control-sm" name="token_budget" id="token_budget_edit_{{ group.id }}" value="{{ group.token_budget }}" {% if group.token_budget == 0 %}disabled{% endif %}>
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">RPM Limit</label>
+                                            <input type="number" class="form-control form-control-sm" name="rpm_limit" value="{{ group.rpm_limit }}">
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Max Concurrent</label>
+                                            <input type="number" class="form-control form-control-sm" name="max_concurrent" value="{{ group.max_concurrent }}">
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Sched. Weight</label>
+                                            <input type="number" class="form-control form-control-sm" name="scheduler_weight" value="{{ group.scheduler_weight }}">
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Key Expiry (days)</label>
+                                            <input type="number" class="form-control form-control-sm" name="api_key_expiry_days" value="{{ group.api_key_expiry_days }}">
+                                        </div>
+                                        <div class="col-6 mb-2">
+                                            <label class="form-label small">Max API Keys</label>
+                                            <input type="number" class="form-control form-control-sm" name="max_api_keys" value="{{ group.max_api_keys }}">
+                                        </div>
+                                    </div>
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="is_admin_{{ group.id }}" name="is_admin" {% if group.is_admin %}checked{% endif %}>
+                                        <label class="form-check-label small" for="is_admin_{{ group.id }}">Admin privileges</label>
+                                    </div>
+                                    <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create Group Modal -->
+<div class="modal fade" id="createGroupModal" tabindex="-1" aria-labelledby="createGroupModalLabel">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="createGroupModalLabel">Create New Group</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" action="/admin/groups">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="name" class="form-label">Slug (lowercase, no spaces)</label>
+                        <input type="text" class="form-control" id="name" name="name" required pattern="[a-z0-9_-]+" placeholder="e.g., researchers">
+                    </div>
+                    <div class="mb-3">
+                        <label for="display_name" class="form-label">Display Name</label>
+                        <input type="text" class="form-control" id="display_name" name="display_name" required placeholder="e.g., Researchers">
+                    </div>
+                    <div class="mb-3">
+                        <label for="description" class="form-label">Description</label>
+                        <input type="text" class="form-control" id="description" name="description">
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label for="token_budget" class="form-label">Token Budget</label>
+                            <div class="form-check mb-1">
+                                <input class="form-check-input unlimited-toggle" type="checkbox" id="unlimited_create" data-target="token_budget">
+                                <label class="form-check-label" for="unlimited_create">Unlimited</label>
+                            </div>
+                            <input type="number" class="form-control" id="token_budget" name="token_budget" value="100000">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label for="rpm_limit" class="form-label">RPM Limit</label>
+                            <input type="number" class="form-control" id="rpm_limit" name="rpm_limit" value="30">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label for="max_concurrent" class="form-label">Max Concurrent</label>
+                            <input type="number" class="form-control" id="max_concurrent" name="max_concurrent" value="2">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label for="scheduler_weight" class="form-label">Scheduler Weight</label>
+                            <input type="number" class="form-control" id="scheduler_weight" name="scheduler_weight" value="1">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label for="api_key_expiry_days" class="form-label">Key Expiry (days)</label>
+                            <input type="number" class="form-control" id="api_key_expiry_days" name="api_key_expiry_days" value="45">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label for="max_api_keys" class="form-label">Max API Keys</label>
+                            <input type="number" class="form-control" id="max_api_keys" name="max_api_keys" value="8">
+                        </div>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="is_admin" name="is_admin">
+                        <label class="form-check-label" for="is_admin">Admin privileges</label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Create Group</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.querySelectorAll('.unlimited-toggle').forEach(function(cb) {
+    var targetId = cb.getAttribute('data-target');
+    var input = document.getElementById(targetId);
+    cb.addEventListener('change', function() {
+        if (cb.checked) {
+            input.dataset.prevValue = input.value;
+            input.value = 0;
+            input.disabled = true;
+        } else {
+            input.disabled = false;
+            input.value = input.dataset.prevValue || 100000;
+        }
+    });
+    // On form submit, re-enable disabled inputs so value is sent
+    var form = cb.closest('form');
+    if (form) {
+        form.addEventListener('submit', function() {
+            if (cb.checked) {
+                input.disabled = false;
+                input.value = 0;
+            }
+        });
+    }
+});
+</script>
+{% endblock %}

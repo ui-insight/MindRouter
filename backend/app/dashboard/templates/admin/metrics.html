@@ -1,0 +1,885 @@
+{% extends "base.html" %}
+
+{% block title %}GPU Metrics - MindRouter2{% endblock %}
+
+{% block extra_css %}
+<style>
+    .stat-value { font-size: 2rem; font-weight: bold; }
+    .stat-label { font-size: 0.85rem; color: #6c757d; }
+    .chart-container { position: relative; height: 280px; }
+    .gpu-gauge { height: 24px; border-radius: 4px; }
+    .gpu-card { border-left: 3px solid #0d6efd; }
+    .gpu-card.warn { border-left-color: #ffc107; }
+    .gpu-card.danger { border-left-color: #dc3545; }
+    .time-btn.active { background-color: #0d6efd; color: white; }
+    .sidecar-badge { font-size: 0.7rem; }
+    .backend-header { cursor: pointer; }
+    .metric-mini { font-size: 0.8rem; }
+    .fade-update { transition: opacity 0.3s; }
+    .loading-spinner { display: none; }
+    .loading .loading-spinner { display: inline-block; }
+    .config-section-header { font-size: 1.1rem; font-weight: 600; }
+    .config-table td, .config-table th { white-space: nowrap; font-size: 0.85rem; vertical-align: middle; }
+    .config-table .status-healthy { color: #198754; }
+    .config-table .status-disabled { color: #ffc107; }
+    .config-table .status-unhealthy { color: #dc3545; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "metrics" %}{% include "admin/_sidebar.html" %}
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-gpu-card"></i> GPU & Inference Metrics</h1>
+                <div>
+                    <span class="text-muted me-2" id="last-updated">Last updated: --</span>
+                    <span class="loading-spinner spinner-border spinner-border-sm text-primary" id="poll-spinner"></span>
+                </div>
+            </div>
+
+            <!-- Cluster Summary Cards -->
+            <div class="row mb-4" id="cluster-stats">
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat primary h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-total-gpus">--</div>
+                            <div class="stat-label">Total GPUs</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat success h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-avg-util">--%</div>
+                            <div class="stat-label">Avg GPU Utilization</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat warning h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-memory">--</div>
+                            <div class="stat-label">GPU Memory (Used/Total)</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat danger h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-power">--W</div>
+                            <div class="stat-label">Total Power Draw</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat primary h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-active">--</div>
+                            <div class="stat-label">Active Requests</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat warning h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-queued">--</div>
+                            <div class="stat-label">Queued Requests</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Time Range Selector -->
+            <div class="mb-3">
+                <div class="btn-group" role="group" aria-label="Time range selection">
+                    <button type="button" class="btn btn-sm btn-outline-primary time-btn active" data-range="1h">1h</button>
+                    <button type="button" class="btn btn-sm btn-outline-primary time-btn" data-range="6h">6h</button>
+                    <button type="button" class="btn btn-sm btn-outline-primary time-btn" data-range="24h">24h</button>
+                    <button type="button" class="btn btn-sm btn-outline-primary time-btn" data-range="7d">7d</button>
+                </div>
+                <a href="/api/admin/telemetry/export?format=csv&range=24h" class="btn btn-sm btn-outline-secondary ms-2">
+                    <i class="bi bi-download"></i> Export CSV
+                </a>
+            </div>
+
+            <!-- Charts Grid -->
+            <div class="row mb-4">
+                <div class="col-md-6 mb-3">
+                    <div class="card">
+                        <div class="card-header"><i class="bi bi-graph-up"></i> GPU Utilization</div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="chart-gpu-util" aria-label="GPU utilization over time chart" role="img"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <div class="card">
+                        <div class="card-header"><i class="bi bi-memory"></i> GPU Memory Usage</div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="chart-gpu-mem" aria-label="GPU memory usage over time chart" role="img"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <div class="card">
+                        <div class="card-header"><i class="bi bi-lightning"></i> Power Consumption</div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="chart-power" aria-label="Power consumption over time chart" role="img"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <div class="card">
+                        <div class="card-header"><i class="bi bi-activity"></i> Request Throughput</div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="chart-requests" aria-label="Request throughput over time chart" role="img"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Backend Configuration Summary -->
+            <div class="mb-4" id="config-tables-section">
+                <h4 class="config-section-header mb-3"><i class="bi bi-sliders"></i> Backend Configuration</h4>
+                <div class="row">
+                    <div class="col-12 mb-3">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <i class="bi bi-box"></i> Ollama Backends
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover config-table mb-0">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Backend</th>
+                                                <th>Status</th>
+                                                <th>URL</th>
+                                                <th>Node</th>
+                                                <th>GPUs</th>
+                                                <th>GPU Type</th>
+                                                <th>Compute Cap</th>
+                                                <th>CUDA</th>
+                                                <th>GPU Memory</th>
+                                                <th>Max Concurrent</th>
+                                                <th>Version</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="config-ollama-tbody">
+                                            <tr><td colspan="11" class="text-center text-muted py-3">
+                                                <div class="spinner-border spinner-border-sm" role="status"></div> Loading...
+                                            </td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12 mb-3">
+                        <div class="card">
+                            <div class="card-header py-2">
+                                <i class="bi bi-cpu"></i> vLLM Backends
+                            </div>
+                            <div class="card-body p-0">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover config-table mb-0">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Backend</th>
+                                                <th>Status</th>
+                                                <th>URL</th>
+                                                <th>Node</th>
+                                                <th>GPUs</th>
+                                                <th>GPU Type</th>
+                                                <th>Compute Cap</th>
+                                                <th>CUDA</th>
+                                                <th>GPU Memory</th>
+                                                <th>Max Concurrent</th>
+                                                <th>Version</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="config-vllm-tbody">
+                                            <tr><td colspan="11" class="text-center text-muted py-3">
+                                                <div class="spinner-border spinner-border-sm" role="status"></div> Loading...
+                                            </td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- View Toggle -->
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="mb-0"><i class="bi bi-server"></i> Details</h4>
+                <div class="btn-group" role="group" aria-label="Detail view selection">
+                    <button type="button" class="btn btn-sm btn-outline-primary view-btn active" data-view="node">
+                        <i class="bi bi-hdd-rack"></i> Node View
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-primary view-btn" data-view="backend">
+                        <i class="bi bi-server"></i> Backend View
+                    </button>
+                </div>
+            </div>
+
+            <!-- Node View Accordion -->
+            <div class="accordion" id="nodes-accordion">
+                <div class="text-muted text-center py-4" id="nodes-loading">
+                    <div class="spinner-border spinner-border-sm" role="status"></div>
+                    Loading node data...
+                </div>
+            </div>
+
+            <!-- Backend View Accordion (hidden by default) -->
+            <div class="accordion d-none" id="backends-accordion">
+                <div class="text-muted text-center py-4" id="backends-loading">
+                    <div class="spinner-border spinner-border-sm" role="status"></div>
+                    Loading backend data...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+// Configuration
+const POLL_INTERVAL_LIVE = 10000;
+const POLL_INTERVAL_CHARTS = 30000;
+
+const BACKEND_COLORS = [
+    '#0d6efd', '#198754', '#dc3545', '#ffc107',
+    '#6f42c1', '#fd7e14', '#20c997', '#0dcaf0',
+    '#d63384', '#6610f2', '#343a40', '#adb5bd'
+];
+
+let currentTimeRange = '1h';
+let gpuUtilChart, gpuMemChart, powerChart, requestChart;
+let liveInterval, chartInterval;
+
+// ── Chart Initialization ──────────────────────────────────────
+function initCharts() {
+    const commonOpts = {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+            x: {
+                type: 'category',
+                ticks: { maxTicksLimit: 12, font: { size: 10 } }
+            }
+        },
+        plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } }
+        }
+    };
+
+    gpuUtilChart = new Chart(document.getElementById('chart-gpu-util'), {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            ...commonOpts,
+            scales: {
+                ...commonOpts.scales,
+                y: { min: 0, max: 100, title: { display: true, text: 'Utilization %' } }
+            }
+        }
+    });
+
+    gpuMemChart = new Chart(document.getElementById('chart-gpu-mem'), {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            ...commonOpts,
+            scales: {
+                ...commonOpts.scales,
+                y: { min: 0, title: { display: true, text: 'Memory (GB)' } }
+            }
+        }
+    });
+
+    powerChart = new Chart(document.getElementById('chart-power'), {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            ...commonOpts,
+            scales: {
+                ...commonOpts.scales,
+                y: { min: 0, title: { display: true, text: 'Power (W)' } }
+            }
+        }
+    });
+
+    requestChart = new Chart(document.getElementById('chart-requests'), {
+        type: 'line',
+        data: { labels: [], datasets: [] },
+        options: {
+            ...commonOpts,
+            scales: {
+                ...commonOpts.scales,
+                y: { min: 0, title: { display: true, text: 'Requests' } }
+            }
+        }
+    });
+}
+
+// ── Helper Functions ──────────────────────────────────────────
+function fmt(val, decimals = 1) {
+    return val != null ? val.toFixed(decimals) : '--';
+}
+
+function utilClass(val) {
+    if (val == null) return '';
+    if (val >= 80) return 'bg-danger';
+    if (val >= 50) return 'bg-warning';
+    return 'bg-success';
+}
+
+function tempClass(val) {
+    if (val == null) return '';
+    if (val >= 80) return 'text-danger';
+    if (val >= 65) return 'text-warning';
+    return 'text-success';
+}
+
+function formatTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+let currentView = 'node';
+
+// ── View Toggle ──────────────────────────────────────────────
+document.querySelectorAll('.view-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        currentView = this.dataset.view;
+
+        if (currentView === 'node') {
+            document.getElementById('nodes-accordion').classList.remove('d-none');
+            document.getElementById('backends-accordion').classList.add('d-none');
+        } else {
+            document.getElementById('nodes-accordion').classList.add('d-none');
+            document.getElementById('backends-accordion').classList.remove('d-none');
+        }
+    });
+});
+
+// ── Live Polling ──────────────────────────────────────────────
+async function fetchLatestTelemetry() {
+    try {
+        document.getElementById('poll-spinner').style.display = 'inline-block';
+        const resp = await fetch('/api/admin/telemetry/latest');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        updateStatCards(data.cluster);
+        if (data.nodes) updateNodeAccordions(data.nodes);
+        updateBackendAccordions(data.backends);
+        updateConfigTables(data.backends, data.nodes || []);
+        document.getElementById('last-updated').textContent =
+            'Last updated: ' + new Date().toLocaleTimeString();
+    } catch (e) {
+        console.error('Telemetry poll error:', e);
+    } finally {
+        document.getElementById('poll-spinner').style.display = 'none';
+    }
+}
+
+function updateStatCards(cluster) {
+    document.getElementById('stat-total-gpus').textContent = cluster.total_gpus || 0;
+
+    const utilEl = document.getElementById('stat-avg-util');
+    utilEl.textContent = cluster.avg_gpu_utilization != null
+        ? cluster.avg_gpu_utilization.toFixed(1) + '%' : 'N/A';
+
+    const used = cluster.used_gpu_memory_gb || 0;
+    const total = cluster.total_gpu_memory_gb || 0;
+    document.getElementById('stat-memory').textContent =
+        fmt(used, 0) + '/' + fmt(total, 0) + ' GB';
+
+    document.getElementById('stat-power').textContent =
+        fmt(cluster.total_power_draw_watts, 0) + 'W';
+
+    document.getElementById('stat-active').textContent = cluster.total_active_requests || 0;
+    document.getElementById('stat-queued').textContent = cluster.total_queued_requests || 0;
+}
+
+function updateNodeAccordions(nodes) {
+    const container = document.getElementById('nodes-accordion');
+    const loading = document.getElementById('nodes-loading');
+    if (loading) loading.remove();
+
+    nodes.forEach((node, idx) => {
+        const color = BACKEND_COLORS[idx % BACKEND_COLORS.length];
+        const existingItem = document.getElementById('node-' + node.id);
+
+        if (existingItem) {
+            updateNodeContent(node, idx);
+            return;
+        }
+
+        const statusBadge = node.status === 'online'
+            ? '<span class="badge bg-success">online</span>'
+            : node.status === 'offline'
+                ? '<span class="badge bg-danger">offline</span>'
+                : '<span class="badge bg-secondary">unknown</span>';
+
+        const item = document.createElement('div');
+        item.className = 'accordion-item';
+        item.id = 'node-' + node.id;
+        item.innerHTML = `
+            <h2 class="accordion-header">
+                <button class="accordion-button collapsed" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#collapse-node-${node.id}">
+                    <span class="me-2" style="color:${color}"><i class="bi bi-hdd-rack"></i></span>
+                    <strong class="me-2">${node.name}</strong>
+                    ${statusBadge}
+                    <small class="text-muted ms-2">${node.hostname || ''}</small>
+                    <span class="ms-auto me-3 metric-mini" id="mini-node-gpus-${node.id}">
+                        ${node.gpu_count ? node.gpu_count + ' GPUs' : ''}
+                    </span>
+                </button>
+            </h2>
+            <div id="collapse-node-${node.id}" class="accordion-collapse collapse"
+                 data-bs-parent="#nodes-accordion">
+                <div class="accordion-body" id="node-body-${node.id}"></div>
+            </div>`;
+        container.appendChild(item);
+        updateNodeContent(node, idx);
+    });
+}
+
+function updateNodeContent(node, idx) {
+    const body = document.getElementById('node-body-' + node.id);
+    if (!body) return;
+
+    let html = `
+    <div class="row mb-3">
+        <div class="col-md-4">
+            <dl class="row small mb-0">
+                <dt class="col-5">Hostname:</dt><dd class="col-7">${node.hostname || 'N/A'}</dd>
+                <dt class="col-5">GPUs:</dt><dd class="col-7">${node.gpu_count || node.gpus.length || 'N/A'}</dd>
+                <dt class="col-5">Driver:</dt><dd class="col-7">${node.driver_version || 'N/A'}</dd>
+                <dt class="col-5">CUDA:</dt><dd class="col-7">${node.cuda_version || 'N/A'}</dd>
+            </dl>
+        </div>
+    </div>`;
+
+    // Per-GPU cards (all GPUs on this node)
+    if (node.gpus && node.gpus.length > 0) {
+        html += '<div class="row">';
+        node.gpus.forEach(gpu => {
+            const utilGpu = gpu.utilization_gpu;
+            const memPct = (gpu.memory_total_gb && gpu.memory_used_gb)
+                ? (gpu.memory_used_gb / gpu.memory_total_gb * 100) : null;
+
+            let cardClass = 'gpu-card';
+            if (utilGpu != null && utilGpu >= 80) cardClass += ' danger';
+            else if (utilGpu != null && utilGpu >= 50) cardClass += ' warn';
+
+            html += `
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card ${cardClass}">
+                    <div class="card-body p-3">
+                        <h6 class="card-title mb-1">
+                            <i class="bi bi-gpu-card"></i> GPU ${gpu.index}
+                            <small class="text-muted">${gpu.name || ''}</small>
+                        </h6>
+                        <small class="text-muted">${gpu.compute_capability ? 'CC ' + gpu.compute_capability : ''}</small>
+                        <div class="mt-2">
+                            <div class="d-flex justify-content-between small">
+                                <span>GPU Util</span>
+                                <span>${utilGpu != null ? fmt(utilGpu) + '%' : 'N/A'}</span>
+                            </div>
+                            <div class="progress gpu-gauge mb-2">
+                                <div class="progress-bar ${utilClass(utilGpu)}" style="width: ${utilGpu || 0}%"></div>
+                            </div>
+                            <div class="d-flex justify-content-between small">
+                                <span>Memory</span>
+                                <span>${gpu.memory_used_gb != null ? fmt(gpu.memory_used_gb) + '/' + fmt(gpu.memory_total_gb) + ' GB' : 'N/A'}</span>
+                            </div>
+                            <div class="progress gpu-gauge mb-2">
+                                <div class="progress-bar ${utilClass(memPct)}" style="width: ${memPct || 0}%"></div>
+                            </div>
+                            <div class="row small mt-2">
+                                <div class="col-6">
+                                    <i class="bi bi-thermometer ${tempClass(gpu.temperature_gpu)}"></i>
+                                    ${gpu.temperature_gpu != null ? gpu.temperature_gpu + '\u00B0C' : 'N/A'}
+                                </div>
+                                <div class="col-6">
+                                    <i class="bi bi-lightning"></i>
+                                    ${gpu.power_draw_watts != null ? fmt(gpu.power_draw_watts, 0) + 'W' : 'N/A'}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        });
+        html += '</div>';
+    } else if (!node.sidecar_url) {
+        html += '<div class="alert alert-info small"><i class="bi bi-info-circle"></i> No sidecar configured for this node.</div>';
+    }
+
+    body.innerHTML = html;
+}
+
+function updateConfigTables(backends, nodes) {
+    const nodeMap = {};
+    nodes.forEach(n => { nodeMap[n.name] = n; });
+
+    function statusBadge(status) {
+        if (status === 'healthy') return '<span class="badge bg-success">healthy</span>';
+        if (status === 'disabled') return '<span class="badge bg-warning text-dark">disabled</span>';
+        return '<span class="badge bg-danger">' + (status || 'unknown') + '</span>';
+    }
+
+    function buildRows(filtered) {
+        if (filtered.length === 0) {
+            return '<tr><td colspan="11" class="text-center text-muted py-3">No backends</td></tr>';
+        }
+        filtered.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        return filtered.map(b => {
+            const node = b.node_name ? nodeMap[b.node_name] : null;
+            const cudaVer = node ? (node.cuda_version || 'N/A') : 'N/A';
+            const gpuIndices = b.gpu_indices ? b.gpu_indices.join(', ') : 'All';
+            const gpuType = (b.gpus && b.gpus.length > 0) ? b.gpus[0].name : 'N/A';
+            const computeCap = (b.gpus && b.gpus.length > 0 && b.gpus[0].compute_capability)
+                ? b.gpus[0].compute_capability : 'N/A';
+            const totalMem = (b.gpus && b.gpus.length > 0)
+                ? b.gpus.reduce((sum, g) => sum + (g.memory_total_gb || 0), 0) : null;
+            const memStr = totalMem != null ? totalMem.toFixed(1) + ' GB' : 'N/A';
+
+            return `<tr>
+                <td><strong>${b.name}</strong></td>
+                <td>${statusBadge(b.status)}</td>
+                <td><small class="text-muted">${b.url}</small></td>
+                <td>${b.node_name || 'N/A'}</td>
+                <td>${gpuIndices}</td>
+                <td>${gpuType}</td>
+                <td>${computeCap}</td>
+                <td>${cudaVer}</td>
+                <td>${memStr}</td>
+                <td>${b.max_concurrent != null ? b.max_concurrent : 'N/A'}</td>
+                <td>${b.version || 'N/A'}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    const ollamaBackends = backends.filter(b => b.engine === 'ollama');
+    const vllmBackends = backends.filter(b => b.engine === 'vllm');
+
+    document.getElementById('config-ollama-tbody').innerHTML = buildRows(ollamaBackends);
+    document.getElementById('config-vllm-tbody').innerHTML = buildRows(vllmBackends);
+}
+
+function updateBackendAccordions(backends) {
+    const container = document.getElementById('backends-accordion');
+    const loading = document.getElementById('backends-loading');
+    if (loading) loading.remove();
+
+    backends.forEach((backend, idx) => {
+        const color = BACKEND_COLORS[idx % BACKEND_COLORS.length];
+        const existingItem = document.getElementById('backend-' + backend.id);
+
+        if (existingItem) {
+            // Update existing accordion content
+            updateBackendContent(backend, idx);
+            return;
+        }
+
+        // Create new accordion item
+        const statusBadge = backend.status === 'healthy'
+            ? '<span class="badge bg-success">healthy</span>'
+            : backend.status === 'disabled'
+                ? '<span class="badge bg-warning text-dark">disabled</span>'
+                : '<span class="badge bg-danger">unhealthy</span>';
+
+        const engineBadge = `<span class="badge bg-info">${backend.engine}</span>`;
+
+        const nodeBadge = backend.node_name
+            ? `<span class="badge bg-primary sidecar-badge">${backend.node_name}</span>`
+            : '<span class="badge bg-secondary sidecar-badge">No Node</span>';
+
+        const item = document.createElement('div');
+        item.className = 'accordion-item';
+        item.id = 'backend-' + backend.id;
+        item.innerHTML = `
+            <h2 class="accordion-header">
+                <button class="accordion-button collapsed" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#collapse-${backend.id}">
+                    <span class="me-2" style="color:${color}"><i class="bi bi-server"></i></span>
+                    <strong class="me-2">${backend.name}</strong>
+                    ${statusBadge} ${engineBadge} ${nodeBadge}
+                    <span class="ms-auto me-3 metric-mini" id="mini-util-${backend.id}"></span>
+                </button>
+            </h2>
+            <div id="collapse-${backend.id}" class="accordion-collapse collapse"
+                 data-bs-parent="#backends-accordion">
+                <div class="accordion-body" id="body-${backend.id}"></div>
+            </div>`;
+        container.appendChild(item);
+        updateBackendContent(backend, idx);
+    });
+}
+
+function updateBackendContent(backend, idx) {
+    const body = document.getElementById('body-' + backend.id);
+    if (!body) return;
+
+    // Mini utilization in collapsed header
+    const miniUtil = document.getElementById('mini-util-' + backend.id);
+    if (miniUtil) {
+        miniUtil.innerHTML = backend.gpu_utilization != null
+            ? `GPU: ${fmt(backend.gpu_utilization)}%`
+            : '';
+    }
+
+    // Backend info row
+    let html = `
+    <div class="row mb-3">
+        <div class="col-md-4">
+            <dl class="row small mb-0">
+                <dt class="col-5">URL:</dt><dd class="col-7 text-truncate">${backend.url}</dd>
+                <dt class="col-5">Engine:</dt><dd class="col-7">${backend.engine} ${backend.version || ''}</dd>
+                <dt class="col-5">Node:</dt><dd class="col-7">${backend.node_name || 'None'}</dd>
+                <dt class="col-5">GPUs:</dt><dd class="col-7">${backend.gpu_indices ? backend.gpu_indices.join(', ') : (backend.node_name ? 'All' : 'N/A')}</dd>
+            </dl>
+        </div>
+        <div class="col-md-4">
+            <dl class="row small mb-0">
+                <dt class="col-5">Concurrency:</dt><dd class="col-7">${backend.current_concurrent}/${backend.max_concurrent}</dd>
+            </dl>
+        </div>
+        <div class="col-md-4">
+            <dl class="row small mb-0">
+                <dt class="col-5">Active:</dt><dd class="col-7">${backend.active_requests}</dd>
+                <dt class="col-5">Queued:</dt><dd class="col-7">${backend.queued_requests}</dd>
+                <dt class="col-5">Latency:</dt><dd class="col-7">${backend.latency_ema_ms ? fmt(backend.latency_ema_ms, 0) + 'ms' : 'N/A'}</dd>
+            </dl>
+        </div>
+    </div>`;
+
+    // Models
+    if (backend.loaded_models && backend.loaded_models.length > 0) {
+        html += '<div class="mb-3"><strong class="small">Loaded Models:</strong> ';
+        backend.loaded_models.forEach(m => {
+            html += `<span class="badge bg-success me-1">${m}</span>`;
+        });
+        html += '</div>';
+    }
+
+    // Per-GPU cards
+    if (backend.gpus && backend.gpus.length > 0) {
+        html += '<div class="row">';
+        backend.gpus.forEach(gpu => {
+            const utilGpu = gpu.utilization_gpu;
+            const utilMem = gpu.utilization_memory;
+            const memPct = (gpu.memory_total_gb && gpu.memory_used_gb)
+                ? (gpu.memory_used_gb / gpu.memory_total_gb * 100) : null;
+
+            let cardClass = 'gpu-card';
+            if (utilGpu != null && utilGpu >= 80) cardClass += ' danger';
+            else if (utilGpu != null && utilGpu >= 50) cardClass += ' warn';
+
+            html += `
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card ${cardClass}">
+                    <div class="card-body p-3">
+                        <h6 class="card-title mb-1">
+                            <i class="bi bi-gpu-card"></i> GPU ${gpu.index}
+                            <small class="text-muted">${gpu.name || ''}</small>
+                        </h6>
+                        <small class="text-muted">${gpu.compute_capability ? 'CC ' + gpu.compute_capability : ''}</small>
+
+                        <div class="mt-2">
+                            <div class="d-flex justify-content-between small">
+                                <span>GPU Util</span>
+                                <span>${utilGpu != null ? fmt(utilGpu) + '%' : 'N/A'}</span>
+                            </div>
+                            <div class="progress gpu-gauge mb-2">
+                                <div class="progress-bar ${utilClass(utilGpu)}"
+                                     style="width: ${utilGpu || 0}%"></div>
+                            </div>
+
+                            <div class="d-flex justify-content-between small">
+                                <span>Memory</span>
+                                <span>${gpu.memory_used_gb != null ? fmt(gpu.memory_used_gb) + '/' + fmt(gpu.memory_total_gb) + ' GB' : 'N/A'}</span>
+                            </div>
+                            <div class="progress gpu-gauge mb-2">
+                                <div class="progress-bar ${utilClass(memPct)}"
+                                     style="width: ${memPct || 0}%"></div>
+                            </div>
+
+                            <div class="row small mt-2">
+                                <div class="col-6">
+                                    <i class="bi bi-thermometer ${tempClass(gpu.temperature_gpu)}"></i>
+                                    ${gpu.temperature_gpu != null ? gpu.temperature_gpu + '°C' : 'N/A'}
+                                </div>
+                                <div class="col-6">
+                                    <i class="bi bi-lightning"></i>
+                                    ${gpu.power_draw_watts != null ? fmt(gpu.power_draw_watts, 0) + 'W' : 'N/A'}
+                                    ${gpu.power_limit_watts ? '<small class="text-muted">/ ' + fmt(gpu.power_limit_watts, 0) + 'W</small>' : ''}
+                                </div>
+                            </div>
+                            <div class="row small">
+                                <div class="col-6">
+                                    <i class="bi bi-fan"></i>
+                                    ${gpu.fan_speed_percent != null ? gpu.fan_speed_percent + '%' : 'N/A'}
+                                </div>
+                                <div class="col-6">
+                                    <i class="bi bi-cpu"></i>
+                                    ${gpu.clock_sm_mhz ? gpu.clock_sm_mhz + ' MHz' : 'N/A'}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        });
+        html += '</div>';
+    } else if (!backend.node_name) {
+        html += '<div class="alert alert-info small"><i class="bi bi-info-circle"></i> No node assigned. Assign this backend to a node with a sidecar to see per-GPU metrics.</div>';
+    }
+
+    body.innerHTML = html;
+}
+
+// ── Chart Data Fetching ───────────────────────────────────────
+async function fetchChartData(timeRange) {
+    try {
+        // First get the list of backends from latest
+        const overviewResp = await fetch('/api/admin/telemetry/latest');
+        if (!overviewResp.ok) return;
+        const overview = await overviewResp.json();
+        const backends = overview.backends;
+
+        // Determine resolution based on range
+        const resMap = { '1h': '1m', '6h': '5m', '24h': '15m', '7d': '1h' };
+        const resolution = resMap[timeRange] || '5m';
+
+        // Fetch history for each backend in parallel
+        const historyPromises = backends.map(b =>
+            fetch(`/api/admin/telemetry/backends/${b.id}/history?metric=gpu_utilization&range=${timeRange}&resolution=${resolution}`)
+                .then(r => r.json())
+                .catch(() => null)
+        );
+        const memPromises = backends.map(b =>
+            fetch(`/api/admin/telemetry/backends/${b.id}/history?metric=gpu_memory&range=${timeRange}&resolution=${resolution}`)
+                .then(r => r.json())
+                .catch(() => null)
+        );
+        const powerPromises = backends.map(b =>
+            fetch(`/api/admin/telemetry/backends/${b.id}/history?metric=power&range=${timeRange}&resolution=${resolution}`)
+                .then(r => r.json())
+                .catch(() => null)
+        );
+        const reqPromises = backends.map(b =>
+            fetch(`/api/admin/telemetry/backends/${b.id}/history?metric=requests&range=${timeRange}&resolution=${resolution}`)
+                .then(r => r.json())
+                .catch(() => null)
+        );
+
+        const [utilResults, memResults, powerResults, reqResults] = await Promise.all([
+            Promise.all(historyPromises),
+            Promise.all(memPromises),
+            Promise.all(powerPromises),
+            Promise.all(reqPromises),
+        ]);
+
+        // Update GPU utilization chart
+        updateChart(gpuUtilChart, backends, utilResults, 'value');
+        updateChart(gpuMemChart, backends, memResults, 'value');
+        updateChart(powerChart, backends, powerResults, 'value');
+        updateChart(requestChart, backends, reqResults, 'value');
+
+    } catch (e) {
+        console.error('Chart data fetch error:', e);
+    }
+}
+
+function updateChart(chart, backends, results, valueKey) {
+    // Collect all unique timestamps across backends
+    let allTimestamps = new Set();
+    results.forEach(r => {
+        if (r && r.series) {
+            r.series.forEach(p => allTimestamps.add(p.timestamp));
+        }
+    });
+    const labels = Array.from(allTimestamps).sort();
+
+    const datasets = backends.map((backend, idx) => {
+        const result = results[idx];
+        const dataMap = {};
+        if (result && result.series) {
+            result.series.forEach(p => { dataMap[p.timestamp] = p[valueKey]; });
+        }
+
+        return {
+            label: backend.name,
+            data: labels.map(ts => dataMap[ts] ?? null),
+            borderColor: BACKEND_COLORS[idx % BACKEND_COLORS.length],
+            backgroundColor: BACKEND_COLORS[idx % BACKEND_COLORS.length] + '20',
+            borderWidth: 2,
+            tension: 0.3,
+            fill: false,
+            pointRadius: 0,
+            pointHitRadius: 10,
+            spanGaps: true,
+        };
+    });
+
+    chart.data.labels = labels.map(ts => {
+        const d = new Date(ts);
+        return isNaN(d.getTime()) ? ts : formatTime(ts);
+    });
+    chart.data.datasets = datasets;
+    chart.update('none');
+}
+
+// ── Event Handlers ────────────────────────────────────────────
+document.querySelectorAll('.time-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        currentTimeRange = this.dataset.range;
+        fetchChartData(currentTimeRange);
+
+        // Update export link
+        const exportLink = document.querySelector('a[href*="export"]');
+        if (exportLink) {
+            exportLink.href = `/api/admin/telemetry/export?format=csv&range=${currentTimeRange}`;
+        }
+    });
+});
+
+// ── Initialization ────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    initCharts();
+    fetchLatestTelemetry();
+    fetchChartData(currentTimeRange);
+
+    liveInterval = setInterval(fetchLatestTelemetry, POLL_INTERVAL_LIVE);
+    chartInterval = setInterval(() => fetchChartData(currentTimeRange), POLL_INTERVAL_CHARTS);
+});
+</script>
+{% endblock %}

@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% block title %}Conversations - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "conversations" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-chat-dots"></i> Conversations</h1>
+                <span class="text-muted">{{ total }} conversation{{ 's' if total != 1 else '' }}</span>
+            </div>
+
+            <!-- Filters -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="GET" action="/admin/conversations" class="row g-3">
+                        <div class="col-md-3">
+                            <label for="search" class="form-label">Search Title</label>
+                            <input type="text" class="form-control" id="search" name="search" value="{{ search }}" placeholder="Conversation title...">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="user_id_filter" class="form-label">User ID</label>
+                            <input type="number" class="form-control" id="user_id_filter" name="user_id_filter" value="{{ user_id_filter }}" placeholder="User ID">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="model_filter" class="form-label">Model</label>
+                            <input type="text" class="form-control" id="model_filter" name="model_filter" value="{{ model_filter }}" placeholder="Model name...">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="start_date" class="form-label">From</label>
+                            <input type="date" class="form-control" id="start_date" name="start_date" value="{{ start_date }}">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="end_date" class="form-label">To</label>
+                            <input type="date" class="form-control" id="end_date" name="end_date" value="{{ end_date }}">
+                        </div>
+                        <div class="col-md-1 d-flex align-items-end gap-1">
+                            <button type="submit" class="btn btn-primary">Apply</button>
+                        </div>
+                        <div class="col-12 d-flex gap-2">
+                            <a href="/admin/conversations" class="btn btn-outline-secondary btn-sm">Reset</a>
+                            <a href="/admin/conversations/export?format=csv{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}" class="btn btn-outline-success btn-sm">
+                                <i class="bi bi-download"></i> CSV
+                            </a>
+                            <a href="/admin/conversations/export?format=json{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}" class="btn btn-outline-success btn-sm">
+                                <i class="bi bi-download"></i> JSON
+                            </a>
+                            <a href="/admin/conversations/export?format=json&include_content=true{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}" class="btn btn-outline-info btn-sm">
+                                <i class="bi bi-download"></i> JSON + Content
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Results Table -->
+            <div class="card">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm">
+                            <caption class="sr-only">Chat conversations</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">ID</th>
+                                    <th scope="col">Username</th>
+                                    <th scope="col">Title</th>
+                                    <th scope="col">Model</th>
+                                    <th scope="col">Msgs</th>
+                                    <th scope="col">Created</th>
+                                    <th scope="col">Updated</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for conv in conversations %}
+                                <tr>
+                                    <td>{{ conv.id }}</td>
+                                    <td><a href="/admin/users/{{ conv.user_id }}">{{ conv.username }}</a></td>
+                                    <td>{{ conv.title[:50] }}{% if conv.title|length > 50 %}...{% endif %}</td>
+                                    <td><span class="badge bg-secondary">{{ conv.model or 'N/A' }}</span></td>
+                                    <td>{{ conv.message_count }}</td>
+                                    <td>{{ conv.created_at|localtime if conv.created_at else 'N/A' }}</td>
+                                    <td>{{ conv.updated_at|localtime if conv.updated_at else 'N/A' }}</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary reveal-btn" data-conv-id="{{ conv.id }}" title="Reveal messages">
+                                            <i class="bi bi-eye"></i> Reveal
+                                        </button>
+                                    </td>
+                                </tr>
+                                <tr class="conv-messages-row" id="conv-messages-{{ conv.id }}" style="display: none;">
+                                    <td colspan="8">
+                                        <div class="p-3 bg-light rounded" id="conv-content-{{ conv.id }}">
+                                            <div class="text-muted">Loading...</div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination -->
+                    {% if total_pages > 1 %}
+                    <nav aria-label="Conversation pagination">
+                        <ul class="pagination justify-content-center mb-0">
+                            <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/conversations?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Previous</a>
+                            </li>
+                            {% for p in range(1, total_pages + 1) %}
+                            {% if p == page or (p >= page - 2 and p <= page + 2) or p == 1 or p == total_pages %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="/admin/conversations?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">{{ p }}</a>
+                            </li>
+                            {% elif p == page - 3 or p == page + 3 %}
+                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                            {% endif %}
+                            {% endfor %}
+                            <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/conversations?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    'use strict';
+    document.querySelectorAll('.reveal-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var convId = btn.dataset.convId;
+            var row = document.getElementById('conv-messages-' + convId);
+            var content = document.getElementById('conv-content-' + convId);
+
+            if (row.style.display === 'none') {
+                row.style.display = '';
+                btn.innerHTML = '<i class="bi bi-eye-slash"></i> Hide';
+
+                // Fetch messages if not already loaded
+                if (content.querySelector('.text-muted')) {
+                    fetch('/admin/conversations/' + convId + '/messages')
+                        .then(function(res) { return res.json(); })
+                        .then(function(data) {
+                            if (data.error) {
+                                content.innerHTML = '<div class="text-danger">' + data.error + '</div>';
+                                return;
+                            }
+                            var html = '';
+                            (data.messages || []).forEach(function(msg) {
+                                var roleClass = msg.role === 'user' ? 'text-primary' : 'text-success';
+                                var roleLabel = msg.role === 'user' ? 'User' : 'Assistant';
+                                var escapedContent = (msg.content || '').replace(/&/g, '&amp;')
+                                    .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                                    .replace(/\n/g, '<br>');
+                                html += '<div class="mb-3 p-2 border-start border-3 ' +
+                                    (msg.role === 'user' ? 'border-primary' : 'border-success') + '">';
+                                html += '<div class="fw-bold ' + roleClass + '">' + roleLabel;
+                                if (msg.created_at) {
+                                    html += ' <small class="text-muted fw-normal">' + msg.created_at + '</small>';
+                                }
+                                if (msg.attachment_count > 0) {
+                                    html += ' <span class="badge bg-info">' + msg.attachment_count + ' file(s)</span>';
+                                }
+                                html += '</div>';
+                                html += '<div class="mt-1" style="white-space: pre-wrap; max-height: 300px; overflow-y: auto;">' + escapedContent + '</div>';
+                                html += '</div>';
+                            });
+                            content.innerHTML = html || '<div class="text-muted">No messages</div>';
+                        })
+                        .catch(function(err) {
+                            content.innerHTML = '<div class="text-danger">Failed to load messages</div>';
+                        });
+                }
+            } else {
+                row.style.display = 'none';
+                btn.innerHTML = '<i class="bi bi-eye"></i> Reveal';
+            }
+        });
+    });
+})();
+</script>
+{% endblock %}

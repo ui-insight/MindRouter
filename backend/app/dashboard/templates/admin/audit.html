@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}Audit Log - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "audit" %}{% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-journal-text"></i> Audit Log</h1>
+                <span class="text-muted">{{ total }} request{{ 's' if total != 1 else '' }}</span>
+            </div>
+
+            <!-- Filters -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="GET" action="/admin/audit" class="row g-3">
+                        <div class="col-md-2">
+                            <label for="search" class="form-label">Search</label>
+                            <input type="text" class="form-control" id="search" name="search" value="{{ search }}" placeholder="Prompt text...">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="user_id_filter" class="form-label">User ID</label>
+                            <input type="number" class="form-control" id="user_id_filter" name="user_id_filter" value="{{ user_id_filter }}" placeholder="User ID">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="model_filter" class="form-label">Model</label>
+                            <input type="text" class="form-control" id="model_filter" name="model_filter" value="{{ model_filter }}" placeholder="Model name...">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="status_filter" class="form-label">Status</label>
+                            <select class="form-select" id="status_filter" name="status_filter">
+                                <option value="">All</option>
+                                <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>Completed</option>
+                                <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>Failed</option>
+                                <option value="processing" {% if status_filter == 'processing' %}selected{% endif %}>Processing</option>
+                                <option value="queued" {% if status_filter == 'queued' %}selected{% endif %}>Queued</option>
+                                <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>Cancelled</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="start_date" class="form-label">From</label>
+                            <input type="date" class="form-control" id="start_date" name="start_date" value="{{ start_date }}">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="end_date" class="form-label">To</label>
+                            <input type="date" class="form-control" id="end_date" name="end_date" value="{{ end_date }}">
+                        </div>
+                        <div class="col-12 d-flex gap-2">
+                            <button type="submit" class="btn btn-primary btn-sm">Apply</button>
+                            <a href="/admin/audit" class="btn btn-outline-secondary btn-sm">Reset</a>
+                            <span class="ms-auto d-flex gap-2">
+                                <a href="/admin/audit/export?format=csv{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}" class="btn btn-outline-success btn-sm"><i class="bi bi-filetype-csv"></i> CSV</a>
+                                <a href="/admin/audit/export?format=json{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}" class="btn btn-outline-info btn-sm"><i class="bi bi-filetype-json"></i> JSON</a>
+                                <a href="/admin/audit/export?format=json&include_content=true{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}" class="btn btn-outline-warning btn-sm"><i class="bi bi-filetype-json"></i> JSON + Content</a>
+                            </span>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Results Table -->
+            <div class="card">
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm">
+                            <caption class="sr-only">Inference request audit log</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">ID</th>
+                                    <th scope="col">Time</th>
+                                    <th scope="col">User</th>
+                                    <th scope="col">Model</th>
+                                    <th scope="col">Endpoint</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Tokens</th>
+                                    <th scope="col">Latency</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for req in audit_requests %}
+                                <tr>
+                                    <td><code>{{ req.request_uuid[:8] }}...</code></td>
+                                    <td>{{ req.created_at|localtime('%m-%d %H:%M:%S') }}</td>
+                                    <td><a href="/admin/users/{{ req.user_id }}">{{ req.user_id }}</a></td>
+                                    <td><span class="badge bg-secondary">{{ req.model }}</span></td>
+                                    <td>{{ req.endpoint }}</td>
+                                    <td>
+                                        <span class="badge {% if req.status.value == 'completed' %}bg-success{% elif req.status.value == 'failed' %}bg-danger{% else %}bg-warning{% endif %}">
+                                            {{ req.status.value }}
+                                        </span>
+                                    </td>
+                                    <td>{{ (req.prompt_tokens or 0) + (req.completion_tokens or 0) }}</td>
+                                    <td>{{ req.total_time_ms or 'N/A' }} ms</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-primary audit-reveal-btn" data-req-uuid="{{ req.request_uuid }}" title="Reveal prompt/response">
+                                            <i class="bi bi-eye"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <tr class="audit-detail-row" id="audit-detail-{{ req.request_uuid }}" style="display: none;">
+                                    <td colspan="9">
+                                        <div class="p-3 bg-light rounded" id="audit-content-{{ req.request_uuid }}">
+                                            <div class="text-muted">Loading...</div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination -->
+                    {% if total_pages > 1 %}
+                    <nav aria-label="Audit log pagination">
+                        <ul class="pagination justify-content-center mb-0">
+                            <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/audit?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Previous</a>
+                            </li>
+                            {% for p in range(1, total_pages + 1) %}
+                            {% if p == page or (p >= page - 2 and p <= page + 2) or p == 1 or p == total_pages %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="/admin/audit?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">{{ p }}</a>
+                            </li>
+                            {% elif p == page - 3 or p == page + 3 %}
+                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                            {% endif %}
+                            {% endfor %}
+                            <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/audit?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    'use strict';
+    document.querySelectorAll('.audit-reveal-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var uuid = btn.dataset.reqUuid;
+            var row = document.getElementById('audit-detail-' + uuid);
+            var content = document.getElementById('audit-content-' + uuid);
+
+            if (row.style.display === 'none') {
+                row.style.display = '';
+                btn.innerHTML = '<i class="bi bi-eye-slash"></i>';
+
+                if (content.querySelector('.text-muted')) {
+                    fetch('/admin/audit/' + uuid + '/detail')
+                        .then(function(res) { return res.json(); })
+                        .then(function(data) {
+                            if (data.error) {
+                                content.innerHTML = '<div class="text-danger">' + escapeHtml(data.error) + '</div>';
+                                return;
+                            }
+                            var html = '';
+
+                            // Prompt/Messages
+                            if (data.messages) {
+                                html += '<div class="mb-3"><strong>Messages:</strong>';
+                                html += '<pre class="mt-1 p-2 bg-white border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(JSON.stringify(data.messages, null, 2)) + '</pre></div>';
+                            } else if (data.prompt) {
+                                html += '<div class="mb-3"><strong>Prompt:</strong>';
+                                html += '<pre class="mt-1 p-2 bg-white border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(data.prompt) + '</pre></div>';
+                            }
+
+                            // Response
+                            if (data.response_content) {
+                                html += '<div class="mb-3"><strong>Response:</strong>';
+                                if (data.finish_reason) {
+                                    html += ' <span class="badge bg-info">' + escapeHtml(data.finish_reason) + '</span>';
+                                }
+                                html += '<pre class="mt-1 p-2 bg-white border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(data.response_content) + '</pre></div>';
+                            }
+
+                            // Error
+                            if (data.error_message) {
+                                html += '<div class="mb-3"><strong class="text-danger">Error:</strong>';
+                                html += '<pre class="mt-1 p-2 bg-white border border-danger rounded" style="font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(data.error_message) + '</pre></div>';
+                            }
+
+                            // Parameters
+                            if (data.parameters) {
+                                html += '<div><strong>Parameters:</strong>';
+                                html += '<pre class="mt-1 p-2 bg-white border rounded" style="font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(JSON.stringify(data.parameters, null, 2)) + '</pre></div>';
+                            }
+
+                            content.innerHTML = html || '<div class="text-muted">No detail available</div>';
+                        })
+                        .catch(function(err) {
+                            content.innerHTML = '<div class="text-danger">Failed to load details</div>';
+                        });
+                }
+            } else {
+                row.style.display = 'none';
+                btn.innerHTML = '<i class="bi bi-eye"></i>';
+            }
+        });
+    });
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        var div = document.createElement('div');
+        div.textContent = typeof text === 'string' ? text : JSON.stringify(text);
+        return div.innerHTML;
+    }
+})();
+</script>
+{% endblock %}

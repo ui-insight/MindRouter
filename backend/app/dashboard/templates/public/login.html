@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Login - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-5">
+            <div class="card shadow">
+                <div class="card-body p-4">
+                    <h1 class="card-title text-center mb-4 h3">
+                        <i class="bi bi-person-lock" aria-hidden="true"></i> Sign In
+                    </h1>
+
+                    {% if error %}
+                    <div class="alert alert-danger" role="alert">
+                        {{ error }}
+                    </div>
+                    {% endif %}
+
+                    {% if azure_enabled %}
+                    <div class="d-grid mb-3">
+                        <a href="/login/azure" class="btn btn-primary btn-lg">
+                            <i class="bi bi-microsoft"></i> Sign in with University of Idaho
+                        </a>
+                    </div>
+                    <p class="text-center text-muted small">
+                        Use your University of Idaho credentials to sign in.
+                        Your account will be created automatically on first login.
+                    </p>
+
+                    <hr>
+
+                    <div class="text-center">
+                        <a class="text-muted small" data-bs-toggle="collapse" href="#adminLogin" role="button" aria-expanded="false" aria-controls="adminLogin">
+                            Admin login
+                        </a>
+                    </div>
+                    <div class="collapse mt-3" id="adminLogin">
+                    {% endif %}
+
+                    <form method="POST" action="/login">
+                        <div class="mb-3">
+                            <label for="username" class="form-label">Username</label>
+                            <input type="text" class="form-control" id="username" name="username" required {% if not azure_enabled %}autofocus{% endif %} autocomplete="username">
+                        </div>
+                        <div class="mb-3">
+                            <label for="password" class="form-label">Password</label>
+                            <input type="password" class="form-control" id="password" name="password" required autocomplete="current-password">
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-outline-secondary">
+                                <i class="bi bi-box-arrow-in-right"></i> Login
+                            </button>
+                        </div>
+                    </form>
+
+                    {% if azure_enabled %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,1156 @@
+{% extends "base.html" %}
+
+{% block title %}MindRouter2 - Cluster Status{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row mb-4">
+        <div class="col-12">
+            <h1><i class="bi bi-speedometer2"></i> Cluster Status</h1>
+            <p class="text-muted">Real-time status of the MindRouter2 inference cluster</p>
+        </div>
+    </div>
+
+    <div class="row row-cols-2 row-cols-md-5 mb-4 g-3">
+        <div class="col">
+            <div class="card card-stat success h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Healthy Backends</h2>
+                    <p class="card-title mb-0 h2" id="stat-backends">{{ healthy_backends }} / {{ total_backends }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card card-stat primary h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Available Models</h2>
+                    <p class="card-title mb-0 h2" id="stat-models-count">{{ models|length }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card card-stat info h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6"><i class="bi bi-people"></i> Active Users (24h)</h2>
+                    <p class="card-title mb-0 h2" id="stat-active-users">{{ active_users }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card card-stat warning h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Queue Size</h2>
+                    <p class="card-title mb-0 h2" id="stat-queue">{{ queue_size }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card card-stat primary h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Status</h2>
+                    <p class="card-title mb-0 h2" id="stat-status">
+                        {% if healthy_backends > 0 %}
+                        <span class="text-success"><i class="bi bi-check-circle" aria-hidden="true"></i> Online</span>
+                        {% else %}
+                        <span class="text-danger"><i class="bi bi-x-circle" aria-hidden="true"></i> Offline</span>
+                        {% endif %}
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Token Flow Animation + Total Tokens Counter (seamless) -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card" style="overflow:hidden; background:#0a0e1a; border-bottom:none;">
+                <div class="card-header" style="background:#0d1225; border-bottom:1px solid #1a2040; color:#8892b0;">
+                    <i class="bi bi-activity"></i> Token Flow &mdash; Live Cluster Throughput
+                </div>
+                <div class="card-body p-0" style="position:relative; height:280px;">
+                    <canvas id="tokenFlowCanvas" style="width:100%; height:100%; display:block;"
+                            role="img" aria-label="Animated visualization of token flow through the inference cluster. Particles flow from request sources through the MindRouter hub to backend servers."></canvas>
+                    <!-- Overlay stats (live region for screen readers) -->
+                    <div id="flowStats" style="position:absolute; top:2px; left:50%; transform:translateX(-50%); text-align:center; pointer-events:none;" aria-live="polite" aria-atomic="true">
+                        <div style="font-size:2rem; font-weight:700; color:#64ffda; line-height:1; text-shadow:0 0 20px rgba(100,255,218,0.4);">
+                            <span id="tpsValue">0</span>
+                            <span style="font-size:0.9rem; font-weight:400; color:#8892b0;"> tok/s</span>
+                        </div>
+                        <div style="font-size:0.8rem; color:#5a6380; margin-top:4px;">
+                            <span id="rpmValue">0</span> requests/min
+                            &nbsp;&middot;&nbsp;
+                            <span id="activeValue">0</span> active
+                        </div>
+                    </div>
+                    <!-- Screen reader summary (updated periodically) -->
+                    <div id="flowStatsSR" class="sr-only" aria-live="polite" role="status"></div>
+                    <!-- Idle label -->
+                    <div id="idleLabel" style="position:absolute; bottom:12px; left:16px; font-size:0.75rem; color:#3a4060; pointer-events:none;" role="status">
+                        Waiting for inference requests...
+                    </div>
+                </div>
+                <!-- Total tokens: seamless continuation of the dark canvas -->
+                <div class="text-center" style="background:#0a0e1a; padding:10px 0 14px;">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 2.5px; color: #8892b0;">Total Tokens Served</div>
+                    <div id="total-tokens-counter" style="font-size: 2.2rem; font-weight: 600; color: rgba(100,255,218,0.55); font-family: 'JetBrains Mono', monospace; line-height: 1.1;">
+                        {{ "{:,}".format(total_tokens) }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <div class="card h-100">
+                <div class="card-header">
+                    <i class="bi bi-cpu"></i> Available Models
+                </div>
+                <div class="card-body" id="models-grid" style="max-height:320px; overflow-y:auto;">
+                    {% if models %}
+                    <div class="row">
+                        {% for model in models %}
+                        <div class="col-md-4 mb-2">
+                            <span class="badge bg-secondary"><i class="bi bi-box"></i> {{ model }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="text-muted mb-0">No models currently available.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-0 shadow-sm" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                <div class="card-header border-0" style="background:transparent; color:#fff;">
+                    <i class="bi bi-lightning-charge-fill"></i> <strong>Quick Start</strong>
+                </div>
+                <div class="card-body text-white">
+                    <div class="d-flex align-items-start mb-3">
+                        <span class="badge rounded-circle bg-white text-dark me-2 d-flex align-items-center justify-content-center" style="width:28px; height:28px; flex-shrink:0; font-weight:700;">1</span>
+                        <div>
+                            <strong>Login to MindRouter</strong>
+                            <div class="mt-1"><a href="/login" class="btn btn-sm btn-light"><i class="bi bi-box-arrow-in-right"></i> Login</a></div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-start mb-3">
+                        <span class="badge rounded-circle bg-white text-dark me-2 d-flex align-items-center justify-content-center" style="width:28px; height:28px; flex-shrink:0; font-weight:700;">2</span>
+                        <div>
+                            <strong>Create an API Key</strong>
+                            <div class="small" style="opacity:0.85;">Generate keys in your Dashboard</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-start mb-3">
+                        <span class="badge rounded-circle bg-white text-dark me-2 d-flex align-items-center justify-content-center" style="width:28px; height:28px; flex-shrink:0; font-weight:700;">3</span>
+                        <div>
+                            <strong>Use the Chat Interface</strong>
+                            <div class="small" style="opacity:0.85;">Talk to models directly in your browser</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-start mb-3">
+                        <span class="badge rounded-circle bg-white text-dark me-2 d-flex align-items-center justify-content-center" style="width:28px; height:28px; flex-shrink:0; font-weight:700;">4</span>
+                        <div>
+                            <strong>Read the Docs &amp; Blog</strong>
+                            <div class="small" style="opacity:0.85;">Guides, examples, and updates</div>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-start">
+                        <span class="badge rounded-circle bg-white text-dark me-2 d-flex align-items-center justify-content-center" style="width:28px; height:28px; flex-shrink:0; font-weight:700;">5</span>
+                        <div>
+                            <strong>Integrate into Your Code</strong>
+                            <div class="small" style="opacity:0.85;">OpenAI-compatible API, drop-in replacement</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trend Charts -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-body">
+                    <div class="d-flex justify-content-center mb-3">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Time range">
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="hour">Hour</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn active" data-range="day">Day</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="week">Week</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="month">Month</button>
+                            <button type="button" class="btn btn-outline-secondary trend-range-btn" data-range="year">Year</button>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6 class="text-center text-muted mb-2"><i class="bi bi-bar-chart"></i> Tokens Served</h6>
+                            <div style="position:relative; height:220px;">
+                                <canvas id="tokenTrendChart"></canvas>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <h6 class="text-center text-muted mb-2"><i class="bi bi-people"></i> Active Users</h6>
+                            <div style="position:relative; height:220px;">
+                                <canvas id="userTrendChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- Features & Capabilities Showcase                                       -->
+<!-- ====================================================================== -->
+<div style="background: linear-gradient(180deg, #f8f9fa 0%, #ffffff 50%, #f8f9fa 100%);">
+<div class="container py-5">
+
+    <!-- Section Header -->
+    <div class="text-center mb-5">
+        <h2 class="fw-bold" style="font-size:2.2rem;">Everything You Need for LLM Inference</h2>
+        <p class="text-muted mx-auto" style="max-width:640px;">MindRouter2 provides a complete platform for running, managing, and integrating large language models &mdash; from a browser-based chat to a full OpenAI-compatible API.</p>
+    </div>
+
+    <!-- ── Feature 1: API Usage ── -->
+    <div class="row align-items-center mb-5 g-4">
+        <div class="col-lg-6">
+            <span class="badge bg-primary bg-opacity-10 text-primary mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-braces"></i> OpenAI-Compatible API</span>
+            <h3 class="fw-bold mt-2">Drop-in API Replacement</h3>
+            <p class="text-muted">Point any OpenAI SDK or tool at MindRouter and start generating. Supports chat completions, streaming, tool calling, structured output, and embeddings &mdash; all through a single endpoint.</p>
+            <ul class="list-unstyled text-muted">
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Full <code>/v1/chat/completions</code> compatibility</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Streaming &amp; non-streaming responses</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Tool calling &amp; function calling</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Structured JSON output</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Image &amp; multimodal inputs</li>
+            </ul>
+        </div>
+        <div class="col-lg-6">
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#1e1e2e; border:1px solid #313244;">
+                <!-- Terminal title bar -->
+                <div class="d-flex align-items-center px-3 py-2" style="background:#181825; border-bottom:1px solid #313244;">
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f38ba8; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#a6e3a1; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f9e2af; display:inline-block; margin-right:6px;"></span>
+                    <span class="ms-2" style="font-size:0.75rem; color:#6c7086;">curl &mdash; Chat Completions</span>
+                </div>
+                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#89b4fa;">curl</span> -X POST {{ request.url.scheme }}://{{ request.url.netloc }}/v1/chat/completions \
+  -H <span style="color:#a6e3a1;">"Authorization: Bearer YOUR_API_KEY"</span> \
+  -H <span style="color:#a6e3a1;">"Content-Type: application/json"</span> \
+  -d <span style="color:#a6e3a1;">'{
+    "model": "openai/gpt-oss-20b",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Explain quantum computing in 3 sentences."}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 256
+  }'</span></code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 2: Python SDK ── -->
+    <div class="row align-items-center mb-5 g-4 flex-lg-row-reverse">
+        <div class="col-lg-6">
+            <span class="badge bg-warning bg-opacity-10 text-warning mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-filetype-py"></i> Python Integration</span>
+            <h3 class="fw-bold mt-2">Works with the OpenAI Python SDK</h3>
+            <p class="text-muted">Change two lines of code &mdash; <code>base_url</code> and <code>api_key</code> &mdash; and your existing OpenAI Python code works instantly with MindRouter. No new libraries to learn.</p>
+            <ul class="list-unstyled text-muted">
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Use <code>openai</code> Python package as-is</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Async support with <code>AsyncOpenAI</code></li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Streaming with server-sent events</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Compatible with LangChain, LlamaIndex, etc.</li>
+            </ul>
+        </div>
+        <div class="col-lg-6">
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#1e1e2e; border:1px solid #313244;">
+                <div class="d-flex align-items-center px-3 py-2" style="background:#181825; border-bottom:1px solid #313244;">
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f38ba8; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#a6e3a1; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f9e2af; display:inline-block; margin-right:6px;"></span>
+                    <span class="ms-2" style="font-size:0.75rem; color:#6c7086;">example.py</span>
+                </div>
+                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#cba6f7;">from</span> <span style="color:#89b4fa;">openai</span> <span style="color:#cba6f7;">import</span> OpenAI
+
+client = OpenAI(
+    <span style="color:#fab387;">base_url</span>=<span style="color:#a6e3a1;">"{{ request.url.scheme }}://{{ request.url.netloc }}/v1"</span>,
+    <span style="color:#fab387;">api_key</span>=<span style="color:#a6e3a1;">"YOUR_API_KEY"</span>,
+)
+
+response = client.chat.completions.create(
+    <span style="color:#fab387;">model</span>=<span style="color:#a6e3a1;">"openai/gpt-oss-20b"</span>,
+    <span style="color:#fab387;">messages</span>=[
+        {<span style="color:#a6e3a1;">"role"</span>: <span style="color:#a6e3a1;">"user"</span>,
+         <span style="color:#a6e3a1;">"content"</span>: <span style="color:#a6e3a1;">"Write a haiku about GPUs."</span>}
+    ],
+    <span style="color:#fab387;">stream</span>=<span style="color:#fab387;">True</span>,
+)
+
+<span style="color:#cba6f7;">for</span> chunk <span style="color:#cba6f7;">in</span> response:
+    <span style="color:#89b4fa;">print</span>(chunk.choices[<span style="color:#fab387;">0</span>].delta.content, <span style="color:#fab387;">end</span>=<span style="color:#a6e3a1;">""</span>)</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 3: Chat Interface ── -->
+    <div class="row align-items-center mb-5 g-4">
+        <div class="col-lg-6">
+            <span class="badge bg-success bg-opacity-10 text-success mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-chat-dots"></i> Built-in Chat</span>
+            <h3 class="fw-bold mt-2">Interactive Chat Interface</h3>
+            <p class="text-muted">No setup required &mdash; just log in and start chatting. MindRouter includes a full-featured web chat with markdown rendering, code highlighting, file uploads, conversation history, and model switching.</p>
+            <ul class="list-unstyled text-muted">
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Real-time streaming responses</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Syntax-highlighted code blocks</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>File &amp; image uploads</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Persistent conversation history</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Switch models mid-conversation</li>
+            </ul>
+            {% if user %}
+            <a href="/chat" class="btn btn-success mt-2"><i class="bi bi-chat-dots"></i> Open Chat</a>
+            {% else %}
+            <a href="/login" class="btn btn-success mt-2"><i class="bi bi-box-arrow-in-right"></i> Login to Chat</a>
+            {% endif %}
+        </div>
+        <div class="col-lg-6">
+            <!-- Chat UI mockup -->
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#ffffff; border:1px solid #dee2e6;">
+                <!-- Chat header -->
+                <div class="d-flex align-items-center justify-content-between px-3 py-2" style="background:#f8f9fa; border-bottom:1px solid #dee2e6;">
+                    <div class="d-flex align-items-center">
+                        <i class="bi bi-chat-dots text-primary me-2"></i>
+                        <span class="fw-semibold" style="font-size:0.9rem;">MindRouter Chat</span>
+                    </div>
+                    <span class="badge bg-secondary" style="font-size:0.7rem;">openai/gpt-oss-20b</span>
+                </div>
+                <!-- Chat messages mockup -->
+                <div class="p-3" style="min-height:240px; background:#fff;">
+                    <!-- User message -->
+                    <div class="d-flex justify-content-end mb-3">
+                        <div class="rounded-3 px-3 py-2" style="background:#e7f1ff; max-width:80%; font-size:0.85rem;">
+                            Write a Python function that finds prime numbers using the Sieve of Eratosthenes.
+                        </div>
+                    </div>
+                    <!-- Assistant message -->
+                    <div class="d-flex justify-content-start mb-2">
+                        <div class="rounded-3 px-3 py-2" style="background:#f8f9fa; max-width:85%; font-size:0.85rem;">
+                            <p class="mb-2">Here's an efficient implementation:</p>
+                            <div class="rounded-2 p-2 mb-2" style="background:#1e1e2e; color:#cdd6f4; font-size:0.78rem; font-family:monospace; line-height:1.5;">
+                                <span style="color:#cba6f7;">def</span> <span style="color:#89b4fa;">sieve</span>(n):<br>
+                                &nbsp;&nbsp;&nbsp;&nbsp;is_prime = [<span style="color:#fab387;">True</span>] * (n + <span style="color:#fab387;">1</span>)<br>
+                                &nbsp;&nbsp;&nbsp;&nbsp;is_prime[<span style="color:#fab387;">0</span>] = is_prime[<span style="color:#fab387;">1</span>] = <span style="color:#fab387;">False</span><br>
+                                &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#cba6f7;">for</span> i <span style="color:#cba6f7;">in</span> <span style="color:#89b4fa;">range</span>(<span style="color:#fab387;">2</span>, <span style="color:#89b4fa;">int</span>(n**<span style="color:#fab387;">0.5</span>)+<span style="color:#fab387;">1</span>):<br>
+                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#cba6f7;">if</span> is_prime[i]:<br>
+                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;is_prime[i*i::i] = [<span style="color:#fab387;">False</span>] * ...<br>
+                                &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#cba6f7;">return</span> [i <span style="color:#cba6f7;">for</span> i, p <span style="color:#cba6f7;">in</span> ...]
+                            </div>
+                            <p class="mb-0 text-muted" style="font-size:0.78rem;">This runs in O(n log log n) time complexity...</p>
+                        </div>
+                    </div>
+                </div>
+                <!-- Chat input mockup -->
+                <div class="d-flex align-items-center px-3 py-2" style="border-top:1px solid #dee2e6; background:#f8f9fa;">
+                    <div class="flex-grow-1 rounded-pill px-3 py-1" style="background:#fff; border:1px solid #ced4da; font-size:0.82rem; color:#6c757d;">
+                        Type a message...
+                    </div>
+                    <button class="btn btn-primary btn-sm rounded-pill ms-2 px-3"><i class="bi bi-send"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 4: Tool Calling ── -->
+    <div class="row align-items-center mb-5 g-4 flex-lg-row-reverse">
+        <div class="col-lg-6">
+            <span class="badge bg-info bg-opacity-10 text-info mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-tools"></i> Tool Calling</span>
+            <h3 class="fw-bold mt-2">Native Function &amp; Tool Calling</h3>
+            <p class="text-muted">Build AI agents and agentic workflows. MindRouter supports the OpenAI tool calling protocol, enabling models to invoke functions, query databases, call APIs, and orchestrate complex multi-step tasks.</p>
+            <ul class="list-unstyled text-muted">
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>OpenAI-compatible <code>tools</code> parameter</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Parallel tool calls supported</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Works with LangChain agents</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Structured JSON Schema outputs</li>
+            </ul>
+        </div>
+        <div class="col-lg-6">
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#1e1e2e; border:1px solid #313244;">
+                <div class="d-flex align-items-center px-3 py-2" style="background:#181825; border-bottom:1px solid #313244;">
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f38ba8; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#a6e3a1; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f9e2af; display:inline-block; margin-right:6px;"></span>
+                    <span class="ms-2" style="font-size:0.75rem; color:#6c7086;">tool_calling.py</span>
+                </div>
+                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code>response = client.chat.completions.create(
+    <span style="color:#fab387;">model</span>=<span style="color:#a6e3a1;">"openai/gpt-oss-20b"</span>,
+    <span style="color:#fab387;">messages</span>=[{<span style="color:#a6e3a1;">"role"</span>: <span style="color:#a6e3a1;">"user"</span>,
+               <span style="color:#a6e3a1;">"content"</span>: <span style="color:#a6e3a1;">"What's the weather in Moscow, ID?"</span>}],
+    <span style="color:#fab387;">tools</span>=[{
+        <span style="color:#a6e3a1;">"type"</span>: <span style="color:#a6e3a1;">"function"</span>,
+        <span style="color:#a6e3a1;">"function"</span>: {
+            <span style="color:#a6e3a1;">"name"</span>: <span style="color:#a6e3a1;">"get_weather"</span>,
+            <span style="color:#a6e3a1;">"description"</span>: <span style="color:#a6e3a1;">"Get current weather"</span>,
+            <span style="color:#a6e3a1;">"parameters"</span>: {
+                <span style="color:#a6e3a1;">"type"</span>: <span style="color:#a6e3a1;">"object"</span>,
+                <span style="color:#a6e3a1;">"properties"</span>: {
+                    <span style="color:#a6e3a1;">"city"</span>: {<span style="color:#a6e3a1;">"type"</span>: <span style="color:#a6e3a1;">"string"</span>}
+                }
+            }
+        }
+    }],
+)</code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 5: Translation Architecture ── -->
+    <div class="row align-items-center mb-5 g-4">
+        <div class="col-lg-6">
+            <span class="badge bg-opacity-10 mb-2 px-3 py-2" style="font-size:0.8rem; background:rgba(111,66,193,0.1); color:#6f42c1;"><i class="bi bi-translate"></i> Translation Architecture</span>
+            <h3 class="fw-bold mt-2">Universal Protocol Translation</h3>
+            <p class="text-muted">MindRouter's innovative translation layer is the engine behind its flexibility. Rather than locking you into a single API format, it translates seamlessly between <strong>OpenAI</strong>, <strong>Ollama</strong>, and <strong>Anthropic</strong> protocols &mdash; on both the client and backend sides.</p>
+            <p class="text-muted">This means any tool, library, or application that speaks one of these protocols can connect to MindRouter &mdash; and MindRouter can route to any backend inference engine, regardless of its native API. The result: maximum flexibility for your code on the front end, and maximum choice of cutting-edge inference engines on the back end.</p>
+            <ul class="list-unstyled text-muted">
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i><strong>OpenAI-compatible</strong> &mdash; drop-in for any OpenAI SDK or tool</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i><strong>Ollama-compatible</strong> &mdash; works with Ollama clients and libraries</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i><strong>Anthropic-compatible</strong> &mdash; supports Claude SDK and tooling</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i><strong>vLLM &amp; Ollama backends</strong> &mdash; route to any engine transparently</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i><strong>Dozens of models</strong> &mdash; deploy and serve cutting-edge models instantly</li>
+            </ul>
+        </div>
+        <div class="col-lg-6">
+            <!-- Translation architecture diagram -->
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border:1px solid #2a2a4a; padding:2rem;">
+                <div class="text-center mb-3" style="font-size:0.7rem; text-transform:uppercase; letter-spacing:2px; color:#6c7086;">Translation Architecture</div>
+                <!-- Client protocols -->
+                <div class="d-flex justify-content-center gap-2 mb-3">
+                    <div class="rounded-2 px-3 py-2 text-center" style="background:rgba(100,255,218,0.08); border:1px solid rgba(100,255,218,0.25); min-width:90px;">
+                        <div style="font-size:1.2rem; color:#64ffda;"><i class="bi bi-braces"></i></div>
+                        <div style="font-size:0.72rem; color:#64ffda; font-weight:600;">OpenAI</div>
+                        <div style="font-size:0.65rem; color:#5a6380;">Client SDK</div>
+                    </div>
+                    <div class="rounded-2 px-3 py-2 text-center" style="background:rgba(130,170,255,0.08); border:1px solid rgba(130,170,255,0.25); min-width:90px;">
+                        <div style="font-size:1.2rem; color:#82aaff;"><i class="bi bi-box"></i></div>
+                        <div style="font-size:0.72rem; color:#82aaff; font-weight:600;">Ollama</div>
+                        <div style="font-size:0.65rem; color:#5a6380;">Client SDK</div>
+                    </div>
+                    <div class="rounded-2 px-3 py-2 text-center" style="background:rgba(247,181,126,0.08); border:1px solid rgba(247,181,126,0.25); min-width:90px;">
+                        <div style="font-size:1.2rem; color:#f7b57e;"><i class="bi bi-chat-square-text"></i></div>
+                        <div style="font-size:0.72rem; color:#f7b57e; font-weight:600;">Anthropic</div>
+                        <div style="font-size:0.65rem; color:#5a6380;">Client SDK</div>
+                    </div>
+                </div>
+                <!-- Arrows down -->
+                <div class="text-center mb-2" style="color:#3a4060; font-size:1.2rem;">
+                    <i class="bi bi-chevron-down"></i> <i class="bi bi-chevron-down"></i> <i class="bi bi-chevron-down"></i>
+                </div>
+                <!-- MindRouter translation hub -->
+                <div class="rounded-3 mx-auto px-4 py-3 text-center mb-2" style="background: linear-gradient(135deg, rgba(100,255,218,0.12) 0%, rgba(130,170,255,0.12) 100%); border:1px solid rgba(100,255,218,0.3); max-width:280px;">
+                    <div style="font-size:0.65rem; text-transform:uppercase; letter-spacing:1.5px; color:#5a6380;">Canonical Schema</div>
+                    <div style="font-size:1.1rem; font-weight:700; color:#64ffda;"><i class="bi bi-arrow-left-right"></i> MindRouter</div>
+                    <div style="font-size:0.7rem; color:#8892b0;">Translate &middot; Route &middot; Balance</div>
+                </div>
+                <!-- Arrows down -->
+                <div class="text-center mb-2" style="color:#3a4060; font-size:1.2rem;">
+                    <i class="bi bi-chevron-down"></i> <i class="bi bi-chevron-down"></i> <i class="bi bi-chevron-down"></i>
+                </div>
+                <!-- Backend engines -->
+                <div class="d-flex justify-content-center gap-2">
+                    <div class="rounded-2 px-3 py-2 text-center" style="background:rgba(166,227,161,0.08); border:1px solid rgba(166,227,161,0.25); min-width:120px;">
+                        <div style="font-size:1.2rem; color:#a6e3a1;"><i class="bi bi-lightning-charge"></i></div>
+                        <div style="font-size:0.72rem; color:#a6e3a1; font-weight:600;">vLLM</div>
+                        <div style="font-size:0.65rem; color:#5a6380;">High-throughput</div>
+                    </div>
+                    <div class="rounded-2 px-3 py-2 text-center" style="background:rgba(130,170,255,0.08); border:1px solid rgba(130,170,255,0.25); min-width:120px;">
+                        <div style="font-size:1.2rem; color:#82aaff;"><i class="bi bi-box"></i></div>
+                        <div style="font-size:0.72rem; color:#82aaff; font-weight:600;">Ollama</div>
+                        <div style="font-size:0.65rem; color:#5a6380;">Flexible serving</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 6: Docs & Blog ── -->
+    <div class="row align-items-center mb-5 g-4">
+        <div class="col-lg-6">
+            <span class="badge bg-danger bg-opacity-10 text-danger mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-book"></i> Documentation &amp; Blog</span>
+            <h3 class="fw-bold mt-2">Comprehensive Docs &amp; Blog</h3>
+            <p class="text-muted">Everything you need to get started and go deep. The documentation covers API endpoints, authentication, model capabilities, rate limits, and integration guides. The blog features updates, tutorials, and best practices.</p>
+            <div class="d-flex gap-2 mt-3">
+                <a href="/documentation" class="btn btn-outline-primary"><i class="bi bi-book"></i> Documentation</a>
+                <a href="/blog" class="btn btn-outline-dark"><i class="bi bi-pencil-square"></i> Blog</a>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <!-- Docs mockup -->
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#ffffff; border:1px solid #dee2e6;">
+                <div class="d-flex align-items-center px-3 py-2" style="background:#f8f9fa; border-bottom:1px solid #dee2e6;">
+                    <i class="bi bi-book text-primary me-2"></i>
+                    <span class="fw-semibold" style="font-size:0.9rem;">MindRouter2 Documentation</span>
+                </div>
+                <div class="p-3" style="font-size:0.82rem;">
+                    <div class="mb-3">
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi bi-journal-code text-primary me-2"></i>
+                            <strong>API Reference</strong>
+                        </div>
+                        <div class="ms-4 text-muted">Chat Completions &middot; Embeddings &middot; Models &middot; Authentication</div>
+                    </div>
+                    <div class="mb-3">
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi bi-rocket-takeoff text-success me-2"></i>
+                            <strong>Getting Started</strong>
+                        </div>
+                        <div class="ms-4 text-muted">Quick Start Guide &middot; Python SDK &middot; cURL Examples &middot; Rate Limits</div>
+                    </div>
+                    <div class="mb-3">
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi bi-puzzle text-warning me-2"></i>
+                            <strong>Integrations</strong>
+                        </div>
+                        <div class="ms-4 text-muted">LangChain &middot; LlamaIndex &middot; Continue.dev &middot; Open WebUI</div>
+                    </div>
+                    <div>
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi bi-gear text-secondary me-2"></i>
+                            <strong>Advanced</strong>
+                        </div>
+                        <div class="ms-4 text-muted">Tool Calling &middot; Structured Output &middot; Streaming &middot; Multimodal</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 7: Institutional AI Sovereignty ── -->
+    <div class="row mb-5">
+        <div class="col-12">
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%); border:1px solid rgba(255,255,255,0.08);">
+                <div class="row g-0 align-items-center">
+                    <div class="col-lg-7 p-4 p-lg-5">
+                        <span class="badge mb-3 px-3 py-2" style="font-size:0.8rem; background:rgba(255,215,0,0.15); color:#ffd700; border:1px solid rgba(255,215,0,0.3);"><i class="bi bi-shield-lock-fill"></i> Institutional AI Sovereignty</span>
+                        <h3 class="fw-bold text-white mt-2" style="font-size:1.6rem;">Your AI. Your Hardware. Your Control.</h3>
+                        <p style="color:rgba(255,255,255,0.75); font-size:0.95rem; line-height:1.7;">Every model served by MindRouter runs on <strong style="color:#fff;">University-owned and University-managed GPUs</strong>. No data leaves institutional infrastructure. No third-party cloud providers process your prompts. No external APIs see your research, coursework, or sensitive data.</p>
+                        <p style="color:rgba(255,255,255,0.65); font-size:0.88rem; line-height:1.7;">This isn't just a cost decision &mdash; it's a strategic one. Institutional AI sovereignty means the University maintains full control over which models are deployed, how they behave, and where data flows. It means predictable costs, observable performance, and the freedom to run open-weight models without license restrictions or vendor lock-in.</p>
+                        <div class="row g-3 mt-3">
+                            <div class="col-sm-6">
+                                <div class="d-flex align-items-start">
+                                    <i class="bi bi-shield-lock text-warning me-2 mt-1" style="font-size:1.1rem;"></i>
+                                    <div>
+                                        <div class="fw-semibold text-white" style="font-size:0.85rem;">Data Security</div>
+                                        <div style="color:rgba(255,255,255,0.55); font-size:0.78rem;">Prompts and responses never leave University infrastructure. Full FERPA and research data compliance.</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                <div class="d-flex align-items-start">
+                                    <i class="bi bi-speedometer text-info me-2 mt-1" style="font-size:1.1rem;"></i>
+                                    <div>
+                                        <div class="fw-semibold text-white" style="font-size:0.85rem;">Speed &amp; Latency</div>
+                                        <div style="color:rgba(255,255,255,0.55); font-size:0.78rem;">On-premise GPUs eliminate network round-trips to distant cloud regions. Lower latency, faster throughput.</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                <div class="d-flex align-items-start">
+                                    <i class="bi bi-lightning-charge text-success me-2 mt-1" style="font-size:1.1rem;"></i>
+                                    <div>
+                                        <div class="fw-semibold text-white" style="font-size:0.85rem;">Power &amp; Sustainability</div>
+                                        <div style="color:rgba(255,255,255,0.55); font-size:0.78rem;">Direct visibility into energy consumption per model and per request. Optimize workloads for efficiency.</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                <div class="d-flex align-items-start">
+                                    <i class="bi bi-sliders text-danger me-2 mt-1" style="font-size:1.1rem;"></i>
+                                    <div>
+                                        <div class="fw-semibold text-white" style="font-size:0.85rem;">Model Control</div>
+                                        <div style="color:rgba(255,255,255,0.55); font-size:0.78rem;">Choose exactly which models to deploy, audit their behavior, and update on your own schedule. No vendor lock-in.</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                <div class="d-flex align-items-start">
+                                    <i class="bi bi-bar-chart text-primary me-2 mt-1" style="font-size:1.1rem;"></i>
+                                    <div>
+                                        <div class="fw-semibold text-white" style="font-size:0.85rem;">Full Observability</div>
+                                        <div style="color:rgba(255,255,255,0.55); font-size:0.78rem;">Complete audit trail of every request. GPU metrics, token usage, and cost accounting &mdash; all visible to administrators.</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-6">
+                                <div class="d-flex align-items-start">
+                                    <i class="bi bi-currency-dollar me-2 mt-1" style="font-size:1.1rem; color:#a6e3a1;"></i>
+                                    <div>
+                                        <div class="fw-semibold text-white" style="font-size:0.85rem;">Predictable Costs</div>
+                                        <div style="color:rgba(255,255,255,0.55); font-size:0.78rem;">No per-token API bills or surprise invoices. Capital investment in GPUs with transparent, fixed operating costs.</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-lg-5 p-4 p-lg-5 text-center d-none d-lg-block">
+                        <!-- GPU rack illustration -->
+                        <div style="position:relative;">
+                            <div class="rounded-3 p-4" style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06);">
+                                <div style="font-size:0.65rem; text-transform:uppercase; letter-spacing:2px; color:rgba(255,255,255,0.3); margin-bottom:1rem;">University GPU Cluster</div>
+                                <div class="d-flex flex-column gap-2">
+                                    <div class="d-flex align-items-center rounded-2 px-3 py-2" style="background:rgba(100,255,218,0.06); border:1px solid rgba(100,255,218,0.15);">
+                                        <i class="bi bi-gpu-card me-2" style="color:#64ffda;"></i>
+                                        <div class="text-start flex-grow-1">
+                                            <div style="font-size:0.75rem; color:#64ffda; font-weight:600;">Node 1</div>
+                                            <div style="font-size:0.65rem; color:#5a6380;">4x GPU &middot; gpt-oss-120b</div>
+                                        </div>
+                                        <span class="badge rounded-pill" style="background:rgba(100,255,218,0.2); color:#64ffda; font-size:0.6rem;">ACTIVE</span>
+                                    </div>
+                                    <div class="d-flex align-items-center rounded-2 px-3 py-2" style="background:rgba(130,170,255,0.06); border:1px solid rgba(130,170,255,0.15);">
+                                        <i class="bi bi-gpu-card me-2" style="color:#82aaff;"></i>
+                                        <div class="text-start flex-grow-1">
+                                            <div style="font-size:0.75rem; color:#82aaff; font-weight:600;">Node 2</div>
+                                            <div style="font-size:0.65rem; color:#5a6380;">4x GPU TP &middot; qwen3.5-400b</div>
+                                        </div>
+                                        <span class="badge rounded-pill" style="background:rgba(130,170,255,0.2); color:#82aaff; font-size:0.6rem;">ACTIVE</span>
+                                    </div>
+                                    <div class="d-flex align-items-center rounded-2 px-3 py-2" style="background:rgba(166,227,161,0.06); border:1px solid rgba(166,227,161,0.15);">
+                                        <i class="bi bi-gpu-card me-2" style="color:#a6e3a1;"></i>
+                                        <div class="text-start flex-grow-1">
+                                            <div style="font-size:0.75rem; color:#a6e3a1; font-weight:600;">Node 3</div>
+                                            <div style="font-size:0.65rem; color:#5a6380;">4x GPU &middot; gpt-oss-120b / 20b</div>
+                                        </div>
+                                        <span class="badge rounded-pill" style="background:rgba(166,227,161,0.2); color:#a6e3a1; font-size:0.6rem;">ACTIVE</span>
+                                    </div>
+                                    <div class="d-flex align-items-center rounded-2 px-3 py-2" style="background:rgba(247,181,126,0.06); border:1px solid rgba(247,181,126,0.15);">
+                                        <i class="bi bi-gpu-card me-2" style="color:#f7b57e;"></i>
+                                        <div class="text-start flex-grow-1">
+                                            <div style="font-size:0.75rem; color:#f7b57e; font-weight:600;">Node 4</div>
+                                            <div style="font-size:0.65rem; color:#5a6380;">2x GPU &middot; Multimodal OCR</div>
+                                        </div>
+                                        <span class="badge rounded-pill" style="background:rgba(247,181,126,0.2); color:#f7b57e; font-size:0.6rem;">ACTIVE</span>
+                                    </div>
+                                </div>
+                                <div class="mt-3" style="font-size:0.65rem; color:rgba(255,255,255,0.25);">
+                                    <i class="bi bi-lock-fill"></i> On-premise &middot; No cloud dependencies &middot; Full institutional control
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 8: Infrastructure ── -->
+    <div class="row align-items-center g-4">
+        <div class="col-lg-12">
+            <div class="text-center mb-4">
+                <span class="badge bg-dark bg-opacity-10 text-dark mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-hdd-rack"></i> Enterprise Infrastructure</span>
+                <h3 class="fw-bold mt-2">Built for Production</h3>
+                <p class="text-muted mx-auto" style="max-width:600px;">MindRouter2 is designed for reliability, observability, and scale &mdash; load balancing across GPU backends with intelligent routing and fair-share scheduling.</p>
+            </div>
+            <div class="row g-3">
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-diagram-3 text-primary" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Load Balancing</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Intelligent routing across multiple GPU backends with health checks and failover</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-shield-check text-success" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Fair-Share Scheduling</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Weighted quotas, rate limiting, and fair access across users and groups</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-gpu-card text-warning" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">GPU Monitoring</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Real-time GPU utilization, memory, temperature, and power metrics across the cluster</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-translate text-info" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Protocol Translation</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Seamless translation between OpenAI, Ollama, and vLLM API formats</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-graph-up text-danger" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Observability</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Prometheus metrics, structured logging, request audit trail, and admin dashboards</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-key text-secondary" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Authentication</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">API key management, Azure AD SSO, group-based access control, and user quotas</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>
+(function() {
+    const canvas = document.getElementById('tokenFlowCanvas');
+    const ctx = canvas.getContext('2d');
+    const tpsEl = document.getElementById('tpsValue');
+    const rpmEl = document.getElementById('rpmValue');
+    const activeEl = document.getElementById('activeValue');
+    const idleEl = document.getElementById('idleLabel');
+    const srEl = document.getElementById('flowStatsSR');
+
+    let W, H;
+    const dpr = window.devicePixelRatio || 1;
+
+    function resize() {
+        const rect = canvas.parentElement.getBoundingClientRect();
+        W = rect.width;
+        H = rect.height;
+        canvas.width = W * dpr;
+        canvas.height = H * dpr;
+        canvas.style.width = W + 'px';
+        canvas.style.height = H + 'px';
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        layoutNodes();
+    }
+
+    // --- Network topology ---
+    const NODE_RADIUS = 6;
+    let nodes = [];
+    let edges = [];
+    let inputNodes = [];
+    let hubNode = null;
+    let outputNodes = [];
+
+    function layoutNodes() {
+        nodes = [];
+        edges = [];
+        inputNodes = [];
+        outputNodes = [];
+
+        const cx = W / 2;
+        const cy = H / 2;
+
+        // Input nodes (left) - incoming requests
+        const inputCount = 5;
+        for (let i = 0; i < inputCount; i++) {
+            const y = cy + (i - (inputCount - 1) / 2) * 40;
+            const node = { x: W * 0.1, y: y, type: 'input', r: NODE_RADIUS };
+            nodes.push(node);
+            inputNodes.push(node);
+        }
+
+        // Central hub - the router
+        hubNode = { x: cx, y: cy, type: 'hub', r: NODE_RADIUS * 2.5 };
+        nodes.push(hubNode);
+
+        // Output nodes (right) - backends
+        const rawCount = {{ total_backends if total_backends > 0 else 4 }};
+        const actualCount = Math.max(3, Math.min(rawCount, 8));
+        for (let i = 0; i < actualCount; i++) {
+            const y = cy + (i - (actualCount - 1) / 2) * 38;
+            const node = { x: W * 0.9, y: y, type: 'output', r: NODE_RADIUS };
+            nodes.push(node);
+            outputNodes.push(node);
+        }
+
+        // Edges: input->hub, hub->output
+        for (const inp of inputNodes) {
+            edges.push({ from: inp, to: hubNode });
+        }
+        for (const out of outputNodes) {
+            edges.push({ from: hubNode, to: out });
+        }
+    }
+
+    // --- Particles ---
+    const particles = [];
+    const PARTICLE_POOL_MAX = 800;
+
+    const COLORS = [
+        { r: 100, g: 255, b: 218 },
+        { r: 72,  g: 202, b: 228 },
+        { r: 144, g: 224, b: 239 },
+        { r: 86,  g: 198, b: 170 },
+        { r: 130, g: 170, b: 255 },
+    ];
+
+    function spawnParticle() {
+        if (particles.length >= PARTICLE_POOL_MAX) return;
+        const inp = inputNodes[Math.floor(Math.random() * inputNodes.length)];
+        const out = outputNodes[Math.floor(Math.random() * outputNodes.length)];
+        const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+        const speed = 0.003 + Math.random() * 0.004;
+        const size = 1.5 + Math.random() * 2.5;
+
+        particles.push({
+            x: inp.x, y: inp.y,
+            seg: 0,
+            t: 0,
+            from: inp,
+            mid: hubNode,
+            to: out,
+            speed: speed,
+            size: size,
+            color: color,
+            alpha: 0.6 + Math.random() * 0.4,
+            trail: [],
+        });
+    }
+
+    // --- Throughput state ---
+    let currentTPS = 0;
+    let displayTPS = 0;
+    let currentRPM = 0;
+    let currentActive = 0;
+
+    async function fetchThroughput() {
+        try {
+            const resp = await fetch('/api/cluster/throughput');
+            if (resp.ok) {
+                const data = await resp.json();
+                currentTPS = data.tokens_per_second || 0;
+                currentRPM = data.requests_per_minute || 0;
+                currentActive = data.active_requests || 0;
+                // Update screen reader summary
+                if (srEl) srEl.textContent = currentTPS + ' tokens per second, ' + currentRPM + ' recent requests, ' + currentActive + ' active';
+            }
+        } catch (e) { /* retry next cycle */ }
+    }
+
+    fetchThroughput();
+    setInterval(fetchThroughput, 1000);
+
+    // --- Drawing helpers ---
+    function drawEdge(edge, alpha) {
+        ctx.beginPath();
+        ctx.moveTo(edge.from.x, edge.from.y);
+        const mx = (edge.from.x + edge.to.x) / 2;
+        const my = (edge.from.y + edge.to.y) / 2;
+        const offset = (edge.from.y - edge.to.y) * 0.15;
+        ctx.quadraticCurveTo(mx + offset, my, edge.to.x, edge.to.y);
+        ctx.strokeStyle = 'rgba(30, 45, 80, ' + alpha + ')';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+
+    function drawNode(node) {
+        const glow = node.type === 'hub' ? 12 : 6;
+        const baseColor = node.type === 'hub'
+            ? { r: 100, g: 255, b: 218 }
+            : node.type === 'input'
+                ? { r: 72, g: 202, b: 228 }
+                : { r: 130, g: 170, b: 255 };
+        // Log-scaled glow: grows smoothly from idle through thousands of tps
+        const logTPS = currentTPS > 0 ? Math.log10(1 + currentTPS) : 0;
+        const intensity = node.type === 'hub'
+            ? 0.12 + Math.min(logTPS * 0.2, 0.75)
+            : 0.08 + Math.min(logTPS * 0.12, 0.45);
+
+        // Glow
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.r + glow, 0, Math.PI * 2);
+        const grad = ctx.createRadialGradient(node.x, node.y, node.r, node.x, node.y, node.r + glow);
+        grad.addColorStop(0, 'rgba(' + baseColor.r + ',' + baseColor.g + ',' + baseColor.b + ',' + intensity + ')');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // Core
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + baseColor.r + ',' + baseColor.g + ',' + baseColor.b + ',' + (0.3 + intensity) + ')';
+        ctx.fill();
+
+        if (node.type === 'hub') {
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, node.r + 2, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(100,255,218,' + (0.2 + intensity * 0.5) + ')';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+    }
+
+    function drawParticle(p) {
+        // Trail
+        if (p.trail.length > 1) {
+            ctx.beginPath();
+            ctx.moveTo(p.trail[0].x, p.trail[0].y);
+            for (let i = 1; i < p.trail.length; i++) {
+                ctx.lineTo(p.trail[i].x, p.trail[i].y);
+            }
+            ctx.strokeStyle = 'rgba(' + p.color.r + ',' + p.color.g + ',' + p.color.b + ',' + (p.alpha * 0.15) + ')';
+            ctx.lineWidth = p.size * 0.6;
+            ctx.stroke();
+        }
+
+        // Glow
+        const glowR = p.size * 3;
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowR);
+        grad.addColorStop(0, 'rgba(' + p.color.r + ',' + p.color.g + ',' + p.color.b + ',' + (p.alpha * 0.5) + ')');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // Core
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + p.color.r + ',' + p.color.g + ',' + p.color.b + ',' + p.alpha + ')';
+        ctx.fill();
+    }
+
+    function curvePoint(from, to, t) {
+        const mx = (from.x + to.x) / 2;
+        const my = (from.y + to.y) / 2;
+        const offset = (from.y - to.y) * 0.15;
+        const ct = 1 - t;
+        return {
+            x: ct * ct * from.x + 2 * ct * t * (mx + offset) + t * t * to.x,
+            y: ct * ct * from.y + 2 * ct * t * my + t * t * to.y,
+        };
+    }
+
+    // --- Animation loop ---
+    let lastTime = 0;
+    const TRAIL_LENGTH = 8;
+
+    function animate(time) {
+        requestAnimationFrame(animate);
+        const dt = Math.min(time - lastTime, 50);
+        lastTime = time;
+
+        // Smooth TPS display
+        displayTPS += (currentTPS - displayTPS) * 0.08;
+        tpsEl.textContent = displayTPS < 1 ? displayTPS.toFixed(1) : Math.round(displayTPS);
+        rpmEl.textContent = currentRPM;
+        activeEl.textContent = currentActive;
+
+        idleEl.style.display = (currentTPS < 0.1 && currentActive === 0) ? 'block' : 'none';
+
+        // Spawn rate: log-scaled, no hard cap
+        // idle (~0 tps): ~0.12/sec (one particle every ~8s)
+        // 100 tps: ~24/sec, 1000 tps: ~36/sec, 5000 tps: ~45/sec
+        const spawnRate = 0.12 + (currentTPS > 0 ? Math.log10(1 + currentTPS) * 12 : 0);
+        const spawnCount = Math.max(0, Math.floor(spawnRate * dt / 1000 + Math.random()));
+        for (let i = 0; i < spawnCount; i++) spawnParticle();
+
+        // Speed: log-scaled so it keeps growing into thousands of tps
+        // idle: 0.7x (lazy drift), 100 tps: ~3.7x, 1000 tps: ~5.2x, 5000 tps: ~6.3x
+        const speedMultiplier = 0.7 + (currentTPS > 0 ? Math.log10(1 + currentTPS) * 1.5 : 0);
+
+        // Clear & background
+        ctx.clearRect(0, 0, W, H);
+        const bg = ctx.createLinearGradient(0, 0, W, 0);
+        bg.addColorStop(0, '#080c18');
+        bg.addColorStop(0.5, '#0a0e1a');
+        bg.addColorStop(1, '#080c18');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Edges: log-scaled brightness
+        const edgeLogTPS = currentTPS > 0 ? Math.log10(1 + currentTPS) : 0;
+        const edgeAlpha = 0.25 + Math.min(edgeLogTPS * 0.15, 0.55);
+        for (const edge of edges) drawEdge(edge, edgeAlpha);
+
+        // Update & draw particles
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.t += p.speed * speedMultiplier * (dt / 16);
+
+            if (p.t >= 1) {
+                if (p.seg === 0) {
+                    p.seg = 1;
+                    p.t = 0;
+                    p.trail = [];
+                } else {
+                    particles.splice(i, 1);
+                    continue;
+                }
+            }
+
+            const from = p.seg === 0 ? p.from : p.mid;
+            const to = p.seg === 0 ? p.mid : p.to;
+            const pt = curvePoint(from, to, p.t);
+            p.x = pt.x;
+            p.y = pt.y;
+
+            p.trail.push({ x: p.x, y: p.y });
+            if (p.trail.length > TRAIL_LENGTH) p.trail.shift();
+
+            drawParticle(p);
+        }
+
+        // Nodes on top
+        for (const node of nodes) drawNode(node);
+
+        // Labels
+        ctx.font = '10px system-ui, -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+
+        if (inputNodes.length > 0) {
+            ctx.fillStyle = 'rgba(90, 99, 128, 0.7)';
+            ctx.fillText('Requests', inputNodes[0].x, inputNodes[0].y - 30);
+        }
+        if (hubNode) {
+            ctx.fillStyle = 'rgba(100, 255, 218, 0.6)';
+            ctx.font = '11px system-ui, -apple-system, sans-serif';
+            ctx.fillText('MindRouter', hubNode.x, hubNode.y - hubNode.r - 12);
+        }
+        if (outputNodes.length > 0) {
+            ctx.fillStyle = 'rgba(90, 99, 128, 0.7)';
+            ctx.font = '10px system-ui, -apple-system, sans-serif';
+            ctx.fillText('Backends', outputNodes[0].x, outputNodes[0].y - 30);
+        }
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    requestAnimationFrame(animate);
+
+    // Auto-refresh cluster stats and model list every 30 seconds
+    async function refreshDashboard() {
+        try {
+            const statusRes = await fetch('/status');
+            if (statusRes.ok) {
+                const status = await statusRes.json();
+                const backendsEl = document.getElementById('stat-backends');
+                const queueEl = document.getElementById('stat-queue');
+                const activeUsersEl = document.getElementById('stat-active-users');
+                const statusEl = document.getElementById('stat-status');
+                if (backendsEl) backendsEl.textContent = status.backends.healthy + ' / ' + status.backends.total;
+                if (queueEl) queueEl.textContent = status.queue.total || 0;
+                if (activeUsersEl && status.active_users !== undefined) activeUsersEl.textContent = status.active_users;
+                if (statusEl) {
+                    if (status.backends.healthy > 0) {
+                        statusEl.innerHTML = '<span class="text-success"><i class="bi bi-check-circle" aria-hidden="true"></i> Online</span>';
+                    } else {
+                        statusEl.innerHTML = '<span class="text-danger"><i class="bi bi-x-circle" aria-hidden="true"></i> Offline</span>';
+                    }
+                }
+
+                const countEl = document.getElementById('stat-models-count');
+                const gridEl = document.getElementById('models-grid');
+                if (countEl) countEl.textContent = status.models ? status.models.length : 0;
+                if (gridEl && status.models && status.models.length) {
+                    var html = '<div class="row">';
+                    status.models.forEach(function(name) {
+                        html += '<div class="col-md-4 mb-2"><span class="badge bg-secondary"><i class="bi bi-box"></i> ' + name + '</span></div>';
+                    });
+                    html += '</div>';
+                    gridEl.innerHTML = html;
+                } else if (gridEl) {
+                    gridEl.innerHTML = '<p class="text-muted mb-0">No models currently available.</p>';
+                }
+            }
+        } catch (e) { /* ignore transient failures */ }
+    }
+    setInterval(refreshDashboard, 30000);
+
+    // --- Total tokens counter polling ---
+    async function refreshTotalTokens() {
+        try {
+            const resp = await fetch('/api/cluster/total-tokens');
+            if (resp.ok) {
+                const data = await resp.json();
+                const el = document.getElementById('total-tokens-counter');
+                if (el) el.textContent = Number(data.total_tokens).toLocaleString();
+            }
+        } catch (e) { /* retry next cycle */ }
+    }
+    setInterval(refreshTotalTokens, 2000);
+
+    // --- Trend charts ---
+    var timeTooltipFmt = { hour: 'HH:mm', day: 'MMM d, HH:mm', week: 'MMM d', month: 'MMM d', year: 'MMM d, yyyy' };
+    var timeDisplayFormats = { minute: 'HH:mm', hour: 'ha', day: 'MMM d', week: 'MMM d', month: 'MMM yyyy' };
+
+    // Tokens: line/area chart
+    var tokenCtx = document.getElementById('tokenTrendChart');
+    var tokenChart = tokenCtx ? new Chart(tokenCtx, {
+        type: 'line',
+        data: { datasets: [{ label: 'Tokens', data: [], borderColor: 'rgba(100,255,218,1)', backgroundColor: 'rgba(100,255,218,0.15)', fill: true, tension: 0.3, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            scales: {
+                x: { type: 'time', time: { tooltipFormat: 'MMM d, HH:mm', displayFormats: timeDisplayFormats }, grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 11 } } },
+                y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { font: { size: 11 } } }
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return 'Tokens: ' + Number(c.parsed.y).toLocaleString(); } } } }
+        }
+    }) : null;
+
+    // Users: bar chart
+    var userCtx = document.getElementById('userTrendChart');
+    var userChart = userCtx ? new Chart(userCtx, {
+        type: 'bar',
+        data: { datasets: [{ label: 'Users', data: [], backgroundColor: 'rgba(130,170,255,0.6)', borderColor: 'rgba(130,170,255,1)', borderWidth: 1, borderRadius: 2 }] },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            scales: {
+                x: { type: 'time', time: { tooltipFormat: 'MMM d, HH:mm', displayFormats: timeDisplayFormats }, grid: { display: false }, ticks: { maxTicksLimit: 8, font: { size: 11 } } },
+                y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { stepSize: 1, font: { size: 11 } } }
+            },
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return 'Users: ' + Number(c.parsed.y).toLocaleString(); } } } }
+        }
+    }) : null;
+
+    async function loadTrends(range) {
+        try {
+            var resp = await fetch('/api/cluster/trends?range=' + encodeURIComponent(range));
+            if (!resp.ok) return;
+            var data = await resp.json();
+            var ttFmt = timeTooltipFmt[range] || 'MMM d, HH:mm';
+            var forceUnit = { week: 'day' };
+            var unit = forceUnit[range] || false;
+            if (tokenChart) {
+                tokenChart.options.scales.x.min = data.since;
+                tokenChart.options.scales.x.max = data.now;
+                tokenChart.options.scales.x.time.unit = unit;
+                tokenChart.options.scales.x.time.tooltipFormat = ttFmt;
+                tokenChart.data.datasets[0].data = data.tokens.map(function(d) { return { x: d.t, y: d.v }; });
+                tokenChart.update('none');
+            }
+            if (userChart) {
+                userChart.options.scales.x.min = data.since;
+                userChart.options.scales.x.max = data.now;
+                userChart.options.scales.x.time.unit = unit;
+                userChart.options.scales.x.time.tooltipFormat = ttFmt;
+                userChart.data.datasets[0].data = data.users.map(function(d) { return { x: d.t, y: d.v }; });
+                userChart.update('none');
+            }
+        } catch (e) { /* retry next interaction */ }
+    }
+
+    // Range pill buttons
+    var currentRange = 'day';
+    document.querySelectorAll('.trend-range-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.trend-range-btn').forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            currentRange = btn.getAttribute('data-range');
+            loadTrends(currentRange);
+        });
+    });
+
+    // Initial load
+    loadTrends(currentRange);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,2396 @@
+############################################################
+#
+# mindrouter2 - LLM Inference Translator and Load Balancer
+#
+# crud.py: Database CRUD operations for all entities
+#
+# Luke Sheneman
+# Research Computing and Data Services (RCDS)
+# Institute for Interdisciplinary Data Sciences (IIDS)
+# University of Idaho
+# sheneman@uidaho.edu
+#
+############################################################
+
+"""Database CRUD operations for MindRouter2."""
+
+import json as _json
+from datetime import datetime, timedelta, timezone
+from typing import Any, List, Optional, Tuple
+
+from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from backend.app.db.models import (
+    ApiKey,
+    ApiKeyStatus,
+    AppConfig,
+    Artifact,
+    Backend,
+    BackendEngine,
+    BackendStatus,
+    BackendTelemetry,
+    BlogPost,
+    GPUDevice,
+    GPUDeviceTelemetry,
+    Group,
+    Model,
+    Modality,
+    Node,
+    NodeStatus,
+    Quota,
+    QuotaRequest,
+    QuotaRequestStatus,
+    Request,
+    RequestStatus,
+    Response,
+    SchedulerDecision,
+    UsageLedger,
+    User,
+    UserRole,
+)
+
+
+def _ensure_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Ensure a datetime is timezone-aware (MariaDB returns naive datetimes)."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# Group CRUD
+async def create_group(
+    db: AsyncSession,
+    name: str,
+    display_name: str,
+    description: Optional[str] = None,
+    token_budget: int = 100000,
+    rpm_limit: int = 30,
+    max_concurrent: int = 2,
+    scheduler_weight: int = 1,
+    is_admin: bool = False,
+    api_key_expiry_days: int = 45,
+    max_api_keys: int = 8,
+) -> Group:
+    """Create a new group."""
+    group = Group(
+        name=name,
+        display_name=display_name,
+        description=description,
+        token_budget=token_budget,
+        rpm_limit=rpm_limit,
+        max_concurrent=max_concurrent,
+        scheduler_weight=scheduler_weight,
+        is_admin=is_admin,
+        api_key_expiry_days=api_key_expiry_days,
+        max_api_keys=max_api_keys,
+    )
+    db.add(group)
+    await db.flush()
+    return group
+
+
+async def get_group_by_id(db: AsyncSession, group_id: int) -> Optional[Group]:
+    """Get group by ID."""
+    result = await db.execute(select(Group).where(Group.id == group_id))
+    return result.scalar_one_or_none()
+
+
+async def get_group_by_name(db: AsyncSession, name: str) -> Optional[Group]:
+    """Get group by name."""
+    result = await db.execute(select(Group).where(Group.name == name))
+    return result.scalar_one_or_none()
+
+
+async def get_all_groups(db: AsyncSession) -> List[Group]:
+    """Get all groups."""
+    result = await db.execute(select(Group).order_by(Group.name))
+    return list(result.scalars().all())
+
+
+async def get_all_groups_with_counts(db: AsyncSession) -> List[Tuple[Group, int]]:
+    """Get all groups with user counts."""
+    result = await db.execute(
+        select(Group, func.count(User.id).label("user_count"))
+        .outerjoin(User, and_(User.group_id == Group.id, User.deleted_at.is_(None)))
+        .group_by(Group.id)
+        .order_by(Group.name)
+    )
+    return [(row[0], row[1]) for row in result.all()]
+
+
+async def update_group(db: AsyncSession, group_id: int, **kwargs) -> Optional[Group]:
+    """Update a group's fields."""
+    result = await db.execute(select(Group).where(Group.id == group_id))
+    group = result.scalar_one_or_none()
+    if not group:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(group, key):
+            setattr(group, key, value)
+    await db.flush()
+
+    # Propagate quota-related fields to existing user quotas
+    quota_fields = {}
+    if "rpm_limit" in kwargs:
+        quota_fields["rpm_limit"] = kwargs["rpm_limit"]
+    if "max_concurrent" in kwargs:
+        quota_fields["max_concurrent"] = kwargs["max_concurrent"]
+    if quota_fields:
+        user_ids = select(User.id).where(User.group_id == group_id)
+        await db.execute(
+            update(Quota).where(Quota.user_id.in_(user_ids)).values(**quota_fields)
+        )
+        await db.flush()
+
+    return group
+
+
+async def delete_group(db: AsyncSession, group_id: int) -> bool:
+    """Delete a group. Fails if users are assigned to it."""
+    # Check for users in this group
+    result = await db.execute(
+        select(User).where(and_(User.group_id == group_id, User.deleted_at.is_(None))).limit(1)
+    )
+    if result.scalar_one_or_none():
+        return False
+
+    result = await db.execute(select(Group).where(Group.id == group_id))
+    group = result.scalar_one_or_none()
+    if group:
+        await db.delete(group)
+        await db.flush()
+        return True
+    return False
+
+
+# User CRUD
+async def get_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
+    """Get user by ID with group eagerly loaded."""
+    result = await db.execute(
+        select(User).options(selectinload(User.group)).where(User.id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_username(db: AsyncSession, username: str) -> Optional[User]:
+    """Get user by username with group eagerly loaded."""
+    result = await db.execute(
+        select(User).options(selectinload(User.group)).where(User.username == username)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
+    """Get user by email with group eagerly loaded."""
+    result = await db.execute(
+        select(User).options(selectinload(User.group)).where(User.email == email)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_azure_oid(db: AsyncSession, azure_oid: str) -> Optional[User]:
+    """Get user by Azure AD object ID with group eagerly loaded."""
+    result = await db.execute(
+        select(User).options(selectinload(User.group)).where(User.azure_oid == azure_oid)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_user(
+    db: AsyncSession,
+    username: str,
+    email: str,
+    password_hash: Optional[str] = None,
+    role: UserRole = UserRole.STUDENT,
+    full_name: Optional[str] = None,
+    group_id: Optional[int] = None,
+    college: Optional[str] = None,
+    department: Optional[str] = None,
+    intended_use: Optional[str] = None,
+) -> User:
+    """Create a new user."""
+    user = User(
+        username=username,
+        email=email,
+        password_hash=password_hash,
+        role=role,
+        full_name=full_name,
+        group_id=group_id,
+        college=college,
+        department=department,
+        intended_use=intended_use,
+    )
+    db.add(user)
+    await db.flush()
+    return user
+
+
+async def get_active_user_count(db: AsyncSession, since_hours: int = 24) -> int:
+    """Count distinct users who made requests in the last N hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    result = await db.execute(
+        select(func.count(func.distinct(Request.user_id)))
+        .where(Request.created_at >= cutoff)
+    )
+    return result.scalar_one() or 0
+
+
+async def get_users(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+    role: Optional[UserRole] = None,
+    group_id: Optional[int] = None,
+    is_active: Optional[bool] = None,
+    search: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+) -> Tuple[List[User], int]:
+    """Get list of users with optional filtering and sorting. Returns (users, total_count)."""
+    conditions = [User.deleted_at.is_(None)]
+    if role:
+        conditions.append(User.role == role)
+    if group_id is not None:
+        conditions.append(User.group_id == group_id)
+    if is_active is not None:
+        conditions.append(User.is_active == is_active)
+    if search:
+        search_pattern = f"%{search}%"
+        conditions.append(
+            or_(
+                User.username.ilike(search_pattern),
+                User.email.ilike(search_pattern),
+                User.full_name.ilike(search_pattern),
+            )
+        )
+
+    where_clause = and_(*conditions)
+
+    # Total count
+    count_result = await db.execute(select(func.count(User.id)).where(where_clause))
+    total = count_result.scalar_one()
+
+    # Determine sort order
+    asc = sort_dir.lower() == "asc"
+
+    if sort_by == "tokens":
+        # Sort by total tokens via a subquery
+        token_subq = (
+            select(
+                UsageLedger.user_id,
+                func.coalesce(func.sum(UsageLedger.total_tokens), 0).label("total_tokens"),
+            )
+            .group_by(UsageLedger.user_id)
+            .subquery()
+        )
+        query = (
+            select(User)
+            .options(selectinload(User.group))
+            .outerjoin(token_subq, User.id == token_subq.c.user_id)
+            .where(where_clause)
+        )
+        order_col = func.coalesce(token_subq.c.total_tokens, 0)
+        query = query.order_by(order_col.asc() if asc else order_col.desc())
+    elif sort_by == "last_login":
+        query = (
+            select(User)
+            .options(selectinload(User.group))
+            .where(where_clause)
+        )
+        # NULLS LAST for asc, NULLS FIRST for desc (so never-logged-in users go to end)
+        if asc:
+            query = query.order_by(
+                case((User.last_login_at.is_(None), 1), else_=0),
+                User.last_login_at.asc(),
+            )
+        else:
+            query = query.order_by(
+                case((User.last_login_at.is_(None), 1), else_=0),
+                User.last_login_at.desc(),
+            )
+    elif sort_by == "name":
+        query = (
+            select(User)
+            .options(selectinload(User.group))
+            .where(where_clause)
+            .order_by(User.username.asc() if asc else User.username.desc())
+        )
+    else:
+        # Default: sort by created_at
+        query = (
+            select(User)
+            .options(selectinload(User.group))
+            .where(where_clause)
+            .order_by(User.created_at.asc() if asc else User.created_at.desc())
+        )
+
+    query = query.offset(skip).limit(limit)
+    result = await db.execute(query)
+    return list(result.scalars().all()), total
+
+
+async def get_user_token_totals(db: AsyncSession, user_ids: List[int]) -> dict:
+    """Get total tokens for a list of user IDs. Returns {user_id: total_tokens}."""
+    if not user_ids:
+        return {}
+    result = await db.execute(
+        select(UsageLedger.user_id, func.sum(UsageLedger.total_tokens))
+        .where(UsageLedger.user_id.in_(user_ids))
+        .group_by(UsageLedger.user_id)
+    )
+    return {row[0]: int(row[1]) for row in result.all()}
+
+
+async def delete_user(db: AsyncSession, user_id: int) -> bool:
+    """Hard-delete a user and all child rows (no CASCADE on FKs).
+
+    Deletion order matters due to foreign key constraints:
+    1. scheduler_decisions (FK -> requests)
+    2. responses (FK -> requests)
+    3. artifacts (FK -> requests)
+    4. usage_ledger (FK -> requests, api_keys, users)
+    5. requests (FK -> users, api_keys)
+    6. api_keys (FK -> users)
+    7. quotas (FK -> users)
+    8. quota_requests (FK -> users)
+    9. users
+    """
+    # Get request IDs for this user (needed for child tables of requests)
+    req_result = await db.execute(
+        select(Request.id).where(Request.user_id == user_id)
+    )
+    request_ids = [r for (r,) in req_result.all()]
+
+    if request_ids:
+        # Delete children of requests
+        await db.execute(
+            delete(SchedulerDecision).where(
+                SchedulerDecision.request_id.in_(request_ids)
+            )
+        )
+        await db.execute(
+            delete(Response).where(Response.request_id.in_(request_ids))
+        )
+        await db.execute(
+            delete(Artifact).where(Artifact.request_id.in_(request_ids))
+        )
+
+    # Delete direct children of user
+    await db.execute(
+        delete(UsageLedger).where(UsageLedger.user_id == user_id)
+    )
+    await db.execute(
+        delete(Request).where(Request.user_id == user_id)
+    )
+    await db.execute(
+        delete(ApiKey).where(ApiKey.user_id == user_id)
+    )
+    await db.execute(
+        delete(Quota).where(Quota.user_id == user_id)
+    )
+    await db.execute(
+        delete(QuotaRequest).where(QuotaRequest.user_id == user_id)
+    )
+
+    # Delete the user
+    result = await db.execute(
+        delete(User).where(User.id == user_id)
+    )
+    await db.flush()
+    return result.rowcount > 0
+
+
+# API Key CRUD
+async def get_api_key_by_hash(db: AsyncSession, key_hash: str) -> Optional[ApiKey]:
+    """Get API key by hash with user and group eagerly loaded."""
+    result = await db.execute(
+        select(ApiKey)
+        .options(selectinload(ApiKey.user).selectinload(User.group))
+        .where(ApiKey.key_hash == key_hash)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_api_key_by_prefix(db: AsyncSession, key_prefix: str) -> Optional[ApiKey]:
+    """Get API key by prefix (for identification)."""
+    result = await db.execute(
+        select(ApiKey)
+        .options(selectinload(ApiKey.user).selectinload(User.group))
+        .where(ApiKey.key_prefix == key_prefix)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_api_key(
+    db: AsyncSession,
+    user_id: int,
+    key_hash: str,
+    key_prefix: str,
+    name: str,
+    expires_at: Optional[datetime] = None,
+) -> ApiKey:
+    """Create a new API key."""
+    api_key = ApiKey(
+        user_id=user_id,
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name=name,
+        expires_at=expires_at,
+        status=ApiKeyStatus.ACTIVE,
+    )
+    db.add(api_key)
+    await db.flush()
+    return api_key
+
+
+async def get_user_api_keys(
+    db: AsyncSession, user_id: int, include_revoked: bool = False
+) -> List[ApiKey]:
+    """Get all API keys for a user."""
+    query = select(ApiKey).where(ApiKey.user_id == user_id)
+    if not include_revoked:
+        query = query.where(ApiKey.status == ApiKeyStatus.ACTIVE)
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def revoke_api_key(db: AsyncSession, api_key_id: int) -> Optional[ApiKey]:
+    """Revoke an API key."""
+    result = await db.execute(select(ApiKey).where(ApiKey.id == api_key_id))
+    api_key = result.scalar_one_or_none()
+    if api_key:
+        api_key.status = ApiKeyStatus.REVOKED
+        await db.flush()
+    return api_key
+
+
+async def update_api_key_usage(db: AsyncSession, api_key_id: int) -> None:
+    """Update API key last used timestamp and usage count.
+
+    Uses an atomic UPDATE to avoid loading the row into the ORM session,
+    which prevents holding an exclusive row lock for the entire request.
+    """
+    await db.execute(
+        update(ApiKey)
+        .where(ApiKey.id == api_key_id)
+        .values(
+            last_used_at=func.now(),
+            usage_count=ApiKey.usage_count + 1,
+        )
+    )
+
+
+# Quota CRUD
+async def get_user_quota(db: AsyncSession, user_id: int) -> Optional[Quota]:
+    """Get quota for a user."""
+    result = await db.execute(select(Quota).where(Quota.user_id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def create_quota(
+    db: AsyncSession,
+    user_id: int,
+    rpm_limit: int,
+    max_concurrent: int,
+) -> Quota:
+    """Create quota for a user."""
+    quota = Quota(
+        user_id=user_id,
+        rpm_limit=rpm_limit,
+        max_concurrent=max_concurrent,
+    )
+    db.add(quota)
+    await db.flush()
+    return quota
+
+
+async def update_quota_usage(
+    db: AsyncSession, user_id: int, tokens_used: int
+) -> Optional[Quota]:
+    """Update quota token usage via Redis (atomic) with DB fallback."""
+    from backend.app.core.redis_client import incr_tokens, is_available
+
+    if is_available():
+        await incr_tokens(user_id, tokens_used)
+        # Return the quota object (tokens_used may be stale in DB but
+        # Redis is the source of truth; the sync loop will persist it)
+        result = await db.execute(select(Quota).where(Quota.user_id == user_id))
+        return result.scalar_one_or_none()
+
+    # Fallback: direct DB update (original behavior)
+    result = await db.execute(select(Quota).where(Quota.user_id == user_id))
+    quota = result.scalar_one_or_none()
+    if quota:
+        quota.tokens_used += tokens_used
+        await db.flush()
+    return quota
+
+
+async def reset_quota_if_needed(db: AsyncSession, user_id: int) -> Optional[Quota]:
+    """Reset quota if period has expired."""
+    result = await db.execute(select(Quota).where(Quota.user_id == user_id))
+    quota = result.scalar_one_or_none()
+    if quota:
+        period_end = _ensure_aware(quota.budget_period_start) + timedelta(days=quota.budget_period_days)
+        if datetime.now(timezone.utc) >= period_end:
+            quota.budget_period_start = datetime.now(timezone.utc)
+            quota.tokens_used = 0
+            await db.flush()
+            # Also reset Redis counter if available
+            from backend.app.core.redis_client import reset_tokens, is_available
+            if is_available():
+                await reset_tokens(user_id)
+    return quota
+
+
+# Node CRUD
+async def create_node(
+    db: AsyncSession,
+    name: str,
+    hostname: Optional[str] = None,
+    sidecar_url: Optional[str] = None,
+    sidecar_key: Optional[str] = None,
+) -> Node:
+    """Create a new node."""
+    node = Node(
+        name=name,
+        hostname=hostname,
+        sidecar_url=sidecar_url,
+        sidecar_key=sidecar_key,
+        status=NodeStatus.UNKNOWN,
+    )
+    db.add(node)
+    await db.flush()
+    return node
+
+
+async def get_node_by_id(db: AsyncSession, node_id: int) -> Optional[Node]:
+    """Get node by ID."""
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    return result.scalar_one_or_none()
+
+
+async def get_node_by_name(db: AsyncSession, name: str) -> Optional[Node]:
+    """Get node by name."""
+    result = await db.execute(select(Node).where(Node.name == name))
+    return result.scalar_one_or_none()
+
+
+async def get_all_nodes(db: AsyncSession) -> List[Node]:
+    """Get all nodes."""
+    result = await db.execute(select(Node))
+    return list(result.scalars().all())
+
+
+async def update_node_hardware(
+    db: AsyncSession,
+    node_id: int,
+    gpu_count: Optional[int] = None,
+    driver_version: Optional[str] = None,
+    cuda_version: Optional[str] = None,
+    sidecar_version: Optional[str] = None,
+) -> Optional[Node]:
+    """Update node hardware info from sidecar."""
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if node:
+        if gpu_count is not None:
+            node.gpu_count = gpu_count
+        if driver_version is not None:
+            node.driver_version = driver_version
+        if cuda_version is not None:
+            node.cuda_version = cuda_version
+        if sidecar_version is not None:
+            node.sidecar_version = sidecar_version
+        await db.flush()
+    return node
+
+
+async def update_node_status(
+    db: AsyncSession,
+    node_id: int,
+    status: NodeStatus,
+) -> Optional[Node]:
+    """Update node status."""
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if node:
+        node.status = status
+        await db.flush()
+    return node
+
+
+async def delete_node(db: AsyncSession, node_id: int) -> bool:
+    """Delete a node. Fails if backends still reference it."""
+    # Check for backends referencing this node
+    result = await db.execute(
+        select(Backend).where(Backend.node_id == node_id).limit(1)
+    )
+    if result.scalar_one_or_none():
+        return False
+
+    # Delete GPU devices on this node (cascade deletes their telemetry)
+    gpu_result = await db.execute(
+        select(GPUDevice).where(GPUDevice.node_id == node_id)
+    )
+    for device in gpu_result.scalars().all():
+        await db.delete(device)
+
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if node:
+        await db.delete(node)
+        await db.flush()
+        return True
+    return False
+
+
+# Backend CRUD
+async def get_backend_by_id(db: AsyncSession, backend_id: int) -> Optional[Backend]:
+    """Get backend by ID."""
+    result = await db.execute(
+        select(Backend)
+        .options(selectinload(Backend.models), selectinload(Backend.node))
+        .where(Backend.id == backend_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_backend_by_name(db: AsyncSession, name: str) -> Optional[Backend]:
+    """Get backend by name."""
+    result = await db.execute(select(Backend).where(Backend.name == name))
+    return result.scalar_one_or_none()
+
+
+async def get_backend_by_url(db: AsyncSession, url: str) -> Optional[Backend]:
+    """Get backend by URL."""
+    result = await db.execute(select(Backend).where(Backend.url == url))
+    return result.scalar_one_or_none()
+
+
+async def get_healthy_backends(
+    db: AsyncSession, engine: Optional[BackendEngine] = None
+) -> List[Backend]:
+    """Get all healthy backends."""
+    query = select(Backend).where(Backend.status == BackendStatus.HEALTHY)
+    if engine:
+        query = query.where(Backend.engine == engine)
+    result = await db.execute(query.options(selectinload(Backend.models), selectinload(Backend.node)))
+    return list(result.scalars().all())
+
+
+async def get_all_backends(db: AsyncSession) -> List[Backend]:
+    """Get all backends."""
+    result = await db.execute(
+        select(Backend).options(selectinload(Backend.models), selectinload(Backend.node))
+    )
+    return list(result.scalars().all())
+
+
+async def create_backend(
+    db: AsyncSession,
+    name: str,
+    url: str,
+    engine: BackendEngine,
+    max_concurrent: int = 4,
+    gpu_memory_gb: Optional[float] = None,
+    gpu_type: Optional[str] = None,
+    node_id: Optional[int] = None,
+    gpu_indices: Optional[list] = None,
+) -> Backend:
+    """Register a new backend."""
+    backend = Backend(
+        name=name,
+        url=url,
+        engine=engine,
+        max_concurrent=max_concurrent,
+        gpu_memory_gb=gpu_memory_gb,
+        gpu_type=gpu_type,
+        node_id=node_id,
+        gpu_indices=gpu_indices,
+        status=BackendStatus.UNKNOWN,
+    )
+    db.add(backend)
+    await db.flush()
+    return backend
+
+
+async def update_backend_status(
+    db: AsyncSession,
+    backend_id: int,
+    status: BackendStatus,
+    version: Optional[str] = None,
+) -> Optional[Backend]:
+    """Update backend health status."""
+    result = await db.execute(select(Backend).where(Backend.id == backend_id))
+    backend = result.scalar_one_or_none()
+    if backend:
+        backend.status = status
+        backend.last_health_check = datetime.now(timezone.utc)
+        if version:
+            backend.version = version
+        if status == BackendStatus.HEALTHY:
+            backend.consecutive_failures = 0
+            backend.last_success = datetime.now(timezone.utc)
+        else:
+            backend.consecutive_failures += 1
+        await db.flush()
+    return backend
+
+
+async def update_backend(
+    db: AsyncSession,
+    backend_id: int,
+    name: Optional[str] = None,
+    url: Optional[str] = None,
+    engine: Optional[BackendEngine] = None,
+    max_concurrent: Optional[int] = None,
+    gpu_memory_gb: Optional[float] = None,
+    gpu_type: Optional[str] = None,
+    priority: Optional[int] = None,
+    node_id: Optional[int] = None,
+    gpu_indices: Optional[list] = None,
+    _clear_fields: Optional[list] = None,
+) -> Optional[Backend]:
+    """Update editable fields on a backend.
+
+    Only non-None kwargs are applied. To explicitly clear a nullable field,
+    include its name in _clear_fields (e.g. _clear_fields=["gpu_memory_gb"]).
+    """
+    result = await db.execute(
+        select(Backend)
+        .options(selectinload(Backend.models), selectinload(Backend.node))
+        .where(Backend.id == backend_id)
+    )
+    backend = result.scalar_one_or_none()
+    if not backend:
+        return None
+
+    clear = set(_clear_fields or [])
+
+    if name is not None:
+        backend.name = name
+    if url is not None:
+        backend.url = url
+    if engine is not None:
+        backend.engine = engine
+    if max_concurrent is not None:
+        backend.max_concurrent = max_concurrent
+    if gpu_memory_gb is not None:
+        backend.gpu_memory_gb = gpu_memory_gb
+    elif "gpu_memory_gb" in clear:
+        backend.gpu_memory_gb = None
+    if gpu_type is not None:
+        backend.gpu_type = gpu_type
+    elif "gpu_type" in clear:
+        backend.gpu_type = None
+    if priority is not None:
+        backend.priority = priority
+    if node_id is not None:
+        backend.node_id = node_id
+    elif "node_id" in clear:
+        backend.node_id = None
+    if gpu_indices is not None:
+        backend.gpu_indices = gpu_indices
+    elif "gpu_indices" in clear:
+        backend.gpu_indices = None
+
+    await db.flush()
+    return backend
+
+
+async def update_node(
+    db: AsyncSession,
+    node_id: int,
+    name: Optional[str] = None,
+    hostname: Optional[str] = None,
+    sidecar_url: Optional[str] = None,
+    sidecar_key: Optional[str] = None,
+    _clear_fields: Optional[list] = None,
+) -> Optional[Node]:
+    """Update editable fields on a node.
+
+    Only non-None kwargs are applied. To explicitly clear a nullable field,
+    include its name in _clear_fields.
+    """
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        return None
+
+    clear = set(_clear_fields or [])
+
+    if name is not None:
+        node.name = name
+    if hostname is not None:
+        node.hostname = hostname
+    elif "hostname" in clear:
+        node.hostname = None
+    if sidecar_url is not None:
+        node.sidecar_url = sidecar_url
+    elif "sidecar_url" in clear:
+        node.sidecar_url = None
+    if sidecar_key is not None:
+        node.sidecar_key = sidecar_key
+    elif "sidecar_key" in clear:
+        node.sidecar_key = None
+
+    await db.flush()
+    return node
+
+
+async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
+    """Delete a backend and its associated data."""
+    # Bulk-delete child rows with NOT NULL FK
+    await db.execute(
+        delete(BackendTelemetry).where(BackendTelemetry.backend_id == backend_id)
+    )
+    await db.execute(
+        delete(Model).where(Model.backend_id == backend_id)
+    )
+    await db.execute(
+        delete(SchedulerDecision).where(SchedulerDecision.selected_backend_id == backend_id)
+    )
+
+    # Null out nullable FK references (preserve request/usage history)
+    await db.execute(
+        update(Request).where(Request.backend_id == backend_id).values(backend_id=None)
+    )
+    await db.execute(
+        update(UsageLedger).where(UsageLedger.backend_id == backend_id).values(backend_id=None)
+    )
+
+    # Delete the backend
+    result = await db.execute(select(Backend).where(Backend.id == backend_id))
+    backend = result.scalar_one_or_none()
+    if backend:
+        await db.delete(backend)
+        await db.flush()
+        return True
+    return False
+
+
+async def update_backend_concurrency(
+    db: AsyncSession, backend_id: int, delta: int
+) -> Optional[Backend]:
+    """Update backend concurrent request count."""
+    result = await db.execute(select(Backend).where(Backend.id == backend_id))
+    backend = result.scalar_one_or_none()
+    if backend:
+        backend.current_concurrent = max(0, backend.current_concurrent + delta)
+        await db.flush()
+    return backend
+
+
+async def update_backend_latency_ema(
+    db: AsyncSession,
+    backend_id: int,
+    latency_ema_ms: Optional[float],
+    ttft_ema_ms: Optional[float],
+    throughput_score: float,
+) -> None:
+    """Persist latency EMA and derived throughput_score to the backend row."""
+    await db.execute(
+        update(Backend)
+        .where(Backend.id == backend_id)
+        .values(
+            latency_ema_ms=latency_ema_ms,
+            ttft_ema_ms=ttft_ema_ms,
+            throughput_score=throughput_score,
+        )
+    )
+
+
+async def update_backend_circuit_breaker(
+    db: AsyncSession,
+    backend_id: int,
+    live_failure_count: int,
+    circuit_open_until: Optional[datetime] = None,
+) -> None:
+    """Persist circuit breaker state."""
+    await db.execute(
+        update(Backend)
+        .where(Backend.id == backend_id)
+        .values(
+            live_failure_count=live_failure_count,
+            circuit_open_until=circuit_open_until,
+        )
+    )
+
+
+# Model CRUD
+async def get_models_for_backend(db: AsyncSession, backend_id: int) -> List[Model]:
+    """Get all models for a backend."""
+    result = await db.execute(
+        select(Model).where(Model.backend_id == backend_id)
+    )
+    return list(result.scalars().all())
+
+
+async def get_backends_with_model(
+    db: AsyncSession,
+    model_name: str,
+    modality: Optional[Modality] = None,
+) -> List[Backend]:
+    """Get backends that have a specific model."""
+    query = (
+        select(Backend)
+        .join(Model)
+        .where(
+            and_(
+                Model.name == model_name,
+                Backend.status == BackendStatus.HEALTHY,
+            )
+        )
+    )
+    if modality:
+        query = query.where(Model.modality == modality)
+    result = await db.execute(query.options(selectinload(Backend.models)))
+    return list(result.scalars().all())
+
+
+async def upsert_model(
+    db: AsyncSession,
+    backend_id: int,
+    name: str,
+    modality: Modality = Modality.CHAT,
+    context_length: Optional[int] = None,
+    supports_multimodal: bool = False,
+    supports_thinking: bool = False,
+    supports_structured_output: bool = True,
+    is_loaded: bool = False,
+    quantization: Optional[str] = None,
+    model_format: Optional[str] = None,
+    capabilities_json: Optional[str] = None,
+    embedding_length: Optional[int] = None,
+    head_count: Optional[int] = None,
+    layer_count: Optional[int] = None,
+    feed_forward_length: Optional[int] = None,
+    parent_model: Optional[str] = None,
+    model_max_context: Optional[int] = None,
+) -> Model:
+    """Create or update a model record."""
+    result = await db.execute(
+        select(Model).where(
+            and_(Model.backend_id == backend_id, Model.name == name)
+        )
+    )
+    model = result.scalar_one_or_none()
+
+    # If admin has set an override, use it instead of auto-detected value
+    effective_multimodal = supports_multimodal
+    effective_thinking = supports_thinking
+
+    if model:
+        if model.multimodal_override is not None:
+            effective_multimodal = model.multimodal_override
+        if model.thinking_override is not None:
+            effective_thinking = model.thinking_override
+        model.modality = modality
+        model.context_length = model.context_length_override if model.context_length_override is not None else (context_length if context_length is not None else model.context_length)
+        model.model_max_context = model_max_context if model_max_context is not None else model.model_max_context
+        model.supports_multimodal = effective_multimodal
+        model.supports_thinking = effective_thinking
+        model.supports_structured_output = supports_structured_output
+        model.is_loaded = is_loaded
+        model.quantization = model.quantization_override if model.quantization_override is not None else quantization
+        model.model_format = model.model_format_override if model.model_format_override is not None else model_format
+        model.capabilities = model.capabilities_override if model.capabilities_override is not None else capabilities_json
+        model.embedding_length = model.embedding_length_override if model.embedding_length_override is not None else embedding_length
+        model.head_count = model.head_count_override if model.head_count_override is not None else head_count
+        model.layer_count = model.layer_count_override if model.layer_count_override is not None else layer_count
+        model.feed_forward_length = model.feed_forward_length_override if model.feed_forward_length_override is not None else feed_forward_length
+        model.parent_model = model.parent_model_override if model.parent_model_override is not None else parent_model
+        model.family = model.family_override if model.family_override is not None else model.family
+        model.parameter_count = model.parameter_count_override if model.parameter_count_override is not None else model.parameter_count
+    else:
+        model = Model(
+            backend_id=backend_id,
+            name=name,
+            modality=modality,
+            context_length=context_length,
+            model_max_context=model_max_context,
+            supports_multimodal=supports_multimodal,
+            supports_thinking=supports_thinking,
+            supports_structured_output=supports_structured_output,
+            is_loaded=is_loaded,
+            quantization=quantization,
+            model_format=model_format,
+            capabilities=capabilities_json,
+            embedding_length=embedding_length,
+            head_count=head_count,
+            layer_count=layer_count,
+            feed_forward_length=feed_forward_length,
+            parent_model=parent_model,
+        )
+        db.add(model)
+
+    await db.flush()
+    return model
+
+
+async def get_model_by_id(db: AsyncSession, model_id: int) -> Optional[Model]:
+    """Get a model by its ID."""
+    result = await db.execute(select(Model).where(Model.id == model_id))
+    return result.scalar_one_or_none()
+
+
+async def set_model_multimodal_override(
+    db: AsyncSession, model_id: int, value: Optional[bool]
+) -> Optional[Model]:
+    """Set the multimodal override for a model.
+
+    When value is True/False, admin's choice sticks regardless of auto-detect.
+    When value is None, auto-detection controls the value.
+    """
+    model = await get_model_by_id(db, model_id)
+    if not model:
+        return None
+    model.multimodal_override = value
+    if value is not None:
+        model.supports_multimodal = value
+    await db.flush()
+    return model
+
+
+async def get_all_models_with_backends(db: AsyncSession) -> list[Model]:
+    """Get all models with their backend relationship eagerly loaded."""
+    result = await db.execute(
+        select(Model).options(selectinload(Model.backend)).order_by(Model.name)
+    )
+    return list(result.scalars().all())
+
+
+async def get_models_grouped_by_name(db: AsyncSession) -> dict:
+    """Get all models grouped by name, each with backend eagerly loaded."""
+    result = await db.execute(
+        select(Model).options(selectinload(Model.backend)).order_by(Model.name)
+    )
+    models = list(result.scalars().all())
+    grouped: dict = {}
+    for m in models:
+        grouped.setdefault(m.name, []).append(m)
+    return grouped
+
+
+async def set_multimodal_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set multimodal override for ALL model rows with the given name."""
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.multimodal_override = value
+        if value is not None:
+            m.supports_multimodal = value
+    await db.flush()
+    return len(models)
+
+
+async def set_thinking_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set thinking override for ALL model rows with the given name."""
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.thinking_override = value
+        if value is not None:
+            m.supports_thinking = value
+    await db.flush()
+    return len(models)
+
+
+async def update_model_overrides_by_name(
+    db: AsyncSession, model_name: str, overrides: dict
+) -> int:
+    """Set metadata overrides for ALL model rows with the given name.
+
+    Accepts a dict mapping override field names to values.
+    A value of None clears the override (back to auto-detect).
+    Also applies the effective value to the base field when setting an override.
+    """
+    # Map override field -> base field
+    override_to_base = {
+        "context_length_override": "context_length",
+        "embedding_length_override": "embedding_length",
+        "head_count_override": "head_count",
+        "layer_count_override": "layer_count",
+        "feed_forward_length_override": "feed_forward_length",
+        "capabilities_override": "capabilities",
+        "family_override": "family",
+        "parameter_count_override": "parameter_count",
+        "quantization_override": "quantization",
+        "model_format_override": "model_format",
+        "parent_model_override": "parent_model",
+    }
+
+    # Direct fields (admin-only, no auto-detect source)
+    direct_fields = {"description", "model_url"}
+
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        for field, value in overrides.items():
+            if field in direct_fields:
+                if hasattr(m, field):
+                    setattr(m, field, value)
+            elif hasattr(m, field):
+                setattr(m, field, value)
+                # Also set the base field so the display value updates immediately
+                base_field = override_to_base.get(field)
+                if base_field and value is not None:
+                    setattr(m, base_field, value)
+    await db.flush()
+    return len(models)
+
+
+async def remove_stale_models(
+    db: AsyncSession, backend_id: int, current_model_names: List[str]
+) -> int:
+    """Remove models for a backend that are no longer discovered."""
+    if not current_model_names:
+        return 0
+    result = await db.execute(
+        delete(Model).where(
+            and_(
+                Model.backend_id == backend_id,
+                Model.name.notin_(current_model_names),
+            )
+        )
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def get_all_available_models(db: AsyncSession) -> List[Tuple[str, List[Backend]]]:
+    """Get all unique model names with their available backends."""
+    result = await db.execute(
+        select(Model.name, Backend)
+        .join(Backend)
+        .where(Backend.status == BackendStatus.HEALTHY)
+        .order_by(Model.name)
+    )
+    # Group by model name
+    models_dict: dict[str, List[Backend]] = {}
+    for row in result.all():
+        model_name, backend = row
+        if model_name not in models_dict:
+            models_dict[model_name] = []
+        models_dict[model_name].append(backend)
+    return list(models_dict.items())
+
+
+# Request/Response CRUD
+async def create_request(
+    db: AsyncSession,
+    user_id: int,
+    api_key_id: int,
+    endpoint: str,
+    model: str,
+    modality: Modality,
+    is_streaming: bool = False,
+    messages: Optional[dict] = None,
+    prompt: Optional[str] = None,
+    parameters: Optional[dict] = None,
+    response_format: Optional[dict] = None,
+    client_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Request:
+    """Create a new request record."""
+    request = Request(
+        user_id=user_id,
+        api_key_id=api_key_id,
+        endpoint=endpoint,
+        model=model,
+        modality=modality,
+        is_streaming=is_streaming,
+        messages=messages,
+        prompt=prompt,
+        parameters=parameters,
+        response_format=response_format,
+        client_ip=client_ip,
+        user_agent=user_agent,
+        status=RequestStatus.QUEUED,
+    )
+    db.add(request)
+    await db.flush()
+    return request
+
+
+async def update_request_started(
+    db: AsyncSession, request_id: int, backend_id: int
+) -> Optional[Request]:
+    """Update request when processing starts."""
+    result = await db.execute(select(Request).where(Request.id == request_id))
+    request = result.scalar_one_or_none()
+    if request:
+        request.status = RequestStatus.PROCESSING
+        request.backend_id = backend_id
+        request.started_at = datetime.now(timezone.utc)
+        queue_delay = request.started_at - _ensure_aware(request.queued_at)
+        request.queue_delay_ms = int(queue_delay.total_seconds() * 1000)
+        await db.flush()
+    return request
+
+
+async def update_request_completed(
+    db: AsyncSession,
+    request_id: int,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    tokens_estimated: bool = False,
+) -> Optional[Request]:
+    """Update request when completed."""
+    result = await db.execute(select(Request).where(Request.id == request_id))
+    request = result.scalar_one_or_none()
+    if request:
+        request.status = RequestStatus.COMPLETED
+        request.completed_at = datetime.now(timezone.utc)
+        if request.started_at:
+            processing_time = request.completed_at - _ensure_aware(request.started_at)
+            request.processing_time_ms = int(processing_time.total_seconds() * 1000)
+        total_time = request.completed_at - _ensure_aware(request.queued_at)
+        request.total_time_ms = int(total_time.total_seconds() * 1000)
+        request.prompt_tokens = prompt_tokens
+        request.completion_tokens = completion_tokens
+        if prompt_tokens and completion_tokens:
+            request.total_tokens = prompt_tokens + completion_tokens
+        request.tokens_estimated = tokens_estimated
+        await db.flush()
+    return request
+
+
+async def update_request_failed(
+    db: AsyncSession, request_id: int, error_message: str, error_code: Optional[str] = None
+) -> Optional[Request]:
+    """Update request when failed."""
+    result = await db.execute(select(Request).where(Request.id == request_id))
+    request = result.scalar_one_or_none()
+    if request:
+        request.status = RequestStatus.FAILED
+        request.completed_at = datetime.now(timezone.utc)
+        request.error_message = error_message
+        request.error_code = error_code
+        if request.started_at:
+            processing_time = request.completed_at - _ensure_aware(request.started_at)
+            request.processing_time_ms = int(processing_time.total_seconds() * 1000)
+        total_time = request.completed_at - _ensure_aware(request.queued_at)
+        request.total_time_ms = int(total_time.total_seconds() * 1000)
+        await db.flush()
+    return request
+
+
+async def create_response(
+    db: AsyncSession,
+    request_id: int,
+    content: Optional[str] = None,
+    finish_reason: Optional[str] = None,
+    chunk_count: int = 0,
+    first_token_time_ms: Optional[int] = None,
+    structured_output_valid: Optional[bool] = None,
+    validation_errors: Optional[list] = None,
+    raw_response: Optional[dict] = None,
+) -> Response:
+    """Create a response record."""
+    response = Response(
+        request_id=request_id,
+        content=content,
+        finish_reason=finish_reason,
+        chunk_count=chunk_count,
+        first_token_time_ms=first_token_time_ms,
+        structured_output_valid=structured_output_valid,
+        validation_errors=validation_errors,
+        raw_response=raw_response,
+    )
+    db.add(response)
+    await db.flush()
+    return response
+
+
+# Usage Ledger CRUD
+async def create_usage_entry(
+    db: AsyncSession,
+    user_id: int,
+    api_key_id: int,
+    request_id: int,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    is_estimated: bool = False,
+    backend_id: Optional[int] = None,
+) -> UsageLedger:
+    """Create a usage ledger entry."""
+    entry = UsageLedger(
+        user_id=user_id,
+        api_key_id=api_key_id,
+        request_id=request_id,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        is_estimated=is_estimated,
+        backend_id=backend_id,
+    )
+    db.add(entry)
+    await db.flush()
+    return entry
+
+
+async def get_user_usage_in_window(
+    db: AsyncSession, user_id: int, window_seconds: int
+) -> int:
+    """Get total tokens used by user in a time window."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    result = await db.execute(
+        select(func.sum(UsageLedger.total_tokens))
+        .where(
+            and_(
+                UsageLedger.user_id == user_id,
+                UsageLedger.created_at >= cutoff,
+            )
+        )
+    )
+    total = result.scalar_one_or_none()
+    return total or 0
+
+
+# Telemetry CRUD
+async def create_telemetry_snapshot(
+    db: AsyncSession,
+    backend_id: int,
+    gpu_utilization: Optional[float] = None,
+    gpu_memory_used_gb: Optional[float] = None,
+    gpu_memory_total_gb: Optional[float] = None,
+    active_requests: int = 0,
+    queued_requests: int = 0,
+    loaded_models: Optional[list] = None,
+    gpu_power_draw_watts: Optional[float] = None,
+    gpu_fan_speed_percent: Optional[float] = None,
+    gpu_temperature: Optional[float] = None,
+) -> BackendTelemetry:
+    """Create a telemetry snapshot."""
+    telemetry = BackendTelemetry(
+        backend_id=backend_id,
+        gpu_utilization=gpu_utilization,
+        gpu_memory_used_gb=gpu_memory_used_gb,
+        gpu_memory_total_gb=gpu_memory_total_gb,
+        gpu_temperature=gpu_temperature,
+        gpu_power_draw_watts=gpu_power_draw_watts,
+        gpu_fan_speed_percent=gpu_fan_speed_percent,
+        active_requests=active_requests,
+        queued_requests=queued_requests,
+        loaded_models=loaded_models,
+    )
+    db.add(telemetry)
+    await db.flush()
+    return telemetry
+
+
+async def get_latest_telemetry(
+    db: AsyncSession, backend_id: int
+) -> Optional[BackendTelemetry]:
+    """Get latest telemetry snapshot for a backend."""
+    result = await db.execute(
+        select(BackendTelemetry)
+        .where(BackendTelemetry.backend_id == backend_id)
+        .order_by(BackendTelemetry.timestamp.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# GPU Device CRUD
+async def upsert_gpu_device(
+    db: AsyncSession,
+    node_id: int,
+    gpu_index: int,
+    uuid: Optional[str] = None,
+    name: Optional[str] = None,
+    pci_bus_id: Optional[str] = None,
+    compute_capability: Optional[str] = None,
+    memory_total_gb: Optional[float] = None,
+    power_limit_watts: Optional[float] = None,
+) -> GPUDevice:
+    """Create or update a GPU device record."""
+    result = await db.execute(
+        select(GPUDevice).where(
+            and_(GPUDevice.node_id == node_id, GPUDevice.gpu_index == gpu_index)
+        )
+    )
+    device = result.scalar_one_or_none()
+
+    if device:
+        if uuid is not None:
+            device.uuid = uuid
+        if name is not None:
+            device.name = name
+        if pci_bus_id is not None:
+            device.pci_bus_id = pci_bus_id
+        if compute_capability is not None:
+            device.compute_capability = compute_capability
+        if memory_total_gb is not None:
+            device.memory_total_gb = memory_total_gb
+        if power_limit_watts is not None:
+            device.power_limit_watts = power_limit_watts
+    else:
+        device = GPUDevice(
+            node_id=node_id,
+            gpu_index=gpu_index,
+            uuid=uuid,
+            name=name,
+            pci_bus_id=pci_bus_id,
+            compute_capability=compute_capability,
+            memory_total_gb=memory_total_gb,
+            power_limit_watts=power_limit_watts,
+        )
+        db.add(device)
+
+    await db.flush()
+    return device
+
+
+async def create_gpu_device_telemetry(
+    db: AsyncSession,
+    gpu_device_id: int,
+    utilization_gpu: Optional[float] = None,
+    utilization_memory: Optional[float] = None,
+    memory_used_gb: Optional[float] = None,
+    memory_free_gb: Optional[float] = None,
+    temperature_gpu: Optional[float] = None,
+    temperature_memory: Optional[float] = None,
+    power_draw_watts: Optional[float] = None,
+    fan_speed_percent: Optional[float] = None,
+    clock_sm_mhz: Optional[int] = None,
+    clock_memory_mhz: Optional[int] = None,
+) -> GPUDeviceTelemetry:
+    """Create a per-GPU telemetry snapshot."""
+    telemetry = GPUDeviceTelemetry(
+        gpu_device_id=gpu_device_id,
+        utilization_gpu=utilization_gpu,
+        utilization_memory=utilization_memory,
+        memory_used_gb=memory_used_gb,
+        memory_free_gb=memory_free_gb,
+        temperature_gpu=temperature_gpu,
+        temperature_memory=temperature_memory,
+        power_draw_watts=power_draw_watts,
+        fan_speed_percent=fan_speed_percent,
+        clock_sm_mhz=clock_sm_mhz,
+        clock_memory_mhz=clock_memory_mhz,
+    )
+    db.add(telemetry)
+    await db.flush()
+    return telemetry
+
+
+async def get_gpu_devices_for_node(
+    db: AsyncSession, node_id: int
+) -> List[GPUDevice]:
+    """Get all GPU devices for a node."""
+    result = await db.execute(
+        select(GPUDevice)
+        .where(GPUDevice.node_id == node_id)
+        .order_by(GPUDevice.gpu_index)
+    )
+    return list(result.scalars().all())
+
+
+async def get_gpu_devices_for_backend(
+    db: AsyncSession, backend_id: int
+) -> List[GPUDevice]:
+    """Get GPU devices assigned to a backend (via its node + gpu_indices)."""
+    # Look up the backend's node_id and gpu_indices
+    result = await db.execute(
+        select(Backend.node_id, Backend.gpu_indices).where(Backend.id == backend_id)
+    )
+    row = result.one_or_none()
+    if not row or not row[0]:
+        return []
+
+    node_id, gpu_indices = row
+
+    query = (
+        select(GPUDevice)
+        .where(GPUDevice.node_id == node_id)
+        .order_by(GPUDevice.gpu_index)
+    )
+    if gpu_indices:
+        query = query.where(GPUDevice.gpu_index.in_(gpu_indices))
+
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_all_gpu_devices(db: AsyncSession) -> List[GPUDevice]:
+    """Get all GPU devices across all nodes."""
+    result = await db.execute(
+        select(GPUDevice).order_by(GPUDevice.node_id, GPUDevice.gpu_index)
+    )
+    return list(result.scalars().all())
+
+
+async def get_backend_telemetry_history(
+    db: AsyncSession,
+    backend_id: int,
+    start: datetime,
+    end: datetime,
+    resolution_minutes: int = 5,
+) -> List[dict]:
+    """Get aggregated backend telemetry history with time bucketing."""
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT
+            DATE_FORMAT(timestamp, :bucket_format) as time_bucket,
+            AVG(gpu_utilization) as avg_gpu_utilization,
+            MIN(gpu_utilization) as min_gpu_utilization,
+            MAX(gpu_utilization) as max_gpu_utilization,
+            AVG(gpu_memory_used_gb) as avg_gpu_memory_used_gb,
+            AVG(gpu_memory_total_gb) as avg_gpu_memory_total_gb,
+            AVG(gpu_temperature) as avg_gpu_temperature,
+            AVG(gpu_power_draw_watts) as avg_gpu_power_draw_watts,
+            AVG(active_requests) as avg_active_requests,
+            AVG(queued_requests) as avg_queued_requests,
+            AVG(requests_per_second) as avg_requests_per_second
+        FROM backend_telemetry
+        WHERE backend_id = :backend_id
+          AND timestamp >= :start
+          AND timestamp <= :end
+        GROUP BY time_bucket
+        ORDER BY time_bucket
+    """)
+
+    # Choose bucket format based on resolution
+    if resolution_minutes <= 1:
+        bucket_format = "%Y-%m-%d %H:%i"
+    elif resolution_minutes <= 5:
+        # Round to 5-minute intervals
+        bucket_format = "%Y-%m-%d %H:"
+        # Use a more complex expression for 5-min bucketing
+        query = text("""
+            SELECT
+                CONCAT(DATE_FORMAT(timestamp, '%Y-%m-%d %H:'),
+                       LPAD(FLOOR(MINUTE(timestamp) / :res_min) * :res_min, 2, '0')) as time_bucket,
+                AVG(gpu_utilization) as avg_gpu_utilization,
+                MIN(gpu_utilization) as min_gpu_utilization,
+                MAX(gpu_utilization) as max_gpu_utilization,
+                AVG(gpu_memory_used_gb) as avg_gpu_memory_used_gb,
+                AVG(gpu_memory_total_gb) as avg_gpu_memory_total_gb,
+                AVG(gpu_temperature) as avg_gpu_temperature,
+                AVG(gpu_power_draw_watts) as avg_gpu_power_draw_watts,
+                AVG(active_requests) as avg_active_requests,
+                AVG(queued_requests) as avg_queued_requests,
+                AVG(requests_per_second) as avg_requests_per_second
+            FROM backend_telemetry
+            WHERE backend_id = :backend_id
+              AND timestamp >= :start
+              AND timestamp <= :end
+            GROUP BY time_bucket
+            ORDER BY time_bucket
+        """)
+    elif resolution_minutes <= 60:
+        bucket_format = "%Y-%m-%d %H:00"
+    else:
+        bucket_format = "%Y-%m-%d"
+
+    params = {
+        "backend_id": backend_id,
+        "start": start,
+        "end": end,
+        "bucket_format": bucket_format,
+        "res_min": resolution_minutes,
+    }
+
+    result = await db.execute(query, params)
+    rows = result.mappings().all()
+
+    return [
+        {
+            "timestamp": row["time_bucket"],
+            "gpu_utilization": row["avg_gpu_utilization"],
+            "gpu_utilization_min": row["min_gpu_utilization"],
+            "gpu_utilization_max": row["max_gpu_utilization"],
+            "gpu_memory_used_gb": row["avg_gpu_memory_used_gb"],
+            "gpu_memory_total_gb": row["avg_gpu_memory_total_gb"],
+            "gpu_temperature": row["avg_gpu_temperature"],
+            "gpu_power_draw_watts": row["avg_gpu_power_draw_watts"],
+            "active_requests": row["avg_active_requests"],
+            "queued_requests": row["avg_queued_requests"],
+            "requests_per_second": row["avg_requests_per_second"],
+        }
+        for row in rows
+    ]
+
+
+async def get_gpu_device_telemetry_history(
+    db: AsyncSession,
+    gpu_device_id: int,
+    start: datetime,
+    end: datetime,
+    resolution_minutes: int = 5,
+) -> List[dict]:
+    """Get aggregated per-GPU telemetry history with time bucketing."""
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT
+            CONCAT(DATE_FORMAT(timestamp, '%Y-%m-%d %H:'),
+                   LPAD(FLOOR(MINUTE(timestamp) / :res_min) * :res_min, 2, '0')) as time_bucket,
+            AVG(utilization_gpu) as avg_utilization_gpu,
+            MIN(utilization_gpu) as min_utilization_gpu,
+            MAX(utilization_gpu) as max_utilization_gpu,
+            AVG(utilization_memory) as avg_utilization_memory,
+            AVG(memory_used_gb) as avg_memory_used_gb,
+            AVG(memory_free_gb) as avg_memory_free_gb,
+            AVG(temperature_gpu) as avg_temperature_gpu,
+            AVG(temperature_memory) as avg_temperature_memory,
+            AVG(power_draw_watts) as avg_power_draw_watts,
+            AVG(fan_speed_percent) as avg_fan_speed_percent,
+            AVG(clock_sm_mhz) as avg_clock_sm_mhz,
+            AVG(clock_memory_mhz) as avg_clock_memory_mhz
+        FROM gpu_device_telemetry
+        WHERE gpu_device_id = :gpu_device_id
+          AND timestamp >= :start
+          AND timestamp <= :end
+        GROUP BY time_bucket
+        ORDER BY time_bucket
+    """)
+
+    result = await db.execute(query, {
+        "gpu_device_id": gpu_device_id,
+        "start": start,
+        "end": end,
+        "res_min": resolution_minutes,
+    })
+    rows = result.mappings().all()
+
+    return [
+        {
+            "timestamp": row["time_bucket"],
+            "utilization_gpu": row["avg_utilization_gpu"],
+            "utilization_gpu_min": row["min_utilization_gpu"],
+            "utilization_gpu_max": row["max_utilization_gpu"],
+            "utilization_memory": row["avg_utilization_memory"],
+            "memory_used_gb": row["avg_memory_used_gb"],
+            "memory_free_gb": row["avg_memory_free_gb"],
+            "temperature_gpu": row["avg_temperature_gpu"],
+            "temperature_memory": row["avg_temperature_memory"],
+            "power_draw_watts": row["avg_power_draw_watts"],
+            "fan_speed_percent": row["avg_fan_speed_percent"],
+            "clock_sm_mhz": row["avg_clock_sm_mhz"],
+            "clock_memory_mhz": row["avg_clock_memory_mhz"],
+        }
+        for row in rows
+    ]
+
+
+async def get_latest_gpu_device_telemetry(
+    db: AsyncSession, node_id: int
+) -> List[GPUDeviceTelemetry]:
+    """Get the most recent telemetry for each GPU device on a node."""
+    # Get device IDs for this node
+    device_result = await db.execute(
+        select(GPUDevice.id).where(GPUDevice.node_id == node_id)
+    )
+    device_ids = [row[0] for row in device_result.all()]
+
+    if not device_ids:
+        return []
+
+    # Get max timestamp per device
+    from sqlalchemy import text
+    placeholders = ",".join(str(d) for d in device_ids)
+    subq = text(f"""
+        SELECT gpu_device_id, MAX(timestamp) as max_ts
+        FROM gpu_device_telemetry
+        WHERE gpu_device_id IN ({placeholders})
+        GROUP BY gpu_device_id
+    """)
+
+    result = await db.execute(subq)
+    latest_map = {row[0]: row[1] for row in result.all()}
+
+    if not latest_map:
+        return []
+
+    # Fetch the actual rows
+    conditions = []
+    for device_id, max_ts in latest_map.items():
+        conditions.append(
+            and_(
+                GPUDeviceTelemetry.gpu_device_id == device_id,
+                GPUDeviceTelemetry.timestamp == max_ts,
+            )
+        )
+
+    result = await db.execute(
+        select(GPUDeviceTelemetry).where(or_(*conditions))
+    )
+    return list(result.scalars().all())
+
+
+async def delete_old_telemetry(
+    db: AsyncSession, older_than: datetime
+) -> int:
+    """Delete backend telemetry data older than the given datetime."""
+    result = await db.execute(
+        delete(BackendTelemetry).where(BackendTelemetry.timestamp < older_than)
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def delete_old_gpu_telemetry(
+    db: AsyncSession, older_than: datetime
+) -> int:
+    """Delete per-GPU telemetry data older than the given datetime."""
+    result = await db.execute(
+        delete(GPUDeviceTelemetry).where(GPUDeviceTelemetry.timestamp < older_than)
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def delete_expired_api_keys(
+    db: AsyncSession, grace_days: int = 15
+) -> int:
+    """Delete API keys that have been expired for more than grace_days."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
+    result = await db.execute(
+        delete(ApiKey).where(
+            ApiKey.expires_at.isnot(None),
+            ApiKey.expires_at < cutoff,
+            ApiKey.status.in_([ApiKeyStatus.ACTIVE, ApiKeyStatus.EXPIRED]),
+        )
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def count_user_active_api_keys(db: AsyncSession, user_id: int) -> int:
+    """Count active (non-revoked) API keys for a user."""
+    result = await db.execute(
+        select(func.count(ApiKey.id)).where(
+            ApiKey.user_id == user_id,
+            ApiKey.status == ApiKeyStatus.ACTIVE,
+        )
+    )
+    return result.scalar() or 0
+
+
+# Quota Request CRUD
+async def create_quota_request(
+    db: AsyncSession,
+    request_type: str,
+    justification: str,
+    user_id: Optional[int] = None,
+    requester_name: Optional[str] = None,
+    requester_email: Optional[str] = None,
+    affiliation: Optional[str] = None,
+    requested_tokens: Optional[int] = None,
+    requested_rpm: Optional[int] = None,
+) -> QuotaRequest:
+    """Create a quota or API key request."""
+    quota_request = QuotaRequest(
+        user_id=user_id,
+        requester_name=requester_name,
+        requester_email=requester_email,
+        affiliation=affiliation,
+        request_type=request_type,
+        justification=justification,
+        requested_tokens=requested_tokens,
+        requested_rpm=requested_rpm,
+        status=QuotaRequestStatus.PENDING,
+    )
+    db.add(quota_request)
+    await db.flush()
+    return quota_request
+
+
+async def get_pending_quota_requests(db: AsyncSession) -> List[QuotaRequest]:
+    """Get all pending quota requests."""
+    result = await db.execute(
+        select(QuotaRequest)
+        .where(QuotaRequest.status == QuotaRequestStatus.PENDING)
+        .order_by(QuotaRequest.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def review_quota_request(
+    db: AsyncSession,
+    request_id: int,
+    reviewer_id: int,
+    status: QuotaRequestStatus,
+    review_notes: Optional[str] = None,
+) -> Optional[QuotaRequest]:
+    """Review a quota request."""
+    result = await db.execute(
+        select(QuotaRequest).where(QuotaRequest.id == request_id)
+    )
+    quota_request = result.scalar_one_or_none()
+    if quota_request:
+        quota_request.status = status
+        quota_request.reviewed_by = reviewer_id
+        quota_request.reviewed_at = datetime.now(timezone.utc)
+        quota_request.review_notes = review_notes
+        await db.flush()
+    return quota_request
+
+
+# Scheduler Decision CRUD
+async def create_scheduler_decision(
+    db: AsyncSession,
+    request_id: int,
+    selected_backend_id: int,
+    candidate_backends: Optional[list] = None,
+    scores: Optional[dict] = None,
+    user_deficit: Optional[float] = None,
+    user_weight: Optional[float] = None,
+    user_recent_usage: Optional[int] = None,
+    hard_constraints_passed: Optional[list] = None,
+    hard_constraints_failed: Optional[list] = None,
+) -> SchedulerDecision:
+    """Record a scheduler decision."""
+    decision = SchedulerDecision(
+        request_id=request_id,
+        selected_backend_id=selected_backend_id,
+        candidate_backends=candidate_backends,
+        scores=scores,
+        user_deficit=user_deficit,
+        user_weight=user_weight,
+        user_recent_usage=user_recent_usage,
+        hard_constraints_passed=hard_constraints_passed,
+        hard_constraints_failed=hard_constraints_failed,
+    )
+    db.add(decision)
+    await db.flush()
+    return decision
+
+
+# Audit Search
+async def search_requests(
+    db: AsyncSession,
+    user_id: Optional[int] = None,
+    model: Optional[str] = None,
+    status: Optional[RequestStatus] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    search_text: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> Tuple[List[Request], int]:
+    """Search requests with filters."""
+    query = select(Request)
+    count_query = select(func.count(Request.id))
+
+    conditions = []
+    if user_id:
+        conditions.append(Request.user_id == user_id)
+    if model:
+        conditions.append(Request.model == model)
+    if status:
+        conditions.append(Request.status == status)
+    if start_date:
+        conditions.append(Request.created_at >= start_date)
+    if end_date:
+        conditions.append(Request.created_at <= end_date)
+    if search_text:
+        conditions.append(
+            or_(
+                Request.prompt.ilike(f"%{search_text}%"),
+                func.json_extract(Request.messages, "$").ilike(f"%{search_text}%"),
+            )
+        )
+
+    if conditions:
+        query = query.where(and_(*conditions))
+        count_query = count_query.where(and_(*conditions))
+
+    # Get total count
+    count_result = await db.execute(count_query)
+    total = count_result.scalar_one()
+
+    # Get paginated results
+    query = query.order_by(Request.created_at.desc()).offset(skip).limit(limit)
+    result = await db.execute(query.options(selectinload(Request.response)))
+    requests = list(result.scalars().all())
+
+    return requests, total
+
+
+# User stats/detail queries
+async def get_user_with_stats(db: AsyncSession, user_id: int) -> Optional[dict]:
+    """Get user with usage statistics."""
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+
+    # Total tokens
+    token_result = await db.execute(
+        select(func.coalesce(func.sum(UsageLedger.total_tokens), 0))
+        .where(UsageLedger.user_id == user_id)
+    )
+    total_tokens = token_result.scalar_one()
+
+    # Request count
+    req_result = await db.execute(
+        select(func.count(Request.id)).where(Request.user_id == user_id)
+    )
+    request_count = req_result.scalar_one()
+
+    # Favorite models (top 5)
+    model_result = await db.execute(
+        select(Request.model, func.count(Request.id).label("cnt"))
+        .where(Request.user_id == user_id)
+        .group_by(Request.model)
+        .order_by(func.count(Request.id).desc())
+        .limit(5)
+    )
+    favorite_models = [(row[0], row[1]) for row in model_result.all()]
+
+    # API key count
+    key_result = await db.execute(
+        select(func.count(ApiKey.id)).where(ApiKey.user_id == user_id)
+    )
+    api_key_count = key_result.scalar_one()
+
+    # Quota
+    quota = await get_user_quota(db, user_id)
+
+    # API keys
+    api_keys = await get_user_api_keys(db, user_id, include_revoked=True)
+
+    return {
+        "user": user,
+        "total_tokens": total_tokens,
+        "request_count": request_count,
+        "favorite_models": favorite_models,
+        "api_key_count": api_key_count,
+        "quota": quota,
+        "api_keys": api_keys,
+    }
+
+
+async def get_user_monthly_usage(
+    db: AsyncSession, user_id: int, months: int = 12
+) -> List[dict]:
+    """Get monthly token usage for a user."""
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT
+            DATE_FORMAT(created_at, '%Y-%m') as month,
+            SUM(total_tokens) as tokens,
+            COUNT(*) as requests
+        FROM usage_ledger
+        WHERE user_id = :user_id
+          AND created_at >= DATE_SUB(NOW(), INTERVAL :months MONTH)
+        GROUP BY month
+        ORDER BY month
+    """)
+    result = await db.execute(query, {"user_id": user_id, "months": months})
+    return [
+        {"month": row[0], "tokens": int(row[1]), "requests": int(row[2])}
+        for row in result.all()
+    ]
+
+
+async def get_all_api_keys(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
+) -> Tuple[List[ApiKey], int]:
+    """Get all API keys with user info, paginated and sortable."""
+    conditions = []
+    if search:
+        search_pattern = f"%{search}%"
+        conditions.append(
+            or_(
+                ApiKey.name.ilike(search_pattern),
+                ApiKey.key_prefix.ilike(search_pattern),
+                User.username.ilike(search_pattern),
+                User.email.ilike(search_pattern),
+            )
+        )
+    if status_filter:
+        conditions.append(ApiKey.status == ApiKeyStatus(status_filter))
+
+    base_query = select(ApiKey).join(User, ApiKey.user_id == User.id)
+    count_query = select(func.count(ApiKey.id)).join(User, ApiKey.user_id == User.id)
+
+    if conditions:
+        where_clause = and_(*conditions)
+        base_query = base_query.where(where_clause)
+        count_query = count_query.where(where_clause)
+
+    count_result = await db.execute(count_query)
+    total = count_result.scalar_one()
+
+    # Determine sort order
+    asc = sort_dir.lower() == "asc"
+    if sort_by == "last_used":
+        if asc:
+            order = [case((ApiKey.last_used_at.is_(None), 1), else_=0), ApiKey.last_used_at.asc()]
+        else:
+            order = [case((ApiKey.last_used_at.is_(None), 1), else_=0), ApiKey.last_used_at.desc()]
+    elif sort_by == "usage":
+        order = [ApiKey.usage_count.asc() if asc else ApiKey.usage_count.desc()]
+    else:
+        # Default: created_at
+        order = [ApiKey.created_at.asc() if asc else ApiKey.created_at.desc()]
+
+    query = (
+        base_query
+        .options(selectinload(ApiKey.user))
+        .order_by(*order)
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    return list(result.scalars().all()), total
+
+
+async def update_user(db: AsyncSession, user_id: int, **kwargs) -> Optional[User]:
+    """Update user fields."""
+    result = await db.execute(
+        select(User).options(selectinload(User.group)).where(User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(user, key):
+            setattr(user, key, value)
+    await db.flush()
+    return user
+
+
+# Blog CRUD
+async def get_published_blog_posts(db: AsyncSession) -> List[BlogPost]:
+    """Get published blog posts ordered by published_at desc."""
+    result = await db.execute(
+        select(BlogPost)
+        .options(selectinload(BlogPost.author))
+        .where(
+            and_(
+                BlogPost.is_published.is_(True),
+                BlogPost.deleted_at.is_(None),
+            )
+        )
+        .order_by(BlogPost.published_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_blog_post_by_slug(db: AsyncSession, slug: str) -> Optional[BlogPost]:
+    """Get a single published blog post by slug."""
+    result = await db.execute(
+        select(BlogPost)
+        .options(selectinload(BlogPost.author))
+        .where(
+            and_(
+                BlogPost.slug == slug,
+                BlogPost.is_published.is_(True),
+                BlogPost.deleted_at.is_(None),
+            )
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_all_blog_posts(db: AsyncSession) -> List[BlogPost]:
+    """Get all blog posts including drafts (admin)."""
+    result = await db.execute(
+        select(BlogPost)
+        .options(selectinload(BlogPost.author))
+        .where(BlogPost.deleted_at.is_(None))
+        .order_by(BlogPost.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_blog_post_by_id(db: AsyncSession, post_id: int) -> Optional[BlogPost]:
+    """Get a blog post by ID (admin)."""
+    result = await db.execute(
+        select(BlogPost)
+        .options(selectinload(BlogPost.author))
+        .where(
+            and_(
+                BlogPost.id == post_id,
+                BlogPost.deleted_at.is_(None),
+            )
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_blog_post(
+    db: AsyncSession,
+    title: str,
+    slug: str,
+    content: str,
+    excerpt: Optional[str],
+    author_id: int,
+    is_published: bool = False,
+) -> BlogPost:
+    """Create a new blog post."""
+    post = BlogPost(
+        title=title,
+        slug=slug,
+        content=content,
+        excerpt=excerpt,
+        author_id=author_id,
+        is_published=is_published,
+        published_at=datetime.now(timezone.utc) if is_published else None,
+    )
+    db.add(post)
+    await db.flush()
+    return post
+
+
+async def update_blog_post(db: AsyncSession, post_id: int, **kwargs) -> Optional[BlogPost]:
+    """Update a blog post's fields."""
+    result = await db.execute(
+        select(BlogPost).where(
+            and_(BlogPost.id == post_id, BlogPost.deleted_at.is_(None))
+        )
+    )
+    post = result.scalar_one_or_none()
+    if not post:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(post, key):
+            setattr(post, key, value)
+    await db.flush()
+    return post
+
+
+async def delete_blog_post(db: AsyncSession, post_id: int) -> bool:
+    """Soft delete a blog post."""
+    result = await db.execute(
+        select(BlogPost).where(
+            and_(BlogPost.id == post_id, BlogPost.deleted_at.is_(None))
+        )
+    )
+    post = result.scalar_one_or_none()
+    if post:
+        post.deleted_at = datetime.now(timezone.utc)
+        await db.flush()
+        return True
+    return False
+
+
+# IP Tracking queries
+async def get_api_key_last_ips_batch(
+    db: AsyncSession, api_key_ids: List[int]
+) -> dict:
+    """Get the most recent client_ip for each API key. Returns {api_key_id: ip}."""
+    if not api_key_ids:
+        return {}
+    from sqlalchemy import text
+
+    placeholders = ",".join(str(int(kid)) for kid in api_key_ids)
+    query = text(f"""
+        SELECT r.api_key_id, r.client_ip
+        FROM requests r
+        INNER JOIN (
+            SELECT api_key_id, MAX(created_at) as max_created
+            FROM requests
+            WHERE api_key_id IN ({placeholders}) AND client_ip IS NOT NULL
+            GROUP BY api_key_id
+        ) latest ON r.api_key_id = latest.api_key_id AND r.created_at = latest.max_created
+        WHERE r.client_ip IS NOT NULL
+    """)
+    result = await db.execute(query)
+    return {row[0]: row[1] for row in result.all()}
+
+
+async def get_user_recent_ips(
+    db: AsyncSession, user_id: int, days: int = 90
+) -> List[Tuple]:
+    """Get recent IPs for a user. Returns list of (ip, last_seen, count)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await db.execute(
+        select(
+            Request.client_ip,
+            func.max(Request.created_at).label("last_seen"),
+            func.count(Request.id).label("req_count"),
+        )
+        .where(
+            and_(
+                Request.user_id == user_id,
+                Request.created_at >= cutoff,
+                Request.client_ip.isnot(None),
+            )
+        )
+        .group_by(Request.client_ip)
+        .order_by(func.max(Request.created_at).desc())
+    )
+    return [(row[0], row[1], row[2]) for row in result.all()]
+
+
+# AppConfig CRUD
+async def get_config(db: AsyncSession, key: str) -> Optional[str]:
+    """Get a raw config value (JSON string) by key."""
+    result = await db.execute(select(AppConfig.value).where(AppConfig.key == key))
+    return result.scalar_one_or_none()
+
+
+async def get_config_json(db: AsyncSession, key: str, default: Any = None) -> Any:
+    """Get a config value parsed from JSON."""
+    raw = await get_config(db, key)
+    if raw is None:
+        return default
+    try:
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+async def set_config(
+    db: AsyncSession, key: str, value: Any, description: Optional[str] = None
+) -> None:
+    """Upsert a config value (JSON-encodes the value)."""
+    json_value = _json.dumps(value)
+    result = await db.execute(select(AppConfig).where(AppConfig.key == key))
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.value = json_value
+        if description is not None:
+            existing.description = description
+    else:
+        row = AppConfig(key=key, value=json_value, description=description)
+        db.add(row)
+    await db.flush()
+
+
+# ---------------------------------------------------------------------------
+# Node drain helpers
+# ---------------------------------------------------------------------------
+
+
+async def get_active_request_count_for_node_backends(
+    db: AsyncSession, backend_ids: List[int]
+) -> int:
+    """Sum current_concurrent across the given backends."""
+    if not backend_ids:
+        return 0
+    result = await db.execute(
+        select(func.coalesce(func.sum(Backend.current_concurrent), 0)).where(
+            Backend.id.in_(backend_ids)
+        )
+    )
+    return int(result.scalar())
+
+
+# ---------------------------------------------------------------------------
+# Public stats queries (status page)
+# ---------------------------------------------------------------------------
+
+_TREND_BUCKETS = {
+    "hour":  (3600,       60),
+    "day":   (86400,      900),
+    "week":  (604800,     3600),
+    "month": (2592000,    21600),
+    "year":  (31536000,   86400),
+}
+
+
+async def get_global_token_total(db: AsyncSession) -> int:
+    """Total tokens ever served (all users, all time)."""
+    result = await db.execute(
+        select(func.coalesce(func.sum(UsageLedger.total_tokens), 0))
+    )
+    return int(result.scalar())
+
+
+def _bucket_iso(unix_ts: int) -> str:
+    """Convert a UTC unix timestamp to an ISO 8601 string with Z suffix."""
+    return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def get_token_trend(
+    db: AsyncSession, range_name: str = "day"
+) -> List[dict]:
+    """Token counts bucketed over time for trend chart."""
+    since_sec, bucket_sec = _TREND_BUCKETS.get(range_name, _TREND_BUCKETS["day"])
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_sec)
+
+    from sqlalchemy import text
+    stmt = text(
+        "SELECT"
+        "  FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(created_at, '+00:00', '+00:00')) / :bucket) * :bucket AS bucket_ts,"
+        "  COALESCE(SUM(total_tokens), 0) AS v"
+        " FROM usage_ledger"
+        " WHERE created_at >= :cutoff"
+        " GROUP BY bucket_ts"
+        " ORDER BY bucket_ts"
+    )
+    result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
+    return [
+        {"t": _bucket_iso(int(row[0])), "v": int(row[1])}
+        for row in result.all()
+    ]
+
+
+async def get_active_users_trend(
+    db: AsyncSession, range_name: str = "day"
+) -> List[dict]:
+    """Distinct user counts bucketed over time for trend chart."""
+    since_sec, bucket_sec = _TREND_BUCKETS.get(range_name, _TREND_BUCKETS["day"])
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_sec)
+
+    from sqlalchemy import text
+    stmt = text(
+        "SELECT"
+        "  FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(created_at, '+00:00', '+00:00')) / :bucket) * :bucket AS bucket_ts,"
+        "  COUNT(DISTINCT user_id) AS v"
+        " FROM requests"
+        " WHERE created_at >= :cutoff"
+        " GROUP BY bucket_ts"
+        " ORDER BY bucket_ts"
+    )
+    result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
+    return [
+        {"t": _bucket_iso(int(row[0])), "v": int(row[1])}
+        for row in result.all()
+    ]
+
+
+async def cancel_active_requests_for_backends(
+    db: AsyncSession, backend_ids: List[int]
+) -> int:
+    """Cancel all PROCESSING requests on the given backends and reset counters."""
+    if not backend_ids:
+        return 0
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(Request)
+        .where(
+            and_(
+                Request.backend_id.in_(backend_ids),
+                Request.status == RequestStatus.PROCESSING,
+            )
+        )
+        .values(
+            status=RequestStatus.CANCELLED,
+            completed_at=now,
+            error_message="Force-drained: node taken offline by admin",
+        )
+    )
+    cancelled = result.rowcount
+    # Reset concurrency counters
+    await db.execute(
+        update(Backend)
+        .where(Backend.id.in_(backend_ids))
+        .values(current_concurrent=0)
+    )
+    await db.flush()
+    return cancelled

@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+
+{% block title %}Node Management - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "nodes" %}{% include "admin/_sidebar.html" %}
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-3">
+            <h1 class="mb-4"><i class="bi bi-hdd-rack"></i> Node Management</h1>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                <i class="bi bi-check-circle"></i>
+                {% if success == 'registered' %}Node registered successfully.
+                {% elif success == 'updated' %}Node updated successfully.
+                {% elif success == 'removed' %}Node removed successfully.
+                {% elif success == 'refreshed' %}Node sidecar refreshed.
+                {% elif success == 'brought_online' %}Node brought online. Backends re-enabled.
+                {% elif success == 'taken_offline' %}Node taken offline. All backends disabled.
+                {% elif success == 'force_drained' %}Remaining requests force-cancelled.
+                {% else %}Operation completed successfully.{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                <i class="bi bi-exclamation-triangle"></i> {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+            {% endif %}
+
+            <!-- Register New Node -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-plus-circle"></i> Register New Node
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="/admin/nodes/register">
+                        <div class="row">
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_name" class="form-label">Name</label>
+                                <input type="text" class="form-control" id="reg_name" name="name" required
+                                       placeholder="e.g., gpu-node-01">
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_hostname" class="form-label">Hostname</label>
+                                <input type="text" class="form-control" id="reg_hostname" name="hostname"
+                                       placeholder="e.g., gpu-server-01.example.com">
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_sidecar_url" class="form-label">Sidecar URL</label>
+                                <input type="text" class="form-control" id="reg_sidecar_url" name="sidecar_url"
+                                       placeholder="http://host:8007">
+                            </div>
+                            <div class="col-md-3 mb-3">
+                                <label for="reg_sidecar_key" class="form-label">Sidecar Secret Key</label>
+                                <input type="password" class="form-control" id="reg_sidecar_key" name="sidecar_key"
+                                       placeholder="Paste the SIDECAR_SECRET_KEY value">
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-plus-lg"></i> Register Node
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Registered Nodes -->
+            {% if nodes %}
+            {% for item in nodes %}
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>
+                        <strong>{{ item.node.name }}</strong>
+                        <span class="badge {% if item.node.status.value == 'online' %}bg-success{% elif item.node.status.value == 'offline' %}bg-danger{% else %}bg-secondary{% endif %} ms-2">
+                            {{ item.node.status.value }}
+                        </span>
+                        {% if item.node.hostname %}
+                        <small class="text-muted ms-2">{{ item.node.hostname }}</small>
+                        {% endif %}
+                    </span>
+                    <span>
+                        {% if item.backends %}
+                            {% set all_disabled = item.backends | selectattr('status.value', 'equalto', 'disabled') | list | length == item.backends | length %}
+                            {% if all_disabled %}
+                            <form method="POST" action="/admin/nodes/{{ item.node.id }}/bring-online" class="d-inline">
+                                <button type="submit" class="btn btn-sm btn-outline-success" title="Bring node online">
+                                    <i class="bi bi-power"></i> Bring Online
+                                </button>
+                            </form>
+                            {% else %}
+                            <button type="button" class="btn btn-sm btn-outline-warning btn-take-offline"
+                                    data-node-id="{{ item.node.id }}" data-node-name="{{ item.node.name }}"
+                                    title="Take node offline">
+                                <i class="bi bi-pause-circle"></i> Take Offline
+                            </button>
+                            {% endif %}
+                        {% endif %}
+                        <button class="btn btn-sm btn-outline-secondary" type="button"
+                                data-bs-toggle="collapse" data-bs-target="#edit-node-{{ item.node.id }}"
+                                title="Edit node">
+                            <i class="bi bi-pencil"></i> Edit
+                        </button>
+                        {% if item.node.sidecar_url %}
+                        <form method="POST" action="/admin/nodes/{{ item.node.id }}/refresh" class="d-inline">
+                            <button type="submit" class="btn btn-sm btn-outline-primary" title="Refresh sidecar">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                        </form>
+                        {% endif %}
+                        <form method="POST" action="/admin/nodes/{{ item.node.id }}/remove" class="d-inline"
+                              onsubmit="return confirm('Remove node {{ item.node.name }}? This will delete all GPU device records. Backends must be removed first.')">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" title="Remove node">
+                                <i class="bi bi-trash"></i> Remove
+                            </button>
+                        </form>
+                    </span>
+                </div>
+                <div class="card-body">
+                    {% if item.node.sidecar_version and app_version and item.node.sidecar_version != app_version %}
+                    <div class="alert alert-warning py-2 mb-3">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <strong>Version mismatch:</strong> Sidecar is v{{ item.node.sidecar_version }}, app is v{{ app_version }}.
+                        Rebuild and restart the sidecar Docker image to align versions.
+                    </div>
+                    {% endif %}
+
+                    <!-- Draining Panel (hidden by default, shown via JS) -->
+                    <div class="alert alert-warning d-none mb-3" id="drain-panel-{{ item.node.id }}">
+                        <h6><i class="bi bi-hourglass-split"></i> Draining Node: <strong>{{ item.node.name }}</strong></h6>
+                        <p class="mb-1">Active requests: <strong id="drain-count-{{ item.node.id }}">...</strong></p>
+                        <div class="progress mb-2" style="height: 6px;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" role="progressbar" style="width: 100%"></div>
+                        </div>
+                        <p class="text-muted small mb-2">Elapsed: <span id="drain-elapsed-{{ item.node.id }}">0</span>s</p>
+                        <div id="drain-force-{{ item.node.id }}" class="d-none">
+                            <button type="button" class="btn btn-sm btn-danger btn-force-drain"
+                                    data-node-id="{{ item.node.id }}" data-node-name="{{ item.node.name }}">
+                                <i class="bi bi-x-octagon"></i> Force Kill Remaining Requests
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Collapsible Edit Form -->
+                    <div class="collapse mb-3" id="edit-node-{{ item.node.id }}">
+                        <div class="card card-body bg-light">
+                            <h6><i class="bi bi-pencil"></i> Edit Node</h6>
+                            <form method="POST" action="/admin/nodes/{{ item.node.id }}/edit">
+                                <div class="row">
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">Name</label>
+                                        <input type="text" class="form-control" name="name"
+                                               value="{{ item.node.name }}" required>
+                                    </div>
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">Hostname</label>
+                                        <input type="text" class="form-control" name="hostname"
+                                               value="{{ item.node.hostname or '' }}"
+                                               placeholder="e.g., gpu-server-01.example.com">
+                                    </div>
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">Sidecar URL</label>
+                                        <input type="text" class="form-control" name="sidecar_url"
+                                               value="{{ item.node.sidecar_url or '' }}"
+                                               placeholder="http://host:8007">
+                                    </div>
+                                    <div class="col-md-3 mb-3">
+                                        <label class="form-label">Sidecar Secret Key</label>
+                                        <input type="password" class="form-control" name="sidecar_key"
+                                               placeholder="Leave blank to keep current key">
+                                    </div>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-check-lg"></i> Save Changes
+                                </button>
+                                <button type="button" class="btn btn-secondary btn-sm"
+                                        data-bs-toggle="collapse" data-bs-target="#edit-node-{{ item.node.id }}">
+                                    Cancel
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-4">
+                            <h6>Hardware Info</h6>
+                            <dl class="row small">
+                                <dt class="col-6">GPU Count:</dt>
+                                <dd class="col-6">{{ item.node.gpu_count or 'N/A' }}</dd>
+                                <dt class="col-6">Driver:</dt>
+                                <dd class="col-6">{{ item.node.driver_version or 'N/A' }}</dd>
+                                <dt class="col-6">CUDA:</dt>
+                                <dd class="col-6">{{ item.node.cuda_version or 'N/A' }}</dd>
+                                <dt class="col-6">Sidecar Ver:</dt>
+                                <dd class="col-6">{{ item.node.sidecar_version or 'N/A' }}</dd>
+                                <dt class="col-6">Sidecar:</dt>
+                                <dd class="col-6">
+                                    {% if item.node.sidecar_url %}
+                                        {% if item.node.status.value == 'online' %}
+                                        <span class="badge bg-success">Connected</span>
+                                        {% elif item.node.status.value == 'offline' %}
+                                        <span class="badge bg-danger">Unreachable</span>
+                                        {% else %}
+                                        <span class="badge bg-warning text-dark">Not Polled</span>
+                                        {% endif %}
+                                    <small class="text-muted d-block">{{ item.node.sidecar_url }}</small>
+                                    {% else %}
+                                    <span class="badge bg-secondary">None</span>
+                                    {% endif %}
+                                </dd>
+                                <dt class="col-6">Key:</dt>
+                                <dd class="col-6">
+                                    {% if item.node.sidecar_key %}
+                                    <span class="badge bg-success">Configured</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary">None</span>
+                                    {% endif %}
+                                </dd>
+                            </dl>
+                        </div>
+                        <div class="col-md-4">
+                            <h6>Backends on this Node</h6>
+                            {% if item.backends %}
+                            {% for b in item.backends %}
+                            <div>
+                                <span class="badge {% if b.status.value == 'healthy' %}bg-success{% elif b.status.value == 'unhealthy' %}bg-danger{% else %}bg-secondary{% endif %}">
+                                    {{ b.name }}
+                                </span>
+                                {% if b.gpu_indices %}
+                                <small class="text-muted">GPUs: {{ b.gpu_indices | join(', ') }}</small>
+                                {% else %}
+                                <small class="text-muted">All GPUs</small>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                            {% else %}
+                            <p class="text-muted small">No backends assigned to this node</p>
+                            {% endif %}
+                        </div>
+                        <div class="col-md-4">
+                            <h6>GPU Devices</h6>
+                            {% if item.gpu_devices %}
+                            {% for device in item.gpu_devices %}
+                            <div class="small mb-1">
+                                <i class="bi bi-gpu-card"></i>
+                                GPU {{ device.gpu_index }}: {{ device.name or 'Unknown' }}
+                                {% if device.memory_total_gb %}
+                                ({{ '%.1f' | format(device.memory_total_gb) }} GB)
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                            {% else %}
+                            <p class="text-muted small">No GPU devices discovered yet</p>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> No nodes registered. Use the form above to register your first physical server node.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    // Take Offline button handler
+    document.querySelectorAll('.btn-take-offline').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var nodeId = this.dataset.nodeId;
+            var nodeName = this.dataset.nodeName;
+            if (!confirm('Take node "' + nodeName + '" offline? This will disable all backends and stop new request routing.')) return;
+
+            fetch('/admin/nodes/' + nodeId + '/take-offline', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (!data.ok) { alert('Error: ' + (data.error || 'Unknown')); return; }
+                    startDrainPolling(nodeId);
+                })
+                .catch(function(err) { alert('Request failed: ' + err); });
+        });
+    });
+
+    // Force Drain button handler
+    document.querySelectorAll('.btn-force-drain').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var nodeId = this.dataset.nodeId;
+            var nodeName = this.dataset.nodeName;
+            if (!confirm('Force-cancel ALL remaining requests on node "' + nodeName + '"? This cannot be undone.')) return;
+
+            fetch('/admin/nodes/' + nodeId + '/force-drain', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.ok) {
+                        window.location.href = '/admin/nodes?success=force_drained';
+                    } else {
+                        alert('Error: ' + (data.error || 'Unknown'));
+                    }
+                })
+                .catch(function(err) { alert('Request failed: ' + err); });
+        });
+    });
+
+    function startDrainPolling(nodeId) {
+        var panel = document.getElementById('drain-panel-' + nodeId);
+        var countEl = document.getElementById('drain-count-' + nodeId);
+        var elapsedEl = document.getElementById('drain-elapsed-' + nodeId);
+        var forceEl = document.getElementById('drain-force-' + nodeId);
+
+        panel.classList.remove('d-none');
+        var startTime = Date.now();
+
+        var interval = setInterval(function() {
+            var elapsed = Math.floor((Date.now() - startTime) / 1000);
+            elapsedEl.textContent = elapsed;
+
+            // Show force kill after 30 seconds
+            if (elapsed >= 30) {
+                forceEl.classList.remove('d-none');
+            }
+
+            fetch('/admin/nodes/' + nodeId + '/active-requests')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    countEl.textContent = data.count;
+                    if (data.count === 0) {
+                        clearInterval(interval);
+                        countEl.textContent = '0';
+                        panel.classList.remove('alert-warning');
+                        panel.classList.add('alert-success');
+                        panel.querySelector('h6').innerHTML = '<i class="bi bi-check-circle"></i> Fully drained!';
+                        forceEl.classList.add('d-none');
+                        setTimeout(function() {
+                            window.location.href = '/admin/nodes?success=taken_offline';
+                        }, 1500);
+                    }
+                })
+                .catch(function() { /* ignore transient fetch errors */ });
+        }, 1000);
+    }
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="row mb-4">
+        <div class="col-12">
+            <h1><i class="bi bi-speedometer"></i> Dashboard</h1>
+            <p class="text-muted">Welcome, {{ user.full_name or user.username }}</p>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-3 mb-3">
+            <div class="card card-stat primary h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Group</h2>
+                    <p class="card-title h3 mb-0">
+                        <span class="badge bg-primary">{{ user.group.display_name if user.group else user.role.value|title }}</span>
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card card-stat {% if quota and group_budget == 0 %}success{% elif usage_percent >= 90 %}danger{% elif usage_percent >= 70 %}warning{% else %}success{% endif %} h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Quota Token Usage</h2>
+                    {% if quota %}
+                    {% if group_budget == 0 %}
+                    <p class="card-title h3 mb-1"><span id="token-usage-top-unlimited">{{ "{:,}".format(tokens_used_display) }}</span> / Unlimited</p>
+                    {% else %}
+                    <p class="card-title h3 mb-1"><span id="token-usage-top">{{ "{:,}".format(tokens_used_display) }}</span> / {{ "{:,}".format(group_budget) }}</p>
+                    <div class="progress" style="height: 6px;">
+                        <div id="token-progress-bar" class="progress-bar {% if usage_percent >= 90 %}bg-danger{% elif usage_percent >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_percent }}%" aria-valuenow="{{ usage_percent }}" aria-valuemin="0" aria-valuemax="100" aria-label="Token usage"></div>
+                    </div>
+                    {% endif %}
+                    {% else %}
+                    <p class="card-title h3 mb-0 text-muted">No quota set</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card card-stat info h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Lifetime Token Usage</h2>
+                    <p class="card-title h3 mb-0"><span id="lifetime-tokens">{{ "{:,}".format(lifetime_tokens) }}</span></p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card card-stat primary h-100">
+                <div class="card-body">
+                    <h2 class="card-subtitle mb-2 text-muted h6">Active API Keys</h2>
+                    <p class="card-title h3 mb-0">{{ api_keys|selectattr('status.value', 'equalto', 'active')|list|length }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-key"></i> API Keys <small class="text-muted">({{ active_key_count }}/{{ max_keys }})</small></span>
+                    {% if active_key_count < max_keys %}
+                    <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#createKeyModal">
+                        <i class="bi bi-plus"></i> Create New Key
+                    </button>
+                    {% else %}
+                    <span class="badge bg-warning text-dark">Key limit reached</span>
+                    {% endif %}
+                </div>
+                <div class="card-body">
+                    {% if key_error == 'limit' %}
+                    <div class="alert alert-warning" role="alert">
+                        You have reached the maximum of {{ max_keys }} active API keys. Revoke an existing key to create a new one.
+                    </div>
+                    {% endif %}
+                    {% if api_keys %}
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <caption class="sr-only">API keys</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Name</th>
+                                    <th scope="col">Key Prefix</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Expires</th>
+                                    <th scope="col">Last Used</th>
+                                    <th scope="col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for key in api_keys %}
+                                {% set is_expired = key.expires_at and key.expires_at.replace(tzinfo=None) < now_utc.replace(tzinfo=None) %}
+                                <tr{% if is_expired %} class="table-warning"{% endif %}>
+                                    <td>{{ key.name }}</td>
+                                    <td><code>{{ key.key_prefix }}...</code></td>
+                                    <td>
+                                        {% if is_expired %}
+                                        <span class="badge bg-warning text-dark">expired</span>
+                                        {% elif key.status.value == 'active' %}
+                                        <span class="badge bg-success">active</span>
+                                        {% elif key.status.value == 'revoked' %}
+                                        <span class="badge bg-secondary">revoked</span>
+                                        {% else %}
+                                        <span class="badge bg-secondary">{{ key.status.value }}</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if key.expires_at %}
+                                        {% set days_left = ((key.expires_at.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).days) %}
+                                        {% if is_expired %}
+                                        <span class="text-danger">Expired {{ key.expires_at|localtime('%Y-%m-%d') }}</span>
+                                        {% elif days_left <= 7 %}
+                                        <span class="text-warning">{{ key.expires_at|localtime('%Y-%m-%d') }} ({{ days_left }}d left)</span>
+                                        {% else %}
+                                        {{ key.expires_at|localtime('%Y-%m-%d') }} ({{ days_left }}d left)
+                                        {% endif %}
+                                        {% else %}
+                                        <span class="text-muted">Never</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ key.last_used_at|localtime if key.last_used_at else 'Never' }}</td>
+                                    <td>
+                                        {% if key.status.value == 'active' and not is_expired %}
+                                        <form method="POST" action="/dashboard/revoke-key/{{ key.id }}" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Are you sure you want to revoke this key?')">
+                                                Revoke
+                                            </button>
+                                        </form>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted mb-0">No API keys yet. Create one to start using the API.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-info-circle"></i> Quota Details
+                </div>
+                <div class="card-body">
+                    {% if quota %}
+                    <dl class="row mb-0">
+                        <dt class="col-6">Budget:</dt>
+                        <dd class="col-6">{% if group_budget == 0 %}Unlimited{% else %}{{ "{:,}".format(group_budget) }} tokens{% endif %}</dd>
+                        <dt class="col-6">Used:</dt>
+                        <dd class="col-6"><span id="token-usage-detail">{{ "{:,}".format(tokens_used_display) }}</span> tokens</dd>
+                        <dt class="col-6">RPM Limit:</dt>
+                        <dd class="col-6">{{ quota.rpm_limit }} req/min</dd>
+                        <dt class="col-6">Max Concurrent:</dt>
+                        <dd class="col-6">{{ quota.max_concurrent }} requests</dd>
+                    </dl>
+                    <hr>
+                    <a href="/dashboard/request-quota" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-arrow-up"></i> Request Quota Increase
+                    </a>
+                    {% else %}
+                    <p class="text-muted mb-0">No quota assigned. Please contact an administrator.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% if user.password_hash %}
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-shield-lock"></i> Change Password
+                </div>
+                <div class="card-body">
+                    {% if pw_error %}
+                    <div class="alert alert-danger" role="alert">{{ pw_error }}</div>
+                    {% endif %}
+                    {% if pw_success %}
+                    <div class="alert alert-success" role="alert">{{ pw_success }}</div>
+                    {% endif %}
+                    <form method="POST" action="/dashboard/change-password">
+                        <div class="mb-3">
+                            <label for="current_password" class="form-label">Current Password</label>
+                            <input type="password" class="form-control" id="current_password" name="current_password" required autocomplete="current-password">
+                        </div>
+                        <div class="mb-3">
+                            <label for="new_password" class="form-label">New Password</label>
+                            <input type="password" class="form-control" id="new_password" name="new_password" required minlength="8" autocomplete="new-password">
+                            <div class="form-text">Minimum 8 characters.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="confirm_password" class="form-label">Confirm New Password</label>
+                            <input type="password" class="form-control" id="confirm_password" name="confirm_password" required minlength="8" autocomplete="new-password">
+                        </div>
+                        <button type="submit" class="btn btn-outline-primary">
+                            <i class="bi bi-check-lg"></i> Change Password
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Create Key Modal -->
+<div class="modal fade" id="createKeyModal" tabindex="-1" aria-labelledby="createKeyModalLabel">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="createKeyModalLabel">Create New API Key</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="/dashboard/create-key">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="key_name" class="form-label">Key Name</label>
+                        <input type="text" class="form-control" id="key_name" name="key_name" required placeholder="e.g., Development, Production">
+                        <div class="form-text">A descriptive name to identify this key.</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Create Key</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{% if quota %}
+<script>
+(function() {
+    const topEl = document.getElementById('token-usage-top') || document.getElementById('token-usage-top-unlimited');
+    const detailEl = document.getElementById('token-usage-detail');
+    const barEl = document.getElementById('token-progress-bar');
+    const lifetimeEl = document.getElementById('lifetime-tokens');
+    const budget = {{ group_budget }};
+
+    function fmt(n) { return n.toLocaleString(); }
+
+    async function poll() {
+        try {
+            const resp = await fetch('/dashboard/api/token-usage');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const used = data.tokens_used || 0;
+            if (topEl) topEl.textContent = fmt(used);
+            if (detailEl) detailEl.textContent = fmt(used);
+            if (lifetimeEl && data.lifetime_tokens !== undefined) lifetimeEl.textContent = fmt(data.lifetime_tokens);
+            if (barEl && budget > 0) {
+                const pct = Math.min(100, used / budget * 100);
+                barEl.style.width = pct + '%';
+                barEl.setAttribute('aria-valuenow', pct.toFixed(0));
+                barEl.className = 'progress-bar ' + (pct >= 90 ? 'bg-danger' : pct >= 70 ? 'bg-warning' : 'bg-success');
+            }
+        } catch (e) { /* silent */ }
+    }
+
+    setInterval(poll, 1000);
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Dashboard - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "overview" %}
+        {% include "admin/_sidebar.html" %}
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-3">
+            <h1 class="mb-4"><i class="bi bi-gear"></i> Admin Dashboard</h1>
+
+            <div class="row mb-4">
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat success h-100">
+                        <div class="card-body">
+                            <h2 class="card-subtitle h6 mb-2 text-muted">Healthy Backends</h2>
+                            <p class="card-title h2 mb-0">{{ backends|selectattr('status.value', 'equalto', 'healthy')|list|length }} / {{ backends|length }}</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat warning h-100">
+                        <div class="card-body">
+                            <h2 class="card-subtitle h6 mb-2 text-muted">Queue Size</h2>
+                            <p class="card-title h2 mb-0">{{ scheduler_stats.queue.total if scheduler_stats else 0 }}</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat primary h-100">
+                        <div class="card-body">
+                            <h2 class="card-subtitle h6 mb-2 text-muted">Active Users</h2>
+                            <p class="card-title h2 mb-0">{{ scheduler_stats.fair_share.total_users if scheduler_stats else 0 }}</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat danger h-100">
+                        <div class="card-body">
+                            <h2 class="card-subtitle h6 mb-2 text-muted">Pending Requests</h2>
+                            <p class="card-title h2 mb-0">{{ pending_requests|length }}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Online/Offline Toggle -->
+            <div class="card mb-4 {% if is_force_offline %}border-danger{% else %}border-success{% endif %}">
+                <div class="card-body d-flex align-items-center justify-content-between py-3 px-4">
+                    <div>
+                        <h2 class="h4 mb-1">
+                            {% if is_force_offline %}
+                            <i class="bi bi-x-circle-fill text-danger"></i> MindRouter is <strong class="text-danger">Offline</strong>
+                            {% else %}
+                            <i class="bi bi-check-circle-fill text-success"></i> MindRouter is <strong class="text-success">Online</strong>
+                            {% endif %}
+                        </h2>
+                        <p class="text-muted mb-0 small">
+                            {% if is_force_offline %}
+                            All backends are disabled. Toggle online to reload and resume polling.
+                            {% else %}
+                            Backends are being polled and serving requests.
+                            {% endif %}
+                        </p>
+                    </div>
+                    <form method="POST" action="/admin/system/toggle-online">
+                        <button type="submit" class="btn btn-lg {% if is_force_offline %}btn-success{% else %}btn-outline-danger{% endif %}"
+                                onclick="return confirm('{% if is_force_offline %}Bring MindRouter back online?{% else %}Take MindRouter offline? All backends will stop serving requests.{% endif %}')">
+                            {% if is_force_offline %}
+                            <i class="bi bi-power"></i> Bring Online
+                            {% else %}
+                            <i class="bi bi-power"></i> Take Offline
+                            {% endif %}
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            {% set unhealthy_backends = [] %}
+            {% for b in backends if b.status.value not in ['healthy', 'disabled'] %}
+                {% if unhealthy_backends.append(b) %}{% endif %}
+            {% endfor %}
+            {% set offline_nodes = [] %}
+            {% for n in nodes if n.status.value != 'online' %}
+                {% if offline_nodes.append(n) %}{% endif %}
+            {% endfor %}
+            {% if unhealthy_backends or offline_nodes %}
+            <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-3 fs-4"></i>
+                <div>
+                    <strong>Health Issues Detected</strong>
+                    {% if unhealthy_backends %}
+                    <div class="mt-1">
+                        <a href="/admin/backends" class="alert-link">{{ unhealthy_backends|length }} backend{{ 's' if unhealthy_backends|length > 1 }} unhealthy</a>:
+                        {{ unhealthy_backends|map(attribute='name')|join(', ') }}
+                    </div>
+                    {% endif %}
+                    {% if offline_nodes %}
+                    <div class="mt-1">
+                        <a href="/admin/nodes" class="alert-link">{{ offline_nodes|length }} node{{ 's' if offline_nodes|length > 1 }} offline</a>:
+                        {{ offline_nodes|map(attribute='name')|join(', ') }}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="row">
+                <div class="col-md-8">
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <i class="bi bi-server"></i> Backend Status
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="table table-hover">
+                                    <caption class="sr-only">Backend status overview</caption>
+                                    <thead>
+                                        <tr>
+                                            <th scope="col">Name</th>
+                                            <th scope="col">Engine</th>
+                                            <th scope="col">Status</th>
+                                            <th scope="col">Concurrent</th>
+                                            <th scope="col">Last Check</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for backend in backends %}
+                                        <tr>
+                                            <td>{{ backend.name }}</td>
+                                            <td><span class="badge bg-secondary">{{ backend.engine.value }}</span></td>
+                                            <td>
+                                                <span class="badge {% if backend.status.value == 'healthy' %}bg-success{% elif backend.status.value == 'unhealthy' %}bg-danger{% else %}bg-secondary{% endif %}">
+                                                    {{ backend.status.value }}
+                                                </span>
+                                            </td>
+                                            <td>{{ backend.current_concurrent }} / {{ backend.max_concurrent }}</td>
+                                            <td>{{ backend.last_health_check|localtime('%H:%M:%S') if backend.last_health_check else 'Never' }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <i class="bi bi-inbox"></i> Pending Requests
+                        </div>
+                        <div class="card-body">
+                            {% if pending_requests %}
+                            <ul class="list-group list-group-flush">
+                                {% for req in pending_requests[:5] %}
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>{{ req.requester_name or 'User #' ~ req.user_id }}</strong><br>
+                                        <small class="text-muted">{{ req.request_type }}</small>
+                                    </div>
+                                    <a href="/admin/requests" class="btn btn-sm btn-outline-primary">Review</a>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                            {% if pending_requests|length > 5 %}
+                            <div class="text-center mt-2">
+                                <a href="/admin/requests">View all {{ pending_requests|length }} requests</a>
+                            </div>
+                            {% endif %}
+                            {% else %}
+                            <p class="text-muted mb-0">No pending requests.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

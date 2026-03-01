@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}Site Settings - MindRouter2{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "settings" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-gear"></i> Site Settings</h1>
+            <p class="text-muted">Global settings that apply across the entire web UI.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'timezone_updated' %}Timezone updated.
+                {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <div class="row g-4">
+                <!-- Timezone -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Display Timezone</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">All dates and times in the web UI will be displayed in this timezone. Stored data remains in UTC.</p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_timezone">
+                                <div class="mb-3">
+                                    <select class="form-select" name="timezone">
+                                        {% for group_label, zones in timezone_choices %}
+                                        <optgroup label="{{ group_label }}">
+                                            {% for tz in zones %}
+                                            <option value="{{ tz }}" {% if tz == current_timezone %}selected{% endif %}>{{ tz }}</option>
+                                            {% endfor %}
+                                        </optgroup>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save Timezone</button>
+                            </form>
+                            <div class="mt-3">
+                                <small class="text-muted">Current time in selected timezone:</small>
+                                <br>
+                                <code>{{ now_in_tz }}</code>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Ollama Context Length Enforcement -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Ollama Context Length</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">When enabled, MindRouter always overrides user-supplied <code>num_ctx</code> with the model's configured context length. This prevents users from oversubscribing backend GPU memory.</p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_enforce_num_ctx">
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" name="enforce_num_ctx" id="enforceNumCtx" {% if enforce_num_ctx %}checked{% endif %}>
+                                    <label class="form-check-label" for="enforceNumCtx">Enforce context length (override user num_ctx)</label>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
