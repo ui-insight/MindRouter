@@ -841,12 +841,12 @@ Examples:
                         help="Number of async workers (default: 10)")
     parser.add_argument("--users", type=int, default=6,
                         help="Number of simulated users (default: 6)")
-    parser.add_argument("--ollama-model", default="phi4:14b",
-                        help="Ollama chat model (default: phi4:14b)")
+    parser.add_argument("--ollama-model", default="phi3:14b",
+                        help="Ollama chat model (default: phi3:14b)")
     parser.add_argument("--vllm-model", default="openai/gpt-oss-120b",
                         help="vLLM chat model (default: openai/gpt-oss-120b)")
-    parser.add_argument("--embedding-model", default="EMBED/all-minilm:33m",
-                        help="Embedding model (default: EMBED/all-minilm:33m)")
+    parser.add_argument("--embedding-model", default="Qwen/Qwen3-Embedding-8B",
+                        help="Embedding model (default: Qwen/Qwen3-Embedding-8B)")
     parser.add_argument("--max-tokens", type=int, default=32,
                         help="Max tokens per response (default: 32)")
     parser.add_argument("--timeout", type=int, default=180,
