@@ -62,10 +62,11 @@ MindRouter implements several layers of authentication and access control:
 - Users are assigned to groups that determine their access level and resource quotas.
 - Group membership controls which models and features are available.
 
-### Admin API Key
+### Admin Role-Based Access Control
 
-- A separate **admin API key** is used for privileged operations such as node/backend registration, configuration changes, and system management.
-- Admin endpoints are protected by a dedicated API key check, separate from user API keys.
+- Admin endpoints (node/backend registration, configuration changes, system management) are protected by **role-based access control**.
+- Users whose group has the `is_admin` flag set are granted access to admin API endpoints.
+- Admin authorization is checked on each request using the same API key authentication as regular users, with an additional group-level permission check.
 
 ## Security Best Practices for Deployment
 
@@ -127,13 +128,12 @@ The following environment variables control security-relevant behavior in MindRo
 | `SECRET_KEY` | Secret key used for HMAC signing of session cookies and tokens. Must be a strong, random value in production. | Development default (insecure) |
 | `SESSION_COOKIE_SECURE` | When `True`, session cookies are only sent over HTTPS connections. Set to `True` in all production deployments. | `False` |
 | `SESSION_COOKIE_SAMESITE` | Controls the `SameSite` attribute of session cookies. Recommended: `Lax` or `Strict`. | `Lax` |
-| `CORS_ORIGINS` | Comma-separated list of allowed CORS origins. Restrict to your actual domain(s) in production. | `*` (allow all) |
+| `CORS_ORIGINS` | Comma-separated list of allowed CORS origins. Restrict to your actual domain(s) in production. | `localhost` only (development) |
 | `SIDECAR_SECRET_KEY` | Shared secret used to authenticate communication between the MindRouter backend and sidecar agents on cluster nodes. | None |
 | `DATABASE_URL` | Database connection string including credentials. Keep this value secret and never commit it to version control. | None |
 | `AZURE_AD_CLIENT_ID` | Azure AD application client ID for SSO integration. | None (SSO disabled) |
 | `AZURE_AD_CLIENT_SECRET` | Azure AD application client secret for SSO integration. Must be kept secret. | None (SSO disabled) |
 | `AZURE_AD_TENANT_ID` | Azure AD tenant ID for SSO integration. | None (SSO disabled) |
-| `ADMIN_API_KEY` | API key for accessing admin endpoints (node/backend management). Must be strong and kept secret. | None |
 
 ---
 
