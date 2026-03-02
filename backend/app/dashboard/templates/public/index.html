@@ -307,6 +307,8 @@ response = client.chat.completions.create(
                 <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>File &amp; image uploads</li>
                 <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Persistent conversation history</li>
                 <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Switch models mid-conversation</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Thinking / reasoning mode</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Web search integration</li>
             </ul>
             {% if user %}
             <a href="/chat" class="btn btn-success mt-2"><i class="bi bi-chat-dots"></i> Open Chat</a>
@@ -641,7 +643,81 @@ response = client.chat.completions.create(
         </div>
     </div>
 
-    <!-- ── Feature 8: Infrastructure ── -->
+    <!-- ── Feature 8: Telemetry & Monitoring ── -->
+    <div class="row align-items-center mb-5 g-4">
+        <div class="col-lg-12">
+            <div class="text-center mb-4">
+                <span class="badge bg-info bg-opacity-10 text-info mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-graph-up-arrow"></i> Telemetry &amp; Monitoring</span>
+                <h3 class="fw-bold mt-2">Full Cluster Observability</h3>
+                <p class="text-muted mx-auto" style="max-width:640px;">Monitor every aspect of your inference cluster in real time &mdash; from GPU utilization and power draw to token throughput and per-request audit trails.</p>
+            </div>
+        </div>
+
+        <!-- Row 1: GPU Metrics + Cluster Status -->
+        <div class="col-lg-6 mb-4">
+            <div class="card border-0 shadow-sm overflow-hidden">
+                <div class="card-header bg-white border-bottom py-2">
+                    <h6 class="mb-0 fw-bold"><i class="bi bi-gpu-card text-warning me-2"></i>GPU &amp; Inference Metrics</h6>
+                </div>
+                <img src="IMAGE_URL_GPU_METRICS" alt="GPU metrics dashboard showing utilization, memory, power consumption, and request throughput charts across 38 GPUs" class="card-img-bottom">
+            </div>
+        </div>
+        <div class="col-lg-6 mb-4">
+            <div class="card border-0 shadow-sm overflow-hidden">
+                <div class="card-header bg-white border-bottom py-2">
+                    <h6 class="mb-0 fw-bold"><i class="bi bi-activity text-success me-2"></i>Live Cluster Status</h6>
+                </div>
+                <img src="IMAGE_URL_CLUSTER_STATUS" alt="Cluster status page showing healthy backends, available models, active users, live token throughput visualization, and total tokens served" class="card-img-bottom">
+            </div>
+        </div>
+
+        <!-- Row 2: Token/User Trends + Audit Log -->
+        <div class="col-lg-6 mb-4">
+            <div class="card border-0 shadow-sm overflow-hidden">
+                <div class="card-header bg-white border-bottom py-2">
+                    <h6 class="mb-0 fw-bold"><i class="bi bi-bar-chart-line text-primary me-2"></i>Token &amp; User Trends</h6>
+                </div>
+                <img src="IMAGE_URL_TOKEN_TRENDS" alt="Token throughput and active user charts with hourly, daily, weekly, monthly, and yearly time ranges" class="card-img-bottom">
+            </div>
+        </div>
+        <div class="col-lg-6 mb-4">
+            <div class="card border-0 shadow-sm overflow-hidden">
+                <div class="card-header bg-white border-bottom py-2">
+                    <h6 class="mb-0 fw-bold"><i class="bi bi-journal-text text-danger me-2"></i>Request Audit Log</h6>
+                </div>
+                <img src="IMAGE_URL_AUDIT_LOG" alt="Audit log showing per-request details including model, endpoint, status, tokens, and latency with filtering and export options" class="card-img-bottom">
+            </div>
+        </div>
+
+        <!-- Feature bullets -->
+        <div class="col-lg-12">
+            <div class="row g-3 justify-content-center">
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-gpu-card text-warning" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">GPU Telemetry</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Utilization, memory, temperature, power draw, and fan speed per GPU with configurable time ranges (1h to 30d)</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-speedometer2 text-info" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Live Throughput</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Real-time token flow visualization, requests per minute, active request counts, and total tokens served</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-journal-text text-danger" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Audit &amp; Export</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Full request audit trail with filtering by user, model, status, and date &mdash; exportable as CSV, JSON, or JSON with content</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Feature 9: Infrastructure ── -->
     <div class="row align-items-center g-4">
         <div class="col-lg-12">
             <div class="text-center mb-4">
