@@ -624,6 +624,6 @@ Please follow conventional commit messages.
 
 ## Acknowledgments
 
-<img src="https://www.nsf.gov/policies/images/NSF_Official_logo_High_Res_1200ppi.png" alt="NSF" height="40">
+![images-2](https://github.com/user-attachments/assets/d2b43c22-84f6-4912-91dc-8b081d9e2c6f)
 
 This project was developed with support from the National Science Foundation ([NSF Award #2427549](https://www.nsf.gov/awardsearch/show-award?AWD_ID=2427549)).
