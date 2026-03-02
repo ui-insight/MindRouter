@@ -624,6 +624,6 @@ Please follow conventional commit messages.
 
 ## Acknowledgments
 
-![images-2](https://github.com/user-attachments/assets/d2b43c22-84f6-4912-91dc-8b081d9e2c6f)
+<img src="https://github.com/user-attachments/assets/d2b43c22-84f6-4912-91dc-8b081d9e2c6f" alt="NSF Logo" width="70%">
 
 This project was developed with support from the National Science Foundation ([NSF Award #2427549](https://www.nsf.gov/awardsearch/show-award?AWD_ID=2427549)).
