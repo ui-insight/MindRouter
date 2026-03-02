@@ -169,14 +169,15 @@ class InferenceService:
         )
         job.request_id = db_request.request_uuid
 
-        try:
-            full_content = ""
-            chunk_count = 0
-            routed_backend = None
-            last_finish_reason = None
-            inflight_chars = 0
-            inflight_total_tokens = 0
+        full_content = ""
+        chunk_count = 0
+        routed_backend = None
+        last_finish_reason = None
+        inflight_chars = 0
+        inflight_total_tokens = 0
+        completed = False
 
+        try:
             async for chunk, backend in self._proxy_stream_with_retry(
                 request, job, user, proxy_fn="_proxy_stream_request"
             ):
@@ -222,17 +223,16 @@ class InferenceService:
                     finish_reason=last_finish_reason,
                 )
 
-            # Decrement inflight counter now that request is complete
-            if inflight_total_tokens > 0:
-                await decr_inflight_tokens(inflight_total_tokens)
-
+            completed = True
         except Exception as e:
-            # Clean up inflight counter on error
-            if inflight_total_tokens > 0:
-                await decr_inflight_tokens(inflight_total_tokens)
             backend_id = routed_backend.id if routed_backend else None
             await self._fail_request(db_request, backend_id, str(e), job)
             raise
+        finally:
+            # Always clean up inflight counter — handles normal completion,
+            # exceptions, and client disconnects (GeneratorExit)
+            if inflight_total_tokens > 0:
+                await decr_inflight_tokens(inflight_total_tokens)
 
     async def embedding(
         self,
@@ -401,13 +401,13 @@ class InferenceService:
         )
         job.request_id = db_request.request_uuid
 
-        try:
-            full_content = ""
-            chunk_count = 0
-            routed_backend = None
-            inflight_chars = 0
-            inflight_total_tokens = 0
+        full_content = ""
+        chunk_count = 0
+        routed_backend = None
+        inflight_chars = 0
+        inflight_total_tokens = 0
 
+        try:
             async for chunk_data, backend in self._proxy_stream_with_retry(
                 request, job, user, proxy_fn="_proxy_ollama_stream"
             ):
@@ -442,18 +442,15 @@ class InferenceService:
                 await self._complete_streaming_request(
                     db_request, routed_backend.id, full_content, chunk_count, job
                 )
-
-            # Decrement inflight counter now that request is complete
-            if inflight_total_tokens > 0:
-                await decr_inflight_tokens(inflight_total_tokens)
-
         except Exception as e:
-            # Clean up inflight counter on error
-            if inflight_total_tokens > 0:
-                await decr_inflight_tokens(inflight_total_tokens)
             backend_id = routed_backend.id if routed_backend else None
             await self._fail_request(db_request, backend_id, str(e), job)
             raise
+        finally:
+            # Always clean up inflight counter — handles normal completion,
+            # exceptions, and client disconnects (GeneratorExit)
+            if inflight_total_tokens > 0:
+                await decr_inflight_tokens(inflight_total_tokens)
 
     async def stream_ollama_generate(
         self,
