@@ -114,8 +114,8 @@ Only the latest release of MindRouter receives security updates. Users are encou
 
 | Version | Supported |
 |---|---|
-| 0.20.x (latest) | Yes |
-| < 0.20.0 | No |
+| 2.0.x (latest) | Yes |
+| < 2.0.0 | No |
 
 If you are running an older version and discover a security issue, please still report it. We will assess whether it affects the current release.
 

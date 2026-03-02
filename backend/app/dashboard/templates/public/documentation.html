@@ -1966,9 +1966,9 @@ python3 -c "import secrets; print('SIDECAR_SECRET_KEY=' + secrets.token_hex(32))
 sudo chmod 600 /etc/mindrouter/sidecar.env</code></pre>
 
                 <h4>Build a specific version</h4>
-<pre><code>docker build -t mindrouter-sidecar:v0.20.0 \
+<pre><code>docker build -t mindrouter-sidecar:v2.0.0 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.20.0:sidecar</code></pre>
+  https://github.com/ui-insight/MindRouter.git#v2.0.0:sidecar</code></pre>
 
                 <h4>Build latest from master</h4>
 <pre><code>docker build -t mindrouter-sidecar:latest \
@@ -1982,19 +1982,19 @@ docker run -d --name gpu-sidecar \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.20.0</code></pre>
+  mindrouter-sidecar:v2.0.0</code></pre>
 
                 <h4>Upgrade to a new version</h4>
-<pre><code>docker build -t mindrouter-sidecar:v0.20.0 \
+<pre><code>docker build -t mindrouter-sidecar:v2.0.0 \
   -f Dockerfile.sidecar \
-  https://github.com/ui-insight/MindRouter.git#v0.20.0:sidecar
+  https://github.com/ui-insight/MindRouter.git#v2.0.0:sidecar
 docker stop gpu-sidecar && docker rm gpu-sidecar
 docker run -d --name gpu-sidecar \
   --gpus all \
   -p 127.0.0.1:18007:8007 \
   --env-file /etc/mindrouter/sidecar.env \
   --restart unless-stopped \
-  mindrouter-sidecar:v0.20.0</code></pre>
+  mindrouter-sidecar:v2.0.0</code></pre>
 
                 <p>In production, bind the sidecar to localhost only (as shown above) and use an nginx reverse proxy on port 8007 to handle external traffic.
                    The env file at <code>/etc/mindrouter/sidecar.env</code> persists the secret key across upgrades — generate it once per node and it's reused automatically.</p>

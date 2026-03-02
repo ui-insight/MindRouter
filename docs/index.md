@@ -667,7 +667,7 @@ These endpoints are unauthenticated and intended for monitoring infrastructure.
 ```json
 {
   "service": "MindRouter",
-  "version": "0.20.0",
+  "version": "2.0.0",
   "timestamp": "2026-03-01T12:00:00+00:00",
   "backends": {"total": 6, "healthy": 5},
   "models": ["gpt-oss-120b", "llama3.2", "qwen3.5"],
