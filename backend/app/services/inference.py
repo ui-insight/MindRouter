@@ -139,8 +139,11 @@ class InferenceService:
 
             return response
 
-        except Exception as e:
-            await self._fail_request(db_request, None, str(e), job)
+        except BaseException as e:
+            try:
+                await self._fail_request(db_request, None, str(e), job)
+            except Exception:
+                pass
             raise
 
     async def stream_chat_completion(
@@ -224,9 +227,15 @@ class InferenceService:
                 )
 
             completed = True
-        except Exception as e:
+        except BaseException as e:
+            # BaseException catches CancelledError (not a subclass of Exception
+            # in Python 3.9+) and GeneratorExit from client disconnects — both
+            # of which would otherwise leak the scheduler queue depth counter.
             backend_id = routed_backend.id if routed_backend else None
-            await self._fail_request(db_request, backend_id, str(e), job)
+            try:
+                await self._fail_request(db_request, backend_id, str(e), job)
+            except Exception:
+                pass
             raise
         finally:
             # Always clean up inflight counter — handles normal completion,
@@ -268,8 +277,11 @@ class InferenceService:
 
             return response
 
-        except Exception as e:
-            await self._fail_request(db_request, None, str(e), job)
+        except BaseException as e:
+            try:
+                await self._fail_request(db_request, None, str(e), job)
+            except Exception:
+                pass
             raise
 
     async def rerank(
@@ -306,8 +318,11 @@ class InferenceService:
 
             return response
 
-        except Exception as e:
-            await self._fail_request(db_request, None, str(e), job)
+        except BaseException as e:
+            try:
+                await self._fail_request(db_request, None, str(e), job)
+            except Exception:
+                pass
             raise
 
     async def score(
@@ -344,8 +359,11 @@ class InferenceService:
 
             return response
 
-        except Exception as e:
-            await self._fail_request(db_request, None, str(e), job)
+        except BaseException as e:
+            try:
+                await self._fail_request(db_request, None, str(e), job)
+            except Exception:
+                pass
             raise
 
     async def ollama_chat(
@@ -378,8 +396,11 @@ class InferenceService:
 
             return response
 
-        except Exception as e:
-            await self._fail_request(db_request, None, str(e), job)
+        except BaseException as e:
+            try:
+                await self._fail_request(db_request, None, str(e), job)
+            except Exception:
+                pass
             raise
 
     async def stream_ollama_chat(
@@ -442,9 +463,14 @@ class InferenceService:
                 await self._complete_streaming_request(
                     db_request, routed_backend.id, full_content, chunk_count, job
                 )
-        except Exception as e:
+        except BaseException as e:
+            # BaseException catches CancelledError and GeneratorExit from
+            # client disconnects that would otherwise leak queue depth.
             backend_id = routed_backend.id if routed_backend else None
-            await self._fail_request(db_request, backend_id, str(e), job)
+            try:
+                await self._fail_request(db_request, backend_id, str(e), job)
+            except Exception:
+                pass
             raise
         finally:
             # Always clean up inflight counter — handles normal completion,
@@ -1499,6 +1525,11 @@ class InferenceService:
         # Release backend capacity FIRST
         if backend_id:
             await self._scheduler.on_job_failed(job, backend_id)
+        else:
+            # Even without a backend_id, the job may have been submitted to the
+            # queue (submit_job) or routed (route_job increments queue depth).
+            # Cancel it from the queue to prevent phantom entries.
+            await self._scheduler.cancel_job(job.request_id)
 
         await asyncio.shield(self._do_fail_db(db_request, error_message))
 

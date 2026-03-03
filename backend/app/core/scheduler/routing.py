@@ -16,6 +16,7 @@
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from backend.app.core.scheduler.queue import Job, RequestQueue
@@ -402,9 +403,11 @@ class BackendRouter:
 
     async def _maintenance_loop(self) -> None:
         """Background maintenance tasks."""
+        gc_counter = 0
         while True:
             try:
                 await asyncio.sleep(30)  # Run every 30 seconds
+                gc_counter += 1
 
                 # Clean up old usage history
                 await self.fair_share.cleanup_old_history()
@@ -423,7 +426,82 @@ class BackendRouter:
                     # Contention detected, decay burst credits
                     await self.fair_share.reset_burst_credits()
 
+                # GC sweep every 60 seconds: evict stale jobs and reconcile
+                # backend queue depth counters to prevent phantom queue buildup.
+                if gc_counter % 2 == 0:
+                    await self._gc_stale_jobs()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("maintenance_error", error=str(e))
+
+    async def _gc_stale_jobs(self) -> None:
+        """Garbage-collect stale jobs and reconcile queue depth counters.
+
+        Jobs older than the maximum possible request lifetime (routing timeout
+        + per-attempt timeout * max attempts + margin) are orphans whose
+        completion/failure callbacks were never invoked.  Evicting them and
+        reconciling ``_backend_queue_depths`` prevents phantom queue buildup.
+        """
+        try:
+            from backend.app.settings import get_settings
+            settings = get_settings()
+
+            # Maximum plausible lifetime: route wait + all retry attempts
+            max_lifetime_s = (
+                settings.backend_request_timeout  # route_timeout default
+                + settings.backend_request_timeout_per_attempt
+                  * settings.backend_retry_max_attempts
+                + 60  # margin
+            )
+
+            all_jobs = await self.queue.get_all_jobs()
+            now = datetime.now(timezone.utc)
+            evicted = 0
+
+            for job in all_jobs:
+                age_s = (now - job.time_submitted).total_seconds()
+                if age_s > max_lifetime_s:
+                    await self.queue.cancel_job(job.request_id)
+                    evicted += 1
+
+            # Reconcile _backend_queue_depths: recompute from live jobs only.
+            # Any counter that was incremented by route_job() for a now-evicted
+            # job is stale.  Rebuild from the ground truth (remaining jobs).
+            remaining_jobs = await self.queue.get_all_jobs()
+            async with self._lock:
+                new_depths: Dict[int, int] = {}
+                for job in remaining_jobs:
+                    if job.assigned_backend_id is not None:
+                        new_depths[job.assigned_backend_id] = (
+                            new_depths.get(job.assigned_backend_id, 0) + 1
+                        )
+
+                # Detect and log corrections
+                old_total = sum(self._backend_queue_depths.values())
+                new_total = sum(new_depths.values())
+                if old_total != new_total:
+                    logger.warning(
+                        "gc_queue_depth_corrected",
+                        old_total=old_total,
+                        new_total=new_total,
+                        evicted_jobs=evicted,
+                    )
+
+                self._backend_queue_depths = new_depths
+
+            if evicted > 0:
+                logger.warning(
+                    "gc_stale_jobs_evicted",
+                    evicted=evicted,
+                    remaining=len(remaining_jobs),
+                    max_lifetime_s=max_lifetime_s,
+                )
+
+                # Wake any waiters that may have been blocked by phantom depth
+                async with self._capacity_condition:
+                    self._capacity_condition.notify_all()
+
+        except Exception as e:
+            logger.error("gc_stale_jobs_error", error=str(e))
