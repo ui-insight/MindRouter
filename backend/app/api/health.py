@@ -192,6 +192,7 @@ async def cluster_status() -> Dict[str, Any]:
         },
         "models": sorted(models),
         "queue": scheduler_stats.get("queue", {}),
+        "queue_health": scheduler_stats.get("health", {}),
         "fair_share": {
             "total_users": scheduler_stats.get("fair_share", {}).get("total_users", 0),
         },
