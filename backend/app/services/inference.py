@@ -575,7 +575,7 @@ class InferenceService:
             prompt=prompt,
             parameters=parameters,
             response_format=response_format,
-            client_ip=http_request.client.host if http_request.client else None,
+            client_ip=self._get_client_ip(http_request),
             user_agent=http_request.headers.get("user-agent"),
         )
 
@@ -585,6 +585,18 @@ class InferenceService:
         await self.db.commit()
 
         return db_request
+
+    @staticmethod
+    def _get_client_ip(http_request: Request) -> Optional[str]:
+        """Extract the real client IP from proxy headers, falling back to direct connection."""
+        forwarded_for = http_request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            # X-Forwarded-For is comma-separated; first entry is the original client
+            return forwarded_for.split(",")[0].strip()
+        real_ip = http_request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip()
+        return http_request.client.host if http_request.client else None
 
     async def _route_request(
         self,
