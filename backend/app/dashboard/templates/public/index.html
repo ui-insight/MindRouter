@@ -236,7 +236,7 @@
                     <span style="width:12px; height:12px; border-radius:50%; background:#f9e2af; display:inline-block; margin-right:6px;"></span>
                     <span class="ms-2" style="font-size:0.75rem; color:#6c7086;">curl &mdash; Chat Completions</span>
                 </div>
-                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#89b4fa;">curl</span> -X POST {{ request.url.scheme }}://{{ request.url.netloc }}/v1/chat/completions \
+                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#89b4fa;">curl</span> -X POST https://mindrouter.example.com/v1/chat/completions \
   -H <span style="color:#a6e3a1;">"Authorization: Bearer YOUR_API_KEY"</span> \
   -H <span style="color:#a6e3a1;">"Content-Type: application/json"</span> \
   -d <span style="color:#a6e3a1;">'{
@@ -276,7 +276,7 @@
                 <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#cba6f7;">from</span> <span style="color:#89b4fa;">openai</span> <span style="color:#cba6f7;">import</span> OpenAI
 
 client = OpenAI(
-    <span style="color:#fab387;">base_url</span>=<span style="color:#a6e3a1;">"{{ request.url.scheme }}://{{ request.url.netloc }}/v1"</span>,
+    <span style="color:#fab387;">base_url</span>=<span style="color:#a6e3a1;">"https://mindrouter.example.com/v1"</span>,
     <span style="color:#fab387;">api_key</span>=<span style="color:#a6e3a1;">"YOUR_API_KEY"</span>,
 )
 
