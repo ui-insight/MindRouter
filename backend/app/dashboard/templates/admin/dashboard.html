@@ -21,11 +21,25 @@
                         </div>
                     </div>
                 </div>
+                {% set qh = scheduler_stats.health if scheduler_stats and scheduler_stats.health else {} %}
+                {% set qh_status = qh.get('status', 'healthy') if qh else 'healthy' %}
+                {% set qh_color = 'success' if qh_status == 'healthy' else ('danger' if qh_status == 'critical' else 'warning') %}
                 <div class="col-md-3 mb-3">
-                    <div class="card card-stat warning h-100">
+                    <div class="card card-stat {{ qh_color }} h-100">
                         <div class="card-body">
-                            <h2 class="card-subtitle h6 mb-2 text-muted">Queue Size</h2>
-                            <p class="card-title h2 mb-0">{{ scheduler_stats.queue.total if scheduler_stats else 0 }}</p>
+                            <h2 class="card-subtitle h6 mb-2 text-muted">Queue Health</h2>
+                            <p class="card-title h2 mb-0">
+                                {{ scheduler_stats.queue.total if scheduler_stats else 0 }}
+                                <span class="badge bg-{{ qh_color }} fs-6 align-middle">
+                                    {% if qh.get('trend') == 'growing' %}<i class="bi bi-arrow-up"></i>
+                                    {% elif qh.get('trend') == 'draining' %}<i class="bi bi-arrow-down"></i>
+                                    {% else %}<i class="bi bi-dash"></i>{% endif %}
+                                    {{ qh_status }}
+                                </span>
+                            </p>
+                            {% if qh.get('stale_jobs', 0) > 0 %}
+                            <small class="text-muted">{{ qh.stale_jobs }} stale job{{ 's' if qh.stale_jobs != 1 }}</small>
+                            {% endif %}
                         </div>
                     </div>
                 </div>

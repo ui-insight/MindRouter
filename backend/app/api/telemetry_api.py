@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import require_admin_or_session
+from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
 from backend.app.db.models import User
@@ -223,6 +224,14 @@ async def telemetry_overview(
     cluster["total_gpu_memory_gb"] = round(cluster["total_gpu_memory_gb"], 1)
     cluster["used_gpu_memory_gb"] = round(cluster["used_gpu_memory_gb"], 1)
     cluster["total_power_draw_watts"] = round(cluster["total_power_draw_watts"], 1)
+
+    # Queue health from scheduler
+    try:
+        scheduler = get_scheduler()
+        scheduler_stats = await scheduler.get_stats()
+        cluster["queue_health"] = scheduler_stats.get("health", {})
+    except Exception:
+        cluster["queue_health"] = {}
 
     return {
         "cluster": cluster,

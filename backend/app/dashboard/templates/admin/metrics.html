@@ -93,6 +93,58 @@
                 </div>
             </div>
 
+            <!-- Queue Health Row -->
+            <div class="row mb-4" id="queue-health-row">
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat h-100" id="queue-health-card">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-queue-status">--</div>
+                            <div class="stat-label">Queue Health</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-queue-trend">--</div>
+                            <div class="stat-label">Queue Trend</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-queue-rate">--</div>
+                            <div class="stat-label">Rate (jobs/min)</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-stale-jobs">--</div>
+                            <div class="stat-label">Stale Jobs (&gt;2m)</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-oldest-job">--</div>
+                            <div class="stat-label">Oldest Job Age</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2 mb-3">
+                    <div class="card card-stat h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-gc-evicted">--</div>
+                            <div class="stat-label">Last GC Evicted</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Time Range Selector -->
             <div class="mb-3">
                 <div class="btn-group" role="group" aria-label="Time range selection">
@@ -421,6 +473,38 @@ function updateStatCards(cluster) {
 
     document.getElementById('stat-active').textContent = cluster.total_active_requests || 0;
     document.getElementById('stat-queued').textContent = cluster.total_queued_requests || 0;
+
+    // Queue health
+    const qh = cluster.queue_health || {};
+    const qhStatus = qh.status || 'unknown';
+    const statusEl = document.getElementById('stat-queue-status');
+    statusEl.textContent = qhStatus;
+
+    const healthCard = document.getElementById('queue-health-card');
+    healthCard.className = 'card card-stat h-100 ' +
+        (qhStatus === 'healthy' ? 'success' : qhStatus === 'critical' ? 'danger' : 'warning');
+
+    const trendIcons = { growing: '\u2191', draining: '\u2193', stable: '\u2192' };
+    document.getElementById('stat-queue-trend').textContent =
+        (trendIcons[qh.trend] || '') + ' ' + (qh.trend || '--');
+
+    document.getElementById('stat-queue-rate').textContent =
+        qh.trend_rate != null ? qh.trend_rate : '--';
+
+    document.getElementById('stat-stale-jobs').textContent =
+        qh.stale_jobs != null ? qh.stale_jobs : '--';
+
+    const oldest = qh.oldest_job_age_seconds;
+    if (oldest != null) {
+        if (oldest < 60) document.getElementById('stat-oldest-job').textContent = Math.round(oldest) + 's';
+        else if (oldest < 3600) document.getElementById('stat-oldest-job').textContent = Math.round(oldest / 60) + 'm';
+        else document.getElementById('stat-oldest-job').textContent = (oldest / 3600).toFixed(1) + 'h';
+    } else {
+        document.getElementById('stat-oldest-job').textContent = '--';
+    }
+
+    document.getElementById('stat-gc-evicted').textContent =
+        qh.gc_last_evicted != null ? qh.gc_last_evicted : '--';
 }
 
 function updateNodeAccordions(nodes) {

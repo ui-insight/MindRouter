@@ -60,6 +60,13 @@ class BackendRouter:
     - Tracks active requests per backend
     """
 
+    # Stale job warning threshold (seconds) — jobs older than this are
+    # flagged in queue health even if not yet eligible for GC eviction.
+    STALE_WARNING_THRESHOLD_S = 120.0
+
+    # Number of depth samples to retain for trend computation (30s each).
+    DEPTH_HISTORY_SIZE = 10
+
     def __init__(self):
         self.queue = RequestQueue()
         self.fair_share = FairShareManager()
@@ -77,6 +84,11 @@ class BackendRouter:
 
         # Background task handle
         self._cleanup_task: Optional[asyncio.Task] = None
+
+        # Queue health monitoring
+        self._queue_depth_history: List[Tuple[datetime, int]] = []
+        self._gc_last_run: Optional[datetime] = None
+        self._gc_last_evicted: int = 0
 
     async def start(self) -> None:
         """Start background maintenance tasks."""
@@ -380,6 +392,7 @@ class BackendRouter:
         """Get queue and scheduling statistics."""
         queue_stats = await self.queue.get_queue_stats()
         fair_share_stats = await self.fair_share.get_stats()
+        health = await self.get_queue_health()
 
         async with self._lock:
             backend_queues = dict(self._backend_queue_depths)
@@ -388,6 +401,78 @@ class BackendRouter:
             "queue": queue_stats,
             "fair_share": fair_share_stats,
             "backend_queues": backend_queues,
+            "health": health,
+        }
+
+    async def get_queue_health(self) -> Dict:
+        """Assess queue health for monitoring.
+
+        Returns a dict with status, trend, stale job count, and GC metadata.
+        """
+        all_jobs = await self.queue.get_all_jobs()
+        now = datetime.now(timezone.utc)
+        queue_total = len(all_jobs)
+
+        # Stale job analysis
+        stale_jobs = 0
+        oldest_age_s: Optional[float] = None
+        for job in all_jobs:
+            age_s = (now - job.time_submitted).total_seconds()
+            if oldest_age_s is None or age_s > oldest_age_s:
+                oldest_age_s = age_s
+            if age_s > self.STALE_WARNING_THRESHOLD_S:
+                stale_jobs += 1
+
+        # Trend from depth history
+        trend = "stable"
+        trend_rate = 0.0  # jobs/min
+        history = list(self._queue_depth_history)
+        if len(history) >= 2:
+            first_time, first_depth = history[0]
+            last_time, last_depth = history[-1]
+            elapsed_min = (last_time - first_time).total_seconds() / 60.0
+            if elapsed_min > 0:
+                trend_rate = round((last_depth - first_depth) / elapsed_min, 2)
+                if trend_rate > 0.5:
+                    trend = "growing"
+                elif trend_rate < -0.5:
+                    trend = "draining"
+
+        # Growing duration — how long has trend been positive?
+        growing_duration_s = 0.0
+        if trend == "growing" and len(history) >= 2:
+            # Walk backwards to find when growth started
+            for i in range(len(history) - 1, 0, -1):
+                if history[i][1] <= history[i - 1][1]:
+                    break
+                growing_duration_s = (history[-1][0] - history[i - 1][0]).total_seconds()
+
+        # Backend depths
+        async with self._lock:
+            backend_depths = dict(self._backend_queue_depths)
+
+        # Health status
+        if queue_total == 0:
+            health_status = "healthy"
+        elif queue_total > 0 and stale_jobs == queue_total:
+            health_status = "critical"
+        elif growing_duration_s >= 300:
+            health_status = "critical"
+        elif stale_jobs > 0 or trend == "growing":
+            health_status = "warning"
+        else:
+            health_status = "healthy"
+
+        return {
+            "status": health_status,
+            "queue_total": queue_total,
+            "trend": trend,
+            "trend_rate": trend_rate,
+            "stale_jobs": stale_jobs,
+            "oldest_job_age_seconds": round(oldest_age_s, 1) if oldest_age_s is not None else None,
+            "backend_depths": backend_depths,
+            "gc_last_run": self._gc_last_run.isoformat() if self._gc_last_run else None,
+            "gc_last_evicted": self._gc_last_evicted,
         }
 
     async def recompute_priorities(self) -> None:
@@ -420,8 +505,14 @@ class BackendRouter:
                 # Recompute priorities for fairness
                 await self.recompute_priorities()
 
-                # Check for idle cluster and accumulate burst credits
+                # Record queue depth sample for trend analysis
                 queue_stats = await self.queue.get_queue_stats()
+                now = datetime.now(timezone.utc)
+                self._queue_depth_history.append((now, queue_stats["total"]))
+                if len(self._queue_depth_history) > self.DEPTH_HISTORY_SIZE:
+                    self._queue_depth_history = self._queue_depth_history[-self.DEPTH_HISTORY_SIZE:]
+
+                # Check for idle cluster and accumulate burst credits
                 if queue_stats["total"] == 0:
                     await self.fair_share.accumulate_burst_credits(30)
                 else:
@@ -458,8 +549,10 @@ class BackendRouter:
                 + 60  # margin
             )
 
+            self._gc_last_run = datetime.now(timezone.utc)
+
             all_jobs = await self.queue.get_all_jobs()
-            now = datetime.now(timezone.utc)
+            now = self._gc_last_run
             evicted = 0
 
             for job in all_jobs:
@@ -493,6 +586,8 @@ class BackendRouter:
                             stale_total=stale_total,
                         )
                         self._backend_queue_depths.clear()
+
+            self._gc_last_evicted = evicted
 
             if evicted > 0:
                 logger.warning(
