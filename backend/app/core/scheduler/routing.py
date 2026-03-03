@@ -208,7 +208,9 @@ class BackendRouter:
                 all_scores=scores,
             )
 
-        # Increment queue depth for selected backend
+        # Increment queue depth for selected backend and record the
+        # assignment on the job so the GC can attribute it correctly.
+        job.assigned_backend_id = selected_backend.id
         async with self._lock:
             self._backend_queue_depths[selected_backend.id] = (
                 self._backend_queue_depths.get(selected_backend.id, 0) + 1
@@ -437,12 +439,12 @@ class BackendRouter:
                 logger.error("maintenance_error", error=str(e))
 
     async def _gc_stale_jobs(self) -> None:
-        """Garbage-collect stale jobs and reconcile queue depth counters.
+        """Garbage-collect stale jobs and correct queue depth counters.
 
         Jobs older than the maximum possible request lifetime (routing timeout
         + per-attempt timeout * max attempts + margin) are orphans whose
         completion/failure callbacks were never invoked.  Evicting them and
-        reconciling ``_backend_queue_depths`` prevents phantom queue buildup.
+        decrementing their backend queue depth prevents phantom queue buildup.
         """
         try:
             from backend.app.settings import get_settings
@@ -464,38 +466,39 @@ class BackendRouter:
                 age_s = (now - job.time_submitted).total_seconds()
                 if age_s > max_lifetime_s:
                     await self.queue.cancel_job(job.request_id)
+
+                    # Decrement queue depth for the assigned backend.
+                    # assigned_backend_id may be None if the job was queued
+                    # but never routed — in that case the depth was never
+                    # incremented so there is nothing to undo.
+                    if job.assigned_backend_id is not None:
+                        async with self._lock:
+                            bid = job.assigned_backend_id
+                            if bid in self._backend_queue_depths:
+                                self._backend_queue_depths[bid] = max(
+                                    0, self._backend_queue_depths[bid] - 1
+                                )
+
                     evicted += 1
 
-            # Reconcile _backend_queue_depths: recompute from live jobs only.
-            # Any counter that was incremented by route_job() for a now-evicted
-            # job is stale.  Rebuild from the ground truth (remaining jobs).
-            remaining_jobs = await self.queue.get_all_jobs()
-            async with self._lock:
-                new_depths: Dict[int, int] = {}
-                for job in remaining_jobs:
-                    if job.assigned_backend_id is not None:
-                        new_depths[job.assigned_backend_id] = (
-                            new_depths.get(job.assigned_backend_id, 0) + 1
+            # Safety net: if queue is empty but depth counters are non-zero,
+            # they are entirely phantom.  Reset them.
+            remaining_count = len(await self.queue.get_all_jobs())
+            if remaining_count == 0:
+                async with self._lock:
+                    stale_total = sum(self._backend_queue_depths.values())
+                    if stale_total > 0:
+                        logger.warning(
+                            "gc_queue_depth_reset",
+                            stale_total=stale_total,
                         )
-
-                # Detect and log corrections
-                old_total = sum(self._backend_queue_depths.values())
-                new_total = sum(new_depths.values())
-                if old_total != new_total:
-                    logger.warning(
-                        "gc_queue_depth_corrected",
-                        old_total=old_total,
-                        new_total=new_total,
-                        evicted_jobs=evicted,
-                    )
-
-                self._backend_queue_depths = new_depths
+                        self._backend_queue_depths.clear()
 
             if evicted > 0:
                 logger.warning(
                     "gc_stale_jobs_evicted",
                     evicted=evicted,
-                    remaining=len(remaining_jobs),
+                    remaining=remaining_count,
                     max_lifetime_s=max_lifetime_s,
                 )
 
