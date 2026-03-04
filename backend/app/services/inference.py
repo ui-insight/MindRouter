@@ -1454,6 +1454,8 @@ class InferenceService:
             await crud.update_api_key_usage(self.db, db_request.api_key_id)
 
             await self.db.commit()
+            # Increment Redis quota only after DB commit succeeds to prevent drift
+            await crud.incr_quota_redis(db_request.user_id, total_tokens)
         except Exception:
             try:
                 await self.db.rollback()
@@ -1520,6 +1522,8 @@ class InferenceService:
             await crud.update_api_key_usage(self.db, db_request.api_key_id)
 
             await self.db.commit()
+            # Increment Redis quota only after DB commit succeeds to prevent drift
+            await crud.incr_quota_redis(db_request.user_id, total_tokens)
         except Exception:
             try:
                 await self.db.rollback()

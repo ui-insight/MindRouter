@@ -585,13 +585,20 @@ async def create_quota(
 async def update_quota_usage(
     db: AsyncSession, user_id: int, tokens_used: int
 ) -> Optional[Quota]:
-    """Update quota token usage via Redis (atomic) with DB fallback."""
-    from backend.app.core.redis_client import incr_tokens, is_available
+    """Update quota token usage in DB (Redis increment happens post-commit).
+
+    When Redis is available, this only stages the DB quota object for return;
+    the caller must call ``incr_quota_redis(user_id, tokens_used)`` **after**
+    a successful ``db.commit()`` to avoid drift between Redis and the ledger.
+
+    When Redis is unavailable, falls back to a direct DB increment that will
+    be committed with the rest of the transaction.
+    """
+    from backend.app.core.redis_client import is_available
 
     if is_available():
-        await incr_tokens(user_id, tokens_used)
-        # Return the quota object (tokens_used may be stale in DB but
-        # Redis is the source of truth; the sync loop will persist it)
+        # Redis is source of truth — don't increment here; caller does it
+        # post-commit via incr_quota_redis().
         result = await db.execute(select(Quota).where(Quota.user_id == user_id))
         return result.scalar_one_or_none()
 
@@ -602,6 +609,14 @@ async def update_quota_usage(
         quota.tokens_used += tokens_used
         await db.flush()
     return quota
+
+
+async def incr_quota_redis(user_id: int, tokens_used: int) -> None:
+    """Increment quota counter in Redis.  Call only after db.commit() succeeds."""
+    from backend.app.core.redis_client import incr_tokens, is_available
+
+    if is_available():
+        await incr_tokens(user_id, tokens_used)
 
 
 async def reset_quota_if_needed(db: AsyncSession, user_id: int) -> Optional[Quota]:
