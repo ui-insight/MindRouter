@@ -1299,6 +1299,10 @@ async def get_user_detail(
     user = stats["user"]
     monthly_usage = await crud.get_user_monthly_usage(db, user_id)
 
+    # Per-key token totals
+    api_key_ids = [k.id for k in stats["api_keys"]]
+    key_token_totals = await crud.get_api_key_token_totals(db, api_key_ids)
+
     return {
         "user": {
             "id": user.id,
@@ -1318,6 +1322,8 @@ async def get_user_detail(
         },
         "stats": {
             "total_tokens": stats["total_tokens"],
+            "prompt_tokens": stats["prompt_tokens"],
+            "completion_tokens": stats["completion_tokens"],
             "request_count": stats["request_count"],
             "favorite_models": [{"model": m, "count": c} for m, c in stats["favorite_models"]],
             "api_key_count": stats["api_key_count"],
@@ -1338,6 +1344,7 @@ async def get_user_detail(
                 "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
                 "usage_count": k.usage_count,
                 "created_at": k.created_at.isoformat(),
+                "token_totals": key_token_totals.get(k.id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
             }
             for k in stats["api_keys"]
         ],

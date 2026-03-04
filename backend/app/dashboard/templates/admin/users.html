@@ -95,7 +95,8 @@
                                     <td>{{ u.created_at|localtime('%Y-%m-%d') }}</td>
                                     <td>{{ u.last_login_at|localtime if u.last_login_at else 'Never' }}</td>
                                     <td>{{ "{:,}".format(user_quota_tokens.get(u.id, 0)) }}</td>
-                                    <td>{{ "{:,}".format(user_tokens.get(u.id, 0)) }}</td>
+                                    {% set ut = user_tokens.get(u.id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}) %}
+                                    <td>{{ "{:,}".format(ut.total_tokens) }}<br><small class="text-muted">{{ "{:,}".format(ut.prompt_tokens) }}in / {{ "{:,}".format(ut.completion_tokens) }}out</small></td>
                                     <td>
                                         <a href="/admin/users/{{ u.id }}" class="btn btn-sm btn-outline-primary">
                                             <i class="bi bi-eye"></i>

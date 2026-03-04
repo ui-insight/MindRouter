@@ -143,6 +143,7 @@
                                 <div class="card-body">
                                     <h2 class="card-subtitle h6 mb-2 text-muted">Lifetime Token Usage</h2>
                                     <p class="card-title h3 mb-0">{{ "{:,}".format(stats.total_tokens) }}</p>
+                                    <small class="text-muted">{{ "{:,}".format(stats.prompt_tokens) }} in / {{ "{:,}".format(stats.completion_tokens) }} out</small>
                                 </div>
                             </div>
                         </div>
@@ -298,17 +299,25 @@ new Chart(ctx, {
     data: {
         labels: {{ monthly_usage|map(attribute='month')|list|tojson }},
         datasets: [{
-            label: 'Tokens',
-            data: {{ monthly_usage|map(attribute='tokens')|list|tojson }},
+            label: 'Input Tokens',
+            data: {{ monthly_usage|map(attribute='prompt_tokens')|list|tojson }},
             backgroundColor: 'rgba(13, 110, 253, 0.5)',
             borderColor: 'rgba(13, 110, 253, 1)',
+            borderWidth: 1,
+        }, {
+            label: 'Output Tokens',
+            data: {{ monthly_usage|map(attribute='completion_tokens')|list|tojson }},
+            backgroundColor: 'rgba(25, 135, 84, 0.5)',
+            borderColor: 'rgba(25, 135, 84, 1)',
             borderWidth: 1,
         }]
     },
     options: {
         responsive: true,
         scales: {
+            x: { stacked: true },
             y: {
+                stacked: true,
                 beginAtZero: true,
                 ticks: {
                     callback: function(v) { return v.toLocaleString(); }
@@ -318,7 +327,7 @@ new Chart(ctx, {
         plugins: {
             tooltip: {
                 callbacks: {
-                    label: function(ctx) { return ctx.parsed.y.toLocaleString() + ' tokens'; }
+                    label: function(ctx) { return ctx.dataset.label + ': ' + ctx.parsed.y.toLocaleString(); }
                 }
             }
         }

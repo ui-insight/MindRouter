@@ -198,7 +198,8 @@ async def public_dashboard(
 
     # Total tokens ever served
     try:
-        total_tokens = await crud.get_global_token_total(db)
+        global_tokens = await crud.get_global_token_total(db)
+        total_tokens = global_tokens["total_tokens"]
     except Exception:
         total_tokens = 0
 
@@ -375,7 +376,8 @@ async def user_dashboard(
 
     # Lifetime token usage from usage_ledger
     lifetime_map = await crud.get_user_token_totals(db, [effective_id])
-    lifetime_tokens = lifetime_map.get(effective_id, 0)
+    lifetime_data = lifetime_map.get(effective_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+    lifetime_tokens = lifetime_data["total_tokens"]
 
     return templates.TemplateResponse(
         "user/dashboard.html",
@@ -395,6 +397,8 @@ async def user_dashboard(
             "now_utc": datetime.now(timezone.utc),
             "masquerade_user": masquerade_user,
             "lifetime_tokens": lifetime_tokens,
+            "lifetime_prompt_tokens": lifetime_data["prompt_tokens"],
+            "lifetime_completion_tokens": lifetime_data["completion_tokens"],
         },
     )
 
@@ -426,10 +430,16 @@ async def dashboard_token_usage(
         tokens_used = quota.tokens_used
 
     lifetime_map = await crud.get_user_token_totals(db, [effective_id])
-    lifetime_tokens = lifetime_map.get(effective_id, 0)
+    lifetime_data = lifetime_map.get(effective_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
     group_budget = user.group.token_budget if user.group else 0
-    return JSONResponse({"tokens_used": tokens_used, "budget": group_budget, "lifetime_tokens": lifetime_tokens})
+    return JSONResponse({
+        "tokens_used": tokens_used,
+        "budget": group_budget,
+        "lifetime_tokens": lifetime_data["total_tokens"],
+        "lifetime_prompt_tokens": lifetime_data["prompt_tokens"],
+        "lifetime_completion_tokens": lifetime_data["completion_tokens"],
+    })
 
 
 @dashboard_router.post("/dashboard/change-password")

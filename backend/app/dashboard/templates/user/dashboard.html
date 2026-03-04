@@ -46,6 +46,7 @@
                 <div class="card-body">
                     <h2 class="card-subtitle mb-2 text-muted h6">Lifetime Token Usage</h2>
                     <p class="card-title h3 mb-0"><span id="lifetime-tokens">{{ "{:,}".format(lifetime_tokens) }}</span></p>
+                    <small class="text-muted"><span id="lifetime-prompt">{{ "{:,}".format(lifetime_prompt_tokens) }}</span> in / <span id="lifetime-completion">{{ "{:,}".format(lifetime_completion_tokens) }}</span> out</small>
                 </div>
             </div>
         </div>
@@ -281,6 +282,8 @@
     const detailEl = document.getElementById('token-usage-detail');
     const barEl = document.getElementById('token-progress-bar');
     const lifetimeEl = document.getElementById('lifetime-tokens');
+    const lifetimePromptEl = document.getElementById('lifetime-prompt');
+    const lifetimeCompletionEl = document.getElementById('lifetime-completion');
     const budget = {{ group_budget }};
 
     function fmt(n) { return n.toLocaleString(); }
@@ -294,6 +297,8 @@
             if (topEl) topEl.textContent = fmt(used);
             if (detailEl) detailEl.textContent = fmt(used);
             if (lifetimeEl && data.lifetime_tokens !== undefined) lifetimeEl.textContent = fmt(data.lifetime_tokens);
+            if (lifetimePromptEl && data.lifetime_prompt_tokens !== undefined) lifetimePromptEl.textContent = fmt(data.lifetime_prompt_tokens);
+            if (lifetimeCompletionEl && data.lifetime_completion_tokens !== undefined) lifetimeCompletionEl.textContent = fmt(data.lifetime_completion_tokens);
             if (barEl && budget > 0) {
                 const pct = Math.min(100, used / budget * 100);
                 barEl.style.width = pct + '%';

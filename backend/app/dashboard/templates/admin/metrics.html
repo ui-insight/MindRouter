@@ -145,6 +145,32 @@
                 </div>
             </div>
 
+            <!-- Token Usage -->
+            <div class="row mb-4" id="token-usage-section">
+                <div class="col-md-4 mb-3">
+                    <div class="card card-stat info h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-total-tokens">--</div>
+                            <div class="stat-label">Total Tokens Served</div>
+                            <small class="text-muted"><span id="stat-input-tokens">--</span> input / <span id="stat-output-tokens">--</span> output</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-8 mb-3">
+                    <div class="card h-100">
+                        <div class="card-header"><i class="bi bi-bar-chart"></i> Top Models by Token Usage</div>
+                        <div class="card-body p-0">
+                            <table class="table table-sm table-striped mb-0" id="model-token-table">
+                                <thead><tr><th>Model</th><th class="text-end">Input</th><th class="text-end">Output</th><th class="text-end">Total</th><th class="text-end">Requests</th></tr></thead>
+                                <tbody id="model-token-tbody">
+                                    <tr><td colspan="5" class="text-muted text-center">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Time Range Selector -->
             <div class="mb-3">
                 <div class="btn-group" role="group" aria-label="Time range selection">
@@ -505,6 +531,31 @@ function updateStatCards(cluster) {
 
     document.getElementById('stat-gc-evicted').textContent =
         qh.gc_last_evicted != null ? qh.gc_last_evicted : '--';
+
+    // Token usage
+    const tu = cluster.token_usage || {};
+    const gl = tu.global || {};
+    document.getElementById('stat-total-tokens').textContent =
+        (gl.total_tokens || 0).toLocaleString();
+    document.getElementById('stat-input-tokens').textContent =
+        (gl.prompt_tokens || 0).toLocaleString();
+    document.getElementById('stat-output-tokens').textContent =
+        (gl.completion_tokens || 0).toLocaleString();
+
+    // Top models table
+    const models = tu.by_model || [];
+    const tbody = document.getElementById('model-token-tbody');
+    if (models.length > 0) {
+        tbody.innerHTML = models.map(m =>
+            '<tr><td>' + m.model + '</td>' +
+            '<td class="text-end">' + (m.prompt_tokens || 0).toLocaleString() + '</td>' +
+            '<td class="text-end">' + (m.completion_tokens || 0).toLocaleString() + '</td>' +
+            '<td class="text-end">' + (m.total_tokens || 0).toLocaleString() + '</td>' +
+            '<td class="text-end">' + (m.request_count || 0).toLocaleString() + '</td></tr>'
+        ).join('');
+    } else {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No data</td></tr>';
+    }
 }
 
 function updateNodeAccordions(nodes) {

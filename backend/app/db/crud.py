@@ -332,15 +332,91 @@ async def get_users(
 
 
 async def get_user_token_totals(db: AsyncSession, user_ids: List[int]) -> dict:
-    """Get total tokens for a list of user IDs. Returns {user_id: total_tokens}."""
+    """Get token totals for a list of user IDs.
+
+    Returns {user_id: {prompt_tokens, completion_tokens, total_tokens}}.
+    """
     if not user_ids:
         return {}
     result = await db.execute(
-        select(UsageLedger.user_id, func.sum(UsageLedger.total_tokens))
+        select(
+            UsageLedger.user_id,
+            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+        )
         .where(UsageLedger.user_id.in_(user_ids))
         .group_by(UsageLedger.user_id)
     )
-    return {row[0]: int(row[1]) for row in result.all()}
+    return {
+        row[0]: {
+            "prompt_tokens": int(row[1]),
+            "completion_tokens": int(row[2]),
+            "total_tokens": int(row[3]),
+        }
+        for row in result.all()
+    }
+
+
+async def get_api_key_token_totals(
+    db: AsyncSession, api_key_ids: List[int]
+) -> dict:
+    """Get token totals for a list of API key IDs.
+
+    Returns {api_key_id: {prompt_tokens, completion_tokens, total_tokens}}.
+    """
+    if not api_key_ids:
+        return {}
+    result = await db.execute(
+        select(
+            UsageLedger.api_key_id,
+            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+        )
+        .where(UsageLedger.api_key_id.in_(api_key_ids))
+        .group_by(UsageLedger.api_key_id)
+    )
+    return {
+        row[0]: {
+            "prompt_tokens": int(row[1]),
+            "completion_tokens": int(row[2]),
+            "total_tokens": int(row[3]),
+        }
+        for row in result.all()
+    }
+
+
+async def get_model_token_totals(
+    db: AsyncSession, limit: int = 20
+) -> List[dict]:
+    """Get token totals grouped by model, ordered by total descending.
+
+    Returns [{model, prompt_tokens, completion_tokens, total_tokens, request_count}].
+    """
+    result = await db.execute(
+        select(
+            UsageLedger.model,
+            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+            func.count(UsageLedger.id),
+        )
+        .where(UsageLedger.model.isnot(None))
+        .group_by(UsageLedger.model)
+        .order_by(func.sum(UsageLedger.total_tokens).desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "model": row[0],
+            "prompt_tokens": int(row[1]),
+            "completion_tokens": int(row[2]),
+            "total_tokens": int(row[3]),
+            "request_count": int(row[4]),
+        }
+        for row in result.all()
+    ]
 
 
 async def delete_user(db: AsyncSession, user_id: int) -> bool:
@@ -1928,12 +2004,19 @@ async def get_user_with_stats(db: AsyncSession, user_id: int) -> Optional[dict]:
     if not user:
         return None
 
-    # Total tokens
+    # Total tokens (with input/output breakdown)
     token_result = await db.execute(
-        select(func.coalesce(func.sum(UsageLedger.total_tokens), 0))
+        select(
+            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+        )
         .where(UsageLedger.user_id == user_id)
     )
-    total_tokens = token_result.scalar_one()
+    token_row = token_result.one()
+    prompt_tokens = int(token_row[0])
+    completion_tokens = int(token_row[1])
+    total_tokens = int(token_row[2])
 
     # Request count
     req_result = await db.execute(
@@ -1966,6 +2049,8 @@ async def get_user_with_stats(db: AsyncSession, user_id: int) -> Optional[dict]:
     return {
         "user": user,
         "total_tokens": total_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
         "request_count": request_count,
         "favorite_models": favorite_models,
         "api_key_count": api_key_count,
@@ -1983,7 +2068,9 @@ async def get_user_monthly_usage(
     query = text("""
         SELECT
             DATE_FORMAT(created_at, '%Y-%m') as month,
-            SUM(total_tokens) as tokens,
+            COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+            COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+            COALESCE(SUM(total_tokens), 0) as tokens,
             COUNT(*) as requests
         FROM usage_ledger
         WHERE user_id = :user_id
@@ -1993,7 +2080,13 @@ async def get_user_monthly_usage(
     """)
     result = await db.execute(query, {"user_id": user_id, "months": months})
     return [
-        {"month": row[0], "tokens": int(row[1]), "requests": int(row[2])}
+        {
+            "month": row[0],
+            "prompt_tokens": int(row[1]),
+            "completion_tokens": int(row[2]),
+            "tokens": int(row[3]),
+            "requests": int(row[4]),
+        }
         for row in result.all()
     ]
 
@@ -2303,12 +2396,24 @@ _TREND_BUCKETS = {
 }
 
 
-async def get_global_token_total(db: AsyncSession) -> int:
-    """Total tokens ever served (all users, all time)."""
+async def get_global_token_total(db: AsyncSession) -> dict:
+    """Total tokens ever served (all users, all time).
+
+    Returns {prompt_tokens, completion_tokens, total_tokens}.
+    """
     result = await db.execute(
-        select(func.coalesce(func.sum(UsageLedger.total_tokens), 0))
+        select(
+            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
+            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+        )
     )
-    return int(result.scalar())
+    row = result.one()
+    return {
+        "prompt_tokens": int(row[0]),
+        "completion_tokens": int(row[1]),
+        "total_tokens": int(row[2]),
+    }
 
 
 def _bucket_iso(unix_ts: int) -> str:
@@ -2327,6 +2432,8 @@ async def get_token_trend(
     stmt = text(
         "SELECT"
         "  FLOOR(UNIX_TIMESTAMP(CONVERT_TZ(created_at, '+00:00', '+00:00')) / :bucket) * :bucket AS bucket_ts,"
+        "  COALESCE(SUM(prompt_tokens), 0) AS prompt_v,"
+        "  COALESCE(SUM(completion_tokens), 0) AS completion_v,"
         "  COALESCE(SUM(total_tokens), 0) AS v"
         " FROM usage_ledger"
         " WHERE created_at >= :cutoff"
@@ -2335,7 +2442,12 @@ async def get_token_trend(
     )
     result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
     return [
-        {"t": _bucket_iso(int(row[0])), "v": int(row[1])}
+        {
+            "t": _bucket_iso(int(row[0])),
+            "prompt_tokens": int(row[1]),
+            "completion_tokens": int(row[2]),
+            "v": int(row[3]),
+        }
         for row in result.all()
     ]
 

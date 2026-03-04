@@ -233,6 +233,17 @@ async def telemetry_overview(
     except Exception:
         cluster["queue_health"] = {}
 
+    # Token usage breakdown
+    try:
+        global_tokens = await crud.get_global_token_total(db)
+        model_tokens = await crud.get_model_token_totals(db)
+        cluster["token_usage"] = {
+            "global": global_tokens,
+            "by_model": model_tokens,
+        }
+    except Exception:
+        cluster["token_usage"] = {}
+
     return {
         "cluster": cluster,
         "nodes": node_list,
