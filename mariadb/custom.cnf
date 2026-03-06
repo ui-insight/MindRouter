@@ -16,7 +16,7 @@ innodb_read_io_threads = 8
 innodb_write_io_threads = 8
 
 # Connections
-max_connections = 200
+max_connections = 512
 thread_cache_size = 50
 
 # Query Cache (disabled — MariaDB 10.6+ deprecates it)

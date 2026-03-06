@@ -1,0 +1,529 @@
+{% extends "base.html" %}
+{% block title %}Models - MindRouter{% endblock %}
+
+{% block extra_css %}
+<style>
+.models-header {
+    background: linear-gradient(135deg, var(--bs-body-bg) 0%, var(--bs-tertiary-bg) 100%);
+    border-bottom: 1px solid var(--bs-border-color);
+    padding: 2.5rem 0 1.5rem;
+}
+.filter-bar {
+    position: sticky;
+    top: 56px;
+    z-index: 1020;
+    background: var(--bs-body-bg);
+    border-bottom: 1px solid var(--bs-border-color);
+    padding: 0.75rem 0;
+}
+.filter-pill {
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s;
+    color: var(--bs-body-color) !important;
+    background-color: var(--bs-body-bg);
+}
+.filter-pill.active {
+    background-color: var(--bs-primary) !important;
+    color: #fff !important;
+    border-color: var(--bs-primary) !important;
+}
+.filter-pill:not(.active):hover {
+    border-color: var(--bs-primary);
+    color: var(--bs-primary) !important;
+}
+.model-card {
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+    height: 100%;
+}
+.model-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+.model-logo {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+.desc-clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: 2.6em;
+}
+.cap-badge {
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+.stat-row {
+    font-size: 0.8rem;
+}
+.stat-row .text-muted { font-size: 0.7rem; }
+.code-block {
+    background: var(--bs-tertiary-bg);
+    border-radius: 0.375rem;
+    padding: 1rem;
+    font-size: 0.82rem;
+    overflow-x: auto;
+    position: relative;
+}
+.copy-btn {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+}
+#modelCount { font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="models-header">
+    <div class="container">
+        <h1 class="mb-1"><i class="bi bi-boxes"></i> Model Catalog</h1>
+        <p class="text-muted mb-0">Explore <span id="modelCount">0</span> models available in the MindRouter cluster</p>
+    </div>
+</div>
+
+<div class="filter-bar">
+    <div class="container">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <div class="input-group" style="max-width:260px;">
+                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <input type="text" class="form-control form-control-sm" id="searchInput" placeholder="Search models...">
+            </div>
+            <div class="vr d-none d-md-block"></div>
+            <div class="d-flex flex-wrap gap-1" id="categoryPills">
+                <span class="badge border filter-pill active" data-filter="category" data-value="all">All</span>
+                <span class="badge border filter-pill" data-filter="category" data-value="LLM">LLM</span>
+                <span class="badge border filter-pill" data-filter="category" data-value="Embedding">Embedding</span>
+                <span class="badge border filter-pill" data-filter="category" data-value="Reranking">Reranking</span>
+            </div>
+            <div class="vr d-none d-md-block"></div>
+            <div class="d-flex flex-wrap gap-1" id="enginePills">
+                <span class="badge border filter-pill active" data-filter="engine" data-value="all">All</span>
+                <span class="badge border filter-pill" data-filter="engine" data-value="ollama">Ollama</span>
+                <span class="badge border filter-pill" data-filter="engine" data-value="vllm">vLLM</span>
+            </div>
+            <div class="vr d-none d-md-block"></div>
+            <div class="d-flex flex-wrap gap-1" id="capPills">
+                <span class="badge border filter-pill" data-filter="cap" data-value="multimodal"><i class="bi bi-eye"></i> Vision</span>
+                <span class="badge border filter-pill" data-filter="cap" data-value="thinking"><i class="bi bi-lightbulb"></i> Thinking</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container py-4">
+    <div class="row g-3" id="modelGrid"></div>
+
+    <div id="noResults" class="text-center py-5 d-none">
+        <i class="bi bi-search" style="font-size:3rem;"></i>
+        <p class="text-muted mt-2">No models match your filters</p>
+    </div>
+
+    <hr class="my-5">
+
+    <h3 class="mb-3"><i class="bi bi-bar-chart"></i> Most Popular Models (by token usage)</h3>
+    <div style="max-width:900px;">
+        <canvas id="popularityChart" height="400"></canvas>
+    </div>
+</div>
+
+<!-- Detail Modal -->
+<div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="d-flex align-items-center gap-3">
+                    <img id="modalLogo" class="model-logo" src="" alt="">
+                    <div>
+                        <h5 class="modal-title mb-0" id="detailModalLabel"></h5>
+                        <small class="text-muted" id="modalFamily"></small>
+                    </div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p id="modalDesc" class="mb-3"></p>
+                <div id="modalUrlRow" class="mb-3 d-flex gap-2">
+                    <a id="modalUrl" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-box-arrow-up-right"></i> Model Page
+                    </a>
+                    <a id="modalHfUrl" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-outline-dark">
+                        <i class="bi bi-hdd-stack"></i> HuggingFace
+                    </a>
+                </div>
+
+                <div class="row mb-4">
+                    <div class="col-md-6">
+                        <table class="table table-sm">
+                            <tr><th>Category</th><td id="mdCategory"></td></tr>
+                            <tr><th>Engine(s)</th><td id="mdEngines"></td></tr>
+                            <tr><th>Context Length</th><td id="mdCtx"></td></tr>
+                            <tr><th>Max Context</th><td id="mdMaxCtx"></td></tr>
+                        </table>
+                    </div>
+                    <div class="col-md-6">
+                        <table class="table table-sm">
+                            <tr><th>Parameters</th><td id="mdParams"></td></tr>
+                            <tr><th>Quantization</th><td id="mdQuant"></td></tr>
+                            <tr><th>Format</th><td id="mdFormat"></td></tr>
+                            <tr><th>Backends</th><td id="mdBackends"></td></tr>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="modalCaps" class="mb-4"></div>
+
+                <ul class="nav nav-tabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabCurl" type="button" role="tab">cURL</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabPython" type="button" role="tab">Python</button>
+                    </li>
+                </ul>
+                <div class="tab-content mt-2">
+                    <div class="tab-pane fade show active" id="tabCurl" role="tabpanel">
+                        <div class="code-block"><pre class="mb-0"><code id="codeCurl"></code></pre>
+                            <button class="btn btn-sm btn-outline-secondary copy-btn" onclick="copyCode('codeCurl')"><i class="bi bi-clipboard"></i></button>
+                        </div>
+                    </div>
+                    <div class="tab-pane fade" id="tabPython" role="tabpanel">
+                        <div class="code-block"><pre class="mb-0"><code id="codePython"></code></pre>
+                            <button class="btn btn-sm btn-outline-secondary copy-btn" onclick="copyCode('codePython')"><i class="bi bi-clipboard"></i></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+    const MODELS = {{ models_json|safe }};
+    const TOKEN_TOTALS = {{ token_totals_json|safe }};
+
+    // Infer family from model name when DB family is null
+    const FAMILY_PATTERNS = [
+        [/llama/i, 'llama'],
+        [/llava/i, 'llama'],
+        [/bakllava/i, 'llama'],
+        [/nemotron/i, 'llama'],
+        [/gemma/i, 'gemma'],
+        [/qwen/i, 'qwen'],
+        [/qwq/i, 'qwen'],
+        [/dots\.?ocr/i, 'qwen'],
+        [/mistral/i, 'mistral'],
+        [/mixtral/i, 'mistral'],
+        [/magistral/i, 'mistral'],
+        [/codestral/i, 'mistral'],
+        [/phi\d/i, 'phi'],
+        [/microsoft/i, 'phi'],
+        [/deepseek/i, 'deepseek'],
+        [/gpt-oss/i, 'gpt-oss'],
+        [/command/i, 'command'],
+        [/\baya\b/i, 'command'],
+        [/nomic/i, 'nomic'],
+        [/mxbai/i, 'mxbai'],
+        [/snowflake/i, 'snowflake'],
+        [/granite/i, 'granite'],
+        [/starcoder/i, 'starcoder'],
+        [/olmo/i, 'nomic'],
+    ];
+    function inferFamily(model) {
+        if (model.family) return model.family;
+        for (const [pat, fam] of FAMILY_PATTERNS) {
+            if (pat.test(model.name)) return fam;
+        }
+        return null;
+    }
+    MODELS.forEach(m => { if (!m.family) m.family = inferFamily(m); });
+
+    const FAMILY_LOGOS = {
+        'llama': '/static/img/models/meta.svg',
+        'qwen': '/static/img/models/qwen.svg',
+        'qwen2': '/static/img/models/qwen.svg',
+        'qwen2.5': '/static/img/models/qwen.svg',
+        'qwen3': '/static/img/models/qwen.svg',
+        'qwen3.5': '/static/img/models/qwen.svg',
+        'mistral': '/static/img/models/mistral.svg',
+        'gemma': '/static/img/models/google.svg',
+        'gemma2': '/static/img/models/google.svg',
+        'phi': '/static/img/models/microsoft.svg',
+        'phi3': '/static/img/models/microsoft.svg',
+        'phi4': '/static/img/models/microsoft.svg',
+        'deepseek': '/static/img/models/deepseek.svg',
+        'gpt-oss': '/static/img/models/openai.svg',
+        'command': '/static/img/models/cohere.svg',
+        'command-r': '/static/img/models/cohere.svg',
+        'nomic': '/static/img/models/nomic.svg',
+        'mxbai': '/static/img/models/mixedbread.svg',
+        'snowflake': '/static/img/models/snowflake.svg',
+        'granite': '/static/img/models/ibm.svg',
+        'starcoder': '/static/img/models/huggingface.svg',
+    };
+    const DEFAULT_LOGO = '/static/img/models/default-ai.svg';
+
+    function getLogo(family) {
+        if (!family) return DEFAULT_LOGO;
+        const f = family.toLowerCase();
+        if (FAMILY_LOGOS[f]) return FAMILY_LOGOS[f];
+        for (const key in FAMILY_LOGOS) {
+            if (f.startsWith(key)) return FAMILY_LOGOS[key];
+        }
+        return DEFAULT_LOGO;
+    }
+
+    const filters = { category: 'all', engine: 'all', caps: new Set(), search: '' };
+
+    // Filter pills
+    document.querySelectorAll('.filter-pill').forEach(pill => {
+        pill.addEventListener('click', function() {
+            const type = this.dataset.filter;
+            const val = this.dataset.value;
+            if (type === 'cap') {
+                this.classList.toggle('active');
+                if (filters.caps.has(val)) filters.caps.delete(val);
+                else filters.caps.add(val);
+            } else {
+                document.querySelectorAll(`[data-filter="${type}"]`).forEach(p => p.classList.remove('active'));
+                this.classList.add('active');
+                filters[type] = val;
+            }
+            applyFilters();
+        });
+    });
+
+    document.getElementById('searchInput').addEventListener('input', function() {
+        filters.search = this.value.toLowerCase();
+        applyFilters();
+    });
+
+    function applyFilters() {
+        const grid = document.getElementById('modelGrid');
+        const filtered = MODELS.filter(m => {
+            if (filters.category !== 'all' && m.category !== filters.category) return false;
+            if (filters.engine !== 'all' && !m.engines.includes(filters.engine)) return false;
+            for (const cap of filters.caps) {
+                if (!m.capabilities[cap]) return false;
+            }
+            if (filters.search && !m.name.toLowerCase().includes(filters.search) &&
+                !(m.family && m.family.toLowerCase().includes(filters.search)) &&
+                !(m.description && m.description.toLowerCase().includes(filters.search))) return false;
+            return true;
+        });
+
+        document.getElementById('modelCount').textContent = filtered.length;
+        document.getElementById('noResults').classList.toggle('d-none', filtered.length > 0);
+
+        grid.innerHTML = filtered.map(m => {
+            const logo = getLogo(m.family);
+            const caps = [];
+            if (m.capabilities.multimodal) caps.push('<span class="badge bg-info cap-badge">Vision</span>');
+            if (m.capabilities.thinking) caps.push('<span class="badge bg-warning text-dark cap-badge">Thinking</span>');
+            if (m.capabilities.embeddings) caps.push('<span class="badge bg-success cap-badge">Embedding</span>');
+
+            const stats = [];
+            if (m.context_length) stats.push(`<span class="text-muted">Context Length:</span> ${(m.context_length/1024).toFixed(0)}k`);
+            if (m.parameter_count) stats.push(`<span class="text-muted">Params:</span> ${m.parameter_count}`);
+
+            return `<div class="col-sm-6 col-lg-4 col-xl-3">
+                <div class="card model-card" onclick="showDetail('${m.name.replace(/'/g, "\\'")}')">
+                    <div class="card-body p-3">
+                        <div class="d-flex align-items-start gap-2 mb-2">
+                            <img src="${logo}" class="model-logo" alt="" onerror="this.src='${DEFAULT_LOGO}'">
+                            <div class="min-w-0">
+                                <h6 class="card-title mb-0 text-truncate">${m.name}</h6>
+                                <small class="text-muted">${m.family || ''} &middot; ${m.engines.join(', ')}</small>
+                            </div>
+                        </div>
+                        <p class="desc-clamp text-muted small mb-2">${m.description || 'No description available.'}</p>
+                        <div class="d-flex flex-wrap gap-1 mb-2">${caps.join('')}
+                            <span class="badge bg-secondary cap-badge">${m.category}</span>
+                        </div>
+                        <div class="stat-row d-flex gap-3">${stats.join(' ')}</div>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    window.showDetail = function(name) {
+        const m = MODELS.find(x => x.name === name);
+        if (!m) return;
+        const logo = getLogo(m.family);
+        document.getElementById('modalLogo').src = logo;
+        document.getElementById('detailModalLabel').textContent = m.name;
+        document.getElementById('modalFamily').textContent = m.family || 'Unknown family';
+        document.getElementById('modalDesc').textContent = m.description || 'No description available.';
+
+        const urlRow = document.getElementById('modalUrlRow');
+        const modelUrlBtn = document.getElementById('modalUrl');
+        const hfUrlBtn = document.getElementById('modalHfUrl');
+        if (m.model_url) {
+            modelUrlBtn.href = m.model_url;
+            modelUrlBtn.classList.remove('d-none');
+        } else {
+            modelUrlBtn.classList.add('d-none');
+        }
+        if (m.huggingface_url) {
+            hfUrlBtn.href = m.huggingface_url;
+            hfUrlBtn.classList.remove('d-none');
+        } else {
+            hfUrlBtn.classList.add('d-none');
+        }
+        urlRow.classList.toggle('d-none', !m.model_url && !m.huggingface_url);
+
+        document.getElementById('mdCategory').textContent = m.category;
+        document.getElementById('mdEngines').textContent = m.engines.join(', ');
+        document.getElementById('mdCtx').textContent = m.context_length ? (m.context_length/1024).toFixed(0) + 'k tokens' : '-';
+        document.getElementById('mdMaxCtx').textContent = m.model_max_context ? (m.model_max_context/1024).toFixed(0) + 'k tokens' : '-';
+        document.getElementById('mdParams').textContent = m.parameter_count || '-';
+        document.getElementById('mdQuant').textContent = m.quantization || '-';
+        document.getElementById('mdFormat').textContent = m.model_format || '-';
+        document.getElementById('mdBackends').textContent = m.backend_count;
+
+        // Capabilities badges
+        const capHtml = [];
+        if (m.capabilities.multimodal) capHtml.push('<span class="badge bg-info me-1">Vision</span>');
+        if (m.capabilities.thinking) capHtml.push('<span class="badge bg-warning text-dark me-1">Thinking</span>');
+        if (m.capabilities.embeddings) capHtml.push('<span class="badge bg-success me-1">Embeddings</span>');
+        if (m.capabilities.structured_output) capHtml.push('<span class="badge bg-secondary me-1">Structured Output</span>');
+        document.getElementById('modalCaps').innerHTML = capHtml.join('');
+
+        // Code examples
+        const baseUrl = window.location.origin;
+        const isEmbed = m.category === 'Embedding';
+        const endpoint = isEmbed ? '/v1/embeddings' : '/v1/chat/completions';
+
+        if (isEmbed) {
+            document.getElementById('codeCurl').textContent =
+`curl ${baseUrl}${endpoint} \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${m.name}",
+    "input": "Your text to embed"
+  }'`;
+            document.getElementById('codePython').textContent =
+`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${baseUrl}/v1",
+    api_key="YOUR_API_KEY"
+)
+
+response = client.embeddings.create(
+    model="${m.name}",
+    input="Your text to embed"
+)
+print(response.data[0].embedding[:5])`;
+        } else {
+            document.getElementById('codeCurl').textContent =
+`curl ${baseUrl}${endpoint} \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${m.name}",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'`;
+            document.getElementById('codePython').textContent =
+`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${baseUrl}/v1",
+    api_key="YOUR_API_KEY"
+)
+
+response = client.chat.completions.create(
+    model="${m.name}",
+    messages=[
+        {"role": "user", "content": "Hello!"}
+    ]
+)
+print(response.choices[0].message.content)`;
+        }
+
+        new bootstrap.Modal(document.getElementById('detailModal')).show();
+    };
+
+    window.copyCode = function(id) {
+        const text = document.getElementById(id).textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = document.getElementById(id).closest('.code-block').querySelector('.copy-btn');
+            btn.innerHTML = '<i class="bi bi-check"></i>';
+            setTimeout(() => btn.innerHTML = '<i class="bi bi-clipboard"></i>', 1500);
+        });
+    };
+
+    // Popularity chart
+    function initChart() {
+        if (!TOKEN_TOTALS.length) return;
+        const canvas = document.getElementById('popularityChart');
+        const isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+        const textColor = isDark ? '#ccc' : '#333';
+        const gridColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+
+        const labels = TOKEN_TOTALS.map(t => t.model);
+        const inputData = TOKEN_TOTALS.map(t => t.prompt_tokens);
+        const outputData = TOKEN_TOTALS.map(t => t.completion_tokens);
+
+        new Chart(canvas, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [
+                    { label: 'Input Tokens', data: inputData, backgroundColor: isDark ? '#4a9eff' : '#0d6efd' },
+                    { label: 'Output Tokens', data: outputData, backgroundColor: isDark ? '#ff6b6b' : '#dc3545' },
+                ]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                plugins: {
+                    legend: { labels: { color: textColor } },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => `${ctx.dataset.label}: ${ctx.raw.toLocaleString()} tokens`
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        stacked: true,
+                        ticks: { color: textColor, callback: v => (v/1e6).toFixed(1) + 'M' },
+                        grid: { color: gridColor },
+                        title: { display: true, text: 'Tokens', color: textColor }
+                    },
+                    y: {
+                        stacked: true,
+                        ticks: { color: textColor, font: { size: 11 } },
+                        grid: { display: false }
+                    }
+                }
+            }
+        });
+    }
+
+    applyFilters();
+    initChart();
+
+    // Re-render chart on theme change
+    document.addEventListener('mr-theme-changed', function() {
+        const container = document.getElementById('popularityChart').parentNode;
+        container.innerHTML = '<canvas id="popularityChart" height="400"></canvas>';
+        initChart();
+    });
+})();
+</script>
+{% endblock %}

@@ -243,6 +243,132 @@ async def documentation(
     )
 
 
+@dashboard_router.get("/models", response_class=HTMLResponse)
+async def models_catalog(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Public models catalog page."""
+    user_id = get_session_user_id(request)
+    user = None
+    if user_id:
+        user = await crud.get_user_by_id(db, user_id)
+
+    registry = get_registry()
+    backends = await registry.get_healthy_backends()
+
+    model_data: dict = {}
+    for backend in backends:
+        backend_models = await registry.get_backend_models(backend.id)
+        for model in backend_models:
+            if model.name not in model_data:
+                model_data[model.name] = {
+                    "capabilities": {
+                        "multimodal": False,
+                        "embeddings": False,
+                        "structured_output": True,
+                        "thinking": False,
+                    },
+                    "context_length": None,
+                    "model_max_context": None,
+                    "parameter_count": None,
+                    "quantization": None,
+                    "family": None,
+                    "description": None,
+                    "model_url": None,
+                    "huggingface_url": None,
+                    "modality": None,
+                    "model_format": None,
+                    "embedding_length": None,
+                    "engines": set(),
+                    "backend_count": 0,
+                }
+
+            md = model_data[model.name]
+            md["backend_count"] += 1
+            md["engines"].add(backend.engine.value)
+
+            if model.supports_multimodal:
+                md["capabilities"]["multimodal"] = True
+            if model.supports_thinking:
+                md["capabilities"]["thinking"] = True
+            if "embed" in model.name.lower():
+                md["capabilities"]["embeddings"] = True
+
+            if model.context_length is not None:
+                cur = md["context_length"]
+                if cur is None or model.context_length > cur:
+                    md["context_length"] = model.context_length
+
+            if model.model_max_context is not None:
+                cur = md["model_max_context"]
+                if cur is None or model.model_max_context > cur:
+                    md["model_max_context"] = model.model_max_context
+
+            if model.parameter_count and not md["parameter_count"]:
+                md["parameter_count"] = model.parameter_count
+            if model.quantization and not md["quantization"]:
+                md["quantization"] = model.quantization
+            if model.family and not md["family"]:
+                md["family"] = model.family
+            if model.description and not md["description"]:
+                md["description"] = model.description
+            if model.model_url and not md["model_url"]:
+                md["model_url"] = model.model_url
+            if model.huggingface_url and not md["huggingface_url"]:
+                md["huggingface_url"] = model.huggingface_url
+            if model.modality and not md["modality"]:
+                md["modality"] = model.modality.value
+            if model.model_format and not md["model_format"]:
+                md["model_format"] = model.model_format
+            if model.embedding_length and not md["embedding_length"]:
+                md["embedding_length"] = model.embedding_length
+
+    # Build list for JSON serialization
+    models_list = []
+    for name, data in sorted(model_data.items()):
+        modality = data["modality"] or "chat"
+        if modality == "embedding":
+            category = "Embedding"
+        elif modality == "reranking":
+            category = "Reranking"
+        else:
+            category = "LLM"
+        models_list.append({
+            "name": name,
+            "family": data["family"],
+            "description": data["description"],
+            "model_url": data["model_url"],
+            "huggingface_url": data["huggingface_url"],
+            "category": category,
+            "engines": sorted(data["engines"]),
+            "capabilities": data["capabilities"],
+            "context_length": data["context_length"],
+            "model_max_context": data["model_max_context"],
+            "parameter_count": data["parameter_count"],
+            "quantization": data["quantization"],
+            "model_format": data["model_format"],
+            "embedding_length": data["embedding_length"],
+            "backend_count": data["backend_count"],
+        })
+
+    # Token usage for popularity chart
+    try:
+        token_totals = await crud.get_model_token_totals(db, limit=15)
+    except Exception:
+        token_totals = []
+
+    return templates.TemplateResponse(
+        "public/models.html",
+        {
+            "request": request,
+            "user": user,
+            "models_json": json.dumps(models_list),
+            "token_totals_json": json.dumps(token_totals),
+        },
+    )
+
+
 # Authentication
 @dashboard_router.get("/login", response_class=HTMLResponse)
 async def login_form(request: Request, error: Optional[str] = None):

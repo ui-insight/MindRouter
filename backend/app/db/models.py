@@ -439,6 +439,7 @@ class Model(Base, TimestampMixin):
     # Admin-editable fields
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     model_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    huggingface_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     # Size and performance
     parameter_count: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "7B", "70B"
