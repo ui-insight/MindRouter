@@ -14,6 +14,7 @@
 
 """Health check and metrics endpoints."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
@@ -200,27 +201,51 @@ async def cluster_status() -> Dict[str, Any]:
     }
 
 
-_total_tokens_cache: Dict[str, Any] = {
+_TOTAL_TOKENS_REDIS_KEY = "cluster:total_tokens"
+_TOTAL_TOKENS_TTL = 10  # seconds
+
+# Per-worker fallback cache (used only when Redis is unavailable)
+_total_tokens_fallback: Dict[str, Any] = {
     "value": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    "expires": 0.0,
 }
 
 
 @router.get("/api/cluster/total-tokens")
 async def cluster_total_tokens() -> Dict[str, Any]:
-    """Public endpoint: total tokens ever served (cached 10s)."""
-    import time
-    now = time.monotonic()
-    if now < _total_tokens_cache["expires"]:
-        return _total_tokens_cache["value"]
+    """Public endpoint: total tokens ever served (cached 10s in Redis).
+
+    Uses Redis as a shared cache so all uvicorn workers return the same
+    value, preventing the counter from appearing to fluctuate.
+    """
+    # Try Redis shared cache first
+    if redis_client.is_available():
+        try:
+            r = redis_client._redis
+            cached = await r.get(_TOTAL_TOKENS_REDIS_KEY)
+            if cached:
+                totals = json.loads(cached)
+                _total_tokens_fallback["value"] = totals
+                return totals
+        except Exception:
+            pass
+
+    # Cache miss or Redis unavailable — query DB
     try:
         from backend.app.db import crud
         async with AsyncSessionLocal() as db:
             totals = await crud.get_global_token_total(db)
     except Exception:
-        totals = _total_tokens_cache["value"]
-    _total_tokens_cache["value"] = totals
-    _total_tokens_cache["expires"] = now + 10
+        return _total_tokens_fallback["value"]
+
+    # Store in Redis (shared across all workers)
+    if redis_client.is_available():
+        try:
+            r = redis_client._redis
+            await r.set(_TOTAL_TOKENS_REDIS_KEY, json.dumps(totals), ex=_TOTAL_TOKENS_TTL)
+        except Exception:
+            pass
+
+    _total_tokens_fallback["value"] = totals
     return totals
 
 
