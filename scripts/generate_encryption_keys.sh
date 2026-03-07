@@ -37,7 +37,8 @@ generate_keys() {
     echo "1;${data_key}" > "$plaintext_keyfile"
 
     # Encrypt the keyfile with the key-encryption-key
-    openssl enc -aes-256-cbc -md sha512 -pbkdf2 \
+    # MariaDB file_key_management expects -md sha1 (its built-in decryptor uses SHA-1)
+    openssl enc -aes-256-cbc -md sha1 \
         -pass "file:${dir}/keyfile.key" \
         -in "$plaintext_keyfile" \
         -out "${dir}/keyfile.enc"
