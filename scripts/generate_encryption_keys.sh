@@ -3,6 +3,9 @@
 # Generate MariaDB TDE encryption keys for primary and archive databases.
 # Uses file_key_management plugin format: keyfile encrypted with AES-256-CBC.
 #
+# Encrypts via the mariadb:11.2 Docker image to guarantee OpenSSL version
+# compatibility with the MariaDB container's built-in decryptor.
+#
 # Usage: bash scripts/generate_encryption_keys.sh
 #
 # Idempotent — skips generation if key files already exist.
@@ -11,6 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+MARIADB_IMAGE="mariadb:11.2"
 
 generate_keys() {
     local name="$1"
@@ -36,18 +40,23 @@ generate_keys() {
     plaintext_keyfile="$(mktemp)"
     echo "1;${data_key}" > "$plaintext_keyfile"
 
-    # Encrypt the keyfile with the key-encryption-key
-    # MariaDB file_key_management expects -md sha1 (its built-in decryptor uses SHA-1)
-    openssl enc -aes-256-cbc -md sha1 \
-        -pass "file:${dir}/keyfile.key" \
-        -in "$plaintext_keyfile" \
-        -out "${dir}/keyfile.enc"
+    # Encrypt the keyfile using the MariaDB container's OpenSSL to guarantee
+    # format compatibility with MariaDB's file_key_management decryptor.
+    # MariaDB uses EVP_BytesToKey with SHA-1 internally.
+    docker run --rm \
+        -v "${dir}:/enc" \
+        -v "${plaintext_keyfile}:/tmp/plain:ro" \
+        "$MARIADB_IMAGE" \
+        openssl enc -aes-256-cbc -md sha1 \
+            -pass "file:/enc/keyfile.key" \
+            -in /tmp/plain \
+            -out /enc/keyfile.enc
 
     # Clean up plaintext
     rm -f "$plaintext_keyfile"
 
-    # Restrict permissions
-    chmod 600 "${dir}/keyfile.key" "${dir}/keyfile.enc"
+    # Make readable by MariaDB container's mysql user
+    chmod 644 "${dir}/keyfile.key" "${dir}/keyfile.enc"
 
     echo "[done] ${name} keys written to ${dir}"
 }
