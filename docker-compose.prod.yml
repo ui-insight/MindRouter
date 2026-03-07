@@ -28,6 +28,8 @@ services:
     depends_on:
       mariadb:
         condition: service_healthy
+      mariadb-archive:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -58,6 +60,22 @@ services:
       - mindrouter_network
     # No external port exposure in production
 
+  mariadb-archive:
+    image: mariadb:11.2
+    env_file:
+      - .env.prod
+    volumes:
+      - mariadb_archive_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - mindrouter_network
+
   redis:
     image: redis:7-alpine
     volumes:
@@ -75,6 +93,7 @@ services:
 
 volumes:
   mariadb_data:
+  mariadb_archive_data:
   redis_data:
 
 networks:

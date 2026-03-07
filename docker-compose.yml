@@ -18,12 +18,15 @@ services:
       - AZURE_AD_TENANT_ID=${AZURE_AD_TENANT_ID:-}
       - AZURE_AD_REDIRECT_URI=${AZURE_AD_REDIRECT_URI:-}
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
+      - ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:${MYSQL_ARCHIVE_PASSWORD:-archive_password}@mariadb-archive:3306/mindrouter_archive
     volumes:
       - artifact_data:/data/artifacts
       - chat_data:/data/chat_files
       - ./backend:/app/backend:ro
     depends_on:
       mariadb:
+        condition: service_healthy
+      mariadb-archive:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -50,6 +53,27 @@ services:
       - mariadb_data:/var/lib/mysql
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./mariadb/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - mindrouter_network
+
+  mariadb-archive:
+    image: mariadb:11.2
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ARCHIVE_ROOT_PASSWORD:-archive_root_password}
+      - MYSQL_DATABASE=mindrouter_archive
+      - MYSQL_USER=mindrouter_archive
+      - MYSQL_PASSWORD=${MYSQL_ARCHIVE_PASSWORD:-archive_password}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mariadb_archive_data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -131,6 +155,7 @@ services:
 
 volumes:
   mariadb_data:
+  mariadb_archive_data:
   redis_data:
   artifact_data:
   chat_data:

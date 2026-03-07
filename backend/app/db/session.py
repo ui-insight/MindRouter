@@ -139,3 +139,82 @@ async def get_async_db_context() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+
+# ------------------------------------------------------------------
+# Archive database (lazy-init, only when archive_database_url is set)
+# ------------------------------------------------------------------
+
+_archive_async_engine = None
+_ArchiveAsyncSessionLocal = None
+
+
+def _init_archive_engine():
+    """Lazily create the archive async engine and session factory."""
+    global _archive_async_engine, _ArchiveAsyncSessionLocal
+    if _archive_async_engine is not None:
+        return
+
+    archive_url = settings.archive_database_url
+    if not archive_url:
+        return
+
+    async_archive_url = archive_url.replace(
+        "mysql+pymysql", "mysql+aiomysql"
+    ).replace(
+        "mariadb+pymysql", "mariadb+aiomysql"
+    )
+
+    _archive_async_engine = create_async_engine(
+        async_archive_url,
+        pool_size=5,
+        max_overflow=5,
+        echo=settings.database_echo,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_timeout=10,
+    )
+
+    _ArchiveAsyncSessionLocal = async_sessionmaker(
+        _archive_async_engine,
+        class_=AsyncSession,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+
+def get_archive_engine():
+    """Return the archive async engine (or None if not configured)."""
+    _init_archive_engine()
+    return _archive_async_engine
+
+
+@asynccontextmanager
+async def get_archive_db_context() -> AsyncGenerator[AsyncSession, None]:
+    """Context manager for archive database session.
+
+    Raises RuntimeError if archive DB is not configured.
+    """
+    _init_archive_engine()
+    if _ArchiveAsyncSessionLocal is None:
+        raise RuntimeError("Archive database is not configured (ARCHIVE_DATABASE_URL not set)")
+
+    async with _ArchiveAsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+async def close_archive_engine():
+    """Dispose the archive engine on shutdown."""
+    global _archive_async_engine, _ArchiveAsyncSessionLocal
+    if _archive_async_engine is not None:
+        await _archive_async_engine.dispose()
+        _archive_async_engine = None
+        _ArchiveAsyncSessionLocal = None

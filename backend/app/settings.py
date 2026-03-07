@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     database_max_overflow: int = 20
     database_echo: bool = False
 
+    # Archive Database (optional — enables tiered data retention)
+    archive_database_url: Optional[str] = None
+
     # Redis (optional)
     redis_url: Optional[str] = None
 

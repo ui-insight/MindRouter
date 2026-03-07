@@ -43,7 +43,6 @@ from backend.app.logging_config import (
     get_logger,
     setup_logging,
 )
-from backend.app.db import chat_crud
 from backend.app.db.session import get_async_db_context
 from backend.app.settings import get_settings
 from backend.app.storage.artifacts import get_artifact_storage
@@ -53,28 +52,30 @@ setup_logging()
 logger = get_logger(__name__)
 
 
-async def _conversation_cleanup_loop() -> None:
-    """Background loop that deletes expired conversations and orphan attachments."""
-    settings = get_settings()
+async def _retention_loop() -> None:
+    """Background loop for tiered data retention (archive + cleanup).
+
+    Replaces the old _conversation_cleanup_loop with a unified retention system
+    that handles requests, chat, and telemetry data with configurable policies.
+    """
+    from backend.app.services.retention import get_retention_config, run_retention_cycle
+
     while True:
         try:
-            await asyncio.sleep(settings.conversation_cleanup_interval)
+            # Load interval from AppConfig each iteration
             async with get_async_db_context() as db:
-                deleted = await chat_crud.delete_expired_conversations(
-                    db, settings.conversation_retention_days
-                )
-                orphans = await chat_crud.delete_all_orphan_attachments(db)
-                await db.commit()
-                if deleted or orphans:
-                    logger.info(
-                        "conversation_cleanup",
-                        conversations_deleted=deleted,
-                        orphan_attachments_deleted=orphans,
-                    )
+                config = await get_retention_config(db)
+            interval = config.get("retention.cleanup_interval", 3600)
+
+            await asyncio.sleep(interval)
+
+            logger.info("retention_cycle_start")
+            summary = await run_retention_cycle()
+            logger.info("retention_cycle_complete", summary=summary)
         except asyncio.CancelledError:
             break
         except Exception:
-            logger.exception("conversation_cleanup_error")
+            logger.exception("retention_cycle_error")
 
 
 async def _seed_redis_from_db() -> None:
@@ -153,8 +154,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     async with AsyncSessionLocal() as db:
         await _init_tz_cache(db)
 
+    # Initialize archive database if configured
+    settings_ref = get_settings()
+    if settings_ref.archive_database_url:
+        try:
+            from backend.app.db.archive_models import ArchiveBase
+            from backend.app.db.session import get_archive_engine
+            archive_engine = get_archive_engine()
+            if archive_engine:
+                async with archive_engine.begin() as conn:
+                    await conn.run_sync(ArchiveBase.metadata.create_all)
+                logger.info("archive_db_initialized")
+        except Exception:
+            logger.exception("archive_db_init_failed")
+
     # Start background loops
-    _cleanup_task = asyncio.create_task(_conversation_cleanup_loop())
+    _cleanup_task = asyncio.create_task(_retention_loop())
     if redis_is_available():
         _redis_sync_task = asyncio.create_task(_redis_sync_loop())
 
@@ -196,6 +211,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         except Exception:
             logger.exception("redis_final_sync_failed")
     await close_redis()
+    # Close archive DB engine if initialized
+    try:
+        from backend.app.db.session import close_archive_engine
+        await close_archive_engine()
+    except Exception:
+        pass
     await shutdown_scheduler()
     await shutdown_registry()
     logger.info("MindRouter shutdown complete")

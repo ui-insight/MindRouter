@@ -2814,3 +2814,148 @@ async def _init_tz_cache(db: AsyncSession) -> None:
     """Load timezone from DB into cache. Call at startup or first request."""
     tz_name = await crud.get_config_json(db, "app.timezone", "America/Los_Angeles")
     _refresh_tz_cache_sync(tz_name)
+
+
+# ------------------------------------------------------------------
+# Data Retention
+# ------------------------------------------------------------------
+
+
+@dashboard_router.get("/admin/retention", response_class=HTMLResponse)
+async def admin_retention(
+    request: Request,
+    tab: str = "policies",
+    page: int = 1,
+    category: str = "requests",
+    model_filter: Optional[str] = None,
+    user_id_filter: Optional[int] = None,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin data retention page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    from backend.app.services.retention import (
+        browse_archive,
+        get_app_db_counts,
+        get_archive_stats,
+        get_retention_config,
+    )
+    from backend.app.settings import get_settings
+
+    settings = get_settings()
+    archive_configured = settings.archive_database_url is not None
+
+    config = await get_retention_config(db)
+    app_counts = await get_app_db_counts(db)
+
+    archive_stats = None
+    browse_rows = []
+    browse_total = 0
+
+    if archive_configured:
+        if tab == "stats" or tab == "browse":
+            try:
+                from backend.app.db.session import get_archive_db_context
+                async with get_archive_db_context() as archive_db:
+                    if tab == "stats":
+                        archive_stats = await get_archive_stats(archive_db)
+                    elif tab == "browse":
+                        archive_stats = await get_archive_stats(archive_db)
+                        browse_rows, browse_total = await browse_archive(
+                            archive_db, category, page, 50,
+                            model_filter=model_filter,
+                            user_id_filter=user_id_filter,
+                        )
+            except Exception as e:
+                error = f"Archive DB error: {e}"
+
+    total_pages = max(1, (browse_total + 49) // 50)
+
+    return templates.TemplateResponse(
+        "admin/retention.html",
+        {
+            "request": request,
+            "user": user,
+            "tab": tab,
+            "config": config,
+            "app_counts": app_counts,
+            "archive_configured": archive_configured,
+            "archive_stats": archive_stats,
+            "browse_rows": browse_rows,
+            "browse_total": browse_total,
+            "browse_category": category,
+            "model_filter": model_filter or "",
+            "user_id_filter": user_id_filter or "",
+            "page": page,
+            "total_pages": total_pages,
+            "success": success,
+            "error": error,
+        },
+    )
+
+
+@dashboard_router.post("/admin/retention")
+async def admin_retention_post(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle retention form submissions."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action")
+
+    if action == "update_policies":
+        from backend.app.services.retention import save_retention_config
+
+        updates = {}
+        for key in [
+            "retention.requests.tier1_days",
+            "retention.requests.tier2_days",
+            "retention.chat.tier1_days",
+            "retention.chat.tier2_days",
+            "retention.telemetry.tier1_days",
+            "retention.telemetry.tier2_days",
+            "retention.cleanup_interval",
+            "retention.batch_size",
+        ]:
+            val = form.get(key)
+            if val is not None:
+                try:
+                    updates[key] = int(val)
+                except ValueError:
+                    pass
+
+        await save_retention_config(db, updates)
+        await db.commit()
+        return RedirectResponse(
+            url="/admin/retention?success=policies_updated", status_code=302
+        )
+
+    elif action == "run_now":
+        import asyncio
+        from backend.app.services.retention import run_retention_cycle
+
+        # Run in background so the redirect completes quickly
+        asyncio.create_task(run_retention_cycle())
+        return RedirectResponse(
+            url="/admin/retention?success=retention_triggered", status_code=302
+        )
+
+    return RedirectResponse(
+        url="/admin/retention?error=Unknown+action", status_code=302
+    )

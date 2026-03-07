@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+
+{% block title %}Data Retention - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "retention" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <h1><i class="bi bi-archive"></i> Data Retention</h1>
+                    <p class="text-muted mb-0">Configure how long data is kept in the app and archive databases.</p>
+                </div>
+                <form method="post" action="/admin/retention" class="d-inline">
+                    <input type="hidden" name="action" value="run_now">
+                    <button type="submit" class="btn btn-warning" onclick="return confirm('Run a full retention cycle now?')">
+                        <i class="bi bi-play-circle"></i> Run Retention Now
+                    </button>
+                </form>
+            </div>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'policies_updated' %}Retention policies saved.
+                {% elif success == 'retention_triggered' %}Retention cycle triggered in background. Check logs for progress.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <!-- Tabs -->
+            <ul class="nav nav-tabs mb-4" role="tablist">
+                <li class="nav-item">
+                    <a class="nav-link {% if tab == 'policies' %}active{% endif %}" href="/admin/retention?tab=policies">
+                        <i class="bi bi-sliders"></i> Policies
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if tab == 'stats' %}active{% endif %}" href="/admin/retention?tab=stats">
+                        <i class="bi bi-bar-chart"></i> Archive Stats
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if tab == 'browse' %}active{% endif %}" href="/admin/retention?tab=browse">
+                        <i class="bi bi-search"></i> Browse Archive
+                    </a>
+                </li>
+            </ul>
+
+            <!-- Tab: Policies -->
+            {% if tab == 'policies' %}
+            <form method="post" action="/admin/retention">
+                <input type="hidden" name="action" value="update_policies">
+
+                <div class="row g-4">
+                    <!-- Requests -->
+                    <div class="col-lg-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0"><i class="bi bi-inbox"></i> Requests</h5>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Includes requests, responses, usage ledger, scheduler decisions, and artifacts.</p>
+                                <div class="mb-3">
+                                    <label class="form-label">Tier 1 — Keep in App DB (days)</label>
+                                    <input type="number" class="form-control" name="retention.requests.tier1_days"
+                                           value="{{ config['retention.requests.tier1_days'] }}" min="0">
+                                    <div class="form-text">0 = never delete. Currently {{ app_counts.requests|default(0) }} requests in app DB.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Tier 2 — Keep in Archive DB (days)</label>
+                                    <input type="number" class="form-control" name="retention.requests.tier2_days"
+                                           value="{{ config['retention.requests.tier2_days'] }}" min="0"
+                                           {% if not archive_configured %}disabled{% endif %}>
+                                    {% if not archive_configured %}
+                                    <div class="form-text text-warning">Archive DB not configured.</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chat -->
+                    <div class="col-lg-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0"><i class="bi bi-chat-dots"></i> Chat</h5>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Includes conversations, messages, and attachments.</p>
+                                <div class="mb-3">
+                                    <label class="form-label">Tier 1 — Keep in App DB (days)</label>
+                                    <input type="number" class="form-control" name="retention.chat.tier1_days"
+                                           value="{{ config['retention.chat.tier1_days'] }}" min="0">
+                                    <div class="form-text">0 = never delete. Currently {{ app_counts.chat_conversations|default(0) }} conversations in app DB.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Tier 2 — Keep in Archive DB (days)</label>
+                                    <input type="number" class="form-control" name="retention.chat.tier2_days"
+                                           value="{{ config['retention.chat.tier2_days'] }}" min="0"
+                                           {% if not archive_configured %}disabled{% endif %}>
+                                    {% if not archive_configured %}
+                                    <div class="form-text text-warning">Archive DB not configured.</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Telemetry -->
+                    <div class="col-lg-4">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0"><i class="bi bi-graph-up"></i> Telemetry</h5>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">GPU and backend telemetry data. Not archived — just deleted.</p>
+                                <div class="mb-3">
+                                    <label class="form-label">Tier 1 — Keep in App DB (days)</label>
+                                    <input type="number" class="form-control" name="retention.telemetry.tier1_days"
+                                           value="{{ config['retention.telemetry.tier1_days'] }}" min="0">
+                                    <div class="form-text">0 = never delete.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Tier 2 — Archive (days)</label>
+                                    <input type="number" class="form-control" name="retention.telemetry.tier2_days"
+                                           value="{{ config['retention.telemetry.tier2_days'] }}" min="0" disabled>
+                                    <div class="form-text text-muted">Telemetry is not archived (always 0).</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Advanced Settings -->
+                <div class="card mt-4">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="bi bi-gear"></i> Advanced</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <label class="form-label">Cleanup Interval (seconds)</label>
+                                <input type="number" class="form-control" name="retention.cleanup_interval"
+                                       value="{{ config['retention.cleanup_interval'] }}" min="60">
+                                <div class="form-text">How often the retention loop runs.</div>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Batch Size (rows)</label>
+                                <input type="number" class="form-control" name="retention.batch_size"
+                                       value="{{ config['retention.batch_size'] }}" min="10" max="10000">
+                                <div class="form-text">Rows processed per archive+delete batch.</div>
+                            </div>
+                            <div class="col-md-4 d-flex align-items-end">
+                                <div>
+                                    {% if archive_configured %}
+                                    <span class="badge bg-success"><i class="bi bi-check-circle"></i> Archive DB Connected</span>
+                                    {% else %}
+                                    <span class="badge bg-warning text-dark"><i class="bi bi-exclamation-triangle"></i> Archive DB Not Configured</span>
+                                    <div class="form-text">Set <code>ARCHIVE_DATABASE_URL</code> to enable archival.</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Save All Policies</button>
+                </div>
+            </form>
+            {% endif %}
+
+            <!-- Tab: Archive Stats -->
+            {% if tab == 'stats' %}
+            {% if not archive_configured %}
+            <div class="alert alert-warning">
+                <i class="bi bi-exclamation-triangle"></i> Archive database is not configured.
+                Set <code>ARCHIVE_DATABASE_URL</code> in your environment to enable archival.
+            </div>
+            {% elif archive_stats %}
+            <div class="row mb-4">
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h3 class="mb-0">{{ archive_stats.total_rows|default(0) }}</h3>
+                            <small class="text-muted">Total Archived Rows</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h3 class="mb-0">{{ archive_stats.total_size_mb|default(0) }} MB</h3>
+                            <small class="text-muted">Total Archive Size</small>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h3 class="mb-0">{{ archive_stats.tables|length }}</h3>
+                            <small class="text-muted">Archive Tables</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Per-Table Breakdown</h5></div>
+                <div class="card-body p-0">
+                    <table class="table table-striped mb-0">
+                        <thead>
+                            <tr>
+                                <th>Table</th>
+                                <th class="text-end">Rows</th>
+                                <th class="text-end">Size (MB)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for table_name, info in archive_stats.tables.items() %}
+                            <tr>
+                                <td><code>{{ table_name }}</code></td>
+                                <td class="text-end">{{ info.rows }}</td>
+                                <td class="text-end">{{ info.size_mb }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                        <tfoot>
+                            <tr class="fw-bold">
+                                <td>Total</td>
+                                <td class="text-end">{{ archive_stats.total_rows }}</td>
+                                <td class="text-end">{{ archive_stats.total_size_mb }}</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+            {% endif %}
+
+            <!-- Tab: Browse Archive -->
+            {% if tab == 'browse' %}
+            {% if not archive_configured %}
+            <div class="alert alert-warning">
+                <i class="bi bi-exclamation-triangle"></i> Archive database is not configured.
+                Set <code>ARCHIVE_DATABASE_URL</code> in your environment to enable archival.
+            </div>
+            {% else %}
+            <!-- Filters -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="get" action="/admin/retention" class="row g-3 align-items-end">
+                        <input type="hidden" name="tab" value="browse">
+                        <div class="col-md-3">
+                            <label class="form-label">Category</label>
+                            <select class="form-select" name="category">
+                                <option value="requests" {% if browse_category == 'requests' %}selected{% endif %}>Requests</option>
+                                <option value="chat" {% if browse_category == 'chat' %}selected{% endif %}>Chat</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Model Filter</label>
+                            <input type="text" class="form-control" name="model_filter" value="{{ model_filter }}" placeholder="e.g. qwen3">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">User ID</label>
+                            <input type="number" class="form-control" name="user_id_filter" value="{{ user_id_filter }}" placeholder="Any">
+                        </div>
+                        <div class="col-md-3">
+                            <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> Search</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div class="card">
+                <div class="card-header d-flex justify-content-between">
+                    <h5 class="mb-0">Archived {{ browse_category|title }} ({{ browse_total }} total)</h5>
+                </div>
+                <div class="card-body p-0">
+                    {% if browse_rows %}
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>User ID</th>
+                                    {% if browse_category == 'requests' %}
+                                    <th>Model</th>
+                                    <th>Endpoint</th>
+                                    <th>Status</th>
+                                    {% else %}
+                                    <th>Title</th>
+                                    <th>Model</th>
+                                    {% endif %}
+                                    <th>Created</th>
+                                    <th>Archived</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for row in browse_rows %}
+                                <tr>
+                                    <td>{{ row.id }}</td>
+                                    <td>{{ row.user_id }}</td>
+                                    {% if browse_category == 'requests' %}
+                                    <td><code>{{ row.model }}</code></td>
+                                    <td>{{ row.endpoint }}</td>
+                                    <td>{{ row.status }}</td>
+                                    {% else %}
+                                    <td>{{ row.title }}</td>
+                                    <td><code>{{ row.model or '—' }}</code></td>
+                                    {% endif %}
+                                    <td>{{ row.created_at.strftime('%Y-%m-%d %H:%M') if row.created_at else '—' }}</td>
+                                    <td>{{ row.archived_at.strftime('%Y-%m-%d %H:%M') if row.archived_at else '—' }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-5 text-muted">
+                        <i class="bi bi-archive" style="font-size: 3rem;"></i>
+                        <p class="mt-2">No archived records found.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            {% if total_pages > 1 %}
+            <nav class="mt-3">
+                <ul class="pagination justify-content-center">
+                    <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                        <a class="page-link" href="/admin/retention?tab=browse&category={{ browse_category }}&model_filter={{ model_filter }}&user_id_filter={{ user_id_filter }}&page={{ page - 1 }}">Previous</a>
+                    </li>
+                    {% for p in range(1, total_pages + 1) %}
+                    {% if p == page or (p <= 3) or (p >= total_pages - 2) or (p >= page - 1 and p <= page + 1) %}
+                    <li class="page-item {% if p == page %}active{% endif %}">
+                        <a class="page-link" href="/admin/retention?tab=browse&category={{ browse_category }}&model_filter={{ model_filter }}&user_id_filter={{ user_id_filter }}&page={{ p }}">{{ p }}</a>
+                    </li>
+                    {% elif p == 4 or p == total_pages - 3 %}
+                    <li class="page-item disabled"><span class="page-link">...</span></li>
+                    {% endif %}
+                    {% endfor %}
+                    <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                        <a class="page-link" href="/admin/retention?tab=browse&category={{ browse_category }}&model_filter={{ model_filter }}&user_id_filter={{ user_id_filter }}&page={{ page + 1 }}">Next</a>
+                    </li>
+                </ul>
+            </nav>
+            {% endif %}
+            {% endif %}
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+{% endblock %}
