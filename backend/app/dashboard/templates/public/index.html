@@ -894,6 +894,11 @@ response = client.chat.completions.create(
     let currentRPM = 0;
     let currentActive = 0;
 
+    // --- Connection-lost detection ---
+    let fetchFailCount = 0;
+    let isDisconnected = false;
+    const DISCONNECT_THRESHOLD = 3;
+
     async function fetchThroughput() {
         try {
             const resp = await fetch('/api/cluster/throughput');
@@ -902,10 +907,28 @@ response = client.chat.completions.create(
                 currentTPS = data.tokens_per_second || 0;
                 currentRPM = data.requests_per_minute || 0;
                 currentActive = data.active_requests || 0;
+                fetchFailCount = 0;
+                isDisconnected = false;
                 // Update screen reader summary
                 if (srEl) srEl.textContent = currentTPS + ' tokens per second, ' + currentRPM + ' recent requests, ' + currentActive + ' active';
+            } else {
+                fetchFailCount++;
+                if (fetchFailCount >= DISCONNECT_THRESHOLD) {
+                    isDisconnected = true;
+                    currentTPS = 0;
+                    currentRPM = 0;
+                    currentActive = 0;
+                }
             }
-        } catch (e) { /* retry next cycle */ }
+        } catch (e) {
+            fetchFailCount++;
+            if (fetchFailCount >= DISCONNECT_THRESHOLD) {
+                isDisconnected = true;
+                currentTPS = 0;
+                currentRPM = 0;
+                currentActive = 0;
+            }
+        }
     }
 
     fetchThroughput();
@@ -1092,6 +1115,59 @@ response = client.chat.completions.create(
             ctx.fillStyle = 'rgba(90, 99, 128, 0.7)';
             ctx.font = '10px system-ui, -apple-system, sans-serif';
             ctx.fillText('Backends', outputNodes[0].x, outputNodes[0].y - 30);
+        }
+
+        // --- Disconnected overlay ---
+        if (isDisconnected) {
+            const cx = W / 2;
+            const cy = H / 2;
+
+            // Dark overlay
+            ctx.fillStyle = 'rgba(8, 12, 24, 0.75)';
+            ctx.fillRect(0, 0, W, H);
+
+            // Scanline effect
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.015)';
+            for (let y = 0; y < H; y += 3) {
+                ctx.fillRect(0, y, W, 1);
+            }
+
+            // Pulsing glow ring
+            const pulse = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(time * 0.003));
+            const ringRadius = 38 + 4 * Math.sin(time * 0.002);
+            const ringGrad = ctx.createRadialGradient(cx, cy, ringRadius - 12, cx, cy, ringRadius + 18);
+            ringGrad.addColorStop(0, 'rgba(255, 60, 40, 0)');
+            ringGrad.addColorStop(0.4, 'rgba(255, 80, 40, ' + (0.25 * pulse) + ')');
+            ringGrad.addColorStop(0.7, 'rgba(255, 50, 30, ' + (0.15 * pulse) + ')');
+            ringGrad.addColorStop(1, 'rgba(255, 40, 20, 0)');
+            ctx.beginPath();
+            ctx.arc(cx, cy, ringRadius + 18, 0, Math.PI * 2);
+            ctx.fillStyle = ringGrad;
+            ctx.fill();
+
+            // Ring stroke
+            ctx.beginPath();
+            ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 70, 40, ' + (0.5 * pulse) + ')';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // "CONNECTION LOST" text
+            ctx.save();
+            ctx.font = 'bold 22px system-ui, -apple-system, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(255, 40, 30, ' + (0.7 * pulse) + ')';
+            ctx.shadowBlur = 16;
+            ctx.fillStyle = 'rgba(255, 255, 255, ' + (0.8 + 0.2 * pulse) + ')';
+            ctx.fillText('CONNECTION LOST', cx, cy - 8);
+            ctx.shadowBlur = 0;
+
+            // Subtext
+            ctx.font = '12px system-ui, -apple-system, sans-serif';
+            ctx.fillStyle = 'rgba(140, 150, 175, 0.8)';
+            ctx.fillText('Unable to reach MindRouter server', cx, cy + 16);
+            ctx.restore();
         }
     }
 
