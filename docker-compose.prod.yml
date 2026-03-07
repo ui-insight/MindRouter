@@ -65,7 +65,7 @@ services:
     env_file:
       - .env.prod
     volumes:
-      - mariadb_archive_data:/var/lib/mysql
+      - /archivedb:/var/lib/mysql
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -93,7 +93,6 @@ services:
 
 volumes:
   mariadb_data:
-  mariadb_archive_data:
   redis_data:
 
 networks:
