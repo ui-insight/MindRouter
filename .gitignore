@@ -98,6 +98,9 @@ vhost-ports.html
 # Claude Code (contains API keys, session data)
 .claude/
 
+# MariaDB encryption keys (generated per-environment)
+mariadb/encryption/
+
 # Secrets (never commit)
 secrets/
 *.pem

@@ -74,6 +74,7 @@
                 <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
+                <li class="nav-item"><a class="nav-link" href="#data-retention">Data Retention</a></li>
                 <li class="nav-item"><a class="nav-link" href="#chat-system">Chat System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#blog-system">Blog / CMS</a></li>
                 <li class="nav-item"><a class="nav-link" href="#app-config">AppConfig System</a></li>
@@ -1457,6 +1458,103 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
 
             <hr>
 
+            <!-- Section: Data Retention -->
+            <section id="data-retention">
+                <h2>Data Retention</h2>
+                <p>MindRouter includes a two-tier data retention system that automatically archives and purges old data to keep the primary database lean while preserving historical records in a separate archive database.</p>
+
+                <h3>Architecture</h3>
+                <p>The retention system manages three data categories:</p>
+                <table class="table table-bordered">
+                    <thead><tr><th>Category</th><th>Tables</th><th>Default Tier 1</th><th>Default Tier 2</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Requests</strong></td>
+                            <td><code>requests</code>, <code>responses</code>, <code>usage_ledger</code>, <code>scheduler_decisions</code>, <code>artifacts</code></td>
+                            <td>90 days</td>
+                            <td>730 days (2 years)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Chat</strong></td>
+                            <td><code>chat_conversations</code>, <code>chat_messages</code>, <code>chat_attachments</code></td>
+                            <td>90 days</td>
+                            <td>730 days (2 years)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Telemetry</strong></td>
+                            <td><code>backend_telemetry</code>, <code>gpu_device_telemetry</code></td>
+                            <td>30 days</td>
+                            <td>Not archived (deleted only)</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <ul>
+                    <li><strong>Tier 1 (App DB)</strong> — Data lives in the primary database for the configured retention period. When it expires, it is archived to Tier 2 (if configured) then deleted from the app DB.</li>
+                    <li><strong>Tier 2 (Archive DB)</strong> — A separate MariaDB instance that stores full copies of archived data. After the Tier 2 retention period expires, archived data is permanently purged.</li>
+                </ul>
+
+                <h3>Archive Database</h3>
+                <p>The archive database is a second MariaDB container (<code>mariadb-archive</code>) defined in <code>docker-compose.yml</code>. It runs alongside the primary database and stores archived records in FK-free tables that mirror the app schema.</p>
+
+                <p>The archive DB is <strong>optional</strong>. If <code>ARCHIVE_DATABASE_URL</code> is not set, the retention system still works — expired data is simply deleted without archival.</p>
+
+                <h4>Configuration</h4>
+                <p>Add the following environment variable to enable archival:</p>
+<pre>ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;password&gt;@mariadb-archive:3306/mindrouter_archive</pre>
+
+                <p>The Docker Compose files include a <code>mariadb-archive</code> service that is started automatically. In production, configure the archive password variables in your <code>.env.prod</code> file:</p>
+<pre>MYSQL_ARCHIVE_ROOT_PASSWORD=&lt;secure-root-password&gt;
+MYSQL_ARCHIVE_PASSWORD=&lt;secure-password&gt;
+ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@mariadb-archive:3306/mindrouter_archive</pre>
+
+                <p>Archive tables are created automatically at startup via <code>create_all(checkfirst=True)</code> — no Alembic migration is needed for the archive database.</p>
+
+                <h3>Retention Policies</h3>
+                <p>All retention policies are stored in the <a href="#app-config">AppConfig</a> table and are editable at runtime from the admin UI at <code>/admin/retention</code>. No restart is required when changing policies.</p>
+
+                <table class="table table-bordered">
+                    <thead><tr><th>AppConfig Key</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>retention.requests.tier1_days</code></td><td>90</td><td>Days before request data is archived</td></tr>
+                        <tr><td><code>retention.requests.tier2_days</code></td><td>730</td><td>Days archived requests are kept before purge</td></tr>
+                        <tr><td><code>retention.chat.tier1_days</code></td><td>90</td><td>Days before chat data is archived</td></tr>
+                        <tr><td><code>retention.chat.tier2_days</code></td><td>730</td><td>Days archived chat data is kept before purge</td></tr>
+                        <tr><td><code>retention.telemetry.tier1_days</code></td><td>30</td><td>Days before telemetry is purged (no archival)</td></tr>
+                        <tr><td><code>retention.telemetry.tier2_days</code></td><td>0</td><td>0 = telemetry is not archived</td></tr>
+                        <tr><td><code>retention.cleanup_interval</code></td><td>3600</td><td>Seconds between retention cycle runs</td></tr>
+                        <tr><td><code>retention.batch_size</code></td><td>500</td><td>Rows per archive+delete batch</td></tr>
+                    </tbody>
+                </table>
+
+                <p>Setting a Tier 1 value to <code>0</code> disables retention for that category (data is kept indefinitely).</p>
+
+                <h3>Admin UI</h3>
+                <p>The <strong>Data Retention</strong> page in the admin dashboard (<code>/admin/retention</code>) provides three tabs:</p>
+                <ul>
+                    <li><strong>Policies</strong> — Edit all retention periods and advanced settings (cleanup interval, batch size). Shows current row counts in the app DB for each category.</li>
+                    <li><strong>Archive Stats</strong> — Per-table row counts and disk usage in the archive database. Only available when the archive DB is configured.</li>
+                    <li><strong>Browse Archive</strong> — Paginated view of archived records with filters for model and user. Supports browsing both archived requests and chat conversations.</li>
+                </ul>
+                <p>A <strong>Run Retention Now</strong> button triggers an immediate retention cycle without waiting for the next scheduled run.</p>
+
+                <h3>Background Loop</h3>
+                <p>A background task (<code>_retention_loop</code>) runs continuously and executes a full retention cycle at the configured interval. Each cycle:</p>
+                <ol>
+                    <li>Archives and deletes expired requests from the app DB (Tier 1)</li>
+                    <li>Archives and deletes expired chat conversations from the app DB (Tier 1)</li>
+                    <li>Deletes expired telemetry data from the app DB (no archival)</li>
+                    <li>Purges expired records from the archive DB (Tier 2)</li>
+                    <li>Cleans up orphan chat attachments</li>
+                </ol>
+                <p>All operations are batched and use FK-order deletion to maintain referential integrity. Archive inserts use <code>INSERT IGNORE</code> for idempotent re-runs.</p>
+
+                <h3>Storage</h3>
+                <p>The archive database volume can be mounted to a separate, larger disk. In production, <code>docker-compose.prod.yml</code> uses a host bind mount (e.g., <code>/archivedb:/var/lib/mysql</code>) so the archive data can reside on a different filesystem than the primary database.</p>
+            </section>
+
+            <hr>
+
             <!-- Section 11: Chat System -->
             <section id="chat-system">
                 <h2>Chat System</h2>
@@ -1634,6 +1732,7 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         <tr><td><code>DATABASE_POOL_SIZE</code></td><td>int</td><td><code>30</code></td><td>Connection pool size</td></tr>
                         <tr><td><code>DATABASE_MAX_OVERFLOW</code></td><td>int</td><td><code>20</code></td><td>Max overflow connections beyond pool</td></tr>
                         <tr><td><code>DATABASE_ECHO</code></td><td>bool</td><td><code>false</code></td><td>Log SQL queries</td></tr>
+                        <tr><td><code>ARCHIVE_DATABASE_URL</code></td><td>str</td><td><code>None</code></td><td>Archive MariaDB connection string (optional — enables <a href="#data-retention">tiered archival</a>)</td></tr>
                     </tbody>
                 </table>
 
@@ -1936,6 +2035,42 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                     <li><strong>Security headers</strong> &mdash; Add <code>Strict-Transport-Security</code> (HSTS), <code>X-Frame-Options</code>, and <code>Content-Security-Policy</code> (CSP) headers at the reverse proxy layer (e.g., nginx).</li>
                     <li><strong>Restrict CORS origins</strong> &mdash; Set <code>CORS_ORIGINS</code> to only the specific domains that need API access. Do not use <code>*</code> in production.</li>
                 </ul>
+
+                <h3>Transparent Data Encryption (TDE)</h3>
+                <p>MindRouter enables MariaDB Transparent Data Encryption to protect data at rest.
+                   TDE encrypts all InnoDB tablespaces, redo logs, and temporary files on disk using AES-256.
+                   Data is decrypted transparently when accessed through the MySQL protocol &mdash; no application code changes required.</p>
+
+                <h4>What TDE protects</h4>
+                <ul>
+                    <li>InnoDB data files (<code>.ibd</code>) containing chat messages, audit logs, and attachment text</li>
+                    <li>InnoDB redo logs (write-ahead logs)</li>
+                    <li>Temporary files created during query execution</li>
+                </ul>
+                <p><strong>What TDE does NOT protect:</strong> Anyone with valid database credentials can still read plaintext data via SQL queries.
+                   TDE guards against stolen disks, leaked backups, and unauthorized filesystem access.</p>
+
+                <h4>Generating encryption keys</h4>
+<pre><code># From the project root:
+bash scripts/generate_encryption_keys.sh</code></pre>
+                <p>This generates independent key sets for the primary and archive databases under <code>mariadb/encryption/</code>.
+                   The script is idempotent &mdash; it skips generation if keys already exist.</p>
+
+                <h4>Key backup</h4>
+                <p class="text-danger"><strong>Critical:</strong> Back up the encryption key files to a secure offline location separate from the database backups.
+                   Without the keys, encrypted data is <strong>permanently unrecoverable</strong>.</p>
+                <ul>
+                    <li><code>mariadb/encryption/primary/keyfile.key</code> + <code>keyfile.enc</code></li>
+                    <li><code>mariadb/encryption/archive/keyfile.key</code> + <code>keyfile.enc</code></li>
+                </ul>
+
+                <h4>Verifying encryption is active</h4>
+<pre><code># Check which tablespaces are encrypted (ENCRYPTION_SCHEME=1 means encrypted):
+SELECT NAME, ENCRYPTION_SCHEME
+FROM information_schema.INNODB_TABLESPACES_ENCRYPTION
+WHERE ENCRYPTION_SCHEME = 1;</code></pre>
+                <p>After enabling TDE and restarting MariaDB, background encryption threads will encrypt existing tablespaces in-place.
+                   This happens automatically and does not block normal queries.</p>
             </section>
 
             <hr>
