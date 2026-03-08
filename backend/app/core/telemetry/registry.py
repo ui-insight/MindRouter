@@ -1358,8 +1358,11 @@ class BackendRegistry:
                 return
 
             # Cross-worker lock: only one uvicorn worker runs enrichment per cycle.
-            # The first worker to see a stale (or missing) lock claims it; others skip.
+            # Uses an atomic conditional UPDATE so exactly one worker wins the race.
+            from sqlalchemy import update as sa_update, text
+            import json as _json
             now = datetime.now(timezone.utc)
+            now_iso = now.isoformat()
             lock_ts = await crud.get_config_json(db, "catalog.enrich_lock", None)
             if lock_ts:
                 try:
@@ -1368,12 +1371,24 @@ class BackendRegistry:
                         return  # Another worker is handling this cycle
                 except (ValueError, TypeError):
                     pass  # Stale/corrupt lock — proceed and overwrite
-            try:
-                await crud.set_config(db, "catalog.enrich_lock", now.isoformat())
-                await db.commit()
-            except Exception:
-                # Another worker raced us to claim the lock — let them have it
-                return
+
+            # Atomic claim: UPDATE ... WHERE value = <old_value>
+            # Only one worker's UPDATE will match the old value; the rest get rowcount=0.
+            old_json = _json.dumps(lock_ts) if lock_ts else _json.dumps(None)
+            new_json = _json.dumps(now_iso)
+            from backend.app.db.models import AppConfig
+            result = await db.execute(
+                sa_update(AppConfig)
+                .where(AppConfig.key == "catalog.enrich_lock", AppConfig.value == old_json)
+                .values(value=new_json)
+            )
+            if result.rowcount == 0:
+                # Either another worker claimed it, or the row doesn't exist yet — try insert
+                try:
+                    await crud.set_config(db, "catalog.enrich_lock", now_iso)
+                except Exception:
+                    return  # Another worker beat us to the insert
+            await db.commit()
 
             enrich_model = await crud.get_config_json(db, "catalog.enrich_model", "")
             enrich_api_key = await crud.get_config_json(db, "catalog.enrich_api_key", "")
