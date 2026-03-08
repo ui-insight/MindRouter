@@ -1368,8 +1368,12 @@ class BackendRegistry:
                         return  # Another worker is handling this cycle
                 except (ValueError, TypeError):
                     pass  # Stale/corrupt lock — proceed and overwrite
-            await crud.set_config(db, "catalog.enrich_lock", now.isoformat())
-            await db.commit()
+            try:
+                await crud.set_config(db, "catalog.enrich_lock", now.isoformat())
+                await db.commit()
+            except Exception:
+                # Another worker raced us to claim the lock — let them have it
+                return
 
             enrich_model = await crud.get_config_json(db, "catalog.enrich_model", "")
             enrich_api_key = await crud.get_config_json(db, "catalog.enrich_api_key", "")
