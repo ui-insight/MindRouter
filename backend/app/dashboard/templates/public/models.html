@@ -348,6 +348,37 @@
         return div.innerHTML;
     }
 
+    function miniMarkdown(src) {
+        // Lightweight markdown renderer: bold, bullets, paragraphs
+        const lines = src.split('\n');
+        const parts = [];
+        let inList = false;
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) {
+                if (inList) { parts.push('</ul>'); inList = false; }
+                continue;
+            }
+            const bullet = trimmed.match(/^[-*]\s+(.*)/);
+            if (bullet) {
+                if (!inList) { parts.push('<ul class="model-desc-list">'); inList = true; }
+                parts.push(`<li>${inlineFmt(bullet[1])}</li>`);
+            } else {
+                if (inList) { parts.push('</ul>'); inList = false; }
+                parts.push(`<p class="model-desc-text">${inlineFmt(trimmed)}</p>`);
+            }
+        }
+        if (inList) parts.push('</ul>');
+        return parts.join('');
+    }
+
+    function inlineFmt(text) {
+        // Escape HTML first, then apply bold
+        let s = escapeHtml(text);
+        s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        return s;
+    }
+
     function renderDescriptionArea(m) {
         const chips = [];
         if (m.parameter_count) chips.push(`<span class="highlight-chip"><i class="bi bi-cpu"></i> ${escapeHtml(m.parameter_count)}</span>`);
@@ -365,14 +396,7 @@
 
         const chipsHtml = chips.length ? `<div class="model-highlights">${chips.join('')}</div>` : '';
         const raw = m.description || 'No description available.';
-        // Split into sentences for readability
-        const sentences = raw.match(/[^.!?]+[.!?]+(\s|$)/g);
-        let descBody;
-        if (sentences && sentences.length > 1) {
-            descBody = '<ul class="model-desc-list">' + sentences.map(s => `<li>${escapeHtml(s.trim())}</li>`).join('') + '</ul>';
-        } else {
-            descBody = `<p class="model-desc-text">${escapeHtml(raw)}</p>`;
-        }
+        const descBody = miniMarkdown(raw);
         return `${chipsHtml}<div class="model-desc-card">${descBody}</div>`;
     }
 
