@@ -16,6 +16,8 @@
             <div class="alert alert-success alert-dismissible fade show" role="alert">
                 {% if success == 'timezone_updated' %}Timezone updated.
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
+                {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
+                {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
                 {% else %}{{ success }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -71,6 +73,57 @@
                                     <label class="form-check-label" for="enforceNumCtx">Enforce context length (override user num_ctx)</label>
                                 </div>
                                 <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Model Auto-Enrichment Toggle -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Model Auto-Enrichment</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">When enabled, MindRouter automatically generates descriptions for new models by searching the web for model cards and summarizing them with an LLM. Only models with no description are enriched.</p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_auto_enrich">
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" name="auto_enrich" id="autoEnrich" {% if auto_enrich %}checked{% endif %}>
+                                    <label class="form-check-label" for="autoEnrich">Enable automatic model description enrichment</label>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Enrichment Configuration -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Enrichment Configuration</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Configure the model and API keys used for auto-enrichment. The enrichment model must be available in the cluster.</p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_enrich_config">
+                                <div class="mb-3">
+                                    <label for="enrichModel" class="form-label">Enrichment Model</label>
+                                    <select class="form-select" name="enrich_model" id="enrichModel">
+                                        <option value="">-- Select a model --</option>
+                                        {% for name in available_model_names %}
+                                        <option value="{{ name }}" {% if name == enrich_model %}selected{% endif %}>{{ name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="enrichApiKey" class="form-label">MindRouter API Key</label>
+                                    <input type="password" class="form-control" name="enrich_api_key" id="enrichApiKey" placeholder="{% if enrich_api_key %}(key configured){% else %}Enter API key{% endif %}">
+                                    <div class="form-text">API key for internal MindRouter inference calls. Leave blank to keep current value.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="braveApiKey" class="form-label">Brave Search API Key</label>
+                                    <input type="password" class="form-control" name="brave_api_key" id="braveApiKey" placeholder="{% if brave_api_key %}(key configured){% else %}Falls back to env var{% endif %}">
+                                    <div class="form-text">Overrides the <code>BRAVE_SEARCH_API_KEY</code> environment variable. Leave blank to keep current value.</div>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save Configuration</button>
                             </form>
                         </div>
                     </div>

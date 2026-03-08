@@ -1257,6 +1257,42 @@ async def remove_stale_models(
     return result.rowcount
 
 
+async def get_models_needing_enrichment(
+    db: AsyncSession, limit: int = 3
+) -> List[Model]:
+    """Get one Model row per unique model name where description is NULL.
+
+    Returns at most ``limit`` models, picking one representative row per
+    distinct name so the enrichment loop does not process the same model
+    name multiple times in a single batch.
+    """
+    # Subquery: one model id per distinct name where description IS NULL
+    subq = (
+        select(func.min(Model.id).label("mid"))
+        .where(Model.description.is_(None))
+        .group_by(Model.name)
+        .limit(limit)
+        .subquery()
+    )
+    result = await db.execute(
+        select(Model).where(Model.id.in_(select(subq.c.mid)))
+    )
+    return list(result.scalars().all())
+
+
+async def set_model_description_by_name(
+    db: AsyncSession, model_name: str, description: str
+) -> int:
+    """Set description on ALL Model rows matching the given name."""
+    result = await db.execute(
+        update(Model)
+        .where(Model.name == model_name)
+        .values(description=description)
+    )
+    await db.flush()
+    return result.rowcount
+
+
 async def get_all_available_models(db: AsyncSession) -> List[Tuple[str, List[Backend]]]:
     """Get all unique model names with their available backends."""
     result = await db.execute(

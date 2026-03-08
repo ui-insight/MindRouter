@@ -61,6 +61,7 @@ class BackendRegistry:
         self._poll_task: Optional[asyncio.Task] = None
         self._persist_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._enrich_task: Optional[asyncio.Task] = None
         self._force_offline: bool = False
 
         # Sidecar clients keyed by node_id (one per physical server)
@@ -123,6 +124,7 @@ class BackendRegistry:
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._persist_task = asyncio.create_task(self._persist_latency_loop())
         self._cleanup_task = asyncio.create_task(self._telemetry_cleanup_loop())
+        self._enrich_task = asyncio.create_task(self._enrich_loop())
         logger.info("Backend registry started")
 
     async def stop(self) -> None:
@@ -145,6 +147,13 @@ class BackendRegistry:
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._enrich_task:
+            self._enrich_task.cancel()
+            try:
+                await self._enrich_task
             except asyncio.CancelledError:
                 pass
 
@@ -1315,6 +1324,86 @@ class BackendRegistry:
                 gpu_telemetry_deleted=deleted_gdt,
                 cutoff=cutoff.isoformat(),
             )
+
+
+    # ------------------------------------------------------------------
+    # Model auto-enrichment
+    # ------------------------------------------------------------------
+
+    async def _enrich_loop(self) -> None:
+        """Periodically enrich models that have no description."""
+        # Wait for backends to be discovered first
+        await asyncio.sleep(90)
+        while True:
+            try:
+                await self._enrich_models()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("enrich_loop_error", error=str(e))
+            try:
+                await asyncio.sleep(120)
+            except asyncio.CancelledError:
+                break
+
+    async def _enrich_models(self) -> None:
+        """Find models with no description and auto-generate one."""
+        # Lazy import to avoid circular imports through telemetry package init
+        from backend.app.services.model_enrichment import enrich_model_description
+
+        async with get_async_db_context() as db:
+            # Check if auto-enrichment is enabled
+            auto_enrich = await crud.get_config_json(db, "catalog.auto_enrich", False)
+            if not auto_enrich:
+                return
+
+            enrich_model = await crud.get_config_json(db, "catalog.enrich_model", "")
+            enrich_api_key = await crud.get_config_json(db, "catalog.enrich_api_key", "")
+            brave_api_key = await crud.get_config_json(db, "catalog.brave_api_key", "")
+
+            if not enrich_model or not enrich_api_key:
+                return
+
+            models = await crud.get_models_needing_enrichment(db, limit=3)
+            if not models:
+                return
+
+            logger.info("enriching_models", count=len(models),
+                        names=[m.name for m in models])
+
+        for model in models:
+            try:
+                metadata = {
+                    "family": model.family,
+                    "parameter_count": model.parameter_count,
+                    "quantization": model.quantization,
+                    "context_length": model.context_length,
+                    "capabilities": model.capabilities,
+                    "supports_thinking": model.supports_thinking,
+                    "supports_multimodal": model.supports_multimodal,
+                }
+                description = await enrich_model_description(
+                    model_name=model.name,
+                    model_metadata=metadata,
+                    enrich_model=enrich_model,
+                    api_key=enrich_api_key,
+                    brave_api_key=brave_api_key or None,
+                )
+                if description:
+                    async with get_async_db_context() as db:
+                        count = await crud.set_model_description_by_name(
+                            db, model.name, description
+                        )
+                        await db.commit()
+                    logger.info("model_enriched", model=model.name, rows_updated=count)
+                else:
+                    logger.warning("model_enrichment_failed", model=model.name,
+                                   reason="empty_response")
+            except Exception as e:
+                logger.error("model_enrichment_error", model=model.name, error=str(e))
+
+            # Rate-limit between models
+            await asyncio.sleep(5)
 
 
 # Global registry instance

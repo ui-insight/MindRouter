@@ -48,9 +48,10 @@
 | `backend/app/tests/unit/test_tool_calling.py` | 33 | Tool calling: schemas, OpenAI/Ollama/Anthropic inbound, vLLM/Ollama outbound, round-trips |
 | `backend/app/tests/unit/test_sidecar_client.py` | 16 | GPU sidecar client: auth, GPU info retrieval, communication |
 | `backend/app/tests/unit/test_version_alignment.py` | 6 | Version alignment: pyproject.toml reading, sidecar VERSION file consistency |
-| `backend/app/tests/unit/test_accessibility.py` | 96 | WCAG 2.1 Level A/AA: ARIA, semantic HTML, heading hierarchy, forms, sidebar include |
+| `backend/app/tests/unit/test_accessibility.py` | 99 | WCAG 2.1 Level A/AA: ARIA, semantic HTML, heading hierarchy, forms, sidebar include |
 | `backend/app/tests/unit/test_chat_mobile.py` | 37 | Chat mobile responsiveness: sidebar collapse/backdrop, thinking block collapse, compact layout CSS |
 | `backend/app/tests/unit/test_rerank_translators.py` | 22 | Rerank/score translators: OpenAIIn, VLLMOut rerank & score methods, canonical schema validation |
+| `backend/app/tests/unit/test_model_enrichment.py` | 28 | Model auto-enrichment: brave_web_search api_key param, LLM call helper, enrichment pipeline, CRUD helpers, config gating |
 
 **Shared fixtures:** `backend/app/tests/conftest.py`
 
@@ -174,7 +175,7 @@ Comprehensive matrix test covering structured output (JSON schema validation) an
 **Makefile:** `make test-a11y`
 **Requirements:** None (parses template files directly).
 
-Subset of unit tests, broken out for convenience. 96 tests validating WCAG 2.1 Level A and AA compliance across all 18 Jinja2 HTML templates (including sidebar include, user detail, groups, and API keys).
+Subset of unit tests, broken out for convenience. 99 tests validating WCAG 2.1 Level A and AA compliance across all 19 Jinja2 HTML templates (including sidebar include, user detail, groups, API keys, and data retention).
 
 ---
 

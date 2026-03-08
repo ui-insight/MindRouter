@@ -2747,6 +2747,18 @@ async def admin_settings(
     current_tz = await crud.get_config_json(db, "app.timezone", "America/Los_Angeles")
     enforce_num_ctx = await crud.get_config_json(db, "ollama.enforce_num_ctx", True)
 
+    # Model auto-enrichment config
+    auto_enrich = await crud.get_config_json(db, "catalog.auto_enrich", False)
+    enrich_model = await crud.get_config_json(db, "catalog.enrich_model", "")
+    enrich_api_key = await crud.get_config_json(db, "catalog.enrich_api_key", "")
+    brave_api_key = await crud.get_config_json(db, "catalog.brave_api_key", "")
+
+    # Available model names for the enrichment model dropdown
+    from sqlalchemy import select, distinct
+    from backend.app.db.models import Model
+    result = await db.execute(select(distinct(Model.name)).order_by(Model.name))
+    available_model_names = [row[0] for row in result.all()]
+
     # Show current time in configured timezone as preview
     now_in_tz = localtime_filter(datetime.now(timezone.utc), "%Y-%m-%d %H:%M:%S %Z")
 
@@ -2759,6 +2771,11 @@ async def admin_settings(
             "timezone_choices": _TIMEZONE_CHOICES,
             "now_in_tz": now_in_tz,
             "enforce_num_ctx": enforce_num_ctx,
+            "auto_enrich": auto_enrich,
+            "enrich_model": enrich_model,
+            "enrich_api_key": enrich_api_key,
+            "brave_api_key": brave_api_key,
+            "available_model_names": available_model_names,
             "success": success,
             "error": error,
         },
@@ -2806,6 +2823,36 @@ async def admin_settings_post(
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=enforce_num_ctx_updated", status_code=302)
+
+    elif action == "set_auto_enrich":
+        val = form.get("auto_enrich") == "on"
+        await crud.set_config(
+            db, "catalog.auto_enrich", val,
+            description="Enable automatic model description enrichment"
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=auto_enrich_updated", status_code=302)
+
+    elif action == "set_enrich_config":
+        model_name = form.get("enrich_model", "").strip()
+        api_key_val = form.get("enrich_api_key", "").strip()
+        brave_key_val = form.get("brave_api_key", "").strip()
+        await crud.set_config(
+            db, "catalog.enrich_model", model_name,
+            description="Model used for auto-enrichment LLM calls"
+        )
+        if api_key_val:
+            await crud.set_config(
+                db, "catalog.enrich_api_key", api_key_val,
+                description="API key for internal MindRouter enrichment calls"
+            )
+        if brave_key_val:
+            await crud.set_config(
+                db, "catalog.brave_api_key", brave_key_val,
+                description="Brave Search API key for enrichment (overrides env var)"
+            )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=enrich_config_updated", status_code=302)
 
     return RedirectResponse(url="/admin/settings?error=Unknown+action", status_code=302)
 

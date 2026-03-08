@@ -24,14 +24,22 @@ logger = get_logger(__name__)
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
 
-async def brave_web_search(query: str, num_results: int = 5) -> list[dict]:
+async def brave_web_search(
+    query: str, num_results: int = 5, api_key: str | None = None
+) -> list[dict]:
     """Search the web via Brave Search API.
+
+    Args:
+        query: Search query string.
+        num_results: Number of results to return.
+        api_key: Optional API key override. Falls back to settings if not provided.
 
     Returns a list of dicts with keys: title, url, description.
     Returns empty list on any failure (missing key, timeout, API error).
     """
-    settings = get_settings()
-    api_key = settings.brave_search_api_key
+    if not api_key:
+        settings = get_settings()
+        api_key = settings.brave_search_api_key
     if not api_key:
         return []
 
