@@ -88,6 +88,39 @@
     right: 0.5rem;
 }
 #modelCount { font-weight: 600; }
+.model-highlights {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+}
+.highlight-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    border-radius: 999px;
+    background: var(--bs-tertiary-bg);
+    color: var(--bs-body-color);
+    border: 1px solid var(--bs-border-color);
+    white-space: nowrap;
+}
+.highlight-chip i { font-size: 0.7rem; }
+.model-desc-card {
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.5rem;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+    background: var(--bs-tertiary-bg);
+}
+.model-desc-text {
+    font-size: 0.9rem;
+    line-height: 1.65;
+    color: var(--bs-body-color);
+    margin: 0;
+}
 </style>
 {% endblock %}
 
@@ -159,7 +192,7 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
-                <p id="modalDesc" class="mb-3"></p>
+                <div id="modalDescArea" class="mb-3"></div>
                 <div id="modalUrlRow" class="mb-3 d-flex gap-2">
                     <a id="modalUrl" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary">
                         <i class="bi bi-box-arrow-up-right"></i> Model Page
@@ -294,6 +327,33 @@
         return DEFAULT_LOGO;
     }
 
+    function escapeHtml(str) {
+        if (!str) return '';
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function renderDescriptionArea(m) {
+        const chips = [];
+        if (m.parameter_count) chips.push(`<span class="highlight-chip"><i class="bi bi-cpu"></i> ${escapeHtml(m.parameter_count)}</span>`);
+        if (m.context_length) chips.push(`<span class="highlight-chip"><i class="bi bi-arrows-expand"></i> ${(m.context_length/1024).toFixed(0)}k context</span>`);
+        if (m.model_max_context && m.model_max_context !== m.context_length) chips.push(`<span class="highlight-chip"><i class="bi bi-arrows-fullscreen"></i> ${(m.model_max_context/1024).toFixed(0)}k max</span>`);
+        if (m.quantization) chips.push(`<span class="highlight-chip"><i class="bi bi-box"></i> ${escapeHtml(m.quantization)}</span>`);
+        if (m.model_format) chips.push(`<span class="highlight-chip"><i class="bi bi-file-earmark-binary"></i> ${escapeHtml(m.model_format).toUpperCase()}</span>`);
+        if (m.capabilities.embeddings && m.embedding_dimensions) chips.push(`<span class="highlight-chip"><i class="bi bi-grid-3x3"></i> ${m.embedding_dimensions}d</span>`);
+        if (m.backend_count > 1) chips.push(`<span class="highlight-chip"><i class="bi bi-hdd-network"></i> ${m.backend_count} backends</span>`);
+        for (const eng of m.engines) {
+            const icon = eng === 'vllm' ? 'bi-gpu-card' : 'bi-server';
+            const label = eng === 'vllm' ? 'vLLM' : 'Ollama';
+            chips.push(`<span class="highlight-chip"><i class="bi ${icon}"></i> ${label}</span>`);
+        }
+
+        const chipsHtml = chips.length ? `<div class="model-highlights">${chips.join('')}</div>` : '';
+        const desc = escapeHtml(m.description || 'No description available.');
+        return `${chipsHtml}<div class="model-desc-card"><p class="model-desc-text">${desc}</p></div>`;
+    }
+
     const filters = { category: 'all', engine: 'all', caps: new Set(), search: '' };
 
     // Filter pills
@@ -364,7 +424,7 @@
                                 <small class="text-muted">${m.family || ''} &middot; ${m.engines.join(', ')}</small>
                             </div>
                         </div>
-                        <p class="desc-clamp text-muted small mb-2">${m.description || 'No description available.'}</p>
+                        <p class="desc-clamp text-muted small mb-2">${escapeHtml(m.description || 'No description available.')}</p>
                         <div class="d-flex flex-wrap gap-1 mb-2">${caps.join('')}
                             <span class="badge bg-secondary cap-badge">${m.category}</span>
                         </div>
@@ -382,7 +442,7 @@
         document.getElementById('modalLogo').src = logo;
         document.getElementById('detailModalLabel').textContent = m.name;
         document.getElementById('modalFamily').textContent = m.family || 'Unknown family';
-        document.getElementById('modalDesc').textContent = m.description || 'No description available.';
+        document.getElementById('modalDescArea').innerHTML = renderDescriptionArea(m);
 
         const urlRow = document.getElementById('modalUrlRow');
         const modelUrlBtn = document.getElementById('modalUrl');
