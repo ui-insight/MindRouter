@@ -2412,8 +2412,13 @@ _TREND_BUCKETS = {
 }
 
 
-async def get_global_token_total(db: AsyncSession) -> dict:
+async def get_global_token_total(db: AsyncSession, include_offset: bool = True) -> dict:
     """Total tokens ever served (all users, all time).
+
+    When *include_offset* is True (the default), the ``stats.token_offset``
+    value from app_config is added to the totals.  This lets the homepage
+    reflect historical usage from before the current database without
+    polluting per-model or per-user metrics.
 
     Returns {prompt_tokens, completion_tokens, total_tokens}.
     """
@@ -2425,11 +2430,18 @@ async def get_global_token_total(db: AsyncSession) -> dict:
         )
     )
     row = result.one()
-    return {
+    totals = {
         "prompt_tokens": int(row[0]),
         "completion_tokens": int(row[1]),
         "total_tokens": int(row[2]),
     }
+
+    if include_offset:
+        offset = await get_config_json(db, "stats.token_offset", 0)
+        if offset:
+            totals["total_tokens"] += int(offset)
+
+    return totals
 
 
 def _bucket_iso(unix_ts: int) -> str:

@@ -235,7 +235,7 @@ async def telemetry_overview(
 
     # Token usage breakdown
     try:
-        global_tokens = await crud.get_global_token_total(db)
+        global_tokens = await crud.get_global_token_total(db, include_offset=False)
         model_tokens = await crud.get_model_token_totals(db)
         cluster["token_usage"] = {
             "global": global_tokens,
