@@ -53,7 +53,6 @@ services:
       - mariadb_data:/var/lib/mysql
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./mariadb/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
-      - ./mariadb/encryption/primary:/etc/mysql/encryption:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -75,7 +74,6 @@ services:
       - "3307:3306"
     volumes:
       - mariadb_archive_data:/var/lib/mysql
-      - ./mariadb/encryption/archive:/etc/mysql/encryption:ro
       - ./mariadb/archive.cnf:/etc/mysql/conf.d/custom.cnf:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
