@@ -918,6 +918,42 @@ message = client.messages.create(
                     <li><strong>Delete a model</strong> &mdash; Remove a model from a specific Ollama backend via the admin API (<code>POST /api/admin/backends/{id}/ollama/delete</code>).</li>
                 </ul>
 
+                <h3>Model Auto-Enrichment</h3>
+                <p>MindRouter can automatically generate structured descriptions for models that have no description. This runs as a background task that searches the web for model cards and summarizes them using MindRouter's own inference API.</p>
+
+                <h4>How It Works</h4>
+                <ol>
+                    <li>Every 120 seconds, the enrichment loop checks for models with no description (up to 3 per cycle).</li>
+                    <li>For each model, it searches the web via the <strong>Brave Search API</strong> for the model's card or documentation page.</li>
+                    <li>It then calls MindRouter's own <code>/v1/chat/completions</code> endpoint with the search results and model metadata, asking an LLM to produce a structured markdown description.</li>
+                    <li>The generated description is saved to <strong>all instances</strong> of that model across backends.</li>
+                </ol>
+                <p>There is a 90-second startup delay before the first enrichment cycle, giving backends time to be discovered. A 5-second delay between individual model enrichments provides rate limiting.</p>
+
+                <h4>Configuration</h4>
+                <p>Auto-enrichment is configured via <strong>Admin &gt; Settings</strong>. Four <a href="#app-config">AppConfig</a> keys control the feature:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>catalog.auto_enrich</code></td><td>bool</td><td><code>false</code></td><td>Master toggle &mdash; enable or disable auto-enrichment</td></tr>
+                        <tr><td><code>catalog.enrich_model</code></td><td>string</td><td><code>""</code></td><td>Model name to use for generating descriptions (e.g. <code>qwen3.5:32b</code>). Must be available in the cluster.</td></tr>
+                        <tr><td><code>catalog.enrich_api_key</code></td><td>string</td><td><code>""</code></td><td>API key for internal MindRouter inference calls</td></tr>
+                        <tr><td><code>catalog.brave_api_key</code></td><td>string</td><td><code>""</code></td><td>Brave Search API key. Overrides the <code>BRAVE_SEARCH_API_KEY</code> environment variable if set.</td></tr>
+                    </tbody>
+                </table>
+                <p>All four values must be configured for enrichment to run. The enrichment model and API key fields are required; if either is empty, the loop exits immediately.</p>
+
+                <h4>Behavior Details</h4>
+                <ul>
+                    <li><strong>Only NULL descriptions are enriched</strong> &mdash; models with any existing description (including admin-written ones) are never overwritten.</li>
+                    <li><strong>Re-enrichment</strong> &mdash; To re-generate a description, clear it via the Admin Models page. The next enrichment cycle will pick it up.</li>
+                    <li><strong>Batch size</strong> &mdash; At most 3 models are enriched per 120-second cycle to avoid flooding backends with enrichment requests.</li>
+                    <li><strong>Deduplication</strong> &mdash; The same model name is only processed once per batch, even if it appears on multiple backends. The resulting description is applied to all instances.</li>
+                    <li><strong>Failures are non-fatal</strong> &mdash; If a web search or LLM call fails for a specific model, it is logged and skipped. The loop continues with the next model and will retry the failed model in a subsequent cycle.</li>
+                </ul>
+
                 <h3>Admin Masquerade</h3>
                 <p>Administrators can "masquerade" as another user to view the user dashboard from that user's perspective. This is useful for troubleshooting user-reported issues or verifying quota and usage display.</p>
                 <ul>
@@ -1697,6 +1733,10 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>chat.max_tokens</code></td><td>int</td><td><code>16384</code></td><td>Default max tokens for chat requests (range: 256&ndash;131072)</td><td>Chat Configuration</td></tr>
                         <tr><td><code>chat.temperature</code></td><td>float</td><td><code>null</code></td><td>Default temperature for chat requests (range: 0.0&ndash;2.0). Null means use model default.</td><td>Chat Configuration</td></tr>
                         <tr><td><code>chat.think</code></td><td>bool/string</td><td><code>null</code></td><td>Default thinking mode for chat: <code>true</code>, <code>false</code>, <code>"low"</code>, <code>"medium"</code>, <code>"high"</code>, or null (no default)</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>catalog.auto_enrich</code></td><td>bool</td><td><code>false</code></td><td>Enable automatic model description enrichment</td><td>Site Settings</td></tr>
+                        <tr><td><code>catalog.enrich_model</code></td><td>string</td><td><code>""</code></td><td>Model name used for LLM enrichment calls</td><td>Site Settings</td></tr>
+                        <tr><td><code>catalog.enrich_api_key</code></td><td>string</td><td><code>""</code></td><td>API key for internal MindRouter enrichment calls</td><td>Site Settings</td></tr>
+                        <tr><td><code>catalog.brave_api_key</code></td><td>string</td><td><code>""</code></td><td>Brave Search API key for enrichment (overrides env var)</td><td>Site Settings</td></tr>
                     </tbody>
                 </table>
                 <p>All AppConfig values take effect immediately upon save &mdash; no application restart is required. These settings are managed via the <strong>Admin Dashboard</strong> under Site Settings and Chat Configuration.</p>
