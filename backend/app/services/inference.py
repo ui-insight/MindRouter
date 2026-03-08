@@ -832,6 +832,14 @@ class InferenceService:
                 else:
                     raise
 
+            # Cap max_tokens so it doesn't exceed model context_length
+            if models and request.max_tokens:
+                for m in models:
+                    if m.context_length and request.max_tokens >= m.context_length:
+                        # Reserve at least half the context for input
+                        request.max_tokens = m.context_length // 2
+                    break
+
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models:
                 for m in models:
@@ -960,6 +968,14 @@ class InferenceService:
                         break
                 else:
                     raise
+
+            # Cap max_tokens so it doesn't exceed model context_length
+            if _models and hasattr(request, 'max_tokens') and request.max_tokens:
+                for m in _models:
+                    if m.context_length and request.max_tokens >= m.context_length:
+                        request.max_tokens = m.context_length // 2
+                    break
+
             tried_backends.add(backend.id)
             start_time = time.monotonic()
             first_chunk_received = False
