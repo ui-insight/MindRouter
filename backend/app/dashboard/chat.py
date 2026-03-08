@@ -910,7 +910,6 @@ async def chat_completions(
                         line = line.strip()
                         if line.startswith("data: ") and line != "data: [DONE]":
                             try:
-                                import json
                                 parsed = json.loads(line[6:])
                                 delta = parsed.get("choices", [{}])[0].get("delta", {}).get("content", "")
                                 if delta:
