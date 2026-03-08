@@ -121,6 +121,20 @@
     color: var(--bs-body-color);
     margin: 0;
 }
+.model-desc-list {
+    font-size: 0.9rem;
+    line-height: 1.65;
+    color: var(--bs-body-color);
+    margin: 0;
+    padding-left: 1.25rem;
+    list-style: disc;
+}
+.model-desc-list li {
+    margin-bottom: 0.35rem;
+}
+.model-desc-list li:last-child {
+    margin-bottom: 0;
+}
 </style>
 {% endblock %}
 
@@ -350,8 +364,16 @@
         }
 
         const chipsHtml = chips.length ? `<div class="model-highlights">${chips.join('')}</div>` : '';
-        const desc = escapeHtml(m.description || 'No description available.');
-        return `${chipsHtml}<div class="model-desc-card"><p class="model-desc-text">${desc}</p></div>`;
+        const raw = m.description || 'No description available.';
+        // Split into sentences for readability
+        const sentences = raw.match(/[^.!?]+[.!?]+(\s|$)/g);
+        let descBody;
+        if (sentences && sentences.length > 1) {
+            descBody = '<ul class="model-desc-list">' + sentences.map(s => `<li>${escapeHtml(s.trim())}</li>`).join('') + '</ul>';
+        } else {
+            descBody = `<p class="model-desc-text">${escapeHtml(raw)}</p>`;
+        }
+        return `${chipsHtml}<div class="model-desc-card">${descBody}</div>`;
     }
 
     const filters = { category: 'all', engine: 'all', caps: new Set(), search: '' };
