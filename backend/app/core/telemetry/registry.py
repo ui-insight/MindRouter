@@ -1357,6 +1357,20 @@ class BackendRegistry:
             if not auto_enrich:
                 return
 
+            # Cross-worker lock: only one uvicorn worker runs enrichment per cycle.
+            # The first worker to see a stale (or missing) lock claims it; others skip.
+            now = datetime.now(timezone.utc)
+            lock_ts = await crud.get_config_json(db, "catalog.enrich_lock", None)
+            if lock_ts:
+                try:
+                    last_run = datetime.fromisoformat(lock_ts)
+                    if (now - last_run).total_seconds() < 90:
+                        return  # Another worker is handling this cycle
+                except (ValueError, TypeError):
+                    pass  # Stale/corrupt lock — proceed and overwrite
+            await crud.set_config(db, "catalog.enrich_lock", now.isoformat())
+            await db.commit()
+
             enrich_model = await crud.get_config_json(db, "catalog.enrich_model", "")
             enrich_api_key = await crud.get_config_json(db, "catalog.enrich_api_key", "")
             brave_api_key = await crud.get_config_json(db, "catalog.brave_api_key", "")
