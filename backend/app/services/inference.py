@@ -1099,7 +1099,9 @@ class InferenceService:
         payload["stream"] = True
 
         async with client.stream("POST", url, json=payload) as response:
-            response.raise_for_status()
+            if response.status_code >= 400:
+                await response.aread()
+                response.raise_for_status()
 
             if backend.engine == BackendEngine.OLLAMA:
                 async for chunk in OllamaOutTranslator.translate_chat_stream(
@@ -1292,7 +1294,9 @@ class InferenceService:
             url = f"{backend.url}/v1/chat/completions"
 
         async with client.stream("POST", url, json=payload) as response:
-            response.raise_for_status()
+            if response.status_code >= 400:
+                await response.aread()
+                response.raise_for_status()
 
             buffer = ""
             async for chunk_bytes in response.aiter_bytes():
