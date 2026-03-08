@@ -72,6 +72,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'backup' %}active{% endif %}" href="/admin/backup" {% if active == 'backup' %}aria-current="page"{% endif %}>
+                <i class="bi bi-cloud-arrow-down-up"></i> Backup &amp; Restore
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'settings' %}active{% endif %}" href="/admin/settings" {% if active == 'settings' %}aria-current="page"{% endif %}>
                 <i class="bi bi-gear"></i> Settings
             </a>

@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+
+{% block title %}Backup & Restore - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "backup" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <h1><i class="bi bi-cloud-arrow-down-up"></i> Backup &amp; Restore</h1>
+                    <p class="text-muted mb-0">Export or restore MindRouter configuration (nodes, backends, users, groups, API keys, quotas, models, settings, blog posts).</p>
+                </div>
+            </div>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {{ success }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <div class="row g-4">
+                <!-- Export Card -->
+                <div class="col-lg-6">
+                    <div class="card h-100">
+                        <div class="card-header">
+                            <h5 class="mb-0"><i class="bi bi-download"></i> Export Configuration</h5>
+                        </div>
+                        <div class="card-body">
+                            <p>Download a JSON file containing all configuration tables:</p>
+                            <ul class="small text-muted">
+                                <li>Groups, Users, API Keys, Quotas</li>
+                                <li>Nodes, Backends, Models, GPU Devices</li>
+                                <li>App Settings (app_config)</li>
+                                <li>Blog Posts</li>
+                            </ul>
+                            <p class="small text-muted mb-3">
+                                <strong>Not included:</strong> requests, responses, usage ledger, telemetry, chat conversations, scheduler decisions, artifacts.
+                            </p>
+                            <a href="/admin/backup/export" class="btn btn-primary">
+                                <i class="bi bi-download"></i> Download Backup
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Restore Card -->
+                <div class="col-lg-6">
+                    <div class="card h-100">
+                        <div class="card-header">
+                            <h5 class="mb-0"><i class="bi bi-upload"></i> Restore Configuration</h5>
+                        </div>
+                        <div class="card-body">
+                            <p>Upload a previously exported JSON backup file to restore configuration.</p>
+                            <div class="alert alert-warning small mb-3">
+                                <i class="bi bi-exclamation-triangle"></i>
+                                <strong>Safe by default:</strong> Existing rows are skipped (not overwritten). Only missing entries are inserted. Backend runtime state is reset to defaults.
+                            </div>
+                            <form method="post" action="/admin/backup/restore" enctype="multipart/form-data">
+                                <div class="mb-3">
+                                    <label for="backup_file" class="form-label">Backup JSON File</label>
+                                    <input type="file" class="form-control" id="backup_file" name="backup_file" accept=".json" required>
+                                </div>
+                                <button type="submit" class="btn btn-warning" onclick="return confirm('Restore configuration from this backup file? Existing rows will be skipped.')">
+                                    <i class="bi bi-upload"></i> Restore Backup
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Restore Results -->
+            {% if restore_summary %}
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-clipboard-check"></i> Restore Results</h5>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table table-striped mb-0">
+                        <thead>
+                            <tr>
+                                <th>Table</th>
+                                <th class="text-end">Inserted</th>
+                                <th class="text-end">Skipped</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for table_name, counts in restore_summary.items() %}
+                            <tr>
+                                <td><code>{{ table_name }}</code></td>
+                                <td class="text-end">
+                                    {% if counts.inserted > 0 %}
+                                    <span class="badge bg-success">{{ counts.inserted }}</span>
+                                    {% else %}
+                                    {{ counts.inserted }}
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">{{ counts.skipped }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+{% endblock %}

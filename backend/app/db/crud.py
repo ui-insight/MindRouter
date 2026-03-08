@@ -16,9 +16,10 @@
 
 import json as _json
 from datetime import datetime, timedelta, timezone
+from enum import Enum as PyEnum
 from typing import Any, List, Optional, Tuple
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import DateTime as SADateTime, and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -2521,3 +2522,161 @@ async def cancel_active_requests_for_backends(
     )
     await db.flush()
     return cancelled
+
+
+# ---------------------------------------------------------------------------
+# Configuration Backup & Restore
+# ---------------------------------------------------------------------------
+
+# Tables to export in FK dependency order, with their unique-key column(s)
+_CONFIG_TABLES = [
+    (Group, "name"),
+    (AppConfig, "key"),
+    (BlogPost, "slug"),
+    (Node, "name"),
+    (Backend, "name"),
+    (Model, None),          # unique on (backend_id, name) — handled specially
+    (GPUDevice, None),      # unique on (node_id, gpu_index) — handled specially
+    (User, "username"),
+    (ApiKey, "key_hash"),
+    (Quota, "user_id"),
+]
+
+# Backend runtime fields to reset on import
+_BACKEND_RUNTIME_DEFAULTS = {
+    "current_concurrent": 0,
+    "consecutive_failures": 0,
+    "last_health_check": None,
+    "last_success": None,
+    "live_failure_count": 0,
+    "circuit_open_until": None,
+    "latency_ema_ms": None,
+    "ttft_ema_ms": None,
+}
+
+
+def _row_to_dict(row) -> dict:
+    """Convert a SQLAlchemy model instance to a JSON-safe dict."""
+    d = {}
+    for col in row.__table__.columns:
+        val = getattr(row, col.name)
+        if isinstance(val, datetime):
+            val = val.isoformat()
+        elif isinstance(val, PyEnum):
+            val = val.value
+        d[col.name] = val
+    return d
+
+
+async def export_config_tables(db: AsyncSession) -> dict:
+    """Export all configuration tables as a dict suitable for JSON serialization."""
+    from backend.app.settings import get_settings
+
+    data = {
+        "metadata": {
+            "version": get_settings().app_version,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "tables": [cls.__tablename__ for cls, _ in _CONFIG_TABLES],
+        }
+    }
+
+    for model_cls, _ in _CONFIG_TABLES:
+        result = await db.execute(select(model_cls))
+        rows = result.scalars().all()
+        data[model_cls.__tablename__] = [_row_to_dict(r) for r in rows]
+
+    return data
+
+
+async def import_config_tables(db: AsyncSession, data: dict) -> dict:
+    """Import configuration from a backup dict. Returns summary with inserted/skipped counts."""
+    summary: dict[str, dict[str, int]] = {}
+
+    for model_cls, unique_col in _CONFIG_TABLES:
+        table_name = model_cls.__tablename__
+        rows = data.get(table_name, [])
+        inserted = 0
+        skipped = 0
+
+        for row_data in rows:
+            # Check if row already exists by unique key
+            exists = False
+            if unique_col:
+                pk_val = row_data.get(unique_col)
+                if pk_val is not None:
+                    if unique_col == "key":
+                        # AppConfig uses 'key' as primary key
+                        existing = await db.execute(
+                            select(model_cls).where(model_cls.key == pk_val)
+                        )
+                    else:
+                        existing = await db.execute(
+                            select(model_cls).where(
+                                getattr(model_cls, unique_col) == pk_val
+                            )
+                        )
+                    exists = existing.scalars().first() is not None
+            elif model_cls is Model:
+                # Unique on (backend_id, name)
+                bid = row_data.get("backend_id")
+                mname = row_data.get("name")
+                if bid and mname:
+                    existing = await db.execute(
+                        select(Model).where(
+                            and_(Model.backend_id == bid, Model.name == mname)
+                        )
+                    )
+                    exists = existing.scalars().first() is not None
+            elif model_cls is GPUDevice:
+                # Unique on (node_id, gpu_index)
+                nid = row_data.get("node_id")
+                gidx = row_data.get("gpu_index")
+                if nid is not None and gidx is not None:
+                    existing = await db.execute(
+                        select(GPUDevice).where(
+                            and_(
+                                GPUDevice.node_id == nid,
+                                GPUDevice.gpu_index == gidx,
+                            )
+                        )
+                    )
+                    exists = existing.scalars().first() is not None
+
+            if exists:
+                skipped += 1
+                continue
+
+            # Prepare row data — convert ISO strings back to datetimes
+            clean = {}
+            col_types = {c.name: c for c in model_cls.__table__.columns}
+            for col_name, val in row_data.items():
+                if col_name not in col_types:
+                    continue
+                col = col_types[col_name]
+                if val is None:
+                    clean[col_name] = None
+                elif isinstance(col.type, SADateTime) and isinstance(val, str):
+                    try:
+                        clean[col_name] = datetime.fromisoformat(val)
+                    except (ValueError, TypeError):
+                        clean[col_name] = None
+                else:
+                    clean[col_name] = val
+
+            # Reset backend runtime state
+            if model_cls is Backend:
+                clean.update(_BACKEND_RUNTIME_DEFAULTS)
+
+            obj = model_cls(**clean)
+            db.add(obj)
+            try:
+                await db.flush()
+                inserted += 1
+            except Exception:
+                await db.rollback()
+                skipped += 1
+
+        summary[table_name] = {"inserted": inserted, "skipped": skipped}
+
+    await db.commit()
+    return summary

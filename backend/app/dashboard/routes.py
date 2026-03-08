@@ -2959,3 +2959,146 @@ async def admin_retention_post(
     return RedirectResponse(
         url="/admin/retention?error=Unknown+action", status_code=302
     )
+
+
+# ---------------------------------------------------------------------------
+# Backup & Restore
+# ---------------------------------------------------------------------------
+
+
+@dashboard_router.get("/admin/backup", response_class=HTMLResponse)
+async def admin_backup(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin backup & restore page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    return templates.TemplateResponse(
+        "admin/backup.html",
+        {
+            "request": request,
+            "user": user,
+            "success": success,
+            "error": error,
+            "restore_summary": None,
+        },
+    )
+
+
+@dashboard_router.get("/admin/backup/export")
+async def admin_backup_export(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Download a JSON backup of all configuration tables."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    data = await crud.export_config_tables(db)
+    content = json.dumps(data, indent=2, ensure_ascii=False)
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"mindrouter-config-{date_str}.json"
+
+    return StreamingResponse(
+        iter([content]),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@dashboard_router.post("/admin/backup/restore", response_class=HTMLResponse)
+async def admin_backup_restore(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Restore configuration from an uploaded JSON backup file."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    backup_file = form.get("backup_file")
+
+    if not backup_file or not hasattr(backup_file, "read"):
+        return templates.TemplateResponse(
+            "admin/backup.html",
+            {
+                "request": request,
+                "user": user,
+                "success": None,
+                "error": "No file uploaded.",
+                "restore_summary": None,
+            },
+        )
+
+    try:
+        contents = await backup_file.read()
+        data = json.loads(contents)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return templates.TemplateResponse(
+            "admin/backup.html",
+            {
+                "request": request,
+                "user": user,
+                "success": None,
+                "error": f"Invalid JSON file: {exc}",
+                "restore_summary": None,
+            },
+        )
+
+    if "metadata" not in data:
+        return templates.TemplateResponse(
+            "admin/backup.html",
+            {
+                "request": request,
+                "user": user,
+                "success": None,
+                "error": "Invalid backup file: missing metadata section.",
+                "restore_summary": None,
+            },
+        )
+
+    try:
+        summary = await crud.import_config_tables(db, data)
+    except Exception as exc:
+        logger.error("Backup restore failed", error=str(exc))
+        return templates.TemplateResponse(
+            "admin/backup.html",
+            {
+                "request": request,
+                "user": user,
+                "success": None,
+                "error": f"Restore failed: {exc}",
+                "restore_summary": None,
+            },
+        )
+
+    total_inserted = sum(v["inserted"] for v in summary.values())
+    return templates.TemplateResponse(
+        "admin/backup.html",
+        {
+            "request": request,
+            "user": user,
+            "success": f"Restore complete — {total_inserted} rows inserted.",
+            "error": None,
+            "restore_summary": summary,
+        },
+    )
