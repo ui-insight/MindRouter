@@ -53,12 +53,25 @@
     line-height: 1.2;
 }
 .hf-link {
-    color: var(--bs-secondary);
+    color: #FF9D00;
     font-size: 0.75rem;
-    opacity: 0.7;
-    transition: opacity 0.15s;
+    opacity: 0.8;
+    transition: opacity 0.2s, transform 0.2s, color 0.2s;
 }
-.hf-link:hover { opacity: 1; color: var(--bs-primary); }
+.hf-link:hover {
+    opacity: 1;
+    color: #FFB833;
+    transform: scale(1.2);
+}
+.btn-outline-hf {
+    color: #FF9D00;
+    border-color: #FF9D00;
+}
+.btn-outline-hf:hover {
+    background-color: #FF9D00;
+    border-color: #FF9D00;
+    color: #fff;
+}
 .desc-clamp {
     display: -webkit-box;
     -webkit-line-clamp: 2;
@@ -211,7 +224,7 @@
                     <a id="modalUrl" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-outline-primary">
                         <i class="bi bi-box-arrow-up-right"></i> Model Page
                     </a>
-                    <a id="modalHfUrl" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-outline-dark">
+                    <a id="modalHfUrl" href="#" target="_blank" rel="noopener" class="btn btn-sm btn-outline-hf">
                         <i class="bi bi-hdd-stack"></i> HuggingFace
                     </a>
                 </div>
