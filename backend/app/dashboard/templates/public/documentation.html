@@ -952,6 +952,7 @@ message = client.messages.create(
                     <li><strong>Batch size</strong> &mdash; At most 3 models are enriched per 120-second cycle to avoid flooding backends with enrichment requests.</li>
                     <li><strong>Deduplication</strong> &mdash; The same model name is only processed once per batch, even if it appears on multiple backends. The resulting description is applied to all instances.</li>
                     <li><strong>Failures are non-fatal</strong> &mdash; If a web search or LLM call fails for a specific model, it is logged and skipped. The loop continues with the next model and will retry the failed model in a subsequent cycle.</li>
+                    <li><strong>Description cache</strong> &mdash; Generated descriptions are cached in a separate <code>model_description_cache</code> table keyed by model name. When a model row is deleted (e.g. by <code>remove_stale_models</code> during node maintenance) and later rediscovered, the enrichment loop restores the description instantly from the cache instead of repeating the web search and LLM call. Cache hits are logged as <code>model_enriched_from_cache</code>.</li>
                 </ul>
 
                 <h3>Admin Masquerade</h3>

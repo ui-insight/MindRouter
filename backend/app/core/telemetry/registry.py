@@ -1406,6 +1406,21 @@ class BackendRegistry:
 
         for model in models:
             try:
+                # Check the description cache first
+                cached = None
+                async with get_async_db_context() as db:
+                    cached = await crud.get_cached_description(db, model.name)
+
+                if cached:
+                    async with get_async_db_context() as db:
+                        count = await crud.set_model_description_by_name(
+                            db, model.name, cached
+                        )
+                        await db.commit()
+                    logger.info("model_enriched_from_cache", model=model.name,
+                                rows_updated=count)
+                    continue
+
                 metadata = {
                     "family": model.family,
                     "parameter_count": model.parameter_count,
@@ -1427,6 +1442,7 @@ class BackendRegistry:
                         count = await crud.set_model_description_by_name(
                             db, model.name, description
                         )
+                        await crud.set_cached_description(db, model.name, description)
                         await db.commit()
                     logger.info("model_enriched", model=model.name, rows_updated=count)
                 else:

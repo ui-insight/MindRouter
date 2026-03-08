@@ -37,6 +37,7 @@ from backend.app.db.models import (
     GPUDeviceTelemetry,
     Group,
     Model,
+    ModelDescriptionCache,
     Modality,
     Node,
     NodeStatus,
@@ -1291,6 +1292,29 @@ async def set_model_description_by_name(
     )
     await db.flush()
     return result.rowcount
+
+
+async def get_cached_description(db: AsyncSession, model_name: str) -> Optional[str]:
+    """Look up a cached description for a model name."""
+    result = await db.execute(
+        select(ModelDescriptionCache.description)
+        .where(ModelDescriptionCache.name == model_name)
+    )
+    row = result.scalar_one_or_none()
+    return row
+
+
+async def set_cached_description(db: AsyncSession, model_name: str, description: str) -> None:
+    """Upsert a description into the model description cache."""
+    result = await db.execute(
+        select(ModelDescriptionCache).where(ModelDescriptionCache.name == model_name)
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.description = description
+    else:
+        db.add(ModelDescriptionCache(name=model_name, description=description))
+    await db.flush()
 
 
 async def get_all_available_models(db: AsyncSession) -> List[Tuple[str, List[Backend]]]:

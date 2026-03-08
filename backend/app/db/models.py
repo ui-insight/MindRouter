@@ -481,6 +481,22 @@ class Model(Base, TimestampMixin):
     )
 
 
+# Model Description Cache
+class ModelDescriptionCache(Base, TimestampMixin):
+    """Cache of enriched model descriptions, keyed by model name.
+
+    Survives model row deletion (e.g. remove_stale_models during node
+    maintenance) so descriptions can be restored from cache when the
+    model is rediscovered, avoiding redundant web search + LLM calls.
+    """
+
+    __tablename__ = "model_description_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 # GPU Device Models
 class GPUDevice(Base, TimestampMixin):
     """Individual GPU device on a node."""
