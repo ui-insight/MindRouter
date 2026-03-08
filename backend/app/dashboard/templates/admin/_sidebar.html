@@ -62,6 +62,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'voice_config' %}active{% endif %}" href="/admin/voice-config" {% if active == 'voice_config' %}aria-current="page"{% endif %}>
+                <i class="bi bi-mic"></i> Voice Config
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'blog' %}active{% endif %}" href="/admin/blog" {% if active == 'blog' %}aria-current="page"{% endif %}>
                 <i class="bi bi-pencil-square"></i> Blog Posts
             </a>

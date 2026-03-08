@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}Voice Config - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "voice_config" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-mic"></i> Voice Configuration</h1>
+            <p class="text-muted">Configure text-to-speech (TTS) and speech-to-text (STT) services for the chat interface.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'tts_updated' %}TTS settings updated.
+                {% elif success == 'stt_updated' %}STT settings updated.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <div class="row g-4">
+                <!-- TTS Configuration -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-volume-up"></i> Text-to-Speech (TTS)</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Configure a self-hosted TTS service (Kokoro TTS or OpenedAI Speech) with an OpenAI-compatible <code>/v1/audio/speech</code> endpoint.</p>
+                            <form method="post" action="/admin/voice-config">
+                                <input type="hidden" name="action" value="save_tts">
+
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="tts_enabled" name="tts_enabled" {% if tts_enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="tts_enabled">Enable TTS</label>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_provider" class="form-label">Provider</label>
+                                    <select class="form-select" id="tts_provider" name="tts_provider">
+                                        <option value="kokoro" {% if tts_provider == 'kokoro' %}selected{% endif %}>Kokoro TTS</option>
+                                        <option value="openedai" {% if tts_provider == 'openedai' %}selected{% endif %}>OpenedAI Speech</option>
+                                    </select>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_url" class="form-label">Service URL</label>
+                                    <input type="url" class="form-control" id="tts_url" name="tts_url" value="{{ tts_url or '' }}" placeholder="http://kokoro:8880">
+                                    <div class="form-text">Base URL of the TTS service (must expose <code>/v1/audio/speech</code>).</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_voice" class="form-label">Default Voice</label>
+                                    <input type="text" class="form-control" id="tts_voice" name="tts_voice" value="{{ tts_voice or '' }}" placeholder="af_heart">
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_api_key" class="form-label">API Key</label>
+                                    <input type="password" class="form-control" id="tts_api_key" name="tts_api_key" value="{{ tts_api_key or '' }}" placeholder="(optional)">
+                                    <div class="form-text">Only needed if the TTS service requires authentication.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_speed" class="form-label">Speed</label>
+                                    <input type="number" class="form-control" id="tts_speed" name="tts_speed" value="{{ tts_speed }}" min="0.5" max="2.0" step="0.1">
+                                    <div class="form-text">Playback speed multiplier (0.5 &ndash; 2.0).</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">Save TTS Settings</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STT Configuration -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-mic"></i> Speech-to-Text (STT)</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Configure a self-hosted STT service (faster-whisper / Speaches) with an OpenAI-compatible <code>/v1/audio/transcriptions</code> endpoint.</p>
+                            <form method="post" action="/admin/voice-config">
+                                <input type="hidden" name="action" value="save_stt">
+
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="stt_enabled" name="stt_enabled" {% if stt_enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="stt_enabled">Enable STT</label>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="stt_url" class="form-label">Service URL</label>
+                                    <input type="url" class="form-control" id="stt_url" name="stt_url" value="{{ stt_url or '' }}" placeholder="http://whisper:8000">
+                                    <div class="form-text">Base URL of the STT service (must expose <code>/v1/audio/transcriptions</code>).</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="stt_model" class="form-label">Model</label>
+                                    <input type="text" class="form-control" id="stt_model" name="stt_model" value="{{ stt_model or '' }}" placeholder="whisper-large-v3-turbo">
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="stt_api_key" class="form-label">API Key</label>
+                                    <input type="password" class="form-control" id="stt_api_key" name="stt_api_key" value="{{ stt_api_key or '' }}" placeholder="(optional)">
+                                    <div class="form-text">Only needed if the STT service requires authentication.</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">Save STT Settings</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

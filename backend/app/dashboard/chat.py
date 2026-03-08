@@ -19,6 +19,7 @@ import base64
 import io
 import json
 import os
+import re
 import time
 from typing import List, Optional, Tuple
 
@@ -300,6 +301,10 @@ async def chat_page(
     api_keys = await crud.get_user_api_keys(db, effective_id, include_revoked=False)
     has_api_key = len(api_keys) > 0
 
+    # Voice feature flags
+    voice_tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
+    voice_stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
+
     return templates.TemplateResponse(
         "chat.html",
         {
@@ -307,6 +312,8 @@ async def chat_page(
             "user": user,
             "has_api_key": has_api_key,
             "masquerade_user": masquerade_user,
+            "voice_tts_enabled": voice_tts_enabled,
+            "voice_stt_enabled": voice_stt_enabled,
         },
     )
 
@@ -980,3 +987,141 @@ async def chat_completions(
         except Exception as e:
             logger.exception("chat_completion_error", error=str(e))
             return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# TTS / STT proxy endpoints
+# ---------------------------------------------------------------------------
+
+def _strip_markdown_for_tts(text: str) -> str:
+    """Strip markdown artifacts that shouldn't be read aloud."""
+    # Remove code blocks
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Remove inline code
+    text = re.sub(r"`[^`]+`", "", text)
+    # Remove image references
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    # Convert links to just their text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Remove bold/italic markers
+    text = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", text)
+    text = re.sub(r"_{1,3}([^_]+)_{1,3}", r"\1", text)
+    # Remove heading markers
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Collapse whitespace
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
+
+@chat_router.post("/chat/api/tts")
+async def chat_tts_proxy(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Proxy TTS requests to the configured TTS service."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
+    if not tts_enabled:
+        raise HTTPException(status_code=404, detail="TTS is not enabled")
+
+    tts_url = await crud.get_config_json(db, "voice.tts_url", None)
+    if not tts_url:
+        raise HTTPException(status_code=500, detail="TTS service URL not configured")
+
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    # Strip markdown artifacts
+    text = _strip_markdown_for_tts(text)
+    if not text:
+        raise HTTPException(status_code=400, detail="No speakable text after cleanup")
+
+    tts_voice = body.get("voice") or await crud.get_config_json(db, "voice.tts_voice", "af_heart")
+    tts_speed = await crud.get_config_json(db, "voice.tts_speed", 1.0)
+    tts_api_key = await crud.get_config_json(db, "voice.tts_api_key", None)
+    tts_provider = await crud.get_config_json(db, "voice.tts_provider", "kokoro")
+
+    headers = {"Content-Type": "application/json"}
+    if tts_api_key:
+        headers["Authorization"] = f"Bearer {tts_api_key}"
+
+    payload = {
+        "model": tts_provider,
+        "input": text,
+        "voice": tts_voice,
+        "speed": tts_speed,
+        "response_format": "mp3",
+    }
+
+    import httpx
+
+    async def stream_audio():
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{tts_url.rstrip('/')}/v1/audio/speech",
+                    json=payload,
+                    headers=headers,
+                ) as resp:
+                    if resp.status_code != 200:
+                        return
+                    async for chunk in resp.aiter_bytes(4096):
+                        yield chunk
+        except Exception as e:
+            logger.warning("tts_proxy_error", error=str(e))
+
+    return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+
+
+@chat_router.post("/chat/api/stt")
+async def chat_stt_proxy(
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Proxy STT requests to the configured STT service."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
+    if not stt_enabled:
+        raise HTTPException(status_code=404, detail="STT is not enabled")
+
+    stt_url = await crud.get_config_json(db, "voice.stt_url", None)
+    if not stt_url:
+        raise HTTPException(status_code=500, detail="STT service URL not configured")
+
+    stt_model = await crud.get_config_json(db, "voice.stt_model", "whisper-large-v3-turbo")
+    stt_api_key = await crud.get_config_json(db, "voice.stt_api_key", None)
+
+    headers = {}
+    if stt_api_key:
+        headers["Authorization"] = f"Bearer {stt_api_key}"
+
+    audio_data = await file.read()
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{stt_url.rstrip('/')}/v1/audio/transcriptions",
+                files={"file": (file.filename or "audio.webm", audio_data, file.content_type or "audio/webm")},
+                data={"model": stt_model},
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                logger.warning("stt_proxy_error", status=resp.status_code, body=resp.text[:500])
+                raise HTTPException(status_code=502, detail="STT service error")
+            result = resp.json()
+            return JSONResponse({"text": result.get("text", "")})
+    except httpx.HTTPError as e:
+        logger.warning("stt_proxy_error", error=str(e))
+        raise HTTPException(status_code=502, detail="STT service unavailable")

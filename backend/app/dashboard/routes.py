@@ -2688,6 +2688,113 @@ async def admin_chat_config_post(
 
 
 # ---------------------------------------------------------------------------
+# Admin Voice Config (TTS / STT)
+# ---------------------------------------------------------------------------
+
+
+@dashboard_router.get("/admin/voice-config")
+async def admin_voice_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin voice configuration page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
+    tts_provider = await crud.get_config_json(db, "voice.tts_provider", "kokoro")
+    tts_url = await crud.get_config_json(db, "voice.tts_url", None)
+    tts_voice = await crud.get_config_json(db, "voice.tts_voice", "af_heart")
+    tts_api_key = await crud.get_config_json(db, "voice.tts_api_key", None)
+    tts_speed = await crud.get_config_json(db, "voice.tts_speed", 1.0)
+    stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
+    stt_url = await crud.get_config_json(db, "voice.stt_url", None)
+    stt_model = await crud.get_config_json(db, "voice.stt_model", "whisper-large-v3-turbo")
+    stt_api_key = await crud.get_config_json(db, "voice.stt_api_key", None)
+
+    return templates.TemplateResponse(
+        "admin/voice_config.html",
+        {
+            "request": request,
+            "user": user,
+            "tts_enabled": tts_enabled,
+            "tts_provider": tts_provider,
+            "tts_url": tts_url,
+            "tts_voice": tts_voice,
+            "tts_api_key": tts_api_key,
+            "tts_speed": tts_speed,
+            "stt_enabled": stt_enabled,
+            "stt_url": stt_url,
+            "stt_model": stt_model,
+            "stt_api_key": stt_api_key,
+            "success": success,
+            "error": error,
+        },
+    )
+
+
+@dashboard_router.post("/admin/voice-config")
+async def admin_voice_config_post(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle voice config form submissions."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action")
+
+    if action == "save_tts":
+        tts_enabled = form.get("tts_enabled") == "on"
+        tts_provider = form.get("tts_provider", "kokoro")
+        tts_url = form.get("tts_url", "").strip() or None
+        tts_voice = form.get("tts_voice", "").strip() or "af_heart"
+        tts_api_key = form.get("tts_api_key", "").strip() or None
+        try:
+            tts_speed = float(form.get("tts_speed", "1.0"))
+            tts_speed = max(0.5, min(2.0, tts_speed))
+        except (ValueError, TypeError):
+            tts_speed = 1.0
+
+        await crud.set_config(db, "voice.tts_enabled", tts_enabled)
+        await crud.set_config(db, "voice.tts_provider", tts_provider)
+        await crud.set_config(db, "voice.tts_url", tts_url)
+        await crud.set_config(db, "voice.tts_voice", tts_voice)
+        await crud.set_config(db, "voice.tts_api_key", tts_api_key)
+        await crud.set_config(db, "voice.tts_speed", tts_speed)
+        await db.commit()
+        return RedirectResponse(url="/admin/voice-config?success=tts_updated", status_code=302)
+
+    elif action == "save_stt":
+        stt_enabled = form.get("stt_enabled") == "on"
+        stt_url = form.get("stt_url", "").strip() or None
+        stt_model = form.get("stt_model", "").strip() or "whisper-large-v3-turbo"
+        stt_api_key = form.get("stt_api_key", "").strip() or None
+
+        await crud.set_config(db, "voice.stt_enabled", stt_enabled)
+        await crud.set_config(db, "voice.stt_url", stt_url)
+        await crud.set_config(db, "voice.stt_model", stt_model)
+        await crud.set_config(db, "voice.stt_api_key", stt_api_key)
+        await db.commit()
+        return RedirectResponse(url="/admin/voice-config?success=stt_updated", status_code=302)
+
+    return RedirectResponse(url="/admin/voice-config?error=Unknown+action", status_code=302)
+
+
+# ---------------------------------------------------------------------------
 # Admin Site Settings (timezone, etc.)
 # ---------------------------------------------------------------------------
 

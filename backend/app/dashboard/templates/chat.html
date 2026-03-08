@@ -196,6 +196,31 @@
     }
     .copy-response-btn:hover { color: #0d6efd; border-color: #0d6efd; }
 
+    /* TTS read-aloud button (same style as copy-response) */
+    .tts-read-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        margin-top: 0.5rem;
+        margin-left: 0.4rem;
+        padding: 0.2rem 0.6rem;
+        font-size: 0.75rem;
+        color: #6c757d;
+        background: none;
+        border: 1px solid var(--mr-border-color);
+        border-radius: 0.25rem;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+    }
+    .tts-read-btn:hover { color: #0d6efd; border-color: #0d6efd; }
+
+    /* Mic recording pulse animation */
+    .recording { animation: pulse-red 1s infinite; }
+    @keyframes pulse-red {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.4); }
+        50% { box-shadow: 0 0 0 8px rgba(220, 53, 69, 0); }
+    }
+
     /* KaTeX math display */
     .message-content .katex-display {
         margin: 1rem 0;
@@ -720,12 +745,18 @@
                         <button class="btn btn-outline-secondary" id="webSearchToggle" title="Toggle web search" aria-label="Toggle web search" aria-pressed="false" style="padding: 0.375rem 0.75rem;">
                             <i class="bi bi-search" aria-hidden="true"></i>
                         </button>
+                        <button class="btn btn-outline-secondary" id="autoReadToggle" title="Auto-read responses" aria-label="Auto-read responses" aria-pressed="false" style="padding: 0.375rem 0.75rem; display: none;">
+                            <i class="bi bi-volume-up" aria-hidden="true"></i>
+                        </button>
                     </div>
                     <label for="chatInput" class="sr-only">Chat message</label>
                     <textarea id="chatInput" rows="2"
                               placeholder="Type a message..."
                               aria-label="Chat message"
                               autofocus></textarea>
+                    <button class="btn btn-outline-secondary" id="micBtn" title="Voice input" aria-label="Voice input" style="display: none;">
+                        <i class="bi bi-mic" aria-hidden="true"></i>
+                    </button>
                     <button class="btn btn-primary" id="sendBtn" title="Send message" aria-label="Send message">
                         <i class="bi bi-send" aria-hidden="true"></i>
                     </button>
@@ -811,6 +842,14 @@ document.addEventListener('mr-theme-changed', function(e) {
     let abortController = null;
     let isStreaming = false;
     let modelCapabilities = {};  // { modelId: { multimodal: bool, ... } }
+
+    // Voice (TTS/STT) state
+    const voiceTtsEnabled = {{ voice_tts_enabled | tojson }};
+    const voiceSttEnabled = {{ voice_stt_enabled | tojson }};
+    let _autoReadActive = false;
+    let _streamTtsPlayer = null;
+    let _micRecorder = null;
+    let _micStream = null;
 
     // ---------------------------------------------------------------
     // DOM refs
@@ -1126,6 +1165,7 @@ document.addEventListener('mr-theme-changed', function(e) {
         if (role === 'assistant') {
             renderMath(div);
             if (content) addCopyResponseButton(div, content);
+            if (content && voiceTtsEnabled) addTTSButton(div, content);
         }
         return div;
     }
@@ -1261,6 +1301,7 @@ document.addEventListener('mr-theme-changed', function(e) {
         addCopyButtons(last);
         renderMath(last);
         addCopyResponseButton(last, content);
+        if (voiceTtsEnabled) addTTSButton(last, content);
 
         // Finalize thinking block: update label with word count and collapse
         if (_streamReasoningContent) {
@@ -1313,6 +1354,145 @@ document.addEventListener('mr-theme-changed', function(e) {
                     btn.innerHTML = '<i class="bi bi-clipboard"></i> Copy response';
                 }, 2000);
             });
+        });
+        messageEl.appendChild(btn);
+    }
+
+    // ---------------------------------------------------------------
+    // TTS Player — sentence-level queuing with pipelined fetch
+    // ---------------------------------------------------------------
+    class TTSPlayer {
+        constructor() {
+            this._buffer = '';
+            this._queue = [];       // [{blob, url}]
+            this._playing = false;
+            this._currentAudio = null;
+            this._aborted = false;
+            this._pendingFetches = [];
+        }
+
+        // Abbreviations to skip when splitting sentences
+        static _ABBREVS = /(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|approx|dept|govt|avg|vol|no)\./i;
+
+        feedDelta(delta) {
+            if (this._aborted) return;
+            this._buffer += delta;
+            // Split on sentence-ending punctuation followed by whitespace or EOL
+            const parts = this._buffer.split(/(?<=[.!?])(?:\s+|$)/);
+            // Keep last (possibly incomplete) part in buffer
+            this._buffer = parts.pop() || '';
+            for (const sentence of parts) {
+                const trimmed = sentence.trim();
+                if (!trimmed) continue;
+                // Skip if it's just an abbreviation fragment
+                if (TTSPlayer._ABBREVS.test(trimmed) && trimmed.length < 8) continue;
+                this._enqueueSentence(trimmed);
+            }
+        }
+
+        flush() {
+            if (this._aborted) return;
+            const remaining = this._buffer.trim();
+            this._buffer = '';
+            if (remaining) this._enqueueSentence(remaining);
+        }
+
+        _enqueueSentence(text) {
+            // Strip code blocks and image markdown
+            let cleaned = text.replace(/```[\s\S]*?```/g, '').replace(/`[^`]+`/g, '');
+            cleaned = cleaned.replace(/!\[[^\]]*\]\([^)]+\)/g, '');
+            cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+            cleaned = cleaned.replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1');
+            cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
+            cleaned = cleaned.trim();
+            if (!cleaned || cleaned.length < 2) return;
+
+            const fetchPromise = fetch('/chat/api/tts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: cleaned }),
+            }).then(r => {
+                if (!r.ok) throw new Error('TTS error');
+                return r.blob();
+            }).then(blob => {
+                if (this._aborted) return;
+                const url = URL.createObjectURL(blob);
+                this._queue.push({ blob, url });
+                this._playNext();
+            }).catch(() => {});
+            this._pendingFetches.push(fetchPromise);
+        }
+
+        _playNext() {
+            if (this._playing || this._aborted || !this._queue.length) return;
+            this._playing = true;
+            const { url } = this._queue.shift();
+            const audio = new Audio(url);
+            this._currentAudio = audio;
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                this._playing = false;
+                this._currentAudio = null;
+                this._playNext();
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                this._playing = false;
+                this._currentAudio = null;
+                this._playNext();
+            };
+            audio.play().catch(() => {
+                this._playing = false;
+                this._currentAudio = null;
+            });
+        }
+
+        stop() {
+            this._aborted = true;
+            if (this._currentAudio) {
+                this._currentAudio.pause();
+                this._currentAudio = null;
+            }
+            // Revoke pending blob URLs
+            for (const item of this._queue) URL.revokeObjectURL(item.url);
+            this._queue = [];
+            this._buffer = '';
+            this._playing = false;
+        }
+
+        get isActive() {
+            return this._playing || this._queue.length > 0 || this._pendingFetches.some(p => p);
+        }
+    }
+
+    function addTTSButton(messageEl, rawContent) {
+        const existing = messageEl.querySelector('.tts-read-btn');
+        if (existing) existing.remove();
+        const btn = document.createElement('button');
+        btn.className = 'tts-read-btn';
+        btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+        let player = null;
+        btn.addEventListener('click', () => {
+            if (player && !player._aborted) {
+                player.stop();
+                player = null;
+                btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+                return;
+            }
+            player = new TTSPlayer();
+            btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
+            // Feed entire content as one block, then flush
+            player.feedDelta(rawContent);
+            player.flush();
+            // Poll to reset button when done
+            const checkDone = setInterval(() => {
+                if (player && player._aborted) { clearInterval(checkDone); return; }
+                if (player && !player._playing && !player._queue.length && !player._buffer) {
+                    clearInterval(checkDone);
+                    btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+                    player = null;
+                }
+            }, 500);
         });
         messageEl.appendChild(btn);
     }
@@ -1720,6 +1900,16 @@ document.addEventListener('mr-theme-changed', function(e) {
         stopBtn.classList.add('active');
         abortController = new AbortController();
 
+        // Init TTS player for auto-read if enabled
+        _autoReadActive = voiceTtsEnabled && document.getElementById('autoReadToggle').getAttribute('aria-pressed') === 'true';
+        if (_autoReadActive) {
+            _streamTtsPlayer = new TTSPlayer();
+            // Safari autoplay workaround: unlock audio context on user gesture
+            try { const s = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAgAAAbAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAbC0SQWRAAAAAAAAAAAAAAAAAAAAAP/jOMAAAh0AUBQAAASqq///woBAOAwGAMPIcv//IHwfi/5c///t////+FDj//0EBP//4IBQBAAADBBBYIBcHg+H///y58uXHD/rEBlJoEBQwZQMCAAEQ2NggOGkSO/+NQZ1EBn/41BARgHEAcABYXF9f//+n//qULiwQGQJB/CAn/8uXYOGOOMEAwYC+LAYGB9Ag/4AAAAAAB//8='); s.volume = 0; s.play().catch(() => {}); } catch(e) {}
+        } else {
+            _streamTtsPlayer = null;
+        }
+
         try {
             const bodyData = {
                 conversation_id: activeConvId,
@@ -1804,6 +1994,7 @@ document.addEventListener('mr-theme-changed', function(e) {
                         }
                         if (contentDelta) {
                             appendStreamDelta(contentDelta);
+                            if (_autoReadActive && _streamTtsPlayer) _streamTtsPlayer.feedDelta(contentDelta);
                         }
                     } catch (e) {
                         // skip malformed chunks
@@ -1822,6 +2013,8 @@ document.addEventListener('mr-theme-changed', function(e) {
             stopBtn.classList.remove('active');
             abortController = null;
 
+            if (_autoReadActive && _streamTtsPlayer) _streamTtsPlayer.flush();
+
             const finalContent = _streamFullContent;
             finalizeAssistantMessage(finalContent);
 
@@ -1837,6 +2030,7 @@ document.addEventListener('mr-theme-changed', function(e) {
     sendBtn.addEventListener('click', sendMessage);
     stopBtn.addEventListener('click', () => {
         if (abortController) abortController.abort();
+        if (_streamTtsPlayer) { _streamTtsPlayer.stop(); _streamTtsPlayer = null; }
     });
 
     inputEl.addEventListener('keydown', (e) => {
@@ -1924,6 +2118,104 @@ document.addEventListener('mr-theme-changed', function(e) {
         const isActive = webSearchToggle.getAttribute('aria-pressed') === 'true';
         setWebSearchState(!isActive);
     });
+
+    // ---------------------------------------------------------------
+    // Auto-read toggle (TTS)
+    // ---------------------------------------------------------------
+    const autoReadToggle = document.getElementById('autoReadToggle');
+    if (voiceTtsEnabled && autoReadToggle) {
+        autoReadToggle.style.display = '';
+        function setAutoReadState(active) {
+            autoReadToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
+            if (active) {
+                autoReadToggle.classList.remove('btn-outline-secondary');
+                autoReadToggle.classList.add('btn-primary');
+            } else {
+                autoReadToggle.classList.remove('btn-primary');
+                autoReadToggle.classList.add('btn-outline-secondary');
+            }
+            localStorage.setItem('mr2_auto_read', active ? '1' : '');
+        }
+        if (localStorage.getItem('mr2_auto_read') === '1') {
+            setAutoReadState(true);
+        }
+        autoReadToggle.addEventListener('click', () => {
+            const isActive = autoReadToggle.getAttribute('aria-pressed') === 'true';
+            setAutoReadState(!isActive);
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Microphone / STT
+    // ---------------------------------------------------------------
+    const micBtn = document.getElementById('micBtn');
+    if (voiceSttEnabled && micBtn) {
+        micBtn.style.display = '';
+        micBtn.addEventListener('click', async () => {
+            // If currently recording, stop
+            if (_micRecorder && _micRecorder.state === 'recording') {
+                _micRecorder.stop();
+                return;
+            }
+            // Start recording
+            try {
+                _micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            } catch (e) {
+                alert('Microphone access denied or unavailable.');
+                return;
+            }
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus' : 'audio/webm';
+            _micRecorder = new MediaRecorder(_micStream, { mimeType });
+            const chunks = [];
+
+            _micRecorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+            _micRecorder.onstart = () => {
+                micBtn.innerHTML = '<i class="bi bi-stop-circle" aria-hidden="true"></i>';
+                micBtn.classList.add('recording');
+                micBtn.classList.remove('btn-outline-secondary');
+                micBtn.classList.add('btn-danger');
+            };
+            _micRecorder.onstop = async () => {
+                micBtn.classList.remove('recording');
+                micBtn.classList.remove('btn-danger');
+                micBtn.classList.add('btn-outline-secondary');
+                micBtn.innerHTML = '<i class="bi bi-hourglass-split" aria-hidden="true"></i>';
+                micBtn.disabled = true;
+
+                // Stop media tracks
+                if (_micStream) { _micStream.getTracks().forEach(t => t.stop()); _micStream = null; }
+
+                if (!chunks.length) {
+                    micBtn.innerHTML = '<i class="bi bi-mic" aria-hidden="true"></i>';
+                    micBtn.disabled = false;
+                    return;
+                }
+
+                const blob = new Blob(chunks, { type: mimeType });
+                const formData = new FormData();
+                formData.append('file', blob, 'recording.webm');
+
+                try {
+                    const resp = await fetch('/chat/api/stt', { method: 'POST', body: formData });
+                    if (!resp.ok) throw new Error('STT error');
+                    const data = await resp.json();
+                    if (data.text) {
+                        const input = document.getElementById('chatInput');
+                        input.value = (input.value ? input.value + ' ' : '') + data.text;
+                        input.focus();
+                        input.dispatchEvent(new Event('input'));
+                    }
+                } catch (e) {
+                    console.error('STT error:', e);
+                }
+                micBtn.innerHTML = '<i class="bi bi-mic" aria-hidden="true"></i>';
+                micBtn.disabled = false;
+            };
+
+            _micRecorder.start();
+        });
+    }
 
     loadModels();
     loadConversations();
