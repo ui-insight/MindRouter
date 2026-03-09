@@ -21,6 +21,8 @@
                 {% elif success == 'max_tokens_updated' %}Max tokens updated.
                 {% elif success == 'temperature_updated' %}Temperature updated.
                 {% elif success == 'think_updated' %}Thinking mode updated.
+                {% elif success == 'voice_tts_updated' %}Voice TTS settings updated.
+                {% elif success == 'voice_stt_updated' %}Voice STT settings updated.
                 {% else %}{{ success }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -153,6 +155,65 @@
                                     </select>
                                 </div>
                                 <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Voice: TTS -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-volume-up"></i> Text-to-Speech (TTS)</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Enable TTS "Read Aloud" in the chat interface and set defaults.</p>
+                            <form method="post" action="/admin/chat-config">
+                                <input type="hidden" name="action" value="save_chat_tts">
+
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="tts_enabled" name="tts_enabled" {% if tts_enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="tts_enabled">Enable TTS</label>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_provider" class="form-label">Provider</label>
+                                    <select class="form-select" id="tts_provider" name="tts_provider">
+                                        <option value="kokoro" {% if tts_provider == 'kokoro' %}selected{% endif %}>Kokoro TTS</option>
+                                        <option value="openedai" {% if tts_provider == 'openedai' %}selected{% endif %}>OpenedAI Speech</option>
+                                    </select>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_voice" class="form-label">Default Voice</label>
+                                    <input type="text" class="form-control" id="tts_voice" name="tts_voice" value="{{ tts_voice or '' }}" placeholder="af_heart">
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="tts_speed" class="form-label">Speed</label>
+                                    <input type="number" class="form-control" id="tts_speed" name="tts_speed" value="{{ tts_speed }}" min="0.5" max="2.0" step="0.1">
+                                    <div class="form-text">Playback speed multiplier (0.5 &ndash; 2.0).</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary btn-sm">Save TTS Settings</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Voice: STT -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-mic"></i> Speech-to-Text (STT)</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Enable microphone input in the chat interface.</p>
+                            <form method="post" action="/admin/chat-config">
+                                <input type="hidden" name="action" value="save_chat_stt">
+
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="stt_enabled" name="stt_enabled" {% if stt_enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="stt_enabled">Enable STT</label>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary btn-sm">Save STT Settings</button>
                             </form>
                         </div>
                     </div>

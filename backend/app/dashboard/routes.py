@@ -2584,6 +2584,13 @@ async def admin_chat_config(
     chat_temperature = await crud.get_config_json(db, "chat.temperature", None)
     chat_think = await crud.get_config_json(db, "chat.think", None)
 
+    # Voice settings (chat-specific)
+    tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
+    tts_provider = await crud.get_config_json(db, "voice.tts_provider", "kokoro")
+    tts_voice = await crud.get_config_json(db, "voice.tts_voice", "af_heart")
+    tts_speed = await crud.get_config_json(db, "voice.tts_speed", 1.0)
+    stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
+
     return templates.TemplateResponse(
         "admin/chat_config.html",
         {
@@ -2596,6 +2603,11 @@ async def admin_chat_config(
             "chat_max_tokens": chat_max_tokens,
             "chat_temperature": chat_temperature,
             "chat_think": chat_think,
+            "tts_enabled": tts_enabled,
+            "tts_provider": tts_provider,
+            "tts_voice": tts_voice,
+            "tts_speed": tts_speed,
+            "stt_enabled": stt_enabled,
             "success": success,
             "error": error,
         },
@@ -2684,6 +2696,28 @@ async def admin_chat_config_post(
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=think_updated", status_code=302)
 
+    elif action == "save_chat_tts":
+        tts_enabled = form.get("tts_enabled") == "on"
+        tts_provider = form.get("tts_provider", "kokoro")
+        tts_voice = form.get("tts_voice", "").strip() or "af_heart"
+        try:
+            tts_speed = float(form.get("tts_speed", "1.0"))
+            tts_speed = max(0.5, min(2.0, tts_speed))
+        except (ValueError, TypeError):
+            tts_speed = 1.0
+        await crud.set_config(db, "voice.tts_enabled", tts_enabled)
+        await crud.set_config(db, "voice.tts_provider", tts_provider)
+        await crud.set_config(db, "voice.tts_voice", tts_voice)
+        await crud.set_config(db, "voice.tts_speed", tts_speed)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=voice_tts_updated", status_code=302)
+
+    elif action == "save_chat_stt":
+        stt_enabled = form.get("stt_enabled") == "on"
+        await crud.set_config(db, "voice.stt_enabled", stt_enabled)
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=voice_stt_updated", status_code=302)
+
     return RedirectResponse(url="/admin/chat-config?error=Unknown+action", status_code=302)
 
 
@@ -2708,32 +2742,28 @@ async def admin_voice_config(
     if not user or (not user.group or not user.group.is_admin):
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
-    tts_provider = await crud.get_config_json(db, "voice.tts_provider", "kokoro")
     tts_url = await crud.get_config_json(db, "voice.tts_url", None)
-    tts_voice = await crud.get_config_json(db, "voice.tts_voice", "af_heart")
     tts_api_key = await crud.get_config_json(db, "voice.tts_api_key", None)
-    tts_speed = await crud.get_config_json(db, "voice.tts_speed", 1.0)
-    stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
+    tts_voices = await crud.get_config_json(db, "voice_api.tts_voices", "af_heart\naf_bella\nam_adam\nam_michael")
     stt_url = await crud.get_config_json(db, "voice.stt_url", None)
-    stt_model = await crud.get_config_json(db, "voice.stt_model", "whisper-large-v3-turbo")
     stt_api_key = await crud.get_config_json(db, "voice.stt_api_key", None)
+    stt_model = await crud.get_config_json(db, "voice.stt_model", "whisper-large-v3-turbo")
+    tts_quota_tokens = await crud.get_config_json(db, "voice_api.tts_quota_tokens", 100)
+    stt_quota_tokens = await crud.get_config_json(db, "voice_api.stt_quota_tokens", 200)
 
     return templates.TemplateResponse(
         "admin/voice_config.html",
         {
             "request": request,
             "user": user,
-            "tts_enabled": tts_enabled,
-            "tts_provider": tts_provider,
             "tts_url": tts_url,
-            "tts_voice": tts_voice,
             "tts_api_key": tts_api_key,
-            "tts_speed": tts_speed,
-            "stt_enabled": stt_enabled,
+            "tts_voices": tts_voices,
             "stt_url": stt_url,
-            "stt_model": stt_model,
             "stt_api_key": stt_api_key,
+            "stt_model": stt_model,
+            "tts_quota_tokens": tts_quota_tokens,
+            "stt_quota_tokens": stt_quota_tokens,
             "success": success,
             "error": error,
         },
@@ -2757,39 +2787,43 @@ async def admin_voice_config_post(
     form = await request.form()
     action = form.get("action")
 
-    if action == "save_tts":
-        tts_enabled = form.get("tts_enabled") == "on"
-        tts_provider = form.get("tts_provider", "kokoro")
+    if action == "save_voice_tts_backend":
         tts_url = form.get("tts_url", "").strip() or None
-        tts_voice = form.get("tts_voice", "").strip() or "af_heart"
         tts_api_key = form.get("tts_api_key", "").strip() or None
-        try:
-            tts_speed = float(form.get("tts_speed", "1.0"))
-            tts_speed = max(0.5, min(2.0, tts_speed))
-        except (ValueError, TypeError):
-            tts_speed = 1.0
+        tts_voices = form.get("tts_voices", "").strip()
 
-        await crud.set_config(db, "voice.tts_enabled", tts_enabled)
-        await crud.set_config(db, "voice.tts_provider", tts_provider)
         await crud.set_config(db, "voice.tts_url", tts_url)
-        await crud.set_config(db, "voice.tts_voice", tts_voice)
         await crud.set_config(db, "voice.tts_api_key", tts_api_key)
-        await crud.set_config(db, "voice.tts_speed", tts_speed)
+        await crud.set_config(db, "voice_api.tts_voices", tts_voices)
         await db.commit()
-        return RedirectResponse(url="/admin/voice-config?success=tts_updated", status_code=302)
+        return RedirectResponse(url="/admin/voice-config?success=tts_backend_updated", status_code=302)
 
-    elif action == "save_stt":
-        stt_enabled = form.get("stt_enabled") == "on"
+    elif action == "save_voice_stt_backend":
         stt_url = form.get("stt_url", "").strip() or None
-        stt_model = form.get("stt_model", "").strip() or "whisper-large-v3-turbo"
         stt_api_key = form.get("stt_api_key", "").strip() or None
+        stt_model = form.get("stt_model", "").strip() or "whisper-large-v3-turbo"
 
-        await crud.set_config(db, "voice.stt_enabled", stt_enabled)
         await crud.set_config(db, "voice.stt_url", stt_url)
-        await crud.set_config(db, "voice.stt_model", stt_model)
         await crud.set_config(db, "voice.stt_api_key", stt_api_key)
+        await crud.set_config(db, "voice.stt_model", stt_model)
         await db.commit()
-        return RedirectResponse(url="/admin/voice-config?success=stt_updated", status_code=302)
+        return RedirectResponse(url="/admin/voice-config?success=stt_backend_updated", status_code=302)
+
+    elif action == "save_voice_quota":
+        try:
+            tts_qt = int(form.get("tts_quota_tokens", "100"))
+            tts_qt = max(0, min(100000, tts_qt))
+        except (ValueError, TypeError):
+            tts_qt = 100
+        try:
+            stt_qt = int(form.get("stt_quota_tokens", "200"))
+            stt_qt = max(0, min(100000, stt_qt))
+        except (ValueError, TypeError):
+            stt_qt = 200
+        await crud.set_config(db, "voice_api.tts_quota_tokens", tts_qt)
+        await crud.set_config(db, "voice_api.stt_quota_tokens", stt_qt)
+        await db.commit()
+        return RedirectResponse(url="/admin/voice-config?success=quota_updated", status_code=302)
 
     return RedirectResponse(url="/admin/voice-config?error=Unknown+action", status_code=302)
 

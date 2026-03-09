@@ -192,10 +192,6 @@ class Settings(BaseSettings):
     brave_search_api_key: Optional[str] = None
     brave_search_max_results: int = 5
 
-    # Voice API quota (fixed token cost per request)
-    tts_quota_tokens: int = 100
-    stt_quota_tokens: int = 200
-
     # Tokenizer
     default_tokenizer: str = "cl100k_base"
 

@@ -28,7 +28,6 @@ from backend.app.db import crud
 from backend.app.db.models import ApiKey, Modality, RequestStatus, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import get_logger
-from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/v1/audio", tags=["voice"])
@@ -121,7 +120,6 @@ async def tts_speech(
     Requires API key authentication.
     """
     user, api_key = auth
-    settings = get_settings()
 
     await _check_quota(db, user)
 
@@ -151,7 +149,7 @@ async def tts_speech(
         "response_format": body.response_format,
     }
 
-    token_cost = settings.tts_quota_tokens
+    token_cost = await crud.get_config_json(db, "voice_api.tts_quota_tokens", 100)
 
     async def stream_audio():
         try:
@@ -204,7 +202,6 @@ async def stt_transcriptions(
     Requires API key authentication.
     """
     user, api_key = auth
-    settings = get_settings()
 
     await _check_quota(db, user)
 
@@ -226,7 +223,7 @@ async def stt_transcriptions(
 
     audio_data = await file.read()
 
-    token_cost = settings.stt_quota_tokens
+    token_cost = await crud.get_config_json(db, "voice_api.stt_quota_tokens", 200)
 
     data = {"model": stt_model}
     if language:
