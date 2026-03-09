@@ -30,6 +30,7 @@ from backend.app.core.redis_client import (
     get_all_token_keys,
     init_redis,
     is_available as redis_is_available,
+    reset_tokens as redis_reset_tokens,
     set_tokens as redis_set_tokens,
 )
 from backend.app.core.scheduler.policy import init_scheduler, shutdown_scheduler
@@ -79,27 +80,64 @@ async def _retention_loop() -> None:
 
 
 async def _seed_redis_from_db() -> None:
-    """Load current token counts from DB into Redis on startup."""
+    """Seed Redis token counters from actual request totals on startup.
+
+    Uses the ``requests`` table as the source of truth (not
+    ``quotas.tokens_used``) so that Redis always reflects real usage.
+    Also deletes orphan Redis keys for user IDs that no longer exist.
+    """
     if not redis_is_available():
         return
     try:
-        from backend.app.db.models import Quota
-        from sqlalchemy import select
+        from backend.app.db.models import Quota, Request
+        from sqlalchemy import select, func
 
         async with get_async_db_context() as db:
-            result = await db.execute(select(Quota.user_id, Quota.tokens_used))
-            rows = result.all()
+            # Get actual token totals from requests table
+            stmt = (
+                select(Quota.user_id, func.coalesce(func.sum(Request.total_tokens), 0))
+                .outerjoin(Request, Request.user_id == Quota.user_id)
+                .group_by(Quota.user_id)
+            )
+            result = await db.execute(stmt)
+            valid_user_ids = set()
             seeded = 0
-            for user_id, tokens_used in rows:
-                await redis_set_tokens(user_id, tokens_used or 0)
+            for user_id, actual_tokens in result.all():
+                await redis_set_tokens(user_id, int(actual_tokens))
+                valid_user_ids.add(user_id)
                 seeded += 1
-            logger.info("redis_seeded_from_db", users=seeded)
+
+            # Also sync DB quotas.tokens_used to match
+            from sqlalchemy import update
+            for user_id in valid_user_ids:
+                sub = select(func.coalesce(func.sum(Request.total_tokens), 0)).where(
+                    Request.user_id == user_id
+                ).scalar_subquery()
+                await db.execute(
+                    update(Quota).where(Quota.user_id == user_id).values(tokens_used=sub)
+                )
+            await db.commit()
+
+        # Clean up orphan Redis keys for user IDs that no longer have quotas
+        all_redis = await get_all_token_keys()
+        orphans = set(all_redis.keys()) - valid_user_ids
+        for orphan_id in orphans:
+            await redis_reset_tokens(orphan_id)
+        if orphans:
+            logger.info("redis_orphan_keys_cleaned", count=len(orphans))
+
+        logger.info("redis_seeded_from_requests", users=seeded)
     except Exception:
         logger.exception("redis_seed_failed")
 
 
 async def _redis_sync_loop() -> None:
-    """Background loop: flush Redis token counters to DB every 60s for durability."""
+    """Background loop: sync Redis token counters to DB every 60s.
+
+    Writes current Redis values into ``quotas.tokens_used`` for durability.
+    Only syncs keys that correspond to existing quota rows (ignores orphans).
+    Orphan cleanup happens on startup in ``_seed_redis_from_db``.
+    """
     while True:
         try:
             await asyncio.sleep(60)
@@ -109,15 +147,20 @@ async def _redis_sync_loop() -> None:
             if not token_map:
                 continue
             from backend.app.db.models import Quota
-            from sqlalchemy import update
+            from sqlalchemy import select, update
 
             async with get_async_db_context() as db:
+                # Get valid user_ids that have quota rows
+                result = await db.execute(select(Quota.user_id))
+                valid_ids = {row[0] for row in result.all()}
+
                 for user_id, tokens in token_map.items():
-                    await db.execute(
-                        update(Quota)
-                        .where(Quota.user_id == user_id)
-                        .values(tokens_used=tokens)
-                    )
+                    if user_id in valid_ids:
+                        await db.execute(
+                            update(Quota)
+                            .where(Quota.user_id == user_id)
+                            .values(tokens_used=tokens)
+                        )
                 await db.commit()
             logger.debug("redis_sync_to_db", users=len(token_map))
         except asyncio.CancelledError:

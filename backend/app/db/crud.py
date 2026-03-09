@@ -573,7 +573,7 @@ async def create_quota(
     rpm_limit: int,
     max_concurrent: int,
 ) -> Quota:
-    """Create quota for a user."""
+    """Create quota for a user and initialise Redis counter to 0."""
     quota = Quota(
         user_id=user_id,
         rpm_limit=rpm_limit,
@@ -581,6 +581,13 @@ async def create_quota(
     )
     db.add(quota)
     await db.flush()
+
+    # Ensure Redis starts at 0 — prevents inheriting stale keys from
+    # a previous database that used the same user_id.
+    from backend.app.core.redis_client import set_tokens, is_available
+    if is_available():
+        await set_tokens(user_id, 0)
+
     return quota
 
 
