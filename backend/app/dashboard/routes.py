@@ -51,6 +51,24 @@ templates.env.filters["fromjson"] = lambda s: json.loads(s) if s else []
 templates.env.globals["version"] = get_settings().app_version
 
 # ---------------------------------------------------------------------------
+# Voice Chat enabled cache — used as a Jinja2 global so nav bar can check it
+# ---------------------------------------------------------------------------
+_voice_chat_cache: dict = {"enabled": None}  # None = not yet loaded
+
+
+def _get_voice_chat_enabled() -> bool:
+    """Return cached voice_chat.enabled flag (safe for template use)."""
+    return bool(_voice_chat_cache.get("enabled"))
+
+
+def _refresh_voice_chat_cache(enabled: bool) -> None:
+    """Update the cached voice chat enabled flag."""
+    _voice_chat_cache["enabled"] = enabled
+
+
+templates.env.globals["voice_chat_enabled"] = _get_voice_chat_enabled
+
+# ---------------------------------------------------------------------------
 # Timezone filter — converts UTC datetimes to the configured app timezone
 # ---------------------------------------------------------------------------
 _tz_cache = {"name": "America/Los_Angeles"}
@@ -2844,6 +2862,11 @@ async def admin_voice_config(
     tts_quota_tokens = await crud.get_config_json(db, "voice_api.tts_quota_tokens", 100)
     stt_quota_tokens = await crud.get_config_json(db, "voice_api.stt_quota_tokens", 200)
 
+    # Voice Chat (PersonaPlex) settings
+    voice_chat_enabled = await crud.get_config_json(db, "voice_chat.enabled", False)
+    voice_chat_personas = await crud.get_config_json(db, "voice_chat.personas", [])
+    voice_chat_personas_json = json.dumps(voice_chat_personas, indent=2) if voice_chat_personas else "[]"
+
     return templates.TemplateResponse(
         "admin/voice_config.html",
         {
@@ -2858,6 +2881,8 @@ async def admin_voice_config(
             "stt_model": stt_model,
             "tts_quota_tokens": tts_quota_tokens,
             "stt_quota_tokens": stt_quota_tokens,
+            "voice_chat_enabled": voice_chat_enabled,
+            "voice_chat_personas_json": voice_chat_personas_json,
             "success": success,
             "error": error,
         },
@@ -2920,6 +2945,24 @@ async def admin_voice_config_post(
         await crud.set_config(db, "voice_api.stt_quota_tokens", stt_qt)
         await db.commit()
         return RedirectResponse(url="/admin/voice-config?success=quota_updated", status_code=302)
+
+    elif action == "save_voice_chat":
+        vc_enabled = form.get("voice_chat_enabled") == "on"
+        vc_personas_raw = form.get("voice_chat_personas", "[]").strip()
+        try:
+            vc_personas = json.loads(vc_personas_raw)
+            if not isinstance(vc_personas, list):
+                raise ValueError("Personas must be a JSON array")
+        except (json.JSONDecodeError, ValueError) as exc:
+            return RedirectResponse(
+                url=f"/admin/voice-config?error=Invalid+personas+JSON:+{exc}",
+                status_code=302,
+            )
+        await crud.set_config(db, "voice_chat.enabled", vc_enabled)
+        await crud.set_config(db, "voice_chat.personas", vc_personas)
+        await db.commit()
+        _refresh_voice_chat_cache(vc_enabled)
+        return RedirectResponse(url="/admin/voice-config?success=voice_chat_updated", status_code=302)
 
     return RedirectResponse(url="/admin/voice-config?error=Unknown+action", status_code=302)
 
@@ -3098,6 +3141,12 @@ async def _init_tz_cache(db: AsyncSession) -> None:
     """Load timezone from DB into cache. Call at startup or first request."""
     tz_name = await crud.get_config_json(db, "app.timezone", "America/Los_Angeles")
     _refresh_tz_cache_sync(tz_name)
+
+
+async def _init_voice_chat_cache(db: AsyncSession) -> None:
+    """Load voice_chat.enabled from DB into cache. Call at startup."""
+    enabled = await crud.get_config_json(db, "voice_chat.enabled", False)
+    _refresh_voice_chat_cache(enabled)
 
 
 # ------------------------------------------------------------------

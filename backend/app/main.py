@@ -38,6 +38,7 @@ from backend.app.core.telemetry.registry import init_registry, shutdown_registry
 from backend.app.dashboard.blog import blog_router
 from backend.app.dashboard.chat import chat_router
 from backend.app.dashboard.routes import dashboard_router
+from backend.app.dashboard.voice_chat import voice_chat_router
 from backend.app.logging_config import (
     bind_request_context,
     clear_request_context,
@@ -191,11 +192,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     await init_redis()
     await _seed_redis_from_db()
 
-    # Initialize timezone cache from DB
+    # Initialize timezone and voice chat caches from DB
     from backend.app.db.session import AsyncSessionLocal
-    from backend.app.dashboard.routes import _init_tz_cache
+    from backend.app.dashboard.routes import _init_tz_cache, _init_voice_chat_cache
     async with AsyncSessionLocal() as db:
         await _init_tz_cache(db)
+        await _init_voice_chat_cache(db)
 
     # Initialize archive database if configured
     settings_ref = get_settings()
@@ -347,6 +349,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_router)
     app.include_router(chat_router)
     app.include_router(blog_router)
+    app.include_router(voice_chat_router)
 
     # Mount static files for dashboard
     import os

@@ -58,6 +58,11 @@
                     <li class="nav-item">
                         <a class="nav-link" href="/chat">Chat</a>
                     </li>
+                    {% if voice_chat_enabled() %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="/voice-chat"><i class="bi bi-soundwave"></i> Voice</a>
+                    </li>
+                    {% endif %}
                     <li class="nav-item">
                         <a class="nav-link" href="/dashboard">Dashboard</a>
                     </li>
