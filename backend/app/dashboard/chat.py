@@ -1044,6 +1044,7 @@ async def chat_tts_proxy(
     tts_voice = (
         body.get("voice")
         or await crud.get_config_json(db, f"user.{user_id}.tts_voice", None)
+        or await crud.get_config_json(db, "voice_api.default_voice", None)
         or await crud.get_config_json(db, "voice.tts_voice", "af_heart")
     )
     tts_speed = (

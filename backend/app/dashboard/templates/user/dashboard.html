@@ -335,14 +335,28 @@
     var sel = document.getElementById('userTtsVoice');
     if (!sel) return;
     var current = '{{ user_tts_voice }}';
+    function friendlyName(id) {
+        // "af_heart" -> "Heart", "am_michael" -> "Michael"
+        var parts = id.split('_');
+        if (parts.length >= 2) {
+            var name = parts.slice(1).join('_');
+            return name.charAt(0).toUpperCase() + name.slice(1);
+        }
+        return id;
+    }
     fetch('/api/tts-voices?allowed_only=true')
         .then(function(r) { return r.json(); })
         .then(function(data) {
             var voices = data.voices || [];
+            var defaultVoice = data.default_voice || '';
+            // Update the "(System default)" label to show which voice it is
+            if (defaultVoice) {
+                sel.options[0].textContent = '(System default \u2014 ' + friendlyName(defaultVoice) + ')';
+            }
             voices.forEach(function(v) {
                 var opt = document.createElement('option');
                 opt.value = v;
-                opt.textContent = v;
+                opt.textContent = friendlyName(v);
                 if (v === current) opt.selected = true;
                 sel.appendChild(opt);
             });

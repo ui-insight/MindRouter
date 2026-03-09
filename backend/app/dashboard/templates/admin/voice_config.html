@@ -53,7 +53,15 @@
                                 <div class="mb-3">
                                     <label for="tts_voices" class="form-label">Available Voices</label>
                                     <textarea class="form-control" id="tts_voices" name="tts_voices" rows="4" placeholder="af_heart&#10;af_bella&#10;am_adam&#10;am_michael">{{ tts_voices or '' }}</textarea>
-                                    <div class="form-text">One voice per line. Callers specify voice via the <code>voice</code> parameter.</div>
+                                    <div class="form-text">One voice per line. These are the voices users can choose from in their dashboard.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="default_voice" class="form-label">Default System Voice</label>
+                                    <select class="form-select" id="default_voice" name="default_voice">
+                                        <option value="{{ default_voice or 'af_heart' }}">{{ default_voice or 'af_heart' }} (loading…)</option>
+                                    </select>
+                                    <div class="form-text">The voice assigned to users by default unless they choose their own.</div>
                                 </div>
 
                                 <button type="submit" class="btn btn-primary">Save TTS Backend</button>
@@ -123,4 +131,42 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var sel = document.getElementById('default_voice');
+    if (!sel) return;
+    var current = '{{ default_voice or "af_heart" }}';
+    fetch('/api/tts-voices')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var voices = data.voices || [];
+            sel.innerHTML = '';
+            voices.forEach(function(v) {
+                var opt = document.createElement('option');
+                opt.value = v;
+                opt.textContent = v;
+                if (v === current) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            if (current && !voices.includes(current)) {
+                var opt = document.createElement('option');
+                opt.value = current;
+                opt.textContent = current;
+                opt.selected = true;
+                sel.insertBefore(opt, sel.firstChild);
+            }
+        })
+        .catch(function() {
+            sel.innerHTML = '';
+            var opt = document.createElement('option');
+            opt.value = current;
+            opt.textContent = current;
+            opt.selected = true;
+            sel.appendChild(opt);
+        });
+})();
+</script>
 {% endblock %}

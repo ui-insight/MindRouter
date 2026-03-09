@@ -591,7 +591,8 @@ async def api_tts_voices(
     if allowed_only and allowed_voices:
         voices = [v for v in voices if v in allowed_voices]
 
-    return JSONResponse({"voices": sorted(voices), "source": source})
+    default_voice = await crud.get_config_json(db, "voice_api.default_voice", "af_heart")
+    return JSONResponse({"voices": sorted(voices), "source": source, "default_voice": default_voice})
 
 
 @dashboard_router.get("/dashboard/api/token-usage")
@@ -2836,6 +2837,7 @@ async def admin_voice_config(
     tts_url = await crud.get_config_json(db, "voice.tts_url", None)
     tts_api_key = await crud.get_config_json(db, "voice.tts_api_key", None)
     tts_voices = await crud.get_config_json(db, "voice_api.tts_voices", "af_heart\naf_bella\nam_adam\nam_michael")
+    default_voice = await crud.get_config_json(db, "voice_api.default_voice", "af_heart")
     stt_url = await crud.get_config_json(db, "voice.stt_url", None)
     stt_api_key = await crud.get_config_json(db, "voice.stt_api_key", None)
     stt_model = await crud.get_config_json(db, "voice.stt_model", "whisper-large-v3-turbo")
@@ -2850,6 +2852,7 @@ async def admin_voice_config(
             "tts_url": tts_url,
             "tts_api_key": tts_api_key,
             "tts_voices": tts_voices,
+            "default_voice": default_voice,
             "stt_url": stt_url,
             "stt_api_key": stt_api_key,
             "stt_model": stt_model,
@@ -2882,10 +2885,12 @@ async def admin_voice_config_post(
         tts_url = form.get("tts_url", "").strip() or None
         tts_api_key = form.get("tts_api_key", "").strip() or None
         tts_voices = form.get("tts_voices", "").strip()
+        default_voice = form.get("default_voice", "").strip() or "af_heart"
 
         await crud.set_config(db, "voice.tts_url", tts_url)
         await crud.set_config(db, "voice.tts_api_key", tts_api_key)
         await crud.set_config(db, "voice_api.tts_voices", tts_voices)
+        await crud.set_config(db, "voice_api.default_voice", default_voice)
         await db.commit()
         return RedirectResponse(url="/admin/voice-config?success=tts_backend_updated", status_code=302)
 
