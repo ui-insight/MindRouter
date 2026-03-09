@@ -1110,7 +1110,7 @@ async def chat_stt_proxy(
     import httpx
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"{stt_url.rstrip('/')}/v1/audio/transcriptions",
                 files={"file": (file.filename or "audio.webm", audio_data, file.content_type or "application/octet-stream")},
@@ -1122,6 +1122,9 @@ async def chat_stt_proxy(
                 raise HTTPException(status_code=502, detail="STT service error")
             result = resp.json()
             return JSONResponse({"text": result.get("text", "")})
+    except httpx.TimeoutException as e:
+        logger.warning("stt_proxy_timeout", error=str(e))
+        raise HTTPException(status_code=502, detail="STT service timed out (model may be loading)")
     except httpx.HTTPError as e:
         logger.warning("stt_proxy_error", error=str(e))
-        raise HTTPException(status_code=502, detail="STT service unavailable")
+        raise HTTPException(status_code=502, detail=f"STT service unavailable: {e}")
