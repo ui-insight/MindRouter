@@ -540,10 +540,26 @@ async def api_tts_voices(
     request: Request,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Return available TTS voices from upstream service or config fallback."""
+    """Return available TTS voices from upstream service or config fallback.
+
+    Query params:
+        allowed_only=true  — filter to only voices in voice_api.tts_voices config
+                             (used by user dashboard to restrict choices)
+    """
     user_id = get_session_user_id(request)
     if not user_id:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    allowed_only = request.query_params.get("allowed_only", "").lower() == "true"
+
+    # Load the admin-configured allowed voices list
+    tts_voices_str = await crud.get_config_json(
+        db, "voice_api.tts_voices", "af_heart\naf_bella\nam_adam\nam_michael"
+    )
+    allowed_voices = {v.strip() for v in tts_voices_str.split("\n") if v.strip()}
+
+    voices = []
+    source = "config"
 
     tts_url = await crud.get_config_json(db, "voice.tts_url", None)
     if tts_url:
@@ -561,16 +577,19 @@ async def api_tts_voices(
                     voices = [str(v) for v in voices_raw]
                 voices = [v for v in voices if v]
                 if voices:
-                    return JSONResponse({"voices": sorted(voices), "source": "upstream"})
+                    source = "upstream"
         except Exception:
             pass
 
-    # Fallback to config
-    tts_voices_str = await crud.get_config_json(
-        db, "voice_api.tts_voices", "af_heart\naf_bella\nam_adam\nam_michael"
-    )
-    voices = [v.strip() for v in tts_voices_str.split("\n") if v.strip()]
-    return JSONResponse({"voices": voices, "source": "config"})
+    # Fallback to config list if upstream failed
+    if not voices:
+        voices = sorted(allowed_voices)
+
+    # Filter to allowed voices when requested
+    if allowed_only and allowed_voices:
+        voices = [v for v in voices if v in allowed_voices]
+
+    return JSONResponse({"voices": sorted(voices), "source": source})
 
 
 @dashboard_router.get("/dashboard/api/token-usage")

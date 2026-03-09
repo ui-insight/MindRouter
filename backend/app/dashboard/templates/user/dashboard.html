@@ -195,7 +195,7 @@
                     <select class="form-select form-select-sm" id="userTtsVoice">
                         <option value="">(System default)</option>
                     </select>
-                    <div class="form-text">Your preferred voice for Read Aloud in chat.</div>
+                    <div class="form-text">Your preferred voice for Read Aloud in chat. <span id="ttsVoiceSaved" class="text-success" style="display:none;"><i class="bi bi-check-circle"></i> Saved</span></div>
                     {% endif %}
                 </div>
             </div>
@@ -327,7 +327,7 @@
     var sel = document.getElementById('userTtsVoice');
     if (!sel) return;
     var current = '{{ user_tts_voice }}';
-    fetch('/api/tts-voices')
+    fetch('/api/tts-voices?allowed_only=true')
         .then(function(r) { return r.json(); })
         .then(function(data) {
             var voices = data.voices || [];
@@ -338,21 +338,20 @@
                 if (v === current) opt.selected = true;
                 sel.appendChild(opt);
             });
-            if (current && !voices.includes(current)) {
-                var opt = document.createElement('option');
-                opt.value = current;
-                opt.textContent = current;
-                opt.selected = true;
-                sel.appendChild(opt);
-            }
             if (!current) sel.value = '';
         })
         .catch(function() {});
     sel.addEventListener('change', function() {
+        var badge = document.getElementById('ttsVoiceSaved');
         fetch('/dashboard/save-preference', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({key: 'tts_voice', value: sel.value})
+        }).then(function(r) {
+            if (r.ok && badge) {
+                badge.style.display = '';
+                setTimeout(function() { badge.style.display = 'none'; }, 2000);
+            }
         });
     });
 })();
