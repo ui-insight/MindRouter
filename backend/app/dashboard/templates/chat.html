@@ -1372,7 +1372,9 @@ document.addEventListener('mr-theme-changed', function(e) {
     class TTSPlayer {
         constructor() {
             this._buffer = '';
-            this._queue = [];       // [{url}]
+            this._pending = new Map();  // seq → {url}
+            this._nextSeq = 0;          // next sequence number to assign
+            this._nextPlay = 0;         // next sequence number to play
             this._playing = false;
             this._currentAudio = null;
             this._aborted = false;
@@ -1411,6 +1413,7 @@ document.addEventListener('mr-theme-changed', function(e) {
             cleaned = cleaned.trim();
             if (!cleaned || cleaned.length < 2) return;
 
+            const seq = this._nextSeq++;
             fetch('/chat/api/tts', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1421,15 +1424,28 @@ document.addEventListener('mr-theme-changed', function(e) {
                 return r.blob();
             }).then(blob => {
                 if (this._aborted) return;
-                this._queue.push({ url: URL.createObjectURL(blob) });
+                this._pending.set(seq, { url: URL.createObjectURL(blob) });
                 this._playNext();
-            }).catch(() => {});  // AbortError or network error — silently ignore
+            }).catch(() => {
+                // On fetch failure, mark this slot so playback skips over it
+                if (this._aborted) return;
+                this._pending.set(seq, null);
+                this._playNext();
+            });
         }
 
         _playNext() {
-            if (this._playing || this._aborted || !this._queue.length) return;
+            if (this._playing || this._aborted) return;
+            // Skip over failed (null) entries
+            while (this._pending.has(this._nextPlay) && this._pending.get(this._nextPlay) === null) {
+                this._pending.delete(this._nextPlay);
+                this._nextPlay++;
+            }
+            if (!this._pending.has(this._nextPlay)) return;
             this._playing = true;
-            const { url } = this._queue.shift();
+            const { url } = this._pending.get(this._nextPlay);
+            this._pending.delete(this._nextPlay);
+            this._nextPlay++;
             const audio = new Audio(url);
             this._currentAudio = audio;
             const done = () => {
@@ -1466,15 +1482,15 @@ document.addEventListener('mr-theme-changed', function(e) {
                 audio.removeAttribute('src');
                 audio.load();  // Forces release of media resources
             }
-            // Revoke all queued blob URLs
-            for (const item of this._queue) URL.revokeObjectURL(item.url);
-            this._queue = [];
+            // Revoke all pending blob URLs
+            for (const item of this._pending.values()) if (item) URL.revokeObjectURL(item.url);
+            this._pending.clear();
             this._buffer = '';
             this._playing = false;
         }
 
         get isDone() {
-            return this._aborted || (!this._playing && !this._queue.length && !this._buffer);
+            return this._aborted || (!this._playing && !this._pending.size && this._nextPlay >= this._nextSeq && !this._buffer);
         }
     }
 
