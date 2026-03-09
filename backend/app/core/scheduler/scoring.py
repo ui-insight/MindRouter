@@ -115,24 +115,23 @@ class BackendScorer:
         model_names = [m.name for m in backend_models]
         constraints.model_available = job.model in model_names
 
-        # Check modality support
+        # Check modality support (derived from model-level data)
         if job.modality == Modality.MULTIMODAL or job.requires_multimodal:
-            constraints.supports_modality = backend.supports_multimodal
-            # Model-level check is authoritative — if the specific model
-            # doesn't support multimodal, override the backend-level flag.
+            constraints.supports_modality = False
             for m in backend_models:
-                if m.name == job.model:
-                    constraints.supports_modality = m.supports_multimodal
+                if m.name == job.model and m.supports_multimodal:
+                    constraints.supports_modality = True
                     break
         elif job.modality == Modality.EMBEDDING:
-            constraints.supports_modality = backend.supports_embeddings
+            constraints.supports_modality = any(
+                m.modality == Modality.EMBEDDING for m in backend_models
+            )
         else:
             constraints.supports_modality = True
 
-        # Check structured output support
+        # Check structured output support (derived from model-level data)
         if job.requires_structured_output:
-            constraints.supports_structured_output = backend.supports_structured_output
-            # Also check model-level support
+            constraints.supports_structured_output = True  # default
             for m in backend_models:
                 if m.name == job.model:
                     constraints.supports_structured_output = m.supports_structured_output

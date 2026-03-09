@@ -270,11 +270,11 @@
                             <h6>Capabilities</h6>
                             <dl class="row small">
                                 <dt class="col-6">Multimodal:</dt>
-                                <dd class="col-6">{{ 'Yes' if item.backend.supports_multimodal else 'No' }}</dd>
+                                <dd class="col-6">{{ 'Yes' if item.models | selectattr('supports_multimodal') | list else 'No' }}</dd>
                                 <dt class="col-6">Embeddings:</dt>
-                                <dd class="col-6">{{ 'Yes' if item.backend.supports_embeddings else 'No' }}</dd>
+                                <dd class="col-6">{{ 'Yes' if item.models | selectattr('modality') | map(attribute='value') | select('equalto', 'embedding') | list else 'No' }}</dd>
                                 <dt class="col-6">Structured:</dt>
-                                <dd class="col-6">{{ 'Yes' if item.backend.supports_structured_output else 'No' }}</dd>
+                                <dd class="col-6">Yes</dd>
                             </dl>
                         </div>
                         <div class="col-md-4">

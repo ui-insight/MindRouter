@@ -313,10 +313,6 @@ class Backend(Base, TimestampMixin):
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     gpu_memory_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     gpu_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    supports_multimodal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    supports_embeddings: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    supports_structured_output: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
     # Runtime state
     current_concurrent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

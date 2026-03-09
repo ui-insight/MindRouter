@@ -163,9 +163,6 @@ def mock_backend():
     backend.url = "http://localhost:11434"
     backend.engine = BackendEngine.OLLAMA
     backend.status = BackendStatus.HEALTHY
-    backend.supports_multimodal = True
-    backend.supports_embeddings = True
-    backend.supports_structured_output = True
     backend.current_concurrent = 0
     backend.max_concurrent = 10
     backend.gpu_memory_gb = 24.0
@@ -494,9 +491,6 @@ def mock_ollama_backend():
     status = MagicMock()
     status.value = "healthy"
     backend.status = status
-    backend.supports_multimodal = True
-    backend.supports_embeddings = True
-    backend.supports_structured_output = True
     backend.current_concurrent = 0
     backend.max_concurrent = 10
     backend.gpu_memory_gb = 24.0
@@ -520,9 +514,6 @@ def mock_vllm_backend():
     status = MagicMock()
     status.value = "healthy"
     backend.status = status
-    backend.supports_multimodal = True
-    backend.supports_embeddings = True
-    backend.supports_structured_output = True
     backend.current_concurrent = 0
     backend.max_concurrent = 10
     backend.gpu_memory_gb = 24.0

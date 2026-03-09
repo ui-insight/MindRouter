@@ -1027,10 +1027,7 @@ class BackendRegistry:
                     async with get_async_db_context() as db:
                         backend = await crud.get_backend_by_id(db, backend_id)
                         if backend:
-                            # Update backend capabilities
-                            backend.supports_multimodal = caps.supports_multimodal
-                            backend.supports_embeddings = caps.supports_embeddings
-                            backend.supports_structured_output = caps.supports_structured_output
+                            # Update backend version
                             backend.version = caps.engine_version
 
                             # Don't overwrite admin-set statuses (DISABLED, DRAINING)

@@ -145,16 +145,6 @@ class VLLMAdapter:
             for model in caps.models:
                 model.is_loaded = True
 
-            # Determine capabilities based on models
-            for model in caps.models:
-                if model.supports_multimodal:
-                    caps.supports_multimodal = True
-                # vLLM can run embedding models
-                if "embed" in model.name.lower():
-                    caps.supports_embeddings = True
-
-            # vLLM generally supports structured output well
-            caps.supports_structured_output = True
             caps.is_healthy = True
 
         except Exception as e:

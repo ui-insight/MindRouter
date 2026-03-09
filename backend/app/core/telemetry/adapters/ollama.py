@@ -135,14 +135,6 @@ class OllamaAdapter:
             for model in caps.models:
                 model.is_loaded = model.name in loaded
 
-            # Determine capabilities based on models
-            for model in caps.models:
-                if model.supports_multimodal:
-                    caps.supports_multimodal = True
-                # Check for embedding models
-                if "embed" in model.name.lower() or "embedding" in model.name.lower():
-                    caps.supports_embeddings = True
-
             caps.is_healthy = True
 
         except Exception as e:

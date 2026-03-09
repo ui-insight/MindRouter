@@ -452,9 +452,6 @@ class TestBackendScorer:
         backend.name = "backend-1"
         backend.status = BackendStatus.HEALTHY
         backend.engine = BackendEngine.OLLAMA
-        backend.supports_multimodal = True
-        backend.supports_embeddings = True
-        backend.supports_structured_output = True
         backend.current_concurrent = 0
         backend.max_concurrent = 10
         backend.gpu_memory_gb = 24.0
@@ -530,7 +527,6 @@ class TestBackendScorer:
 
     def test_hard_constraint_multimodal_not_supported(self, scorer, backend, model):
         """Test hard constraint failure: multimodal not supported."""
-        backend.supports_multimodal = False
         model.supports_multimodal = False
 
         job = Job(
@@ -657,9 +653,6 @@ class TestBackendScorer:
             backend.id = i
             backend.name = f"backend-{i}"
             backend.status = BackendStatus.HEALTHY
-            backend.supports_multimodal = True
-            backend.supports_embeddings = True
-            backend.supports_structured_output = True
             backend.current_concurrent = 0
             backend.max_concurrent = 10
             backend.gpu_memory_gb = 24.0

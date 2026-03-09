@@ -96,9 +96,6 @@ def _make_backend(bid, name="test", throughput_score=1.0):
     b.id = bid
     b.name = name
     b.status = _HEALTHY_SENTINEL
-    b.supports_multimodal = False
-    b.supports_embeddings = False
-    b.supports_structured_output = True
     b.current_concurrent = 0
     b.max_concurrent = 10
     b.gpu_memory_gb = None

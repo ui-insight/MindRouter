@@ -65,10 +65,6 @@ class BackendCapabilities:
     loaded_models: List[str] = field(default_factory=list)
     gpu_info: Optional[GPUInfo] = None
 
-    supports_multimodal: bool = False
-    supports_embeddings: bool = False
-    supports_structured_output: bool = True
-
     max_concurrent: int = 4
     is_healthy: bool = False
     error_message: Optional[str] = None
