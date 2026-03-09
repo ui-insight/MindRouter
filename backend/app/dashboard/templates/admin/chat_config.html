@@ -184,7 +184,9 @@
 
                                 <div class="mb-3">
                                     <label for="tts_voice" class="form-label">Default Voice</label>
-                                    <input type="text" class="form-control" id="tts_voice" name="tts_voice" value="{{ tts_voice or '' }}" placeholder="af_heart">
+                                    <select class="form-select" id="tts_voice" name="tts_voice">
+                                        <option value="{{ tts_voice or 'af_heart' }}">{{ tts_voice or 'af_heart' }} (loading…)</option>
+                                    </select>
                                 </div>
 
                                 <div class="mb-3">
@@ -222,4 +224,43 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var sel = document.getElementById('tts_voice');
+    if (!sel) return;
+    var current = '{{ tts_voice or "af_heart" }}';
+    fetch('/api/tts-voices')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var voices = data.voices || [];
+            sel.innerHTML = '';
+            voices.forEach(function(v) {
+                var opt = document.createElement('option');
+                opt.value = v;
+                opt.textContent = v;
+                if (v === current) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            // If current value not in list, add it
+            if (current && !voices.includes(current)) {
+                var opt = document.createElement('option');
+                opt.value = current;
+                opt.textContent = current;
+                opt.selected = true;
+                sel.insertBefore(opt, sel.firstChild);
+            }
+        })
+        .catch(function() {
+            sel.innerHTML = '';
+            var opt = document.createElement('option');
+            opt.value = current;
+            opt.textContent = current;
+            opt.selected = true;
+            sel.appendChild(opt);
+        });
+})();
+</script>
 {% endblock %}

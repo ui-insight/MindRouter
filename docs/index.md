@@ -963,6 +963,7 @@ The public landing page (`/`) includes a live token flow animation showing real-
 The user dashboard includes the following features:
 
 - **Dark Mode Toggle** -- The Preferences section includes a dark mode toggle. The preference is saved to browser localStorage and persists across sessions.
+- **TTS Voice Preference** -- When TTS is enabled by an admin, a "TTS Voice" dropdown appears in the Preferences card. Users can pick their preferred voice for Read Aloud in chat, or leave it on "(System default)" to use the admin-configured default. The dropdown is dynamically populated from the upstream TTS service. The preference is saved server-side and overrides the global default voice.
 - **Live Token Usage** -- Token usage statistics on the dashboard update in real-time via polling (every 1 second), providing live feedback without page refresh.
 - **Lifetime vs Rolling Usage** -- The dashboard displays two token metrics: **Lifetime Token Usage** (all-time total tokens consumed) and **Current Period Usage** (tokens used in the current rolling budget period). These are distinct -- the lifetime counter never resets, while the period counter resets when the budget period rolls over.
 - **Quota Details** -- Users can view their current quota limits (RPM limit and max concurrent requests) in the Quota Details card on the dashboard.
@@ -1515,7 +1516,7 @@ Admins can configure the chat interface defaults at `/admin/chat-config`:
 - **Max tokens** -- Default `max_tokens` value for chat requests.
 - **Temperature** -- Default temperature for chat requests.
 - **Thinking mode** -- Enable or disable thinking/reasoning mode by default for chat.
-- **TTS settings** -- Enable/disable "Read Aloud" in the chat UI, select TTS provider (Kokoro or OpenedAI), set default voice and playback speed.
+- **TTS settings** -- Enable/disable "Read Aloud" in the chat UI, select TTS provider (Kokoro or OpenedAI), set default voice (dynamically populated dropdown from upstream TTS service) and playback speed.
 - **STT settings** -- Enable/disable microphone input in the chat UI.
 
 ### Chat UI Features
@@ -1578,6 +1579,13 @@ Voice API settings are managed on two admin pages:
 
 The backend connection settings (URLs, API keys) are shared between the chat UI and the Voice API. The chat-specific settings (enable toggles, provider, voice, speed) only affect the chat interface and do not gate the Voice API endpoints.
 
+**Voice discovery endpoint** (`GET /api/tts-voices`): Returns the list of available TTS voices. Tries the upstream TTS service first (`{tts_url}/v1/audio/voices`), then falls back to the `voice_api.tts_voices` config. Used by the admin Chat Config dropdown and the user dashboard Preferences dropdown.
+
+**Chat TTS voice resolution order:** When a user triggers Read Aloud in the chat UI, the voice is resolved with this priority:
+1. Explicit `voice` in the request body (not currently exposed in the UI)
+2. User's per-user preference (`user.{user_id}.tts_voice`, set via Dashboard > Preferences)
+3. Admin global default (`voice.tts_voice`, set via Admin > Chat Config)
+
 ### Limitations
 
 The Voice API is a thin proxy layer. It does not perform any audio processing itself -- it forwards requests to the upstream TTS/STT service and relays the response.
@@ -1606,9 +1614,10 @@ These limits are appropriate for short-to-medium clips (up to ~10 minutes). For 
 | `voice.tts_voice` | string | `"af_heart"` | Default voice for chat TTS |
 | `voice.tts_speed` | float | `1.0` | Default playback speed for chat TTS |
 | `voice.stt_enabled` | boolean | `false` | Enable STT in chat UI |
-| `voice_api.tts_voices` | string | `"af_heart\naf_bella\nam_adam\nam_michael"` | Available TTS voices (newline-separated) |
+| `voice_api.tts_voices` | string | `"af_heart\naf_bella\nam_adam\nam_michael"` | Available TTS voices (newline-separated, used as fallback when upstream is unreachable) |
 | `voice_api.tts_quota_tokens` | integer | `100` | Token cost per TTS API request |
 | `voice_api.stt_quota_tokens` | integer | `200` | Token cost per STT API request |
+| `user.{user_id}.tts_voice` | string | (none) | Per-user TTS voice preference (overrides `voice.tts_voice` for chat Read Aloud) |
 
 ---
 
@@ -1866,9 +1875,10 @@ In addition to the environment variables above, MindRouter stores runtime config
 | `voice.stt_url` | string | (none) | STT service base URL |
 | `voice.stt_api_key` | string | (none) | STT service API key |
 | `voice.stt_model` | string | `"whisper-large-v3-turbo"` | Default STT model |
-| `voice_api.tts_voices` | string | (see below) | Available TTS voices (newline-separated) |
+| `voice_api.tts_voices` | string | (see below) | Available TTS voices (newline-separated, fallback when upstream unreachable) |
 | `voice_api.tts_quota_tokens` | integer | `100` | Token cost per TTS API request |
 | `voice_api.stt_quota_tokens` | integer | `200` | Token cost per STT API request |
+| `user.{user_id}.tts_voice` | string | (none) | Per-user TTS voice preference (overrides global default) |
 | `app.timezone` | string | `"America/Los_Angeles"` | IANA timezone for date display in web UI |
 | `ollama.enforce_num_ctx` | boolean | `true` | Override user-supplied `num_ctx` with model config `context_length` |
 

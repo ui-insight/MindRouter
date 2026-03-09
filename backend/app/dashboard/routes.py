@@ -505,6 +505,10 @@ async def user_dashboard(
     lifetime_data = lifetime_map.get(effective_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
     lifetime_tokens = lifetime_data["total_tokens"]
 
+    # TTS preferences
+    tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
+    user_tts_voice = await crud.get_config_json(db, f"user.{effective_id}.tts_voice", "")
+
     return templates.TemplateResponse(
         "user/dashboard.html",
         {
@@ -525,8 +529,48 @@ async def user_dashboard(
             "lifetime_tokens": lifetime_tokens,
             "lifetime_prompt_tokens": lifetime_data["prompt_tokens"],
             "lifetime_completion_tokens": lifetime_data["completion_tokens"],
+            "tts_enabled": tts_enabled,
+            "user_tts_voice": user_tts_voice or "",
         },
     )
+
+
+@dashboard_router.get("/api/tts-voices")
+async def api_tts_voices(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Return available TTS voices from upstream service or config fallback."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    tts_url = await crud.get_config_json(db, "voice.tts_url", None)
+    if tts_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{tts_url.rstrip('/')}/v1/audio/voices")
+                resp.raise_for_status()
+                data = resp.json()
+                # Kokoro returns {"voices": [{"id": "af_heart", ...}, ...]}
+                voices_raw = data.get("voices", [])
+                if voices_raw and isinstance(voices_raw[0], dict):
+                    voices = [v.get("id") or v.get("name", "") for v in voices_raw]
+                else:
+                    voices = [str(v) for v in voices_raw]
+                voices = [v for v in voices if v]
+                if voices:
+                    return JSONResponse({"voices": sorted(voices), "source": "upstream"})
+        except Exception:
+            pass
+
+    # Fallback to config
+    tts_voices_str = await crud.get_config_json(
+        db, "voice_api.tts_voices", "af_heart\naf_bella\nam_adam\nam_michael"
+    )
+    voices = [v.strip() for v in tts_voices_str.split("\n") if v.strip()]
+    return JSONResponse({"voices": voices, "source": "config"})
 
 
 @dashboard_router.get("/dashboard/api/token-usage")
@@ -566,6 +610,32 @@ async def dashboard_token_usage(
         "lifetime_prompt_tokens": lifetime_data["prompt_tokens"],
         "lifetime_completion_tokens": lifetime_data["completion_tokens"],
     })
+
+
+@dashboard_router.post("/dashboard/save-preference")
+async def save_preference(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Save a user preference (e.g. tts_voice)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    effective_id = await get_effective_user_id(request, db)
+    body = await request.json()
+    key = body.get("key", "")
+    value = body.get("value", "")
+    allowed_keys = {"tts_voice"}
+    if key not in allowed_keys:
+        return JSONResponse({"error": f"Invalid preference key: {key}"}, status_code=400)
+    config_key = f"user.{effective_id}.{key}"
+    if value:
+        await crud.set_config(db, config_key, value)
+    else:
+        # Empty value = reset to default (delete the config)
+        await crud.set_config(db, config_key, None)
+    await db.commit()
+    return JSONResponse({"ok": True})
 
 
 @dashboard_router.post("/dashboard/change-password")

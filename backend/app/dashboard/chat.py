@@ -1041,7 +1041,11 @@ async def chat_tts_proxy(
     if not text:
         raise HTTPException(status_code=400, detail="No speakable text after cleanup")
 
-    tts_voice = body.get("voice") or await crud.get_config_json(db, "voice.tts_voice", "af_heart")
+    tts_voice = (
+        body.get("voice")
+        or await crud.get_config_json(db, f"user.{user_id}.tts_voice", None)
+        or await crud.get_config_json(db, "voice.tts_voice", "af_heart")
+    )
     tts_speed = await crud.get_config_json(db, "voice.tts_speed", 1.0)
     tts_api_key = await crud.get_config_json(db, "voice.tts_api_key", None)
     tts_provider = await crud.get_config_json(db, "voice.tts_provider", "kokoro")

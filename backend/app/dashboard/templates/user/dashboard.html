@@ -188,6 +188,15 @@
                         </label>
                     </div>
                     <div class="form-text">Your theme preference is saved in this browser.</div>
+
+                    {% if tts_enabled %}
+                    <hr>
+                    <label for="userTtsVoice" class="form-label"><i class="bi bi-volume-up me-1"></i> TTS Voice</label>
+                    <select class="form-select form-select-sm" id="userTtsVoice">
+                        <option value="">(System default)</option>
+                    </select>
+                    <div class="form-text">Your preferred voice for Read Aloud in chat.</div>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -309,6 +318,43 @@
     }
 
     setInterval(poll, 1000);
+})();
+</script>
+{% endif %}
+{% if tts_enabled %}
+<script>
+(function() {
+    var sel = document.getElementById('userTtsVoice');
+    if (!sel) return;
+    var current = '{{ user_tts_voice }}';
+    fetch('/api/tts-voices')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var voices = data.voices || [];
+            voices.forEach(function(v) {
+                var opt = document.createElement('option');
+                opt.value = v;
+                opt.textContent = v;
+                if (v === current) opt.selected = true;
+                sel.appendChild(opt);
+            });
+            if (current && !voices.includes(current)) {
+                var opt = document.createElement('option');
+                opt.value = current;
+                opt.textContent = current;
+                opt.selected = true;
+                sel.appendChild(opt);
+            }
+            if (!current) sel.value = '';
+        })
+        .catch(function() {});
+    sel.addEventListener('change', function() {
+        fetch('/dashboard/save-preference', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: 'tts_voice', value: sel.value})
+        });
+    });
 })();
 </script>
 {% endif %}
