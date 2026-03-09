@@ -24,6 +24,8 @@ voice_chat_router = APIRouter(tags=["voice-chat"])
 # Setup templates (same directory as other dashboard templates)
 templates_path = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=templates_path)
+from backend.app.dashboard.routes import _get_voice_chat_enabled
+templates.env.globals["voice_chat_enabled"] = _get_voice_chat_enabled
 
 
 # ---------------------------------------------------------------------------
