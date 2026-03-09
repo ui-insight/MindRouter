@@ -846,12 +846,16 @@ document.addEventListener('mr-theme-changed', function(e) {
     // Voice (TTS/STT) state
     const voiceTtsEnabled = {{ voice_tts_enabled | tojson }};
     const voiceSttEnabled = {{ voice_stt_enabled | tojson }};
-    let _autoReadActive = false;
-    let _streamTtsPlayer = null;
     let _micRecorder = null;
     let _micStream = null;
-    let _activeTtsPlayer = null;    // Global: the one TTS player allowed at a time
-    let _activeTtsBtn = null;       // The button that started it (for reset)
+
+    // Single global TTS manager — prevents any possibility of overlap
+    const _tts = {
+        player: null,       // Current TTSPlayer instance (only one ever)
+        btn: null,          // "Read aloud" button that started it (null for auto-read)
+        isAutoRead: false,  // Whether current playback is from auto-read
+        pollId: null,       // Interval ID for polling done state
+    };
 
     // ---------------------------------------------------------------
     // DOM refs
@@ -1366,11 +1370,11 @@ document.addEventListener('mr-theme-changed', function(e) {
     class TTSPlayer {
         constructor() {
             this._buffer = '';
-            this._queue = [];       // [{blob, url}]
+            this._queue = [];       // [{url}]
             this._playing = false;
             this._currentAudio = null;
             this._aborted = false;
-            this._pendingFetches = [];
+            this._abortController = new AbortController();
         }
 
         // Abbreviations to skip when splitting sentences
@@ -1379,14 +1383,11 @@ document.addEventListener('mr-theme-changed', function(e) {
         feedDelta(delta) {
             if (this._aborted) return;
             this._buffer += delta;
-            // Split on sentence-ending punctuation followed by whitespace or EOL
             const parts = this._buffer.split(/(?<=[.!?])(?:\s+|$)/);
-            // Keep last (possibly incomplete) part in buffer
             this._buffer = parts.pop() || '';
             for (const sentence of parts) {
                 const trimmed = sentence.trim();
                 if (!trimmed) continue;
-                // Skip if it's just an abbreviation fragment
                 if (TTSPlayer._ABBREVS.test(trimmed) && trimmed.length < 8) continue;
                 this._enqueueSentence(trimmed);
             }
@@ -1400,7 +1401,6 @@ document.addEventListener('mr-theme-changed', function(e) {
         }
 
         _enqueueSentence(text) {
-            // Strip code blocks and image markdown
             let cleaned = text.replace(/```[\s\S]*?```/g, '').replace(/`[^`]+`/g, '');
             cleaned = cleaned.replace(/!\[[^\]]*\]\([^)]+\)/g, '');
             cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
@@ -1409,20 +1409,19 @@ document.addEventListener('mr-theme-changed', function(e) {
             cleaned = cleaned.trim();
             if (!cleaned || cleaned.length < 2) return;
 
-            const fetchPromise = fetch('/chat/api/tts', {
+            fetch('/chat/api/tts', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ text: cleaned }),
+                signal: this._abortController.signal,
             }).then(r => {
                 if (!r.ok) throw new Error('TTS error');
                 return r.blob();
             }).then(blob => {
                 if (this._aborted) return;
-                const url = URL.createObjectURL(blob);
-                this._queue.push({ blob, url });
+                this._queue.push({ url: URL.createObjectURL(blob) });
                 this._playNext();
-            }).catch(() => {});
-            this._pendingFetches.push(fetchPromise);
+            }).catch(() => {});  // AbortError or network error — silently ignore
         }
 
         _playNext() {
@@ -1431,39 +1430,45 @@ document.addEventListener('mr-theme-changed', function(e) {
             const { url } = this._queue.shift();
             const audio = new Audio(url);
             this._currentAudio = audio;
-            audio.onended = () => {
+            const done = () => {
+                // Guard: only act if this audio is still current
+                if (this._currentAudio !== audio) return;
                 URL.revokeObjectURL(url);
                 this._playing = false;
                 this._currentAudio = null;
-                this._playNext();
+                if (!this._aborted) this._playNext();
             };
-            audio.onerror = () => {
-                URL.revokeObjectURL(url);
-                this._playing = false;
-                this._currentAudio = null;
-                this._playNext();
-            };
+            audio.onended = done;
+            audio.onerror = done;
             audio.play().catch(() => {
-                this._playing = false;
-                this._currentAudio = null;
+                if (this._currentAudio === audio) {
+                    URL.revokeObjectURL(url);
+                    this._playing = false;
+                    this._currentAudio = null;
+                }
             });
         }
 
         stop() {
+            if (this._aborted) return;  // Already stopped
             this._aborted = true;
+            // Abort all in-flight fetches
+            this._abortController.abort();
+            // Kill current audio completely
             if (this._currentAudio) {
-                this._currentAudio.pause();
+                const audio = this._currentAudio;
                 this._currentAudio = null;
+                audio.onended = null;
+                audio.onerror = null;
+                audio.pause();
+                audio.removeAttribute('src');
+                audio.load();  // Forces release of media resources
             }
-            // Revoke pending blob URLs
+            // Revoke all queued blob URLs
             for (const item of this._queue) URL.revokeObjectURL(item.url);
             this._queue = [];
             this._buffer = '';
             this._playing = false;
-        }
-
-        get isActive() {
-            return this._playing || this._queue.length > 0 || this._pendingFetches.some(p => p);
         }
 
         get isDone() {
@@ -1471,21 +1476,38 @@ document.addEventListener('mr-theme-changed', function(e) {
         }
     }
 
-    // Global TTS management — only one player at a time
+    // ---------------------------------------------------------------
+    // Global TTS management — one player at a time, period.
+    // ---------------------------------------------------------------
     function stopAllTts() {
-        if (_activeTtsPlayer) {
-            _activeTtsPlayer.stop();
-            _activeTtsPlayer = null;
+        if (_tts.pollId) { clearInterval(_tts.pollId); _tts.pollId = null; }
+        if (_tts.player) {
+            _tts.player.stop();
+            _tts.player = null;
         }
-        if (_streamTtsPlayer) {
-            _streamTtsPlayer.stop();
-            _streamTtsPlayer = null;
+        if (_tts.btn) {
+            _tts.btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+            _tts.btn = null;
         }
-        // Reset any active "Read aloud" button back to default
-        if (_activeTtsBtn) {
-            _activeTtsBtn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
-            _activeTtsBtn = null;
-        }
+        _tts.isAutoRead = false;
+    }
+
+    // Start polling to detect when playback finishes naturally
+    function _ttsPollDone() {
+        if (_tts.pollId) clearInterval(_tts.pollId);
+        _tts.pollId = setInterval(() => {
+            if (!_tts.player || _tts.player.isDone) {
+                clearInterval(_tts.pollId);
+                _tts.pollId = null;
+                // Reset button if it was a "Read aloud" click
+                if (_tts.btn) {
+                    _tts.btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+                    _tts.btn = null;
+                }
+                _tts.player = null;
+                _tts.isAutoRead = false;
+            }
+        }, 500);
     }
 
     function addTTSButton(messageEl, rawContent) {
@@ -1495,32 +1517,22 @@ document.addEventListener('mr-theme-changed', function(e) {
         btn.className = 'tts-read-btn';
         btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
         btn.addEventListener('click', () => {
-            // If THIS button's player is active, stop it
-            if (_activeTtsBtn === btn && _activeTtsPlayer && !_activeTtsPlayer._aborted) {
+            // If THIS button is currently playing, stop it
+            if (_tts.btn === btn && _tts.player && !_tts.player._aborted) {
                 stopAllTts();
                 return;
             }
-            // Stop any other TTS first
+            // Stop anything else that's playing
             stopAllTts();
-            // Start new player
+            // Start fresh
             const player = new TTSPlayer();
-            _activeTtsPlayer = player;
-            _activeTtsBtn = btn;
+            _tts.player = player;
+            _tts.btn = btn;
+            _tts.isAutoRead = false;
             btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
             player.feedDelta(rawContent);
             player.flush();
-            // Poll to reset button when playback finishes naturally
-            const checkDone = setInterval(() => {
-                if (player._aborted || player !== _activeTtsPlayer) {
-                    clearInterval(checkDone);
-                    return;
-                }
-                if (player.isDone) {
-                    clearInterval(checkDone);
-                    btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
-                    if (_activeTtsPlayer === player) { _activeTtsPlayer = null; _activeTtsBtn = null; }
-                }
-            }, 500);
+            _ttsPollDone();
         });
         messageEl.appendChild(btn);
     }
@@ -1929,15 +1941,14 @@ document.addEventListener('mr-theme-changed', function(e) {
         abortController = new AbortController();
 
         // Init TTS player for auto-read if enabled
-        _autoReadActive = voiceTtsEnabled && document.getElementById('autoReadToggle').getAttribute('aria-pressed') === 'true';
-        if (_autoReadActive) {
+        if (voiceTtsEnabled && document.getElementById('autoReadToggle').getAttribute('aria-pressed') === 'true') {
             stopAllTts();  // Stop any existing TTS before starting auto-read
-            _streamTtsPlayer = new TTSPlayer();
-            _activeTtsPlayer = _streamTtsPlayer;
+            _tts.player = new TTSPlayer();
+            _tts.isAutoRead = true;
+            _tts.btn = null;
+            _ttsPollDone();
             // Safari autoplay workaround: unlock audio context on user gesture
             try { const s = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAgAAAbAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAbC0SQWRAAAAAAAAAAAAAAAAAAAAAP/jOMAAAh0AUBQAAASqq///woBAOAwGAMPIcv//IHwfi/5c///t////+FDj//0EBP//4IBQBAAADBBBYIBcHg+H///y58uXHD/rEBlJoEBQwZQMCAAEQ2NggOGkSO/+NQZ1EBn/41BARgHEAcABYXF9f//+n//qULiwQGQJB/CAn/8uXYOGOOMEAwYC+LAYGB9Ag/4AAAAAAB//8='); s.volume = 0; s.play().catch(() => {}); } catch(e) {}
-        } else {
-            _streamTtsPlayer = null;
         }
 
         try {
@@ -2024,7 +2035,7 @@ document.addEventListener('mr-theme-changed', function(e) {
                         }
                         if (contentDelta) {
                             appendStreamDelta(contentDelta);
-                            if (_autoReadActive && _streamTtsPlayer) _streamTtsPlayer.feedDelta(contentDelta);
+                            if (_tts.isAutoRead && _tts.player) _tts.player.feedDelta(contentDelta);
                         }
                     } catch (e) {
                         // skip malformed chunks
@@ -2043,7 +2054,7 @@ document.addEventListener('mr-theme-changed', function(e) {
             stopBtn.classList.remove('active');
             abortController = null;
 
-            if (_autoReadActive && _streamTtsPlayer) _streamTtsPlayer.flush();
+            if (_tts.isAutoRead && _tts.player) _tts.player.flush();
 
             const finalContent = _streamFullContent;
             finalizeAssistantMessage(finalContent);
