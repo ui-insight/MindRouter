@@ -850,6 +850,8 @@ document.addEventListener('mr-theme-changed', function(e) {
     let _streamTtsPlayer = null;
     let _micRecorder = null;
     let _micStream = null;
+    let _activeTtsPlayer = null;    // Global: the one TTS player allowed at a time
+    let _activeTtsBtn = null;       // The button that started it (for reset)
 
     // ---------------------------------------------------------------
     // DOM refs
@@ -1463,6 +1465,27 @@ document.addEventListener('mr-theme-changed', function(e) {
         get isActive() {
             return this._playing || this._queue.length > 0 || this._pendingFetches.some(p => p);
         }
+
+        get isDone() {
+            return this._aborted || (!this._playing && !this._queue.length && !this._buffer);
+        }
+    }
+
+    // Global TTS management — only one player at a time
+    function stopAllTts() {
+        if (_activeTtsPlayer) {
+            _activeTtsPlayer.stop();
+            _activeTtsPlayer = null;
+        }
+        if (_streamTtsPlayer) {
+            _streamTtsPlayer.stop();
+            _streamTtsPlayer = null;
+        }
+        // Reset any active "Read aloud" button back to default
+        if (_activeTtsBtn) {
+            _activeTtsBtn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+            _activeTtsBtn = null;
+        }
     }
 
     function addTTSButton(messageEl, rawContent) {
@@ -1471,26 +1494,31 @@ document.addEventListener('mr-theme-changed', function(e) {
         const btn = document.createElement('button');
         btn.className = 'tts-read-btn';
         btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
-        let player = null;
         btn.addEventListener('click', () => {
-            if (player && !player._aborted) {
-                player.stop();
-                player = null;
-                btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
+            // If THIS button's player is active, stop it
+            if (_activeTtsBtn === btn && _activeTtsPlayer && !_activeTtsPlayer._aborted) {
+                stopAllTts();
                 return;
             }
-            player = new TTSPlayer();
+            // Stop any other TTS first
+            stopAllTts();
+            // Start new player
+            const player = new TTSPlayer();
+            _activeTtsPlayer = player;
+            _activeTtsBtn = btn;
             btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
-            // Feed entire content as one block, then flush
             player.feedDelta(rawContent);
             player.flush();
-            // Poll to reset button when done
+            // Poll to reset button when playback finishes naturally
             const checkDone = setInterval(() => {
-                if (player && player._aborted) { clearInterval(checkDone); return; }
-                if (player && !player._playing && !player._queue.length && !player._buffer) {
+                if (player._aborted || player !== _activeTtsPlayer) {
+                    clearInterval(checkDone);
+                    return;
+                }
+                if (player.isDone) {
                     clearInterval(checkDone);
                     btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
-                    player = null;
+                    if (_activeTtsPlayer === player) { _activeTtsPlayer = null; _activeTtsBtn = null; }
                 }
             }, 500);
         });
@@ -1903,7 +1931,9 @@ document.addEventListener('mr-theme-changed', function(e) {
         // Init TTS player for auto-read if enabled
         _autoReadActive = voiceTtsEnabled && document.getElementById('autoReadToggle').getAttribute('aria-pressed') === 'true';
         if (_autoReadActive) {
+            stopAllTts();  // Stop any existing TTS before starting auto-read
             _streamTtsPlayer = new TTSPlayer();
+            _activeTtsPlayer = _streamTtsPlayer;
             // Safari autoplay workaround: unlock audio context on user gesture
             try { const s = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAgAAAbAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAbC0SQWRAAAAAAAAAAAAAAAAAAAAAP/jOMAAAh0AUBQAAASqq///woBAOAwGAMPIcv//IHwfi/5c///t////+FDj//0EBP//4IBQBAAADBBBYIBcHg+H///y58uXHD/rEBlJoEBQwZQMCAAEQ2NggOGkSO/+NQZ1EBn/41BARgHEAcABYXF9f//+n//qULiwQGQJB/CAn/8uXYOGOOMEAwYC+LAYGB9Ag/4AAAAAAB//8='); s.volume = 0; s.play().catch(() => {}); } catch(e) {}
         } else {
@@ -2030,7 +2060,7 @@ document.addEventListener('mr-theme-changed', function(e) {
     sendBtn.addEventListener('click', sendMessage);
     stopBtn.addEventListener('click', () => {
         if (abortController) abortController.abort();
-        if (_streamTtsPlayer) { _streamTtsPlayer.stop(); _streamTtsPlayer = null; }
+        stopAllTts();
     });
 
     inputEl.addEventListener('keydown', (e) => {
@@ -2142,6 +2172,8 @@ document.addEventListener('mr-theme-changed', function(e) {
         autoReadToggle.addEventListener('click', () => {
             const isActive = autoReadToggle.getAttribute('aria-pressed') === 'true';
             setAutoReadState(!isActive);
+            // If toggling off, stop any active auto-read TTS immediately
+            if (isActive) stopAllTts();
         });
     }
 
