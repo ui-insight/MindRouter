@@ -1113,7 +1113,7 @@ async def chat_stt_proxy(
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{stt_url.rstrip('/')}/v1/audio/transcriptions",
-                files={"file": (file.filename or "audio.webm", audio_data, file.content_type or "audio/webm")},
+                files={"file": (file.filename or "audio.webm", audio_data, file.content_type or "application/octet-stream")},
                 data={"model": stt_model},
                 headers=headers,
             )

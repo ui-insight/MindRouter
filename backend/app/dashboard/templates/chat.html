@@ -2209,9 +2209,11 @@ document.addEventListener('mr-theme-changed', function(e) {
                 alert('Microphone access denied or unavailable.');
                 return;
             }
-            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus' : 'audio/webm';
-            _micRecorder = new MediaRecorder(_micStream, { mimeType });
+            let mimeType = '';
+            for (const mt of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', '']) {
+                if (!mt || MediaRecorder.isTypeSupported(mt)) { mimeType = mt; break; }
+            }
+            _micRecorder = new MediaRecorder(_micStream, mimeType ? { mimeType } : undefined);
             const chunks = [];
 
             _micRecorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
@@ -2237,13 +2239,20 @@ document.addEventListener('mr-theme-changed', function(e) {
                     return;
                 }
 
-                const blob = new Blob(chunks, { type: mimeType });
+                const actualMime = mimeType || _micRecorder.mimeType || 'audio/webm';
+                const ext = actualMime.includes('mp4') ? 'mp4' : actualMime.includes('aac') ? 'aac' : 'webm';
+                const blob = new Blob(chunks, { type: actualMime });
                 const formData = new FormData();
-                formData.append('file', blob, 'recording.webm');
+                formData.append('file', blob, 'recording.' + ext);
 
                 try {
                     const resp = await fetch('/chat/api/stt', { method: 'POST', body: formData });
-                    if (!resp.ok) throw new Error('STT error');
+                    if (!resp.ok) {
+                        const errBody = await resp.text().catch(() => '');
+                        console.error('STT error:', resp.status, errBody);
+                        alert('Speech-to-text failed (' + resp.status + '). Check console for details.');
+                        throw new Error('STT error');
+                    }
                     const data = await resp.json();
                     if (data.text) {
                         const input = document.getElementById('chatInput');
