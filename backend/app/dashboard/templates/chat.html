@@ -214,11 +214,88 @@
     }
     .tts-read-btn:hover { color: #0d6efd; border-color: #0d6efd; }
 
-    /* Mic recording pulse animation */
+    /* Mic recording pulse animation (button) */
     .recording { animation: pulse-red 1s infinite; }
     @keyframes pulse-red {
         0%, 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.4); }
         50% { box-shadow: 0 0 0 8px rgba(220, 53, 69, 0); }
+    }
+
+    /* ── Voice activity animations ── */
+    @property --voice-angle {
+        syntax: '<angle>';
+        initial-value: 0deg;
+        inherits: false;
+    }
+    .chat-input-wrapper {
+        position: relative;
+        z-index: 0;
+    }
+    .chat-input-wrapper.voice-active::before,
+    .chat-input-wrapper.voice-active::after {
+        content: '';
+        position: absolute;
+        inset: -3px;
+        border-radius: inherit;
+        z-index: -1;
+        pointer-events: none;
+    }
+    /* ::before = the colored glow ring */
+    .chat-input-wrapper.voice-active::before {
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+    .chat-input-wrapper.voice-active::before { opacity: 1; }
+    /* ::after = soft outer bloom */
+    .chat-input-wrapper.voice-active::after {
+        inset: -8px;
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+    .chat-input-wrapper.voice-active::after { opacity: 0.5; }
+
+    /* TTS — flowing cyan / blue / purple — smooth, serene */
+    .chat-input-wrapper.tts-playing::before {
+        background: conic-gradient(from var(--voice-angle, 0deg),
+            #06b6d4, #3b82f6, #8b5cf6, #c084fc, #8b5cf6, #3b82f6, #06b6d4);
+        animation: voice-rotate 3s linear infinite, voice-glow-tts 2s ease-in-out infinite;
+    }
+    .chat-input-wrapper.tts-playing::after {
+        background: conic-gradient(from var(--voice-angle, 0deg),
+            #06b6d480, #3b82f680, #8b5cf680, #c084fc80, #3b82f680, #06b6d480);
+        animation: voice-rotate 3s linear infinite, voice-bloom-tts 2s ease-in-out infinite;
+    }
+    @keyframes voice-glow-tts {
+        0%, 100% { opacity: 0.6; filter: blur(2px); }
+        50% { opacity: 1; filter: blur(4px); }
+    }
+    @keyframes voice-bloom-tts {
+        0%, 100% { opacity: 0.25; filter: blur(8px); inset: -8px; }
+        50% { opacity: 0.5; filter: blur(14px); inset: -12px; }
+    }
+
+    /* STT — flowing magenta / rose / amber — energetic, urgent */
+    .chat-input-wrapper.stt-recording::before {
+        background: conic-gradient(from var(--voice-angle, 0deg),
+            #f43f5e, #ec4899, #f97316, #fbbf24, #f97316, #ec4899, #f43f5e);
+        animation: voice-rotate 2s linear infinite, voice-glow-stt 1s ease-in-out infinite;
+    }
+    .chat-input-wrapper.stt-recording::after {
+        background: conic-gradient(from var(--voice-angle, 0deg),
+            #f43f5e80, #ec489980, #f9731680, #fbbf2480, #ec489980, #f43f5e80);
+        animation: voice-rotate 2s linear infinite, voice-bloom-stt 1s ease-in-out infinite;
+    }
+    @keyframes voice-glow-stt {
+        0%, 100% { opacity: 0.65; filter: blur(2px); }
+        50% { opacity: 1; filter: blur(5px); }
+    }
+    @keyframes voice-bloom-stt {
+        0%, 100% { opacity: 0.3; filter: blur(8px); inset: -8px; }
+        50% { opacity: 0.6; filter: blur(16px); inset: -14px; }
+    }
+
+    @keyframes voice-rotate {
+        to { --voice-angle: 360deg; }
     }
 
     /* KaTeX math display */
@@ -1503,6 +1580,8 @@ document.addEventListener('mr-theme-changed', function(e) {
             _tts.btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
             _tts.btn = null;
         }
+        const wrap = document.querySelector('.chat-input-wrapper');
+        if (wrap) { wrap.classList.remove('voice-active', 'tts-playing'); }
     }
 
     // Start polling to detect when playback finishes naturally
@@ -1512,13 +1591,14 @@ document.addEventListener('mr-theme-changed', function(e) {
             if (!_tts.player || _tts.player.isDone) {
                 clearInterval(_tts.pollId);
                 _tts.pollId = null;
-                // Reset button if it was a "Read aloud" click
                 if (_tts.btn) {
                     _tts.btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
                     _tts.btn = null;
                 }
                 _tts.player = null;
-                    }
+                const wrap = document.querySelector('.chat-input-wrapper');
+                if (wrap) { wrap.classList.remove('voice-active', 'tts-playing'); }
+            }
         }, 500);
     }
 
@@ -1540,7 +1620,9 @@ document.addEventListener('mr-theme-changed', function(e) {
             const player = new TTSPlayer();
             _tts.player = player;
             _tts.btn = btn;
-                btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
+            btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
+            const wrap = document.querySelector('.chat-input-wrapper');
+            if (wrap) { wrap.classList.add('voice-active', 'tts-playing'); }
             player.feedDelta(rawContent);
             player.flush();
             _ttsPollDone();
@@ -2189,6 +2271,8 @@ document.addEventListener('mr-theme-changed', function(e) {
                 micBtn.classList.add('recording');
                 micBtn.classList.remove('btn-outline-secondary');
                 micBtn.classList.add('btn-danger');
+                const wrap = document.querySelector('.chat-input-wrapper');
+                if (wrap) { wrap.classList.add('voice-active', 'stt-recording'); }
             };
             _micRecorder.onstop = async () => {
                 micBtn.classList.remove('recording');
@@ -2196,6 +2280,8 @@ document.addEventListener('mr-theme-changed', function(e) {
                 micBtn.classList.add('btn-outline-secondary');
                 micBtn.innerHTML = '<i class="bi bi-hourglass-split" aria-hidden="true"></i>';
                 micBtn.disabled = true;
+                const wrap = document.querySelector('.chat-input-wrapper');
+                if (wrap) { wrap.classList.remove('voice-active', 'stt-recording'); }
 
                 // Stop media tracks
                 if (_micStream) { _micStream.getTracks().forEach(t => t.stop()); _micStream = null; }
