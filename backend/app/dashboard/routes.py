@@ -2881,7 +2881,7 @@ async def admin_voice_config(
             "stt_model": stt_model,
             "tts_quota_tokens": tts_quota_tokens,
             "stt_quota_tokens": stt_quota_tokens,
-            "voice_chat_enabled": voice_chat_enabled,
+            "vc_enabled": voice_chat_enabled,
             "voice_chat_personas_json": voice_chat_personas_json,
             "success": success,
             "error": error,
