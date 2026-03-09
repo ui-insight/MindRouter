@@ -19,11 +19,12 @@ MindRouter is a production-ready **LLM inference load balancer and translation l
 9. [Translation Layer](#translation-layer)
 10. [Telemetry & Monitoring](#telemetry-monitoring)
 11. [Chat System](#chat-system)
-12. [Blog System](#blog-system)
-13. [Configuration Reference](#configuration-reference)
-14. [Implementation Notes](#implementation-notes)
-15. [Deployment](#deployment)
-16. [Testing](#testing)
+12. [Voice API](#voice-api)
+13. [Blog System](#blog-system)
+14. [Configuration Reference](#configuration-reference)
+15. [Implementation Notes](#implementation-notes)
+16. [Deployment](#deployment)
+17. [Testing](#testing)
 
 ---
 
@@ -633,6 +634,75 @@ message = client.messages.create(
 
 > **Note:** This is inbound-only -- there are no Anthropic backends. Requests are translated to canonical format and routed to Ollama/vLLM backends like any other request.
 
+### Voice API Endpoints
+
+OpenAI-compatible text-to-speech and speech-to-text endpoints. These proxy to configured upstream TTS/STT services (e.g., Kokoro TTS, faster-whisper) and require API key authentication with quota tracking.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/audio/speech` | API Key | Text-to-speech (streaming audio response) |
+| POST | `/v1/audio/transcriptions` | API Key | Speech-to-text (file upload) |
+
+#### POST /v1/audio/speech
+
+Converts text to speech audio. Returns a streaming audio response.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kokoro",
+    "input": "Hello, world!",
+    "voice": "af_heart",
+    "response_format": "mp3",
+    "speed": 1.0
+  }' \
+  --output speech.mp3
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | `"kokoro"` | TTS model name |
+| `input` | string | (required) | Text to synthesize |
+| `voice` | string | `"af_heart"` | Voice identifier (see available voices in Voice API admin config) |
+| `response_format` | string | `"mp3"` | Audio format: `mp3`, `wav`, `opus`, `flac` |
+| `speed` | float | `1.0` | Speed multiplier (0.25 -- 4.0) |
+
+Returns streaming audio with content type matching the requested format (e.g., `audio/mpeg` for mp3).
+
+#### POST /v1/audio/transcriptions
+
+Transcribes audio to text. Accepts multipart file upload.
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -H "Authorization: Bearer your-api-key" \
+  -F "file=@recording.mp3" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "language=en"
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | file | (required) | Audio file to transcribe |
+| `model` | string | (from config) | STT model name (defaults to admin-configured model) |
+| `language` | string | (none) | ISO language code hint (e.g., `en`, `fr`) |
+
+Response:
+```json
+{"text": "Hello, world!"}
+```
+
+#### Voice API Quota
+
+Each Voice API request deducts a fixed token cost from the user's quota. The cost per request is configurable by admins in the Voice API Config page:
+
+- **TTS**: default 100 tokens per request
+- **STT**: default 200 tokens per request
+
+These costs are stored in the database (`voice_api.tts_quota_tokens`, `voice_api.stt_quota_tokens`) and can be changed without redeploying.
+
 ### Health & Metrics Endpoints
 
 These endpoints are unauthenticated and intended for monitoring infrastructure.
@@ -851,7 +921,8 @@ The admin dashboard has a persistent sidebar with links to all admin pages:
 | Requests | `/admin/requests` | Pending API key and quota increase requests, approve/deny |
 | Audit Log | `/admin/audit` | Inference request history with filtering and search |
 | Conversations | `/admin/conversations` | Browse and search all user conversations, view messages, export |
-| Chat Config | `/admin/chat-config` | Configure core models, default model, system prompt, max_tokens, temperature, thinking mode |
+| Chat Config | `/admin/chat-config` | Configure core models, default model, system prompt, max_tokens, temperature, thinking mode, voice TTS/STT settings |
+| Voice API Config | `/admin/voice-config` | Configure TTS/STT backend connections, available voices, and API quota token costs |
 | Blog | `/admin/blog` | Blog/CMS management -- create, edit, publish, delete posts |
 | Settings | `/admin/settings` | Site-wide settings: timezone, enforce `num_ctx` override |
 
@@ -1380,6 +1451,8 @@ Admins can configure the chat interface defaults at `/admin/chat-config`:
 - **Max tokens** -- Default `max_tokens` value for chat requests.
 - **Temperature** -- Default temperature for chat requests.
 - **Thinking mode** -- Enable or disable thinking/reasoning mode by default for chat.
+- **TTS settings** -- Enable/disable "Read Aloud" in the chat UI, select TTS provider (Kokoro or OpenedAI), set default voice and playback speed.
+- **STT settings** -- Enable/disable microphone input in the chat UI.
 
 ### Chat UI Features
 
@@ -1409,6 +1482,55 @@ These controls only appear when the selected model supports thinking.
 **Auto-conversation titling** -- New conversations are automatically titled from the first user message. The title can be updated by the user via the conversation settings.
 
 **Model selection persistence** -- The last selected model is saved to browser localStorage and automatically restored when returning to the chat.
+
+---
+
+## Voice API
+
+MindRouter provides public TTS and STT endpoints that proxy to self-hosted voice services. These are OpenAI-compatible and separate from the chat UI's voice features.
+
+### Architecture
+
+The Voice API acts as a proxy between API consumers and upstream voice services:
+
+- **TTS**: Proxies to a self-hosted service (Kokoro TTS or OpenedAI Speech) exposing `/v1/audio/speech`
+- **STT**: Proxies to a self-hosted service (faster-whisper / Speaches) exposing `/v1/audio/transcriptions`
+
+Both endpoints require API key authentication and deduct a configurable fixed token cost from the user's quota per request.
+
+### Admin Configuration
+
+Voice API settings are managed on two admin pages:
+
+**Voice API Config** (`/admin/voice-config`):
+- TTS backend URL and API key
+- Available TTS voices (one per line, informational for API callers)
+- STT backend URL, API key, and default model
+- Quota token costs per TTS/STT request
+
+**Chat Config** (`/admin/chat-config`):
+- TTS enable/disable toggle, provider, default voice, playback speed (chat UI only)
+- STT enable/disable toggle (chat UI only)
+
+The backend connection settings (URLs, API keys) are shared between the chat UI and the Voice API. The chat-specific settings (enable toggles, provider, voice, speed) only affect the chat interface and do not gate the Voice API endpoints.
+
+### DB Config Keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `voice.tts_url` | string | (none) | TTS service base URL |
+| `voice.tts_api_key` | string | (none) | TTS service API key |
+| `voice.stt_url` | string | (none) | STT service base URL |
+| `voice.stt_api_key` | string | (none) | STT service API key |
+| `voice.stt_model` | string | `"whisper-large-v3-turbo"` | Default STT model |
+| `voice.tts_enabled` | boolean | `false` | Enable TTS in chat UI |
+| `voice.tts_provider` | string | `"kokoro"` | Chat TTS provider (`kokoro` or `openedai`) |
+| `voice.tts_voice` | string | `"af_heart"` | Default voice for chat TTS |
+| `voice.tts_speed` | float | `1.0` | Default playback speed for chat TTS |
+| `voice.stt_enabled` | boolean | `false` | Enable STT in chat UI |
+| `voice_api.tts_voices` | string | `"af_heart\naf_bella\nam_adam\nam_michael"` | Available TTS voices (newline-separated) |
+| `voice_api.tts_quota_tokens` | integer | `100` | Token cost per TTS API request |
+| `voice_api.stt_quota_tokens` | integer | `200` | Token cost per STT API request |
 
 ---
 
@@ -1656,6 +1778,19 @@ In addition to the environment variables above, MindRouter stores runtime config
 | `chat.max_tokens` | integer | `16384` | Default max_tokens for chat requests |
 | `chat.temperature` | float | (none) | Default temperature override |
 | `chat.think` | bool/string | (none) | Default thinking mode (`true`/`false`/`"low"`/`"medium"`/`"high"`) |
+| `voice.tts_enabled` | boolean | `false` | Enable TTS "Read Aloud" in chat UI |
+| `voice.tts_provider` | string | `"kokoro"` | Chat TTS provider (`kokoro` or `openedai`) |
+| `voice.tts_voice` | string | `"af_heart"` | Default voice for chat TTS |
+| `voice.tts_speed` | float | `1.0` | Default playback speed (0.5--2.0) |
+| `voice.stt_enabled` | boolean | `false` | Enable microphone input in chat UI |
+| `voice.tts_url` | string | (none) | TTS service base URL |
+| `voice.tts_api_key` | string | (none) | TTS service API key |
+| `voice.stt_url` | string | (none) | STT service base URL |
+| `voice.stt_api_key` | string | (none) | STT service API key |
+| `voice.stt_model` | string | `"whisper-large-v3-turbo"` | Default STT model |
+| `voice_api.tts_voices` | string | (see below) | Available TTS voices (newline-separated) |
+| `voice_api.tts_quota_tokens` | integer | `100` | Token cost per TTS API request |
+| `voice_api.stt_quota_tokens` | integer | `200` | Token cost per STT API request |
 | `app.timezone` | string | `"America/Los_Angeles"` | IANA timezone for date display in web UI |
 | `ollama.enforce_num_ctx` | boolean | `true` | Override user-supplied `num_ctx` with model config `context_length` |
 

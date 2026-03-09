@@ -25,6 +25,7 @@ Interactive API docs are also available at `/docs` (Swagger UI) and `/redoc` (Re
 - **Thinking/Reasoning Mode**: Control reasoning depth on supported models (qwen3.5, qwen3, gpt-oss)
 - **Web Search**: Optional Brave Search integration injects web results as context in chat
 - **Azure AD SSO**: Optional single sign-on with JIT user provisioning from Microsoft Entra ID
+- **Voice API**: Public TTS and STT endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`) with API key auth and quota tracking
 - **Full Audit Logging**: All prompts, responses, and artifacts stored for review
 - **Dual Dashboards**: Public status + authenticated user/admin interfaces with dark mode
 
@@ -360,6 +361,13 @@ make docker-migrate # Run Alembic migrations via docker-compose
 | POST | `/api/generate` | Ollama-compatible generate |
 | GET | `/api/tags` | Ollama-compatible model list |
 | POST | `/anthropic/v1/messages` | Anthropic Messages API compatible |
+
+#### Voice API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/audio/speech` | OpenAI-compatible text-to-speech |
+| POST | `/v1/audio/transcriptions` | OpenAI-compatible speech-to-text |
 
 #### Health & Metrics
 
