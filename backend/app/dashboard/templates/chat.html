@@ -752,19 +752,16 @@
                               aria-label="Chat message"
                               autofocus></textarea>
                     <div style="display: flex; flex-direction: column; gap: 0.25rem; align-items: center;">
-                        <button class="btn btn-outline-secondary" id="autoReadToggle" title="Auto-read responses" aria-label="Auto-read responses" aria-pressed="false" style="padding: 0.375rem 0.75rem; display: none;">
-                            <i class="bi bi-volume-up" aria-hidden="true"></i>
-                        </button>
                         <button class="btn btn-outline-secondary" id="micBtn" title="Voice input" aria-label="Voice input" style="display: none;">
                             <i class="bi bi-mic" aria-hidden="true"></i>
                         </button>
+                        <button class="btn btn-primary" id="sendBtn" title="Send message" aria-label="Send message">
+                            <i class="bi bi-send" aria-hidden="true"></i>
+                        </button>
+                        <button class="btn btn-danger stop-btn" id="stopBtn" title="Stop generation" aria-label="Stop generation">
+                            <i class="bi bi-stop-fill" aria-hidden="true"></i>
+                        </button>
                     </div>
-                    <button class="btn btn-primary" id="sendBtn" title="Send message" aria-label="Send message">
-                        <i class="bi bi-send" aria-hidden="true"></i>
-                    </button>
-                    <button class="btn btn-danger stop-btn" id="stopBtn" title="Stop generation" aria-label="Stop generation">
-                        <i class="bi bi-stop-fill" aria-hidden="true"></i>
-                    </button>
                 </div>
             </div>
         </div>
@@ -854,8 +851,7 @@ document.addEventListener('mr-theme-changed', function(e) {
     // Single global TTS manager — prevents any possibility of overlap
     const _tts = {
         player: null,       // Current TTSPlayer instance (only one ever)
-        btn: null,          // "Read aloud" button that started it (null for auto-read)
-        isAutoRead: false,  // Whether current playback is from auto-read
+        btn: null,          // "Read aloud" button that started it
         pollId: null,       // Interval ID for polling done state
     };
 
@@ -1507,7 +1503,6 @@ document.addEventListener('mr-theme-changed', function(e) {
             _tts.btn.innerHTML = '<i class="bi bi-volume-up"></i> Read aloud';
             _tts.btn = null;
         }
-        _tts.isAutoRead = false;
     }
 
     // Start polling to detect when playback finishes naturally
@@ -1523,8 +1518,7 @@ document.addEventListener('mr-theme-changed', function(e) {
                     _tts.btn = null;
                 }
                 _tts.player = null;
-                _tts.isAutoRead = false;
-            }
+                    }
         }, 500);
     }
 
@@ -1546,8 +1540,7 @@ document.addEventListener('mr-theme-changed', function(e) {
             const player = new TTSPlayer();
             _tts.player = player;
             _tts.btn = btn;
-            _tts.isAutoRead = false;
-            btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
+                btn.innerHTML = '<i class="bi bi-stop-fill"></i> Stop';
             player.feedDelta(rawContent);
             player.flush();
             _ttsPollDone();
@@ -1958,17 +1951,6 @@ document.addEventListener('mr-theme-changed', function(e) {
         stopBtn.classList.add('active');
         abortController = new AbortController();
 
-        // Init TTS player for auto-read if enabled
-        if (voiceTtsEnabled && document.getElementById('autoReadToggle').getAttribute('aria-pressed') === 'true') {
-            stopAllTts();  // Stop any existing TTS before starting auto-read
-            _tts.player = new TTSPlayer();
-            _tts.isAutoRead = true;
-            _tts.btn = null;
-            _ttsPollDone();
-            // Safari autoplay workaround: unlock audio context on user gesture
-            try { const s = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAgAAAbAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAbC0SQWRAAAAAAAAAAAAAAAAAAAAAP/jOMAAAh0AUBQAAASqq///woBAOAwGAMPIcv//IHwfi/5c///t////+FDj//0EBP//4IBQBAAADBBBYIBcHg+H///y58uXHD/rEBlJoEBQwZQMCAAEQ2NggOGkSO/+NQZ1EBn/41BARgHEAcABYXF9f//+n//qULiwQGQJB/CAn/8uXYOGOOMEAwYC+LAYGB9Ag/4AAAAAAB//8='); s.volume = 0; s.play().catch(() => {}); } catch(e) {}
-        }
-
         try {
             const bodyData = {
                 conversation_id: activeConvId,
@@ -2053,7 +2035,6 @@ document.addEventListener('mr-theme-changed', function(e) {
                         }
                         if (contentDelta) {
                             appendStreamDelta(contentDelta);
-                            if (_tts.isAutoRead && _tts.player) _tts.player.feedDelta(contentDelta);
                         }
                     } catch (e) {
                         // skip malformed chunks
@@ -2071,8 +2052,6 @@ document.addEventListener('mr-theme-changed', function(e) {
             sendBtn.style.display = '';
             stopBtn.classList.remove('active');
             abortController = null;
-
-            if (_tts.isAutoRead && _tts.player) _tts.player.flush();
 
             const finalContent = _streamFullContent;
             finalizeAssistantMessage(finalContent);
@@ -2177,34 +2156,6 @@ document.addEventListener('mr-theme-changed', function(e) {
         const isActive = webSearchToggle.getAttribute('aria-pressed') === 'true';
         setWebSearchState(!isActive);
     });
-
-    // ---------------------------------------------------------------
-    // Auto-read toggle (TTS)
-    // ---------------------------------------------------------------
-    const autoReadToggle = document.getElementById('autoReadToggle');
-    if (voiceTtsEnabled && autoReadToggle) {
-        autoReadToggle.style.display = '';
-        function setAutoReadState(active) {
-            autoReadToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
-            if (active) {
-                autoReadToggle.classList.remove('btn-outline-secondary');
-                autoReadToggle.classList.add('btn-primary');
-            } else {
-                autoReadToggle.classList.remove('btn-primary');
-                autoReadToggle.classList.add('btn-outline-secondary');
-            }
-            localStorage.setItem('mr2_auto_read', active ? '1' : '');
-        }
-        if (localStorage.getItem('mr2_auto_read') === '1') {
-            setAutoReadState(true);
-        }
-        autoReadToggle.addEventListener('click', () => {
-            const isActive = autoReadToggle.getAttribute('aria-pressed') === 'true';
-            setAutoReadState(!isActive);
-            // If toggling off, stop any active auto-read TTS immediately
-            if (isActive) stopAllTts();
-        });
-    }
 
     // ---------------------------------------------------------------
     // Microphone / STT
