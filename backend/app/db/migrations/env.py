@@ -25,7 +25,6 @@ from backend.app.db.models import (  # noqa: F401 - Import all models for metada
     ApiKey,
     Quota,
     QuotaRequest,
-    UsageLedger,
     Backend,
     BackendTelemetry,
     Model,

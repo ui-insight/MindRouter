@@ -140,36 +140,6 @@ class ArchivedResponse(ArchiveBase):
     )
 
 
-class ArchivedUsageLedger(ArchiveBase):
-    """Archived token usage entry."""
-
-    __tablename__ = "archived_usage_ledger"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    api_key_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    request_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-
-    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    is_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    model: Mapped[str] = mapped_column(String(100), nullable=False)
-    backend_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    archived_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    __table_args__ = (
-        Index("ix_arch_usage_user_created", "user_id", "created_at"),
-        Index("ix_arch_usage_archived_at", "archived_at"),
-    )
-
-
 class ArchivedSchedulerDecision(ArchiveBase):
     """Archived scheduler routing decision."""
 

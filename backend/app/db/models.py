@@ -163,7 +163,6 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     quota_requests: Mapped[List["QuotaRequest"]] = relationship(
         "QuotaRequest", back_populates="user", foreign_keys="QuotaRequest.user_id"
     )
-    usage_ledger: Mapped[List["UsageLedger"]] = relationship("UsageLedger", back_populates="user")
     requests: Mapped[List["Request"]] = relationship("Request", back_populates="user")
 
     __table_args__ = (
@@ -265,32 +264,6 @@ class QuotaRequest(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_quota_requests_status", "status"),
-    )
-
-
-class UsageLedger(Base, TimestampMixin):
-    """Token usage accounting entries."""
-
-    __tablename__ = "usage_ledger"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    api_key_id: Mapped[int] = mapped_column(Integer, ForeignKey("api_keys.id"), nullable=False)
-    request_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("requests.id"), nullable=False)
-
-    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    is_estimated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    model: Mapped[str] = mapped_column(String(100), nullable=False)
-    backend_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("backends.id"), nullable=True)
-
-    # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="usage_ledger")
-
-    __table_args__ = (
-        Index("ix_usage_ledger_user_created", "user_id", "created_at"),
     )
 
 

@@ -500,7 +500,7 @@ async def user_dashboard(
     max_keys = user.group.max_api_keys if user.group else 8
     active_key_count = await crud.count_user_active_api_keys(db, effective_id)
 
-    # Lifetime token usage from usage_ledger
+    # Lifetime token usage from requests
     lifetime_map = await crud.get_user_token_totals(db, [effective_id])
     lifetime_data = lifetime_map.get(effective_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
     lifetime_tokens = lifetime_data["total_tokens"]

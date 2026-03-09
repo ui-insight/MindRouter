@@ -364,7 +364,7 @@ class TestQuotaCheckLogic:
         assert can_proceed is False
 
 
-class TestUsageLedger:
+class TestUsageTracking:
     """Tests for usage tracking logic."""
 
     def test_calculate_total_tokens(self):

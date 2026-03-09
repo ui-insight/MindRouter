@@ -1458,18 +1458,6 @@ class InferenceService:
                 finish_reason=response.get("choices", [{}])[0].get("finish_reason"),
             )
 
-            await crud.create_usage_entry(
-                self.db,
-                user_id=db_request.user_id,
-                api_key_id=db_request.api_key_id,
-                request_id=db_request.id,
-                model=db_request.model,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                is_estimated=tokens_estimated,
-                backend_id=backend_id,
-            )
-
             await crud.update_quota_usage(self.db, db_request.user_id, total_tokens)
             await crud.update_api_key_usage(self.db, db_request.api_key_id)
 
@@ -1524,18 +1512,6 @@ class InferenceService:
                 content=content,
                 chunk_count=chunk_count,
                 finish_reason=finish_reason,
-            )
-
-            await crud.create_usage_entry(
-                self.db,
-                user_id=db_request.user_id,
-                api_key_id=db_request.api_key_id,
-                request_id=db_request.id,
-                model=db_request.model,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                is_estimated=True,
-                backend_id=backend_id,
             )
 
             await crud.update_quota_usage(self.db, db_request.user_id, total_tokens)

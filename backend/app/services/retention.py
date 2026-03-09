@@ -141,20 +141,17 @@ async def archive_expired_requests(
         Request,
         Response,
         SchedulerDecision,
-        UsageLedger,
     )
     from backend.app.db.archive_models import (
         ArchivedArtifact,
         ArchivedRequest,
         ArchivedResponse,
         ArchivedSchedulerDecision,
-        ArchivedUsageLedger,
     )
 
     counts = {
         "requests": 0,
         "responses": 0,
-        "usage_ledger": 0,
         "scheduler_decisions": 0,
         "artifacts": 0,
     }
@@ -175,11 +172,6 @@ async def archive_expired_requests(
             select(Response).where(Response.request_id.in_(request_ids))
         )
         responses = list(resp_result.scalars().all())
-
-        usage_result = await app_db.execute(
-            select(UsageLedger).where(UsageLedger.request_id.in_(request_ids))
-        )
-        usage_rows = list(usage_result.scalars().all())
 
         sched_result = await app_db.execute(
             select(SchedulerDecision).where(
@@ -202,10 +194,6 @@ async def archive_expired_requests(
         counts["responses"] += await _bulk_insert_ignore(
             archive_db, ArchivedResponse,
             [_row_to_dict(r) for r in responses],
-        )
-        counts["usage_ledger"] += await _bulk_insert_ignore(
-            archive_db, ArchivedUsageLedger,
-            [_row_to_dict(r) for r in usage_rows],
         )
         counts["scheduler_decisions"] += await _bulk_insert_ignore(
             archive_db, ArchivedSchedulerDecision,
@@ -233,9 +221,6 @@ async def archive_expired_requests(
             )
             await app_db.execute(
                 delete(Artifact).where(Artifact.request_id.in_(request_ids))
-            )
-            await app_db.execute(
-                delete(UsageLedger).where(UsageLedger.request_id.in_(request_ids))
             )
             await app_db.execute(
                 delete(Request).where(Request.id.in_(request_ids))
@@ -377,7 +362,6 @@ async def purge_expired_archives(
         ArchivedRequest,
         ArchivedResponse,
         ArchivedSchedulerDecision,
-        ArchivedUsageLedger,
     )
 
     counts: dict[str, int] = {}
@@ -397,7 +381,6 @@ async def purge_expired_archives(
                 (ArchivedSchedulerDecision, "scheduler_decisions"),
                 (ArchivedResponse, "responses"),
                 (ArchivedArtifact, "artifacts"),
-                (ArchivedUsageLedger, "usage_ledger"),
             ]:
                 r = await archive_db.execute(
                     delete(model).where(model.request_id.in_(req_ids))
@@ -466,7 +449,6 @@ async def get_archive_stats(archive_db: AsyncSession) -> dict[str, Any]:
     tables = [
         "archived_requests",
         "archived_responses",
-        "archived_usage_ledger",
         "archived_scheduler_decisions",
         "archived_artifacts",
         "archived_chat_conversations",
@@ -510,14 +492,12 @@ async def get_app_db_counts(app_db: AsyncSession) -> dict[str, int]:
         Request,
         Response,
         SchedulerDecision,
-        UsageLedger,
     )
 
     counts = {}
     for label, model in [
         ("requests", Request),
         ("responses", Response),
-        ("usage_ledger", UsageLedger),
         ("scheduler_decisions", SchedulerDecision),
         ("artifacts", Artifact),
         ("chat_conversations", ChatConversation),
@@ -617,7 +597,7 @@ async def run_retention_cycle() -> dict[str, Any]:
             # No archive DB — just delete
             from backend.app.db.models import (
                 Artifact, Request, Response,
-                SchedulerDecision, UsageLedger,
+                SchedulerDecision,
             )
             async with get_async_db_context() as app_db:
                 batch_size = config.get("retention.batch_size", 500)
@@ -641,9 +621,6 @@ async def run_retention_cycle() -> dict[str, Any]:
                     )
                     await app_db.execute(
                         delete(Artifact).where(Artifact.request_id.in_(ids))
-                    )
-                    await app_db.execute(
-                        delete(UsageLedger).where(UsageLedger.request_id.in_(ids))
                     )
                     await app_db.execute(
                         delete(Request).where(Request.id.in_(ids))

@@ -48,7 +48,6 @@ from backend.app.db.models import (
     RequestStatus,
     Response,
     SchedulerDecision,
-    UsageLedger,
     User,
     UserRole,
 )
@@ -281,10 +280,11 @@ async def get_users(
         # Sort by total tokens via a subquery
         token_subq = (
             select(
-                UsageLedger.user_id,
-                func.coalesce(func.sum(UsageLedger.total_tokens), 0).label("total_tokens"),
+                Request.user_id,
+                func.coalesce(func.sum(Request.total_tokens), 0).label("total_tokens"),
             )
-            .group_by(UsageLedger.user_id)
+            .where(Request.total_tokens.isnot(None))
+            .group_by(Request.user_id)
             .subquery()
         )
         query = (
@@ -342,13 +342,13 @@ async def get_user_token_totals(db: AsyncSession, user_ids: List[int]) -> dict:
         return {}
     result = await db.execute(
         select(
-            UsageLedger.user_id,
-            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+            Request.user_id,
+            func.coalesce(func.sum(Request.prompt_tokens), 0),
+            func.coalesce(func.sum(Request.completion_tokens), 0),
+            func.coalesce(func.sum(Request.total_tokens), 0),
         )
-        .where(UsageLedger.user_id.in_(user_ids))
-        .group_by(UsageLedger.user_id)
+        .where(Request.user_id.in_(user_ids), Request.total_tokens.isnot(None))
+        .group_by(Request.user_id)
     )
     return {
         row[0]: {
@@ -371,13 +371,13 @@ async def get_api_key_token_totals(
         return {}
     result = await db.execute(
         select(
-            UsageLedger.api_key_id,
-            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+            Request.api_key_id,
+            func.coalesce(func.sum(Request.prompt_tokens), 0),
+            func.coalesce(func.sum(Request.completion_tokens), 0),
+            func.coalesce(func.sum(Request.total_tokens), 0),
         )
-        .where(UsageLedger.api_key_id.in_(api_key_ids))
-        .group_by(UsageLedger.api_key_id)
+        .where(Request.api_key_id.in_(api_key_ids), Request.total_tokens.isnot(None))
+        .group_by(Request.api_key_id)
     )
     return {
         row[0]: {
@@ -398,15 +398,15 @@ async def get_model_token_totals(
     """
     result = await db.execute(
         select(
-            UsageLedger.model,
-            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
-            func.count(UsageLedger.id),
+            Request.model,
+            func.coalesce(func.sum(Request.prompt_tokens), 0),
+            func.coalesce(func.sum(Request.completion_tokens), 0),
+            func.coalesce(func.sum(Request.total_tokens), 0),
+            func.count(Request.id),
         )
-        .where(UsageLedger.model.isnot(None))
-        .group_by(UsageLedger.model)
-        .order_by(func.sum(UsageLedger.total_tokens).desc())
+        .where(Request.total_tokens.isnot(None))
+        .group_by(Request.model)
+        .order_by(func.sum(Request.total_tokens).desc())
         .limit(limit)
     )
     return [
@@ -428,12 +428,11 @@ async def delete_user(db: AsyncSession, user_id: int) -> bool:
     1. scheduler_decisions (FK -> requests)
     2. responses (FK -> requests)
     3. artifacts (FK -> requests)
-    4. usage_ledger (FK -> requests, api_keys, users)
-    5. requests (FK -> users, api_keys)
-    6. api_keys (FK -> users)
-    7. quotas (FK -> users)
-    8. quota_requests (FK -> users)
-    9. users
+    4. requests (FK -> users, api_keys)
+    5. api_keys (FK -> users)
+    6. quotas (FK -> users)
+    7. quota_requests (FK -> users)
+    8. users
     """
     # Get request IDs for this user (needed for child tables of requests)
     req_result = await db.execute(
@@ -456,9 +455,6 @@ async def delete_user(db: AsyncSession, user_id: int) -> bool:
         )
 
     # Delete direct children of user
-    await db.execute(
-        delete(UsageLedger).where(UsageLedger.user_id == user_id)
-    )
     await db.execute(
         delete(Request).where(Request.user_id == user_id)
     )
@@ -954,12 +950,9 @@ async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
         delete(SchedulerDecision).where(SchedulerDecision.selected_backend_id == backend_id)
     )
 
-    # Null out nullable FK references (preserve request/usage history)
+    # Null out nullable FK references (preserve request history)
     await db.execute(
         update(Request).where(Request.backend_id == backend_id).values(backend_id=None)
-    )
-    await db.execute(
-        update(UsageLedger).where(UsageLedger.backend_id == backend_id).values(backend_id=None)
     )
 
     # Delete the backend
@@ -1469,51 +1462,22 @@ async def create_response(
     return response
 
 
-# Usage Ledger CRUD
-async def create_usage_entry(
-    db: AsyncSession,
-    user_id: int,
-    api_key_id: int,
-    request_id: int,
-    model: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-    is_estimated: bool = False,
-    backend_id: Optional[int] = None,
-) -> UsageLedger:
-    """Create a usage ledger entry."""
-    entry = UsageLedger(
-        user_id=user_id,
-        api_key_id=api_key_id,
-        request_id=request_id,
-        model=model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        is_estimated=is_estimated,
-        backend_id=backend_id,
-    )
-    db.add(entry)
-    await db.flush()
-    return entry
-
-
 async def get_user_usage_in_window(
     db: AsyncSession, user_id: int, window_seconds: int
 ) -> int:
     """Get total tokens used by user in a time window."""
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
     result = await db.execute(
-        select(func.sum(UsageLedger.total_tokens))
+        select(func.coalesce(func.sum(Request.total_tokens), 0))
         .where(
             and_(
-                UsageLedger.user_id == user_id,
-                UsageLedger.created_at >= cutoff,
+                Request.user_id == user_id,
+                Request.created_at >= cutoff,
+                Request.total_tokens.isnot(None),
             )
         )
     )
-    total = result.scalar_one_or_none()
-    return total or 0
+    return result.scalar_one() or 0
 
 
 # Telemetry CRUD
@@ -2090,11 +2054,11 @@ async def get_user_with_stats(db: AsyncSession, user_id: int) -> Optional[dict]:
     # Total tokens (with input/output breakdown)
     token_result = await db.execute(
         select(
-            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+            func.coalesce(func.sum(Request.prompt_tokens), 0),
+            func.coalesce(func.sum(Request.completion_tokens), 0),
+            func.coalesce(func.sum(Request.total_tokens), 0),
         )
-        .where(UsageLedger.user_id == user_id)
+        .where(Request.user_id == user_id, Request.total_tokens.isnot(None))
     )
     token_row = token_result.one()
     prompt_tokens = int(token_row[0])
@@ -2155,8 +2119,9 @@ async def get_user_monthly_usage(
             COALESCE(SUM(completion_tokens), 0) as completion_tokens,
             COALESCE(SUM(total_tokens), 0) as tokens,
             COUNT(*) as requests
-        FROM usage_ledger
+        FROM requests
         WHERE user_id = :user_id
+          AND total_tokens IS NOT NULL
           AND created_at >= DATE_SUB(NOW(), INTERVAL :months MONTH)
         GROUP BY month
         ORDER BY month
@@ -2491,10 +2456,11 @@ async def get_global_token_total(db: AsyncSession, include_offset: bool = True) 
     """
     result = await db.execute(
         select(
-            func.coalesce(func.sum(UsageLedger.prompt_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.completion_tokens), 0),
-            func.coalesce(func.sum(UsageLedger.total_tokens), 0),
+            func.coalesce(func.sum(Request.prompt_tokens), 0),
+            func.coalesce(func.sum(Request.completion_tokens), 0),
+            func.coalesce(func.sum(Request.total_tokens), 0),
         )
+        .where(Request.total_tokens.isnot(None))
     )
     row = result.one()
     totals = {
@@ -2530,8 +2496,8 @@ async def get_token_trend(
         "  COALESCE(SUM(prompt_tokens), 0) AS prompt_v,"
         "  COALESCE(SUM(completion_tokens), 0) AS completion_v,"
         "  COALESCE(SUM(total_tokens), 0) AS v"
-        " FROM usage_ledger"
-        " WHERE created_at >= :cutoff"
+        " FROM requests"
+        " WHERE created_at >= :cutoff AND total_tokens IS NOT NULL"
         " GROUP BY bucket_ts"
         " ORDER BY bucket_ts"
     )
