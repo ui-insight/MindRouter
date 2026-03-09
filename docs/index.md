@@ -694,6 +694,70 @@ Response:
 {"text": "Hello, world!"}
 ```
 
+#### STT Limitations & Long Audio
+
+The transcription endpoint is designed for short-to-medium audio clips (up to ~10 minutes). Several constraints affect long-form audio:
+
+| Constraint | Value | Impact |
+|------------|-------|--------|
+| Upload size limit | 50 MB (nginx `client_max_body_size`) | A 1-hour MP3 at 128 kbps is ~57 MB -- over the limit. WAV files are much larger. |
+| Proxy timeout | 120 seconds (hardcoded in `voice_api.py`) | Whisper transcribing a long file can take 5--10+ minutes, causing a 502 timeout. |
+| Memory buffering | Entire file read into RAM | Large uploads spike container memory since the file is fully buffered before forwarding. |
+| No chunking | Single request per file | There is no server-side segmentation -- one file = one request to the upstream STT service. |
+| Flat quota cost | Same cost regardless of duration | A 1-hour file costs the same 200 tokens as a 5-second clip. |
+
+**Mitigation: client-side chunking.** Split long audio into segments before sending. This avoids all of the above limits and gives you per-segment error recovery.
+
+**Python example -- split and transcribe a long file with pydub:**
+
+```python
+import httpx
+from pydub import AudioSegment
+
+API_KEY = "mr2_your-api-key"
+BASE_URL = "https://mindrouter.example.com"
+CHUNK_MINUTES = 5
+
+audio = AudioSegment.from_file("lecture.mp3")
+chunk_ms = CHUNK_MINUTES * 60 * 1000
+
+transcript_parts = []
+for i in range(0, len(audio), chunk_ms):
+    chunk = audio[i : i + chunk_ms]
+    buf = chunk.export(format="mp3")
+
+    resp = httpx.post(
+        f"{BASE_URL}/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        files={"file": (f"chunk_{i // chunk_ms}.mp3", buf, "audio/mpeg")},
+        data={"model": "whisper-large-v3-turbo"},
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    transcript_parts.append(resp.json()["text"])
+
+full_transcript = " ".join(transcript_parts)
+print(full_transcript)
+```
+
+**Bash example -- split with ffmpeg and transcribe each chunk:**
+
+```bash
+# Split into 5-minute chunks
+ffmpeg -i lecture.mp3 -f segment -segment_time 300 -c copy chunk_%03d.mp3
+
+# Transcribe each chunk
+for f in chunk_*.mp3; do
+  curl -s -X POST https://mindrouter.example.com/v1/audio/transcriptions \
+    -H "Authorization: Bearer mr2_your-api-key" \
+    -F "file=@$f" \
+    -F "model=whisper-large-v3-turbo" \
+    | jq -r '.text'
+done
+```
+
+> **Tip:** Each chunk is a separate API request, so each one deducts the configured STT quota cost. For a 1-hour file split into 12 chunks at the default 200 tokens/request, the total cost is 2,400 tokens.
+
 #### Voice API Quota
 
 Each Voice API request deducts a fixed token cost from the user's quota. The cost per request is configurable by admins in the Voice API Config page:
@@ -1513,6 +1577,20 @@ Voice API settings are managed on two admin pages:
 - STT enable/disable toggle (chat UI only)
 
 The backend connection settings (URLs, API keys) are shared between the chat UI and the Voice API. The chat-specific settings (enable toggles, provider, voice, speed) only affect the chat interface and do not gate the Voice API endpoints.
+
+### Limitations
+
+The Voice API is a thin proxy layer. It does not perform any audio processing itself -- it forwards requests to the upstream TTS/STT service and relays the response.
+
+**STT upload constraints:**
+- **50 MB** maximum upload size (nginx limit)
+- **120-second** proxy timeout to the upstream Whisper service
+- The entire audio file is buffered in memory before forwarding
+- No server-side audio segmentation or chunking
+
+These limits are appropriate for short-to-medium clips (up to ~10 minutes). For longer audio, clients should split the file into chunks before sending -- see [STT Limitations & Long Audio](#stt-limitations--long-audio) in the API Reference for code examples.
+
+**Quota model:** Both TTS and STT use a flat per-request token cost regardless of input size. Admins can adjust the cost via the Voice API Config page.
 
 ### DB Config Keys
 
