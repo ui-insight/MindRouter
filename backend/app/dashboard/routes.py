@@ -508,6 +508,7 @@ async def user_dashboard(
     # TTS preferences
     tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
     user_tts_voice = await crud.get_config_json(db, f"user.{effective_id}.tts_voice", "")
+    user_tts_speed = await crud.get_config_json(db, f"user.{effective_id}.tts_speed", None)
 
     return templates.TemplateResponse(
         "user/dashboard.html",
@@ -531,6 +532,7 @@ async def user_dashboard(
             "lifetime_completion_tokens": lifetime_data["completion_tokens"],
             "tts_enabled": tts_enabled,
             "user_tts_voice": user_tts_voice or "",
+            "user_tts_speed": user_tts_speed,
         },
     )
 
@@ -644,7 +646,7 @@ async def save_preference(
     body = await request.json()
     key = body.get("key", "")
     value = body.get("value", "")
-    allowed_keys = {"tts_voice"}
+    allowed_keys = {"tts_voice", "tts_speed"}
     if key not in allowed_keys:
         return JSONResponse({"error": f"Invalid preference key: {key}"}, status_code=400)
     config_key = f"user.{effective_id}.{key}"

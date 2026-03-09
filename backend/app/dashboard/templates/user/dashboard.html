@@ -196,6 +196,14 @@
                         <option value="">(System default)</option>
                     </select>
                     <div class="form-text">Your preferred voice for Read Aloud in chat. <span id="ttsVoiceSaved" class="text-success" style="display:none;"><i class="bi bi-check-circle"></i> Saved</span></div>
+
+                    <label for="userTtsSpeed" class="form-label mt-3"><i class="bi bi-speedometer2 me-1"></i> TTS Speed</label>
+                    <div class="d-flex align-items-center gap-2">
+                        <input type="range" class="form-range flex-grow-1" id="userTtsSpeed" min="0.5" max="2.0" step="0.1" value="{{ user_tts_speed if user_tts_speed is not none else '' }}">
+                        <span id="ttsSpeedValue" class="text-muted small" style="min-width:3em;">{{ user_tts_speed if user_tts_speed is not none else '—' }}</span>
+                    </div>
+                    <div class="form-text">Playback speed (0.5 &ndash; 2.0). Leave at default to use the system setting. <span id="ttsSpeedSaved" class="text-success" style="display:none;"><i class="bi bi-check-circle"></i> Saved</span></div>
+                    <button type="button" class="btn btn-outline-secondary btn-sm mt-1" id="ttsSpeedReset">Reset to default</button>
                     {% endif %}
                 </div>
             </div>
@@ -351,6 +359,57 @@
             if (r.ok && badge) {
                 badge.style.display = '';
                 setTimeout(function() { badge.style.display = 'none'; }, 2000);
+            }
+        });
+    });
+})();
+
+// TTS Speed
+(function() {
+    var slider = document.getElementById('userTtsSpeed');
+    var label = document.getElementById('ttsSpeedValue');
+    var badge = document.getElementById('ttsSpeedSaved');
+    var resetBtn = document.getElementById('ttsSpeedReset');
+    if (!slider) return;
+    var hasValue = {{ 'true' if user_tts_speed is not none else 'false' }};
+    if (!hasValue) slider.value = 1.0;
+
+    function updateLabel() {
+        label.textContent = parseFloat(slider.value).toFixed(1);
+    }
+    if (hasValue) updateLabel();
+
+    var saveTimeout;
+    slider.addEventListener('input', function() {
+        updateLabel();
+        clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(function() {
+            fetch('/dashboard/save-preference', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({key: 'tts_speed', value: parseFloat(slider.value)})
+            }).then(function(r) {
+                if (r.ok && badge) {
+                    badge.style.display = '';
+                    setTimeout(function() { badge.style.display = 'none'; }, 2000);
+                }
+            });
+        }, 400);
+    });
+
+    resetBtn.addEventListener('click', function() {
+        fetch('/dashboard/save-preference', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: 'tts_speed', value: ''})
+        }).then(function(r) {
+            if (r.ok) {
+                slider.value = 1.0;
+                label.textContent = '\u2014';
+                if (badge) {
+                    badge.style.display = '';
+                    setTimeout(function() { badge.style.display = 'none'; }, 2000);
+                }
             }
         });
     });
