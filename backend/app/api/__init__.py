@@ -23,6 +23,7 @@ from backend.app.api.admin_api import router as admin_router
 from backend.app.api.models_api import router as models_router
 from backend.app.api.health import router as health_router
 from backend.app.api.telemetry_api import router as telemetry_router
+from backend.app.api.voice_api import router as voice_router
 
 # Create main API router
 api_router = APIRouter()
@@ -35,5 +36,6 @@ api_router.include_router(anthropic_router)
 api_router.include_router(models_router)
 api_router.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 api_router.include_router(telemetry_router, prefix="/api/admin/telemetry", tags=["telemetry"])
+api_router.include_router(voice_router)
 
 __all__ = ["api_router"]

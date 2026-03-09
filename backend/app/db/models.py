@@ -103,6 +103,8 @@ class Modality(str, PyEnum):
     EMBEDDING = "embedding"
     MULTIMODAL = "multimodal"
     RERANKING = "reranking"
+    TTS = "tts"
+    STT = "stt"
 
 
 # Group Model
