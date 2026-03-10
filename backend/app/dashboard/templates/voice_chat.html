@@ -306,9 +306,18 @@
             // e.data[0] is a Float32Array of decoded PCM
             var pcm = e.data[0];
             if (pcm && pcm.length > 0 && workletNode) {
+                decoderOutputCount++;
+                if (decoderOutputCount <= 5) {
+                    console.log('[VC] Decoder output #' + decoderOutputCount,
+                        'samples:', pcm.length,
+                        'max:', Math.max.apply(null, Array.from(pcm.slice(0, 100))).toFixed(4));
+                }
                 workletNode.port.postMessage({ frame: pcm, type: 'audio', micDuration: 0 });
                 if (currentState === 'active') setState('speaking');
             }
+        };
+        decoderWorker.onerror = function(e) {
+            console.error('[VC] Decoder worker error:', e.message);
         };
     }
 
@@ -343,6 +352,7 @@
             // Create AudioContext at default sample rate (decoder handles resampling)
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             await audioCtx.resume();
+            console.log('[VC] AudioContext state:', audioCtx.state, 'sampleRate:', audioCtx.sampleRate);
 
             // Load and register AudioWorklet for playback
             await audioCtx.audioWorklet.addModule('/static/voice-chat/audio-processor.js');
@@ -366,11 +376,22 @@
                 statusEl.textContent = 'Waiting for persona to load...';
             };
 
+            var audioMsgCount = 0;
+            var decoderOutputCount = 0;
             ws.onmessage = function(event) {
+                if (typeof event.data === 'string') {
+                    console.log('[VC] Got text WS frame (not binary):', event.data.substring(0, 50));
+                    return;
+                }
                 var msg = decodeServerMsg(event.data);
-                if (!msg) return;
+                if (!msg) {
+                    var raw = new Uint8Array(event.data);
+                    console.warn('[VC] Unknown msg type byte:', raw[0], 'len:', raw.length);
+                    return;
+                }
 
                 if (msg.type === 'handshake') {
+                    console.log('[VC] Handshake received');
                     handshakeReceived = true;
                     setState('active');
                     startMicCapture();
@@ -378,7 +399,16 @@
                 }
 
                 if (msg.type === 'audio') {
-                    // Feed Ogg Opus pages to decoder worker
+                    audioMsgCount++;
+                    if (audioMsgCount <= 5) {
+                        var hasOggS = msg.data.length >= 4 &&
+                            msg.data[0] === 0x4F && msg.data[1] === 0x67 &&
+                            msg.data[2] === 0x67 && msg.data[3] === 0x53;
+                        console.log('[VC] Audio msg #' + audioMsgCount,
+                            'size:', msg.data.length,
+                            'hasOggS:', hasOggS,
+                            'first4:', Array.from(msg.data.slice(0, 4)).map(function(b){return '0x'+b.toString(16)}).join(' '));
+                    }
                     if (decoderWorker) {
                         decoderWorker.postMessage(
                             { command: 'decode', pages: msg.data },
@@ -447,7 +477,10 @@
         };
 
         recorder.onstart = function() {
-            console.log('Mic recording started');
+            console.log('[VC] Mic recording started, AudioContext state:', audioCtx ? audioCtx.state : 'null');
+        };
+        recorder.onstop = function() {
+            console.log('[VC] Mic recording stopped');
         };
 
         recorder.start().catch(function(err) {
