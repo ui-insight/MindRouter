@@ -34,10 +34,12 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
-      interval: 30s
+      interval: 10s
       timeout: 10s
       retries: 3
       start_period: 40s
+    # Allow in-flight requests to finish before hard-killing the container
+    stop_grace_period: 65s
     restart: unless-stopped
     networks:
       - mindrouter_network
