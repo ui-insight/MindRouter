@@ -210,7 +210,7 @@
     var errorEl = document.getElementById('vcError');
     var transcriptEl = document.getElementById('vcTranscript');
 
-    var SAMPLE_RATE = 24000;
+    var PERSONAPLEX_RATE = 24000;  // PersonaPlex native rate (decoder input)
 
     function setState(state) {
         container.className = 'vc-container vc-state-' + state;
@@ -264,15 +264,43 @@
     }
 
     // ---- Decoder Worker setup ----
+    function createWarmupBosPage() {
+        // Minimal valid Ogg BOS page with OpusHead header (mono, 48kHz)
+        // This triggers the decoder's internal init() to create buffers
+        var opusHead = new Uint8Array([
+            0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, // "OpusHead"
+            0x01, 0x01, 0x38, 0x01, 0x80, 0xBB, 0x00, 0x00,
+            0x00, 0x00, 0x00
+        ]);
+        var pageHeader = new Uint8Array([
+            0x4F, 0x67, 0x67, 0x53, 0x00, 0x02,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x13
+        ]);
+        var bos = new Uint8Array(pageHeader.length + opusHead.length);
+        bos.set(pageHeader, 0);
+        bos.set(opusHead, pageHeader.length);
+        return bos;
+    }
+
     function initDecoderWorker() {
         decoderWorker = new Worker('/static/voice-chat/decoderWorker.min.js');
+        var outRate = audioCtx.sampleRate;
         decoderWorker.postMessage({
             command: 'init',
-            bufferLength: Math.round(960 * audioCtx.sampleRate / 24000),
-            decoderSampleRate: 24000,
-            outputBufferSampleRate: audioCtx.sampleRate,
+            bufferLength: Math.round(960 * outRate / PERSONAPLEX_RATE),
+            decoderSampleRate: PERSONAPLEX_RATE,
+            outputBufferSampleRate: outRate,
             resampleQuality: 0,
         });
+        // Send warmup BOS page to trigger decoder internal init
+        setTimeout(function() {
+            if (decoderWorker) {
+                var bos = createWarmupBosPage();
+                decoderWorker.postMessage({ command: 'decode', pages: bos });
+            }
+        }, 100);
         decoderWorker.onmessage = function(e) {
             if (!e.data) return;
             // e.data[0] is a Float32Array of decoded PCM
@@ -312,21 +340,20 @@
                 }).catch(function() {});
             }
 
-            // Create AudioContext at 24kHz (PersonaPlex native rate)
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)({
-                sampleRate: SAMPLE_RATE
-            });
+            // Create AudioContext at default sample rate (decoder handles resampling)
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            await audioCtx.resume();
 
             // Load and register AudioWorklet for playback
             await audioCtx.audioWorklet.addModule('/static/voice-chat/audio-processor.js');
             workletNode = new AudioWorkletNode(audioCtx, 'moshi-processor');
             workletNode.connect(audioCtx.destination);
 
-            // Init decoder worker
+            // Init decoder worker (with warmup BOS page)
             initDecoderWorker();
 
-            // Wait briefly for decoder worker to init
-            await new Promise(function(r) { setTimeout(r, 500); });
+            // Wait for decoder worker WASM init + warmup
+            await new Promise(function(r) { setTimeout(r, 1000); });
 
             // Open WebSocket to MindRouter proxy
             var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -397,8 +424,9 @@
 
         recorder = new window.Recorder({
             encoderPath: '/static/voice-chat/encoderWorker.min.js',
+            bufferLength: Math.round(960 * audioCtx.sampleRate / PERSONAPLEX_RATE),
             encoderFrameSize: 20,
-            encoderSampleRate: 24000,
+            encoderSampleRate: PERSONAPLEX_RATE,
             maxFramesPerPage: 2,
             numberOfChannels: 1,
             recordingGain: 1,
