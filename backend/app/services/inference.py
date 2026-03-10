@@ -1181,7 +1181,14 @@ class InferenceService:
         data = response.json()
 
         canonical = VLLMOutTranslator.translate_rerank_response(data)
-        return canonical.model_dump(exclude_none=True, by_alias=True)
+        result = canonical.model_dump(exclude_none=True, by_alias=True)
+
+        # vLLM always returns documents; strip them if client asked not to
+        if not request.return_documents:
+            for r in result.get("results", []):
+                r.pop("document", None)
+
+        return result
 
     async def _proxy_score_request(
         self,
