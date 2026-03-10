@@ -215,6 +215,10 @@ async def voice_chat_ws(websocket: WebSocket):
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
     connect_kwargs = {"ssl": ssl_ctx} if pp_url.startswith("wss://") else {}
+    # PersonaPlex processes system prompts before sending handshake — allow up to 120s
+    connect_kwargs["open_timeout"] = 120
+    connect_kwargs["close_timeout"] = 10
+    connect_kwargs["ping_timeout"] = 60
 
     try:
         async with websockets.connect(pp_url, **connect_kwargs) as pp_ws:
