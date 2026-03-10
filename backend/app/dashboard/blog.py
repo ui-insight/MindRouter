@@ -35,8 +35,6 @@ blog_router = APIRouter(tags=["blog"])
 # Setup templates
 templates_path = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=templates_path)
-from backend.app.dashboard.routes import _get_voice_chat_enabled
-templates.env.globals["voice_chat_enabled"] = _get_voice_chat_enabled
 
 
 def _render_markdown(text: str) -> str:

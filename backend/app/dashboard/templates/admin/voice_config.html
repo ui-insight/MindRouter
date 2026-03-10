@@ -17,7 +17,6 @@
                 {% if success == 'tts_backend_updated' %}TTS backend settings updated.
                 {% elif success == 'stt_backend_updated' %}STT backend settings updated.
                 {% elif success == 'quota_updated' %}Quota settings updated.
-                {% elif success == 'voice_chat_updated' %}Voice Chat settings updated.
                 {% else %}{{ success }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -124,32 +123,6 @@
                                 <div class="mt-3">
                                     <button type="submit" class="btn btn-primary">Save Quota Settings</button>
                                 </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-                <!-- Voice Chat (PersonaPlex) -->
-                <div class="col-12">
-                    <div class="card">
-                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-soundwave"></i> Voice Chat (PersonaPlex)</h5></div>
-                        <div class="card-body">
-                            <p class="text-muted small">Full-duplex voice conversation using NVIDIA PersonaPlex. Each persona maps to a running PersonaPlex instance at a specific URL.</p>
-                            <form method="post" action="/admin/voice-config">
-                                <input type="hidden" name="action" value="save_voice_chat">
-
-                                <div class="mb-3 form-check form-switch">
-                                    <input type="checkbox" class="form-check-input" id="voice_chat_enabled" name="voice_chat_enabled" {% if vc_enabled %}checked{% endif %}>
-                                    <label class="form-check-label" for="voice_chat_enabled">Enable Voice Chat</label>
-                                    <div class="form-text">When enabled, authenticated users will see a "Voice" link in the navigation bar.</div>
-                                </div>
-
-                                <div class="mb-3">
-                                    <label for="voice_chat_personas" class="form-label">Personas (JSON)</label>
-                                    <textarea class="form-control font-monospace" id="voice_chat_personas" name="voice_chat_personas" rows="8" placeholder='[{"name": "Nova", "url": "wss://host:8998", "description": "Friendly assistant"}]'>{{ voice_chat_personas_json }}</textarea>
-                                    <div class="form-text">JSON array of persona objects. Each needs <code>name</code>, <code>url</code> (WSS URL of the PersonaPlex instance), and <code>description</code>.</div>
-                                </div>
-
-                                <button type="submit" class="btn btn-primary">Save Voice Chat</button>
                             </form>
                         </div>
                     </div>
