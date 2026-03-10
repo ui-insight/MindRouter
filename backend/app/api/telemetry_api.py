@@ -550,3 +550,180 @@ async def export_telemetry(
         "count": len(rows),
         "data": rows,
     }
+
+
+# ------------------------------------------------------------------
+# Energy / power endpoints
+# ------------------------------------------------------------------
+
+
+@router.get("/energy/nodes/{node_id}/history")
+async def node_power_history(
+    node_id: int,
+    metric: str = Query("server_power", description="server_power or gpu_power"),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    range: Optional[str] = Query(None, description="1h, 6h, 24h, 7d, 30d"),
+    resolution: str = Query("5m"),
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Get time-series power history for a single node."""
+    node = await crud.get_node_by_id(db, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    start_dt, end_dt = _parse_time_range(start, end, range)
+    res_minutes = RESOLUTION_MAP.get(resolution, 5)
+
+    rows = await crud.get_node_telemetry_history(
+        db=db,
+        node_id=node_id,
+        start=start_dt,
+        end=end_dt,
+        resolution_minutes=res_minutes,
+    )
+
+    series = []
+    for row in rows:
+        point = {"timestamp": row["timestamp"]}
+        if metric == "server_power":
+            point["value"] = row.get("server_power_watts")
+            point["min"] = row.get("server_power_watts_min")
+            point["max"] = row.get("server_power_watts_max")
+        elif metric == "gpu_power":
+            point["value"] = row.get("gpu_power_watts")
+            point["min"] = row.get("gpu_power_watts_min")
+            point["max"] = row.get("gpu_power_watts_max")
+        else:
+            point["server_power"] = row.get("server_power_watts")
+            point["gpu_power"] = row.get("gpu_power_watts")
+        series.append(point)
+
+    return {
+        "node_id": node_id,
+        "node_name": node.name,
+        "metric": metric,
+        "resolution": resolution,
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "series": series,
+    }
+
+
+@router.get("/energy/cluster/history")
+async def cluster_power_history(
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    range: Optional[str] = Query(None, description="1h, 6h, 24h, 7d, 30d"),
+    resolution: str = Query("5m"),
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Get time-series cluster-wide power history (all nodes summed)."""
+    start_dt, end_dt = _parse_time_range(start, end, range)
+    res_minutes = RESOLUTION_MAP.get(resolution, 5)
+
+    rows = await crud.get_cluster_power_history(
+        db=db,
+        start=start_dt,
+        end=end_dt,
+        resolution_minutes=res_minutes,
+    )
+
+    series = [
+        {
+            "timestamp": row["timestamp"],
+            "server_power": row.get("total_server_power_watts"),
+            "gpu_power": row.get("total_gpu_power_watts"),
+            "node_count": row.get("node_count"),
+        }
+        for row in rows
+    ]
+
+    return {
+        "resolution": resolution,
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "series": series,
+    }
+
+
+@router.get("/energy/export")
+async def export_energy(
+    node_id: Optional[int] = Query(None, description="Filter by node (omit for all)"),
+    scope: str = Query("all", description="all, server, gpu"),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    range: Optional[str] = Query("24h"),
+    resolution: str = Query("5m"),
+    format: str = Query("csv"),
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Export energy/power data as CSV or JSON with faceted filtering."""
+    start_dt, end_dt = _parse_time_range(start, end, range)
+    res_minutes = RESOLUTION_MAP.get(resolution, 5)
+
+    registry = get_registry()
+    all_nodes = await registry.get_all_nodes()
+
+    if node_id:
+        target_nodes = [n for n in all_nodes if n.id == node_id]
+    else:
+        target_nodes = all_nodes
+
+    rows = []
+    for n in target_nodes:
+        n_rows = await crud.get_node_telemetry_history(
+            db=db,
+            node_id=n.id,
+            start=start_dt,
+            end=end_dt,
+            resolution_minutes=res_minutes,
+        )
+        for r in n_rows:
+            entry = {"timestamp": r["timestamp"], "node_id": n.id, "node_name": n.name}
+            if scope in ("all", "server"):
+                entry["server_power_watts"] = r.get("server_power_watts")
+            if scope in ("all", "gpu"):
+                entry["gpu_power_watts"] = r.get("gpu_power_watts")
+            rows.append(entry)
+
+    # Also add cluster total if exporting all nodes
+    if not node_id:
+        cluster_rows = await crud.get_cluster_power_history(
+            db=db, start=start_dt, end=end_dt, resolution_minutes=res_minutes,
+        )
+        for r in cluster_rows:
+            entry = {"timestamp": r["timestamp"], "node_id": "total", "node_name": "CLUSTER_TOTAL"}
+            if scope in ("all", "server"):
+                entry["server_power_watts"] = r.get("total_server_power_watts")
+            if scope in ("all", "gpu"):
+                entry["gpu_power_watts"] = r.get("total_gpu_power_watts")
+            rows.append(entry)
+
+    if format == "csv":
+        import csv
+        import io
+
+        output = io.StringIO()
+        if rows:
+            writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+
+        node_label = f"node{node_id}" if node_id else "cluster"
+        filename = f"energy_{node_label}_{range or 'custom'}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
+    return {
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "count": len(rows),
+        "data": rows,
+    }

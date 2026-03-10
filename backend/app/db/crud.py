@@ -41,6 +41,7 @@ from backend.app.db.models import (
     Modality,
     Node,
     NodeStatus,
+    NodeTelemetry,
     Quota,
     QuotaRequest,
     QuotaRequestStatus,
@@ -1874,6 +1875,125 @@ async def delete_old_gpu_telemetry(
     """Delete per-GPU telemetry data older than the given datetime."""
     result = await db.execute(
         delete(GPUDeviceTelemetry).where(GPUDeviceTelemetry.timestamp < older_than)
+    )
+    await db.flush()
+    return result.rowcount
+
+
+async def create_node_telemetry(
+    db: AsyncSession,
+    node_id: int,
+    server_power_watts: Optional[int] = None,
+    gpu_power_watts: Optional[float] = None,
+) -> NodeTelemetry:
+    """Insert a node-level telemetry snapshot (server + GPU power)."""
+    entry = NodeTelemetry(
+        node_id=node_id,
+        server_power_watts=server_power_watts,
+        gpu_power_watts=gpu_power_watts,
+    )
+    db.add(entry)
+    await db.flush()
+    return entry
+
+
+async def get_node_telemetry_history(
+    db: AsyncSession,
+    node_id: int,
+    start: datetime,
+    end: datetime,
+    resolution_minutes: int = 5,
+) -> List[dict]:
+    """Get aggregated node telemetry history with time bucketing."""
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT
+            CONCAT(DATE_FORMAT(timestamp, '%Y-%m-%d %H:'),
+                   LPAD(FLOOR(MINUTE(timestamp) / :res_min) * :res_min, 2, '0')) as time_bucket,
+            AVG(server_power_watts) as avg_server_power_watts,
+            MIN(server_power_watts) as min_server_power_watts,
+            MAX(server_power_watts) as max_server_power_watts,
+            AVG(gpu_power_watts) as avg_gpu_power_watts,
+            MIN(gpu_power_watts) as min_gpu_power_watts,
+            MAX(gpu_power_watts) as max_gpu_power_watts
+        FROM node_telemetry
+        WHERE node_id = :node_id
+          AND timestamp >= :start
+          AND timestamp <= :end
+        GROUP BY time_bucket
+        ORDER BY time_bucket
+    """)
+
+    result = await db.execute(query, {
+        "node_id": node_id,
+        "start": start,
+        "end": end,
+        "res_min": resolution_minutes,
+    })
+    rows = result.mappings().all()
+
+    return [
+        {
+            "timestamp": row["time_bucket"],
+            "server_power_watts": row["avg_server_power_watts"],
+            "server_power_watts_min": row["min_server_power_watts"],
+            "server_power_watts_max": row["max_server_power_watts"],
+            "gpu_power_watts": row["avg_gpu_power_watts"],
+            "gpu_power_watts_min": row["min_gpu_power_watts"],
+            "gpu_power_watts_max": row["max_gpu_power_watts"],
+        }
+        for row in rows
+    ]
+
+
+async def get_cluster_power_history(
+    db: AsyncSession,
+    start: datetime,
+    end: datetime,
+    resolution_minutes: int = 5,
+) -> List[dict]:
+    """Get aggregated cluster-wide power history (all nodes summed)."""
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT
+            CONCAT(DATE_FORMAT(timestamp, '%Y-%m-%d %H:'),
+                   LPAD(FLOOR(MINUTE(timestamp) / :res_min) * :res_min, 2, '0')) as time_bucket,
+            SUM(server_power_watts) as total_server_power_watts,
+            SUM(gpu_power_watts) as total_gpu_power_watts,
+            COUNT(DISTINCT node_id) as node_count
+        FROM node_telemetry
+        WHERE timestamp >= :start
+          AND timestamp <= :end
+        GROUP BY time_bucket
+        ORDER BY time_bucket
+    """)
+
+    result = await db.execute(query, {
+        "start": start,
+        "end": end,
+        "res_min": resolution_minutes,
+    })
+    rows = result.mappings().all()
+
+    return [
+        {
+            "timestamp": row["time_bucket"],
+            "total_server_power_watts": row["total_server_power_watts"],
+            "total_gpu_power_watts": row["total_gpu_power_watts"],
+            "node_count": row["node_count"],
+        }
+        for row in rows
+    ]
+
+
+async def delete_old_node_telemetry(
+    db: AsyncSession, older_than: datetime
+) -> int:
+    """Delete node telemetry data older than the given datetime."""
+    result = await db.execute(
+        delete(NodeTelemetry).where(NodeTelemetry.timestamp < older_than)
     )
     await db.flush()
     return result.rowcount

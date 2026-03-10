@@ -1198,6 +1198,18 @@ class BackendRegistry:
                         clock_memory_mhz=gpu.clock_memory_mhz,
                     )
 
+                # Store node-level power telemetry (time-series)
+                gpu_power_total = sum(
+                    g.power_draw_watts for g in sidecar_data.gpus
+                    if g.power_draw_watts is not None
+                ) or None
+                await crud.create_node_telemetry(
+                    db=db,
+                    node_id=node_id,
+                    server_power_watts=server_power,
+                    gpu_power_watts=gpu_power_total,
+                )
+
         except Exception as e:
             logger.debug("node_telemetry_store_error", node_id=node_id, error=str(e))
 
@@ -1313,6 +1325,7 @@ class BackendRegistry:
         async with get_async_db_context() as db:
             deleted_bt = await crud.delete_old_telemetry(db, older_than=cutoff)
             deleted_gdt = await crud.delete_old_gpu_telemetry(db, older_than=cutoff)
+            deleted_nt = await crud.delete_old_node_telemetry(db, older_than=cutoff)
             deleted_keys = await crud.delete_expired_api_keys(db, grace_days=15)
 
         if deleted_keys:

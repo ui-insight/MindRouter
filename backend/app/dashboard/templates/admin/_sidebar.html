@@ -27,6 +27,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'energy' %}active{% endif %}" href="/admin/energy" {% if active == 'energy' %}aria-current="page"{% endif %}>
+                <i class="bi bi-lightning-charge"></i> Energy
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'users' %}active{% endif %}" href="/admin/users" {% if active == 'users' %}aria-current="page"{% endif %}>
                 <i class="bi bi-people"></i> Users
             </a>

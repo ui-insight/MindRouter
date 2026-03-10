@@ -298,6 +298,33 @@ class Node(Base, TimestampMixin):
     # Relationships
     gpu_devices: Mapped[List["GPUDevice"]] = relationship("GPUDevice", back_populates="node")
     backends: Mapped[List["Backend"]] = relationship("Backend", back_populates="node")
+    node_telemetry: Mapped[List["NodeTelemetry"]] = relationship(
+        "NodeTelemetry", back_populates="node", cascade="all, delete-orphan"
+    )
+
+
+class NodeTelemetry(Base):
+    """Time-series telemetry snapshots for nodes (server-level power)."""
+
+    __tablename__ = "node_telemetry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    node_id: Mapped[int] = mapped_column(Integer, ForeignKey("nodes.id"), nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    # Server-level power from IPMI DCMI
+    server_power_watts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Sum of all GPU power draws on this node at this timestamp
+    gpu_power_watts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Relationships
+    node: Mapped["Node"] = relationship("Node", back_populates="node_telemetry")
+
+    __table_args__ = (
+        Index("ix_node_telemetry_node_time", "node_id", "timestamp"),
+    )
 
 
 # Backend Models

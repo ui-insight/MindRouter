@@ -1,0 +1,719 @@
+{% extends "base.html" %}
+
+{% block title %}Energy Monitoring - MindRouter{% endblock %}
+
+{% block extra_css %}
+<style>
+    .stat-value { font-size: 2rem; font-weight: bold; }
+    .stat-label { font-size: 0.85rem; color: #6c757d; }
+    .stat-unit { font-size: 1rem; font-weight: normal; color: #6c757d; }
+    .chart-container { position: relative; height: 320px; }
+    .chart-container-lg { position: relative; height: 400px; }
+    .time-btn.active { background-color: #0d6efd; color: white; }
+    .node-power-row { cursor: pointer; transition: background-color 0.15s; }
+    .node-power-row:hover { background-color: var(--mr-table-hover-bg, #f8f9fa); }
+    .power-bar { height: 8px; border-radius: 4px; background: #e9ecef; overflow: hidden; }
+    .power-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+    .power-bar-server { background: linear-gradient(90deg, #0d6efd, #6610f2); }
+    .power-bar-gpu { background: linear-gradient(90deg, #198754, #20c997); }
+    .card-stat { border-left: 4px solid; }
+    .card-stat.primary { border-left-color: #0d6efd; }
+    .card-stat.success { border-left-color: #198754; }
+    .card-stat.warning { border-left-color: #ffc107; }
+    .card-stat.info { border-left-color: #0dcaf0; }
+    .fade-update { transition: opacity 0.3s; }
+    .export-section { border-top: 1px solid var(--mr-border-color, #dee2e6); padding-top: 1rem; margin-top: 1rem; }
+    .node-detail-chart { height: 250px; position: relative; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "energy" %}{% include "admin/_sidebar.html" %}
+
+        <!-- Main Content -->
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-lightning-charge"></i> Energy Monitoring</h1>
+                <div>
+                    <span class="text-muted me-2" id="last-updated">Last updated: --</span>
+                    <div class="btn-group btn-group-sm me-2" role="group" aria-label="Time range">
+                        <button class="btn btn-outline-secondary time-btn" data-range="1h">1h</button>
+                        <button class="btn btn-outline-secondary time-btn" data-range="6h">6h</button>
+                        <button class="btn btn-outline-secondary time-btn active" data-range="24h">24h</button>
+                        <button class="btn btn-outline-secondary time-btn" data-range="7d">7d</button>
+                        <button class="btn btn-outline-secondary time-btn" data-range="30d">30d</button>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary" id="btn-refresh" title="Refresh now">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Stat Cards Row -->
+            <div class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <div class="card card-stat primary h-100">
+                        <div class="card-body">
+                            <div class="stat-label">Total Server Power</div>
+                            <div class="stat-value" id="stat-server-power">--<span class="stat-unit"> W</span></div>
+                            <div class="text-muted small" id="stat-server-kw">-- kW</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-stat success h-100">
+                        <div class="card-body">
+                            <div class="stat-label">Total GPU Power</div>
+                            <div class="stat-value" id="stat-gpu-power">--<span class="stat-unit"> W</span></div>
+                            <div class="text-muted small" id="stat-gpu-kw">-- kW</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-stat warning h-100">
+                        <div class="card-body">
+                            <div class="stat-label">GPU / Server Ratio</div>
+                            <div class="stat-value" id="stat-ratio">--<span class="stat-unit">%</span></div>
+                            <div class="text-muted small">GPU share of total power</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card card-stat info h-100">
+                        <div class="card-body">
+                            <div class="stat-label">Active Nodes</div>
+                            <div class="stat-value" id="stat-nodes">--</div>
+                            <div class="text-muted small" id="stat-gpus">-- GPUs</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cluster Power Trend Chart -->
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-graph-up"></i> Cluster Power Trend</span>
+                    <div>
+                        <span class="me-3"><span class="legend-dot" style="background:#0d6efd"></span>Server Power</span>
+                        <span class="me-3"><span class="legend-dot" style="background:#198754"></span>GPU Power</span>
+                        <span><span class="legend-dot" style="background:rgba(13,110,253,0.1)"></span>Non-GPU overhead</span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container-lg">
+                        <canvas id="chart-cluster-power"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Per-Node Power Breakdown -->
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-hdd-rack"></i> Per-Node Power Breakdown</span>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="toggle-stacked" checked>
+                        <label class="form-check-label small" for="toggle-stacked">Stacked view</label>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container-lg">
+                        <canvas id="chart-node-power"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Node Power Table -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-table"></i> Current Node Power
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0" id="node-table">
+                            <thead>
+                                <tr>
+                                    <th>Node</th>
+                                    <th>Status</th>
+                                    <th>GPUs</th>
+                                    <th>Server Power</th>
+                                    <th>GPU Power</th>
+                                    <th>Overhead</th>
+                                    <th>GPU %</th>
+                                    <th class="w-25">Power Distribution</th>
+                                </tr>
+                            </thead>
+                            <tbody id="node-table-body">
+                                <tr><td colspan="8" class="text-center text-muted py-4">Loading...</td></tr>
+                            </tbody>
+                            <tfoot id="node-table-foot">
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Per-Node Detail (expanded on click) -->
+            <div class="card mb-4" id="node-detail-card" style="display:none;">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-zoom-in"></i> <span id="node-detail-title">Node Detail</span></span>
+                    <button class="btn btn-sm btn-outline-secondary" id="close-detail"><i class="bi bi-x-lg"></i></button>
+                </div>
+                <div class="card-body">
+                    <div class="node-detail-chart">
+                        <canvas id="chart-node-detail"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Export Section -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <i class="bi bi-download"></i> Export Energy Data
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 align-items-end">
+                        <div class="col-md-3">
+                            <label class="form-label small">Node</label>
+                            <select class="form-select form-select-sm" id="export-node">
+                                <option value="">All Nodes (+ cluster total)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Scope</label>
+                            <select class="form-select form-select-sm" id="export-scope">
+                                <option value="all">Server + GPU</option>
+                                <option value="server">Server only</option>
+                                <option value="gpu">GPU only</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Time Range</label>
+                            <select class="form-select form-select-sm" id="export-range">
+                                <option value="1h">Last 1 hour</option>
+                                <option value="6h">Last 6 hours</option>
+                                <option value="24h" selected>Last 24 hours</option>
+                                <option value="7d">Last 7 days</option>
+                                <option value="30d">Last 30 days</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Resolution</label>
+                            <select class="form-select form-select-sm" id="export-resolution">
+                                <option value="1m">1 minute</option>
+                                <option value="5m" selected>5 minutes</option>
+                                <option value="15m">15 minutes</option>
+                                <option value="1h">1 hour</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <a class="btn btn-sm btn-primary w-100" id="export-csv-btn" href="#">
+                                <i class="bi bi-filetype-csv"></i> Download CSV
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+    'use strict';
+
+    // -- Config --
+    const POLL_LIVE = 15000;
+    const POLL_CHARTS = 30000;
+    const NODE_COLORS = [
+        '#0d6efd', '#198754', '#dc3545', '#ffc107',
+        '#6f42c1', '#fd7e14', '#20c997', '#0dcaf0',
+        '#d63384', '#6610f2', '#343a40', '#adb5bd'
+    ];
+
+    let currentRange = '24h';
+    let liveInterval, chartInterval;
+    let clusterChart, nodeChart, detailChart;
+    let nodesData = [];
+    let selectedNodeId = null;
+
+    const resMap = { '1h': '1m', '6h': '5m', '24h': '15m', '7d': '1h', '30d': '6h' };
+
+    function fmt(v, decimals) {
+        if (v == null) return '--';
+        return Number(v).toFixed(decimals ?? 0);
+    }
+
+    function fmtTime(ts) {
+        const d = new Date(ts.replace(' ', 'T'));
+        if (isNaN(d.getTime())) return ts;
+        if (currentRange === '7d' || currentRange === '30d') {
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+                   d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        }
+        return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    }
+
+    // -- Chart setup --
+    const commonOpts = {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+            x: {
+                type: 'category',
+                ticks: { maxTicksLimit: 16, font: { size: 10 } }
+            }
+        },
+        plugins: {
+            legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+            tooltip: {
+                callbacks: {
+                    label: function(ctx) {
+                        const v = ctx.parsed.y;
+                        if (v == null) return ctx.dataset.label + ': N/A';
+                        return ctx.dataset.label + ': ' + fmt(v, 0) + ' W';
+                    }
+                }
+            }
+        }
+    };
+
+    function initCharts() {
+        clusterChart = new Chart(document.getElementById('chart-cluster-power'), {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: {
+                ...commonOpts,
+                scales: {
+                    ...commonOpts.scales,
+                    y: {
+                        min: 0,
+                        title: { display: true, text: 'Watts' },
+                        ticks: {
+                            callback: function(v) {
+                                return v >= 1000 ? (v / 1000).toFixed(1) + ' kW' : v + ' W';
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    ...commonOpts.plugins,
+                    legend: { display: false },
+                    tooltip: {
+                        ...commonOpts.plugins.tooltip,
+                        callbacks: {
+                            label: function(ctx) {
+                                const v = ctx.parsed.y;
+                                if (v == null) return ctx.dataset.label + ': N/A';
+                                if (v >= 1000) return ctx.dataset.label + ': ' + (v / 1000).toFixed(2) + ' kW';
+                                return ctx.dataset.label + ': ' + fmt(v, 0) + ' W';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        nodeChart = new Chart(document.getElementById('chart-node-power'), {
+            type: 'bar',
+            data: { labels: [], datasets: [] },
+            options: {
+                ...commonOpts,
+                scales: {
+                    ...commonOpts.scales,
+                    x: { ...commonOpts.scales.x, stacked: true },
+                    y: {
+                        stacked: true,
+                        title: { display: true, text: 'Watts' },
+                        ticks: {
+                            callback: function(v) {
+                                return v >= 1000 ? (v / 1000).toFixed(1) + ' kW' : v + ' W';
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    ...commonOpts.plugins,
+                    tooltip: {
+                        ...commonOpts.plugins.tooltip,
+                        callbacks: {
+                            label: function(ctx) {
+                                const v = ctx.parsed.y;
+                                if (v == null) return ctx.dataset.label + ': N/A';
+                                return ctx.dataset.label + ': ' + fmt(v, 0) + ' W';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        detailChart = new Chart(document.getElementById('chart-node-detail'), {
+            type: 'line',
+            data: { labels: [], datasets: [] },
+            options: {
+                ...commonOpts,
+                scales: {
+                    ...commonOpts.scales,
+                    y: { min: 0, title: { display: true, text: 'Watts' } }
+                }
+            }
+        });
+    }
+
+    // -- Live data polling --
+    async function fetchLive() {
+        try {
+            const resp = await fetch('/api/admin/telemetry/latest');
+            if (!resp.ok) return;
+            const data = await resp.json();
+
+            nodesData = data.nodes || [];
+            const cluster = data.cluster || {};
+
+            // Stat cards
+            const serverPower = cluster.total_server_power_watts || 0;
+            const gpuPower = Math.round(cluster.total_power_draw_watts || 0);
+            const ratio = serverPower > 0 ? Math.round(gpuPower / serverPower * 100) : 0;
+
+            document.getElementById('stat-server-power').innerHTML = fmt(serverPower) + '<span class="stat-unit"> W</span>';
+            document.getElementById('stat-server-kw').textContent = (serverPower / 1000).toFixed(2) + ' kW';
+            document.getElementById('stat-gpu-power').innerHTML = fmt(gpuPower) + '<span class="stat-unit"> W</span>';
+            document.getElementById('stat-gpu-kw').textContent = (gpuPower / 1000).toFixed(2) + ' kW';
+            document.getElementById('stat-ratio').innerHTML = ratio + '<span class="stat-unit">%</span>';
+            document.getElementById('stat-nodes').textContent = (data.nodes || []).filter(n => n.status === 'online').length;
+            document.getElementById('stat-gpus').textContent = cluster.total_gpus + ' GPUs';
+
+            // Node table
+            updateNodeTable(data.nodes || []);
+
+            // Export node filter
+            updateExportNodeSelect(data.nodes || []);
+
+            document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+        } catch (e) {
+            console.error('Live poll error:', e);
+        }
+    }
+
+    function updateNodeTable(nodes) {
+        const tbody = document.getElementById('node-table-body');
+        const tfoot = document.getElementById('node-table-foot');
+
+        let totalServer = 0, totalGpu = 0, totalGpuCount = 0;
+
+        const rows = nodes.map((node, idx) => {
+            const sp = node.server_power_watts || 0;
+            const gpuW = (node.gpus || []).reduce((s, g) => s + (g.power_draw_watts || 0), 0);
+            const overhead = Math.max(0, sp - gpuW);
+            const gpuPct = sp > 0 ? Math.round(gpuW / sp * 100) : 0;
+            const gpuCount = node.gpu_count || (node.gpus || []).length;
+
+            totalServer += sp;
+            totalGpu += gpuW;
+            totalGpuCount += gpuCount;
+
+            const statusBadge = node.status === 'online'
+                ? '<span class="badge bg-success">online</span>'
+                : '<span class="badge bg-danger">offline</span>';
+
+            const barWidth = sp > 0 ? Math.round(gpuW / sp * 100) : 0;
+            const color = NODE_COLORS[idx % NODE_COLORS.length];
+
+            return `<tr class="node-power-row" data-node-id="${node.id}" data-node-name="${node.name}">
+                <td><strong style="color:${color}">${node.name}</strong></td>
+                <td>${statusBadge}</td>
+                <td>${gpuCount}</td>
+                <td>${fmt(sp)} W</td>
+                <td>${fmt(gpuW, 0)} W</td>
+                <td>${fmt(overhead, 0)} W</td>
+                <td>${gpuPct}%</td>
+                <td>
+                    <div class="power-bar">
+                        <div class="power-bar-fill power-bar-gpu" style="width:${barWidth}%" title="GPU: ${fmt(gpuW,0)}W / Server: ${fmt(sp)}W"></div>
+                    </div>
+                    <div class="d-flex justify-content-between" style="font-size:0.7rem;color:#6c757d">
+                        <span>GPU</span><span>Overhead</span>
+                    </div>
+                </td>
+            </tr>`;
+        });
+
+        tbody.innerHTML = rows.join('');
+
+        const totalOverhead = Math.max(0, totalServer - totalGpu);
+        const totalPct = totalServer > 0 ? Math.round(totalGpu / totalServer * 100) : 0;
+        tfoot.innerHTML = `<tr class="table-active fw-bold">
+            <td>TOTAL</td>
+            <td></td>
+            <td>${totalGpuCount}</td>
+            <td>${fmt(totalServer)} W</td>
+            <td>${fmt(totalGpu, 0)} W</td>
+            <td>${fmt(totalOverhead, 0)} W</td>
+            <td>${totalPct}%</td>
+            <td>
+                <div class="power-bar">
+                    <div class="power-bar-fill power-bar-gpu" style="width:${totalPct}%"></div>
+                </div>
+            </td>
+        </tr>`;
+
+        // Click handler for node detail
+        tbody.querySelectorAll('.node-power-row').forEach(row => {
+            row.addEventListener('click', function() {
+                const nid = parseInt(this.dataset.nodeId);
+                const name = this.dataset.nodeName;
+                showNodeDetail(nid, name);
+            });
+        });
+    }
+
+    function updateExportNodeSelect(nodes) {
+        const sel = document.getElementById('export-node');
+        const current = sel.value;
+        if (sel.options.length <= 1) {
+            nodes.forEach(n => {
+                const opt = document.createElement('option');
+                opt.value = n.id;
+                opt.textContent = n.name;
+                sel.appendChild(opt);
+            });
+        }
+        sel.value = current;
+    }
+
+    // -- Chart data fetching --
+    async function fetchChartData() {
+        const resolution = resMap[currentRange] || '5m';
+
+        try {
+            // Cluster power trend
+            const clusterResp = await fetch(
+                `/api/admin/telemetry/energy/cluster/history?range=${currentRange}&resolution=${resolution}`
+            );
+            if (clusterResp.ok) {
+                const clusterData = await clusterResp.json();
+                updateClusterChart(clusterData.series);
+            }
+
+            // Per-node power — fetch latest to get node list, then fetch each node
+            if (nodesData.length > 0) {
+                const nodePromises = nodesData.map(n =>
+                    fetch(`/api/admin/telemetry/energy/nodes/${n.id}/history?range=${currentRange}&resolution=${resolution}&metric=all`)
+                        .then(r => r.ok ? r.json() : null)
+                        .catch(() => null)
+                );
+                const nodeResults = await Promise.all(nodePromises);
+                updateNodeChart(nodesData, nodeResults);
+            }
+
+            // Update detail chart if open
+            if (selectedNodeId) {
+                await fetchNodeDetail(selectedNodeId);
+            }
+        } catch (e) {
+            console.error('Chart fetch error:', e);
+        }
+    }
+
+    function updateClusterChart(series) {
+        const labels = series.map(p => fmtTime(p.timestamp));
+        const serverData = series.map(p => p.server_power);
+        const gpuData = series.map(p => p.gpu_power);
+
+        clusterChart.data.labels = labels;
+        clusterChart.data.datasets = [
+            {
+                label: 'Server Power (total)',
+                data: serverData,
+                borderColor: '#0d6efd',
+                backgroundColor: 'rgba(13,110,253,0.1)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.3,
+                pointRadius: 0,
+                pointHitRadius: 10,
+            },
+            {
+                label: 'GPU Power (total)',
+                data: gpuData,
+                borderColor: '#198754',
+                backgroundColor: 'rgba(25,135,84,0.15)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.3,
+                pointRadius: 0,
+                pointHitRadius: 10,
+            }
+        ];
+        clusterChart.update('none');
+    }
+
+    function updateNodeChart(nodes, results) {
+        // Collect all timestamps
+        const allTs = new Set();
+        results.forEach(r => {
+            if (r && r.series) r.series.forEach(p => allTs.add(p.timestamp));
+        });
+        const labels = Array.from(allTs).sort();
+
+        const isStacked = document.getElementById('toggle-stacked').checked;
+
+        const datasets = nodes.map((node, idx) => {
+            const result = results[idx];
+            const dataMap = {};
+            if (result && result.series) {
+                result.series.forEach(p => {
+                    dataMap[p.timestamp] = p.server_power || p.value;
+                });
+            }
+
+            return {
+                label: node.name,
+                data: labels.map(ts => dataMap[ts] ?? null),
+                backgroundColor: NODE_COLORS[idx % NODE_COLORS.length] + (isStacked ? 'cc' : '40'),
+                borderColor: NODE_COLORS[idx % NODE_COLORS.length],
+                borderWidth: 1,
+            };
+        });
+
+        nodeChart.data.labels = labels.map(fmtTime);
+        nodeChart.data.datasets = datasets;
+        nodeChart.options.scales.x.stacked = isStacked;
+        nodeChart.options.scales.y.stacked = isStacked;
+        nodeChart.config.type = isStacked ? 'bar' : 'line';
+
+        if (!isStacked) {
+            datasets.forEach(ds => {
+                ds.fill = false;
+                ds.borderWidth = 2;
+                ds.tension = 0.3;
+                ds.pointRadius = 0;
+                ds.pointHitRadius = 10;
+            });
+        }
+
+        nodeChart.update('none');
+    }
+
+    // -- Node detail --
+    async function showNodeDetail(nodeId, nodeName) {
+        selectedNodeId = nodeId;
+        document.getElementById('node-detail-title').textContent = nodeName + ' Power Detail';
+        document.getElementById('node-detail-card').style.display = '';
+        document.getElementById('node-detail-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        await fetchNodeDetail(nodeId);
+    }
+
+    async function fetchNodeDetail(nodeId) {
+        const resolution = resMap[currentRange] || '5m';
+        try {
+            const resp = await fetch(
+                `/api/admin/telemetry/energy/nodes/${nodeId}/history?range=${currentRange}&resolution=${resolution}&metric=all`
+            );
+            if (!resp.ok) return;
+            const data = await resp.json();
+
+            const labels = data.series.map(p => fmtTime(p.timestamp));
+            const serverData = data.series.map(p => p.server_power);
+            const gpuData = data.series.map(p => p.gpu_power);
+
+            detailChart.data.labels = labels;
+            detailChart.data.datasets = [
+                {
+                    label: 'Server Power',
+                    data: serverData,
+                    borderColor: '#0d6efd',
+                    backgroundColor: 'rgba(13,110,253,0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    pointHitRadius: 10,
+                },
+                {
+                    label: 'GPU Power',
+                    data: gpuData,
+                    borderColor: '#198754',
+                    backgroundColor: 'rgba(25,135,84,0.15)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    pointHitRadius: 10,
+                }
+            ];
+            detailChart.update('none');
+        } catch (e) {
+            console.error('Node detail fetch error:', e);
+        }
+    }
+
+    // -- Export --
+    function updateExportLink() {
+        const nodeId = document.getElementById('export-node').value;
+        const scope = document.getElementById('export-scope').value;
+        const range = document.getElementById('export-range').value;
+        const resolution = document.getElementById('export-resolution').value;
+
+        let url = `/api/admin/telemetry/energy/export?format=csv&range=${range}&scope=${scope}&resolution=${resolution}`;
+        if (nodeId) url += `&node_id=${nodeId}`;
+
+        document.getElementById('export-csv-btn').href = url;
+    }
+
+    // -- Event bindings --
+    function bindEvents() {
+        // Time range buttons
+        document.querySelectorAll('.time-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                currentRange = this.dataset.range;
+                fetchChartData();
+            });
+        });
+
+        // Refresh button
+        document.getElementById('btn-refresh').addEventListener('click', () => {
+            fetchLive();
+            fetchChartData();
+        });
+
+        // Stacked toggle
+        document.getElementById('toggle-stacked').addEventListener('change', fetchChartData);
+
+        // Close node detail
+        document.getElementById('close-detail').addEventListener('click', () => {
+            selectedNodeId = null;
+            document.getElementById('node-detail-card').style.display = 'none';
+        });
+
+        // Export controls
+        ['export-node', 'export-scope', 'export-range', 'export-resolution'].forEach(id => {
+            document.getElementById(id).addEventListener('change', updateExportLink);
+        });
+    }
+
+    // -- Init --
+    initCharts();
+    bindEvents();
+    updateExportLink();
+
+    // Initial fetch
+    fetchLive().then(() => fetchChartData());
+
+    // Polling
+    liveInterval = setInterval(fetchLive, POLL_LIVE);
+    chartInterval = setInterval(fetchChartData, POLL_CHARTS);
+})();
+</script>
+{% endblock %}

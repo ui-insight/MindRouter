@@ -1860,6 +1860,26 @@ async def admin_metrics(
     )
 
 
+@dashboard_router.get("/admin/energy", response_class=HTMLResponse)
+async def admin_energy(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin energy & power monitoring dashboard."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    return templates.TemplateResponse(
+        "admin/energy.html",
+        {"request": request, "user": user},
+    )
+
+
 @dashboard_router.get("/admin/audit", response_class=HTMLResponse)
 async def admin_audit(
     request: Request,
