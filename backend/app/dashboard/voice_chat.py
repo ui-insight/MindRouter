@@ -218,50 +218,73 @@ async def voice_chat_ws(websocket: WebSocket):
     # PersonaPlex processes system prompts before sending handshake — allow up to 120s
     connect_kwargs["open_timeout"] = 120
     connect_kwargs["close_timeout"] = 10
-    connect_kwargs["ping_timeout"] = 60
+    # Disable automatic pings — PersonaPlex (aiohttp) doesn't respond to
+    # websockets-library pings, which can cause spurious disconnections.
+    connect_kwargs["ping_interval"] = None
+    connect_kwargs["ping_timeout"] = None
 
+    pp_ws = None
     try:
-        async with websockets.connect(pp_url, **connect_kwargs) as pp_ws:
-            # 7. Bridge: forward all frames bidirectionally
-            # PersonaPlex uses binary frames exclusively (0x00/0x01/0x02 prefixed)
-            async def browser_to_pp():
-                try:
-                    while True:
-                        msg = await websocket.receive()
-                        if msg.get("type") == "websocket.disconnect":
-                            break
-                        if "bytes" in msg and msg["bytes"]:
-                            await pp_ws.send(msg["bytes"])
-                        elif "text" in msg and msg["text"]:
-                            await pp_ws.send(msg["text"])
-                except Exception:
-                    pass
-                finally:
-                    await pp_ws.close()
+        pp_ws = await websockets.connect(pp_url, **connect_kwargs)
+        logger.info(
+            "voice_chat_pp_connected",
+            user_id=user_id,
+            backend_url=persona["url"],
+        )
 
-            async def pp_to_browser():
-                try:
-                    async for msg in pp_ws:
-                        if isinstance(msg, bytes):
-                            await websocket.send_bytes(msg)
-                        else:
-                            await websocket.send_text(msg)
-                except Exception:
-                    pass
+        # 7. Bridge: forward all frames bidirectionally
+        # PersonaPlex uses binary frames exclusively (0x00/0x01/0x02 prefixed)
+        b2p_count = 0
+        p2b_count = 0
 
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(browser_to_pp()),
-                    asyncio.create_task(pp_to_browser()),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        async def browser_to_pp():
+            nonlocal b2p_count
+            try:
+                while True:
+                    msg = await websocket.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        break
+                    if "bytes" in msg and msg["bytes"]:
+                        await pp_ws.send(msg["bytes"])
+                        b2p_count += 1
+                    elif "text" in msg and msg["text"]:
+                        await pp_ws.send(msg["text"])
+                        b2p_count += 1
+            except Exception as exc:
+                logger.debug("voice_chat_b2p_error", error=str(exc))
+
+        async def pp_to_browser():
+            nonlocal p2b_count
+            try:
+                async for msg in pp_ws:
+                    if isinstance(msg, bytes):
+                        await websocket.send_bytes(msg)
+                    else:
+                        await websocket.send_text(msg)
+                    p2b_count += 1
+            except Exception as exc:
+                logger.debug("voice_chat_p2b_error", error=str(exc))
+
+        done, pending = await asyncio.wait(
+            [
+                asyncio.create_task(browser_to_pp()),
+                asyncio.create_task(pp_to_browser()),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        logger.info(
+            "voice_chat_ws_stats",
+            user_id=user_id,
+            browser_to_pp=b2p_count,
+            pp_to_browser=p2b_count,
+        )
 
     except Exception as exc:
         logger.warning("voice_chat_ws_error", error=str(exc), user_id=user_id)
@@ -270,4 +293,10 @@ async def voice_chat_ws(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        # Always close the PersonaPlex connection to release the server lock
+        if pp_ws is not None:
+            try:
+                await pp_ws.close()
+            except Exception:
+                pass
         logger.info("voice_chat_ws_disconnected", user_id=user_id)
