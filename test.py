@@ -817,6 +817,87 @@ def test_admin(client: httpx.Client, cfg: argparse.Namespace):
 
 
 # ---------------------------------------------------------------------------
+# Section 9 — Reranker
+# ---------------------------------------------------------------------------
+
+def test_rerank(client: httpx.Client, cfg: argparse.Namespace):
+    section_header("9. Reranker")
+    headers = {"Authorization": f"Bearer {cfg.api_key}"}
+    model = cfg.rerank_model
+
+    documents = [
+        "The capital of France is Paris.",
+        "Python is a programming language.",
+        "The Eiffel Tower is located in Paris, France.",
+    ]
+
+    # POST /v1/rerank (basic)
+    name = "POST /v1/rerank (basic)"
+    try:
+        r = client.post("/v1/rerank", headers=headers, json={
+            "model": model,
+            "query": "What is the capital of France?",
+            "documents": documents,
+        })
+        body = r.json()
+        if r.status_code == 200 and "results" in body:
+            res = body["results"]
+            has_scores = all("relevance_score" in item for item in res)
+            if len(res) == 3 and has_scores:
+                top_score = res[0]["relevance_score"]
+                record("pass", name, f"{len(res)} results, top_score={top_score:.4f}")
+            else:
+                record("fail", name, f"results={len(res)} has_scores={has_scores}")
+        else:
+            record("fail", name, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+    # POST /v1/rerank (top_n)
+    name = "POST /v1/rerank (top_n=2)"
+    try:
+        r = client.post("/v1/rerank", headers=headers, json={
+            "model": model,
+            "query": "What is the capital of France?",
+            "documents": documents,
+            "top_n": 2,
+        })
+        body = r.json()
+        if r.status_code == 200 and "results" in body:
+            res = body["results"]
+            if len(res) == 2:
+                record("pass", name, f"{len(res)} results returned")
+            else:
+                record("fail", name, f"expected 2 results, got {len(res)}")
+        else:
+            record("fail", name, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+    # POST /v1/rerank (return_documents=false)
+    name = "POST /v1/rerank (return_documents=false)"
+    try:
+        r = client.post("/v1/rerank", headers=headers, json={
+            "model": model,
+            "query": "What is the capital of France?",
+            "documents": documents,
+            "return_documents": False,
+        })
+        body = r.json()
+        if r.status_code == 200 and "results" in body:
+            res = body["results"]
+            has_docs = any("document" in item for item in res)
+            if not has_docs:
+                record("pass", name, f"{len(res)} results, no document text")
+            else:
+                record("fail", name, "results contain document text despite return_documents=false")
+        else:
+            record("fail", name, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+
+# ---------------------------------------------------------------------------
 # Section registry
 # ---------------------------------------------------------------------------
 
@@ -829,6 +910,7 @@ SECTIONS = {
     "cross": test_cross_engine,
     "errors": test_errors,
     "admin": test_admin,
+    "rerank": test_rerank,
 }
 
 
@@ -861,6 +943,8 @@ Examples:
                         help="vLLM model to test (default: openai/gpt-oss-120b)")
     parser.add_argument("--embedding-model", default="Qwen/Qwen3-Embedding-8B",
                         help="Embedding model to test (default: Qwen/Qwen3-Embedding-8B)")
+    parser.add_argument("--rerank-model", default="Qwen/Qwen3-Reranker-8B",
+                        help="Reranker model to test (default: Qwen/Qwen3-Reranker-8B)")
     parser.add_argument("--timeout", type=int, default=180,
                         help="Request timeout in seconds (default: 180)")
     parser.add_argument("--section", action="append", dest="sections",
@@ -875,6 +959,7 @@ Examples:
     print(f"  Ollama model:  {cfg.ollama_model}")
     print(f"  vLLM model:    {cfg.vllm_model}")
     print(f"  Embed model:   {cfg.embedding_model}")
+    print(f"  Rerank model:  {cfg.rerank_model}")
     print(f"  Timeout:       {cfg.timeout}s")
     print(f"  Admin key:     {'set' if cfg.admin_key else 'not set'}")
     print(f"  Sections:      {', '.join(sections_to_run)}")

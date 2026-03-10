@@ -480,6 +480,9 @@ class VLLMOutTranslator:
         if canonical.top_n is not None:
             payload["top_n"] = canonical.top_n
 
+        if not canonical.return_documents:
+            payload["return_documents"] = False
+
         return payload
 
     @staticmethod
