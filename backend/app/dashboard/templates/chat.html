@@ -21,7 +21,7 @@
     /* Full-height layout: no footer, no scrollbar on body */
     body { overflow: hidden; }
     footer { display: none; }
-    main { height: calc(100dvh - 56px); }
+    main { height: calc(100dvh - 56px); overflow: hidden; }
 
     .chat-layout {
         display: flex;
@@ -2217,6 +2217,50 @@ document.addEventListener('mr-theme-changed', function(e) {
     if (!isMobile()) {
         inputEl.placeholder = 'Type a message... (Shift+Enter for new line)';
     }
+
+    // ---------------------------------------------------------------
+    // Mobile keyboard fix: keep input pinned to bottom
+    // ---------------------------------------------------------------
+    (function() {
+        if (!isMobile()) return;
+        const mainEl = document.querySelector('main');
+        if (!mainEl) return;
+
+        function adjustForViewport() {
+            if (window.visualViewport) {
+                const vvHeight = window.visualViewport.height;
+                const vvOffsetTop = window.visualViewport.offsetTop;
+                // Set main height to visual viewport minus navbar
+                mainEl.style.height = (vvHeight - 56) + 'px';
+                // Offset for any scroll the browser applied
+                mainEl.style.transform = 'translateY(' + vvOffsetTop + 'px)';
+            }
+        }
+
+        function resetViewport() {
+            mainEl.style.height = '';
+            mainEl.style.transform = '';
+        }
+
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', adjustForViewport);
+            window.visualViewport.addEventListener('scroll', adjustForViewport);
+        }
+
+        // Also handle focus/blur on textarea as a fallback
+        inputEl.addEventListener('focus', () => {
+            // Small delay to let keyboard finish animating
+            setTimeout(() => {
+                adjustForViewport();
+                // Ensure messages scroll to bottom
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+            }, 300);
+        });
+
+        inputEl.addEventListener('blur', () => {
+            setTimeout(resetViewport, 100);
+        });
+    })();
 
     // Web search toggle button
     const webSearchToggle = document.getElementById('webSearchToggle');
