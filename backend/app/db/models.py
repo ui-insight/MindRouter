@@ -292,6 +292,9 @@ class Node(Base, TimestampMixin):
     cuda_version: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     sidecar_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
+    # Server power (IPMI DCMI, populated by sidecar)
+    server_power_watts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Relationships
     gpu_devices: Mapped[List["GPUDevice"]] = relationship("GPUDevice", back_populates="node")
     backends: Mapped[List["Backend"]] = relationship("Backend", back_populates="node")

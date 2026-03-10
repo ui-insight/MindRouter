@@ -122,6 +122,17 @@ class GPUDeviceSnapshot:
 
 
 @dataclass
+class ServerPowerSnapshot:
+    """Server-level power reading from IPMI DCMI."""
+
+    instantaneous_watts: Optional[int] = None
+    minimum_watts: Optional[int] = None
+    maximum_watts: Optional[int] = None
+    average_watts: Optional[int] = None
+    error: Optional[str] = None
+
+
+@dataclass
 class SidecarResponse:
     """Full response from GPU sidecar agent."""
 
@@ -132,6 +143,7 @@ class SidecarResponse:
     gpus: List[GPUDeviceSnapshot] = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     sidecar_version: Optional[str] = None
+    server_power: Optional[ServerPowerSnapshot] = None
 
 
 @dataclass

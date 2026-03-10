@@ -20,8 +20,10 @@
 
 import asyncio
 import os
+import re
 import secrets
 import socket
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -239,6 +241,45 @@ async def health(_: None = Depends(verify_sidecar_key)):
     )
 
 
+def _get_server_power() -> Dict[str, Any]:
+    """Read server-level power via IPMI DCMI (requires /dev/ipmi0 access).
+
+    Returns dict with instantaneous, min, max, and average power in watts,
+    or an error string if ipmitool is unavailable or fails.
+    """
+    try:
+        result = subprocess.run(
+            ["ipmitool", "dcmi", "power", "reading"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return {"error": result.stderr.strip() or "ipmitool failed"}
+
+        power: Dict[str, Any] = {}
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            m = re.match(r"Instantaneous power reading:\s+(\d+)\s+Watts", line)
+            if m:
+                power["instantaneous_watts"] = int(m.group(1))
+            m = re.match(r"Minimum during sampling period:\s+(\d+)\s+Watts", line)
+            if m:
+                power["minimum_watts"] = int(m.group(1))
+            m = re.match(r"Maximum during sampling period:\s+(\d+)\s+Watts", line)
+            if m:
+                power["maximum_watts"] = int(m.group(1))
+            m = re.match(r"Average power reading over sample period:\s+(\d+)\s+Watts", line)
+            if m:
+                power["average_watts"] = int(m.group(1))
+
+        return power if power else {"error": "Could not parse DCMI output"}
+    except FileNotFoundError:
+        return {"error": "ipmitool not installed"}
+    except subprocess.TimeoutExpired:
+        return {"error": "ipmitool timed out"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/gpu-info")
 async def gpu_info(_: None = Depends(verify_sidecar_key)):
     """Return detailed GPU metrics for all devices on this node."""
@@ -260,6 +301,9 @@ async def gpu_info(_: None = Depends(verify_sidecar_key)):
         except Exception as e:
             gpus.append({"index": i, "error": str(e)})
 
+    # Server-level power via IPMI (best-effort, non-blocking)
+    server_power = _get_server_power()
+
     return {
         "hostname": socket.gethostname(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -267,6 +311,7 @@ async def gpu_info(_: None = Depends(verify_sidecar_key)):
         "cuda_version": _cuda_version,
         "gpu_count": _device_count,
         "gpus": gpus,
+        "server_power": server_power,
         "sidecar_version": SIDECAR_VERSION,
     }
 

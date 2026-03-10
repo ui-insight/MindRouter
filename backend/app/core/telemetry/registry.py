@@ -1156,12 +1156,16 @@ class BackendRegistry:
         try:
             async with get_async_db_context() as db:
                 # Update node hardware info and status
+                server_power = None
+                if sidecar_data.server_power and sidecar_data.server_power.instantaneous_watts is not None:
+                    server_power = sidecar_data.server_power.instantaneous_watts
                 await crud.update_node_hardware(
                     db, node_id,
                     gpu_count=sidecar_data.gpu_count,
                     driver_version=sidecar_data.driver_version,
                     cuda_version=sidecar_data.cuda_version,
                     sidecar_version=sidecar_data.sidecar_version,
+                    server_power_watts=server_power,
                 )
                 await crud.update_node_status(db, node_id, NodeStatus.ONLINE)
 

@@ -120,6 +120,7 @@ async def telemetry_overview(
         "used_gpu_memory_gb": 0.0,
         "avg_gpu_utilization": None,
         "total_power_draw_watts": 0.0,
+        "total_server_power_watts": 0,
         "total_active_requests": 0,
         "total_queued_requests": 0,
     }
@@ -152,6 +153,8 @@ async def telemetry_overview(
                 cluster["total_power_draw_watts"] += gpu_t.power_draw_watts
 
         cluster["total_gpus"] += len(gpu_devices) or (node.gpu_count or 0)
+        if node.server_power_watts:
+            cluster["total_server_power_watts"] += node.server_power_watts
 
         node_list.append({
             "id": node.id,
@@ -162,6 +165,7 @@ async def telemetry_overview(
             "gpu_count": node.gpu_count or len(gpu_devices),
             "driver_version": node.driver_version,
             "cuda_version": node.cuda_version,
+            "server_power_watts": node.server_power_watts,
             "gpus": gpu_list,
         })
 

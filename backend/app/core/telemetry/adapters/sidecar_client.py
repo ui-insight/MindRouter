@@ -20,6 +20,7 @@ import httpx
 
 from backend.app.core.telemetry.models import (
     GPUDeviceSnapshot,
+    ServerPowerSnapshot,
     SidecarResponse,
 )
 from backend.app.logging_config import get_logger
@@ -183,6 +184,19 @@ class SidecarClient:
                 )
             )
 
+        # Parse server power (IPMI DCMI) if present
+        server_power = None
+        sp_data = data.get("server_power")
+        if sp_data and not sp_data.get("error"):
+            server_power = ServerPowerSnapshot(
+                instantaneous_watts=sp_data.get("instantaneous_watts"),
+                minimum_watts=sp_data.get("minimum_watts"),
+                maximum_watts=sp_data.get("maximum_watts"),
+                average_watts=sp_data.get("average_watts"),
+            )
+        elif sp_data and sp_data.get("error"):
+            server_power = ServerPowerSnapshot(error=sp_data["error"])
+
         return SidecarResponse(
             hostname=data.get("hostname"),
             driver_version=data.get("driver_version"),
@@ -190,5 +204,6 @@ class SidecarClient:
             gpu_count=data.get("gpu_count", 0),
             gpus=gpus,
             sidecar_version=data.get("sidecar_version"),
+            server_power=server_power,
         )
 
