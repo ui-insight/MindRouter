@@ -106,11 +106,11 @@
 **Makefile:** `make test-smoke`
 **Requirements:** Live deployment, valid API key.
 
-Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `cross`, `errors`, `admin`.
+Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `anthropic`, `cross`, `errors`, `admin`, `rerank`.
 
 | File | What it covers |
 |------|----------------|
-| `test.py` | Health endpoints, authentication, OpenAI-compatible API, Ollama-compatible API, cross-engine routing, error handling, admin API |
+| `test.py` | Health endpoints, authentication, OpenAI-compatible API, Ollama-compatible API, Anthropic-compatible API, cross-engine routing, error handling, admin API, reranker (basic, top_n, return_documents) |
 
 **CLI arguments:**
 ```
@@ -120,6 +120,7 @@ Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `cr
 --ollama-model   phi4:14b
 --vllm-model     openai/gpt-oss-120b
 --embedding-model EMBED/all-minilm:33m
+--rerank-model   Qwen/Qwen3-Reranker-8B
 --timeout        Request timeout in seconds (180)
 --section        Run specific section(s) only
 ```
