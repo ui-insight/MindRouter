@@ -855,12 +855,12 @@ Examples:
                         help="API key for authentication (required)")
     parser.add_argument("--admin-key", default=None,
                         help="Admin API key (admin tests skipped without this)")
-    parser.add_argument("--ollama-model", default="phi4:14b",
-                        help="Ollama model to test (default: phi4:14b)")
+    parser.add_argument("--ollama-model", default="microsoft/phi-4",
+                        help="Ollama model to test (default: microsoft/phi-4)")
     parser.add_argument("--vllm-model", default="openai/gpt-oss-120b",
                         help="vLLM model to test (default: openai/gpt-oss-120b)")
-    parser.add_argument("--embedding-model", default="EMBED/all-minilm:33m",
-                        help="Embedding model to test (default: EMBED/all-minilm:33m)")
+    parser.add_argument("--embedding-model", default="Qwen/Qwen3-Embedding-8B",
+                        help="Embedding model to test (default: Qwen/Qwen3-Embedding-8B)")
     parser.add_argument("--timeout", type=int, default=180,
                         help="Request timeout in seconds (default: 180)")
     parser.add_argument("--section", action="append", dest="sections",
