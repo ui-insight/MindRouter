@@ -188,7 +188,7 @@
 
 {% block extra_js %}
 <!-- opus-recorder for Opus encoding of mic input -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/opus-recorder/8.0.5/recorder.min.js"></script>
+<script src="/static/voice-chat/recorder.min.js"></script>
 <script>
 (function() {
     "use strict";
@@ -396,7 +396,7 @@
         }
 
         recorder = new window.Recorder({
-            encoderPath: 'https://cdnjs.cloudflare.com/ajax/libs/opus-recorder/8.0.5/encoderWorker.min.js',
+            encoderPath: '/static/voice-chat/encoderWorker.min.js',
             encoderFrameSize: 20,
             encoderSampleRate: 24000,
             maxFramesPerPage: 2,
