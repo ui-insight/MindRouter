@@ -1157,8 +1157,18 @@ class BackendRegistry:
             async with get_async_db_context() as db:
                 # Update node hardware info and status
                 server_power = None
-                if sidecar_data.server_power and sidecar_data.server_power.instantaneous_watts is not None:
+                if sidecar_data.server_power and sidecar_data.server_power.instantaneous_watts:
                     server_power = sidecar_data.server_power.instantaneous_watts
+
+                # Fallback: if IPMI DCMI is unavailable or returns 0, use GPU power sum
+                if not server_power:
+                    gpu_fallback = sum(
+                        g.power_draw_watts for g in sidecar_data.gpus
+                        if g.power_draw_watts is not None
+                    )
+                    if gpu_fallback > 0:
+                        server_power = int(gpu_fallback)
+
                 await crud.update_node_hardware(
                     db, node_id,
                     gpu_count=sidecar_data.gpu_count,
