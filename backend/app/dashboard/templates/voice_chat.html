@@ -19,11 +19,7 @@
         position: relative;
     }
 
-    /* Persona selector */
-    .vc-persona-select {
-        min-width: 220px;
-        max-width: 320px;
-    }
+    .vc-persona-select { min-width: 220px; max-width: 320px; }
 
     /* ---- The Orb ---- */
     .vc-orb-wrapper {
@@ -48,7 +44,6 @@
         z-index: 2;
     }
 
-    /* Glow ring behind the orb */
     .vc-orb-wrapper::before {
         content: '';
         position: absolute;
@@ -67,178 +62,100 @@
         z-index: 1;
     }
 
-    /* ---- Idle state: subtle breathing ---- */
+    /* Idle */
     .vc-state-idle .vc-orb {
-        --orb-inner: #6c757d;
-        --orb-outer: #343a40;
+        --orb-inner: #6c757d; --orb-outer: #343a40;
         --orb-glow: rgba(108,117,125,0.25);
         animation: orb-breathe 4s ease-in-out infinite;
     }
-
     @keyframes orb-breathe {
         0%, 100% { transform: scale(1); }
         50% { transform: scale(1.04); }
     }
 
-    /* ---- Connecting state ---- */
+    /* Connecting */
     .vc-state-connecting .vc-orb {
-        --orb-inner: #ffc107;
-        --orb-outer: #6c5b00;
+        --orb-inner: #ffc107; --orb-outer: #6c5b00;
         --orb-glow: rgba(255,193,7,0.3);
         animation: orb-pulse 1.2s ease-in-out infinite;
     }
-
     @keyframes orb-pulse {
         0%, 100% { transform: scale(1); opacity: 1; }
         50% { transform: scale(1.08); opacity: 0.85; }
     }
 
-    /* ---- Listening state (user speaking): warm colors ---- */
+    /* Listening (user speaking) */
     .vc-state-listening .vc-orb {
-        --orb-inner: #e040a0;
-        --orb-outer: #b02060;
+        --orb-inner: #e040a0; --orb-outer: #b02060;
         --orb-glow: rgba(224,64,160,0.5);
         animation: orb-listen 0.6s ease-in-out infinite alternate;
     }
-
     .vc-state-listening .vc-orb-wrapper::before {
-        --orb-c1: rgba(255,0,128,0.6);
-        --orb-c2: rgba(255,170,50,0.4);
+        --orb-c1: rgba(255,0,128,0.6); --orb-c2: rgba(255,170,50,0.4);
         --orb-c3: rgba(200,0,100,0.5);
-        opacity: 0.7;
-        animation: orb-rotate 3s linear infinite;
+        opacity: 0.7; animation: orb-rotate 3s linear infinite;
     }
+    @keyframes orb-listen { 0% { transform: scale(1); } 100% { transform: scale(1.12); } }
 
-    @keyframes orb-listen {
-        0% { transform: scale(1); }
-        100% { transform: scale(1.12); }
-    }
-
-    /* ---- Speaking state (AI responding): cool colors ---- */
+    /* Speaking (AI responding) */
     .vc-state-speaking .vc-orb {
-        --orb-inner: #00d4ff;
-        --orb-outer: #0040a0;
+        --orb-inner: #00d4ff; --orb-outer: #0040a0;
         --orb-glow: rgba(0,212,255,0.5);
         animation: orb-speak 0.8s ease-in-out infinite alternate;
     }
-
     .vc-state-speaking .vc-orb-wrapper::before {
-        --orb-c1: rgba(0,212,255,0.6);
-        --orb-c2: rgba(100,0,255,0.4);
+        --orb-c1: rgba(0,212,255,0.6); --orb-c2: rgba(100,0,255,0.4);
         --orb-c3: rgba(0,150,255,0.5);
-        opacity: 0.8;
-        animation: orb-rotate 2s linear infinite;
+        opacity: 0.8; animation: orb-rotate 2s linear infinite;
     }
+    @keyframes orb-speak { 0% { transform: scale(1); } 100% { transform: scale(1.06); } }
 
-    @keyframes orb-speak {
-        0% { transform: scale(1); }
-        100% { transform: scale(1.06); }
-    }
-
-    @keyframes orb-rotate {
-        from { --orb-angle: 0deg; }
-        to { --orb-angle: 360deg; }
-    }
-
+    @keyframes orb-rotate { from { --orb-angle: 0deg; } to { --orb-angle: 360deg; } }
     @supports (background: conic-gradient(from 0deg, red, blue)) {
         @property --orb-angle {
-            syntax: '<angle>';
-            inherits: false;
-            initial-value: 0deg;
+            syntax: '<angle>'; inherits: false; initial-value: 0deg;
         }
     }
 
-    /* ---- Active (connected) state: pulsing border ---- */
+    /* Active (connected, idle) */
     .vc-state-active .vc-orb {
-        --orb-inner: #28a745;
-        --orb-outer: #155724;
+        --orb-inner: #28a745; --orb-outer: #155724;
         --orb-glow: rgba(40,167,69,0.4);
         animation: orb-breathe 3s ease-in-out infinite;
     }
-
     .vc-state-active .vc-orb-wrapper::before {
-        --orb-c1: rgba(40,167,69,0.3);
-        --orb-c2: rgba(0,200,100,0.2);
+        --orb-c1: rgba(40,167,69,0.3); --orb-c2: rgba(0,200,100,0.2);
         --orb-c3: rgba(40,167,69,0.3);
-        opacity: 0.4;
-        animation: orb-rotate 6s linear infinite;
+        opacity: 0.4; animation: orb-rotate 6s linear infinite;
     }
 
-    /* ---- Status text ---- */
-    .vc-status {
-        font-size: 1.1rem;
-        color: var(--bs-secondary-color);
-        min-height: 1.5em;
-    }
+    .vc-status { font-size: 1.1rem; color: var(--bs-secondary-color); min-height: 1.5em; }
 
-    /* ---- Control button ---- */
-    .vc-btn {
-        font-size: 1.1rem;
-        padding: 0.7rem 2rem;
-        border-radius: 2rem;
-        min-width: 220px;
-    }
+    .vc-btn { font-size: 1.1rem; padding: 0.7rem 2rem; border-radius: 2rem; min-width: 220px; }
+    .vc-btn-start { background: linear-gradient(135deg, #6366f1, #8b5cf6); border: none; color: #fff; }
+    .vc-btn-start:hover { background: linear-gradient(135deg, #4f46e5, #7c3aed); color: #fff; }
+    .vc-btn-stop { background: linear-gradient(135deg, #ef4444, #dc2626); border: none; color: #fff; }
+    .vc-btn-stop:hover { background: linear-gradient(135deg, #dc2626, #b91c1c); color: #fff; }
 
-    .vc-btn-start {
-        background: linear-gradient(135deg, #6366f1, #8b5cf6);
-        border: none;
-        color: #fff;
-    }
-    .vc-btn-start:hover {
-        background: linear-gradient(135deg, #4f46e5, #7c3aed);
-        color: #fff;
-    }
-
-    .vc-btn-stop {
-        background: linear-gradient(135deg, #ef4444, #dc2626);
-        border: none;
-        color: #fff;
-    }
-    .vc-btn-stop:hover {
-        background: linear-gradient(135deg, #dc2626, #b91c1c);
-        color: #fff;
-    }
-
-    /* ---- Transcript area ---- */
     .vc-transcript {
-        max-width: 600px;
-        width: 100%;
-        max-height: 200px;
-        overflow-y: auto;
-        font-size: 0.9rem;
-        color: var(--bs-secondary-color);
-        border: 1px solid var(--bs-border-color);
-        border-radius: 0.5rem;
-        padding: 0.75rem 1rem;
-        display: none;
+        max-width: 600px; width: 100%; max-height: 200px; overflow-y: auto;
+        font-size: 0.9rem; color: var(--bs-secondary-color);
+        border: 1px solid var(--bs-border-color); border-radius: 0.5rem;
+        padding: 0.75rem 1rem; display: none;
     }
     .vc-transcript.has-content { display: block; }
+    .vc-transcript .vc-t-ai { color: var(--bs-success); font-weight: 500; }
 
-    .vc-transcript .vc-t-user {
-        color: var(--bs-primary);
-        font-weight: 500;
-    }
-    .vc-transcript .vc-t-ai {
-        color: var(--bs-success);
-        font-weight: 500;
-    }
-
-    /* ---- Error alert ---- */
-    .vc-error {
-        max-width: 500px;
-        width: 100%;
-    }
+    .vc-error { max-width: 500px; width: 100%; }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="vc-container" id="vcContainer">
-    <!-- Persona selector -->
     {% if personas and personas|length > 1 %}
     <select class="form-select vc-persona-select" id="vcPersonaSelect">
         {% for p in personas %}
-        <option value="{{ p.name }}" {% if user_persona == p.name %}selected{% endif %}
-                data-description="{{ p.description or '' }}">
+        <option value="{{ p.name }}" {% if user_persona == p.name %}selected{% endif %}>
             {{ p.name }}{% if p.description %} &mdash; {{ p.description }}{% endif %}
         </option>
         {% endfor %}
@@ -251,15 +168,12 @@
     <input type="hidden" id="vcPersonaSelect" value="{{ personas[0].name }}">
     {% endif %}
 
-    <!-- The Orb -->
     <div class="vc-orb-wrapper" id="vcOrbWrapper">
         <div class="vc-orb" id="vcOrb"></div>
     </div>
 
-    <!-- Status -->
     <div class="vc-status" id="vcStatus">Ready to connect</div>
 
-    <!-- Control button -->
     <button class="btn vc-btn vc-btn-start" id="vcStartBtn" onclick="vcStart()">
         <i class="bi bi-mic-fill"></i> Start Conversation
     </button>
@@ -267,15 +181,14 @@
         <i class="bi bi-stop-fill"></i> End Conversation
     </button>
 
-    <!-- Error display -->
     <div class="alert alert-danger vc-error d-none" id="vcError" role="alert"></div>
-
-    <!-- Transcript -->
     <div class="vc-transcript" id="vcTranscript"></div>
 </div>
 {% endblock %}
 
 {% block extra_js %}
+<!-- opus-recorder for Opus encoding of mic input -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/opus-recorder/8.0.5/recorder.min.js"></script>
 <script>
 (function() {
     "use strict";
@@ -283,12 +196,12 @@
     // ---- State ----
     var ws = null;
     var audioCtx = null;
-    var micStream = null;
-    var scriptNode = null;
-    var sourceNode = null;
-    var playbackQueue = [];
-    var isPlaying = false;
-    var currentState = 'idle';  // idle, connecting, active, listening, speaking
+    var workletNode = null;
+    var recorder = null;          // opus-recorder instance
+    var decoderWorker = null;     // Ogg Opus decoder Web Worker
+    var currentState = 'idle';
+    var handshakeReceived = false;
+    var textBuffer = '';          // accumulates text tokens from server
 
     var container = document.getElementById('vcContainer');
     var statusEl = document.getElementById('vcStatus');
@@ -297,15 +210,17 @@
     var errorEl = document.getElementById('vcError');
     var transcriptEl = document.getElementById('vcTranscript');
 
+    var SAMPLE_RATE = 24000;
+
     function setState(state) {
         container.className = 'vc-container vc-state-' + state;
         currentState = state;
         var labels = {
             'idle': 'Ready to connect',
             'connecting': 'Connecting...',
-            'active': 'Connected — speak anytime',
+            'active': 'Connected \u2014 speak anytime',
             'listening': 'Listening...',
-            'speaking': 'Speaking...'
+            'speaking': 'AI is speaking...'
         };
         statusEl.textContent = labels[state] || state;
     }
@@ -317,106 +232,71 @@
         setTimeout(function() { errorEl.classList.add('d-none'); }, 8000);
     }
 
-    function appendTranscript(role, text) {
-        var cls = role === 'user' ? 'vc-t-user' : 'vc-t-ai';
-        var label = role === 'user' ? 'You' : 'AI';
-        var line = document.createElement('div');
-        line.innerHTML = '<span class="' + cls + '">' + label + ':</span> ' + escapeHtml(text);
+    function appendTranscript(text) {
+        // Flush accumulated text as a line
+        if (!text) return;
+        var line = document.createElement('span');
+        line.className = 'vc-t-ai';
+        line.textContent = text;
         transcriptEl.appendChild(line);
         transcriptEl.classList.add('has-content');
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
 
-    function escapeHtml(s) {
-        var d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
+    // ---- PersonaPlex protocol helpers ----
+    // Message types: 0x00=handshake, 0x01=audio, 0x02=text
+    function encodeAudioMsg(opusData) {
+        var msg = new Uint8Array(1 + opusData.length);
+        msg[0] = 0x01;
+        msg.set(opusData, 1);
+        return msg;
     }
 
-    // ---- Audio helpers ----
-    var SAMPLE_RATE = 24000;
-
-    function float32ToInt16(buffer) {
-        var len = buffer.length;
-        var out = new Int16Array(len);
-        for (var i = 0; i < len; i++) {
-            var s = Math.max(-1, Math.min(1, buffer[i]));
-            out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-        return out;
+    function decodeServerMsg(data) {
+        var arr = new Uint8Array(data);
+        if (arr.length === 0) return null;
+        var kind = arr[0];
+        var payload = arr.slice(1);
+        if (kind === 0x00) return { type: 'handshake' };
+        if (kind === 0x01) return { type: 'audio', data: payload };
+        if (kind === 0x02) return { type: 'text', data: new TextDecoder().decode(payload) };
+        return null;
     }
 
-    function int16ToFloat32(buffer) {
-        var len = buffer.length;
-        var out = new Float32Array(len);
-        for (var i = 0; i < len; i++) {
-            out[i] = buffer[i] / 0x8000;
-        }
-        return out;
-    }
-
-    // ---- Playback ----
-    function enqueueAudio(pcmInt16) {
-        playbackQueue.push(pcmInt16);
-        if (!isPlaying) drainPlayback();
-    }
-
-    function drainPlayback() {
-        if (playbackQueue.length === 0) {
-            isPlaying = false;
-            if (currentState === 'speaking') setState('active');
-            return;
-        }
-        isPlaying = true;
-        if (currentState === 'active') setState('speaking');
-
-        var pcm = playbackQueue.shift();
-        var floats = int16ToFloat32(pcm);
-        var buf = audioCtx.createBuffer(1, floats.length, SAMPLE_RATE);
-        buf.getChannelData(0).set(floats);
-
-        var src = audioCtx.createBufferSource();
-        src.buffer = buf;
-        src.connect(audioCtx.destination);
-        src.onended = drainPlayback;
-        src.start();
-    }
-
-    // ---- VAD: simple energy-based voice activity detection ----
-    var vadActive = false;
-    var vadSilenceFrames = 0;
-    var VAD_THRESHOLD = 0.01;
-    var VAD_SILENCE_LIMIT = 15;  // ~15 frames of silence to go back to 'active'
-
-    function checkVAD(floatBuffer) {
-        var sum = 0;
-        for (var i = 0; i < floatBuffer.length; i++) {
-            sum += floatBuffer[i] * floatBuffer[i];
-        }
-        var rms = Math.sqrt(sum / floatBuffer.length);
-
-        if (rms > VAD_THRESHOLD) {
-            vadActive = true;
-            vadSilenceFrames = 0;
-            if (currentState === 'active') setState('listening');
-        } else if (vadActive) {
-            vadSilenceFrames++;
-            if (vadSilenceFrames > VAD_SILENCE_LIMIT) {
-                vadActive = false;
-                if (currentState === 'listening') setState('active');
+    // ---- Decoder Worker setup ----
+    function initDecoderWorker() {
+        decoderWorker = new Worker('/static/voice-chat/decoderWorker.min.js');
+        decoderWorker.postMessage({
+            command: 'init',
+            bufferLength: Math.round(960 * audioCtx.sampleRate / 24000),
+            decoderSampleRate: 24000,
+            outputBufferSampleRate: audioCtx.sampleRate,
+            resampleQuality: 0,
+        });
+        decoderWorker.onmessage = function(e) {
+            if (!e.data) return;
+            // e.data[0] is a Float32Array of decoded PCM
+            var pcm = e.data[0];
+            if (pcm && pcm.length > 0 && workletNode) {
+                workletNode.port.postMessage({ frame: pcm, type: 'audio', micDuration: 0 });
+                if (currentState === 'active') setState('speaking');
             }
-        }
+        };
     }
 
-    // ---- Start / Stop ----
+    // ---- VAD for mic (detect user speaking from recorder activity) ----
+    var lastAudioSendTime = 0;
+
+    // ---- Start ----
     window.vcStart = async function() {
         try {
             setState('connecting');
             startBtn.classList.add('d-none');
             stopBtn.classList.remove('d-none');
             errorEl.classList.add('d-none');
+            handshakeReceived = false;
+            textBuffer = '';
 
-            // Get persona
             var personaSel = document.getElementById('vcPersonaSelect');
             var persona = '';
             if (personaSel) {
@@ -432,72 +312,59 @@
                 }).catch(function() {});
             }
 
-            // Request microphone
-            micStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    sampleRate: SAMPLE_RATE,
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true
-                }
-            });
-
-            // Create AudioContext
+            // Create AudioContext at 24kHz (PersonaPlex native rate)
             audioCtx = new (window.AudioContext || window.webkitAudioContext)({
                 sampleRate: SAMPLE_RATE
             });
 
-            // Open WebSocket
+            // Load and register AudioWorklet for playback
+            await audioCtx.audioWorklet.addModule('/static/voice-chat/audio-processor.js');
+            workletNode = new AudioWorkletNode(audioCtx, 'moshi-processor');
+            workletNode.connect(audioCtx.destination);
+
+            // Init decoder worker
+            initDecoderWorker();
+
+            // Wait briefly for decoder worker to init
+            await new Promise(function(r) { setTimeout(r, 500); });
+
+            // Open WebSocket to MindRouter proxy
             var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             var wsUrl = proto + '//' + location.host + '/voice-chat/ws?persona=' + encodeURIComponent(persona);
             ws = new WebSocket(wsUrl);
             ws.binaryType = 'arraybuffer';
 
             ws.onopen = function() {
-                setState('active');
-
-                // Setup mic capture with ScriptProcessor (widely supported)
-                sourceNode = audioCtx.createMediaStreamSource(micStream);
-                // Buffer size of 2048 at 24kHz ≈ 85ms chunks
-                scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
-
-                scriptNode.onaudioprocess = function(e) {
-                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-                    var input = e.inputBuffer.getChannelData(0);
-
-                    // VAD check
-                    checkVAD(input);
-
-                    // Send PCM16 to server
-                    var pcm16 = float32ToInt16(input);
-                    ws.send(pcm16.buffer);
-                };
-
-                sourceNode.connect(scriptNode);
-                scriptNode.connect(audioCtx.destination);  // Required for ScriptProcessor to fire
+                // PersonaPlex processes system prompts first, then sends handshake
+                statusEl.textContent = 'Waiting for persona to load...';
             };
 
             ws.onmessage = function(event) {
-                if (event.data instanceof ArrayBuffer) {
-                    // Binary audio data — PCM16 from PersonaPlex
-                    var pcm = new Int16Array(event.data);
-                    if (pcm.length > 0) {
-                        enqueueAudio(pcm);
+                var msg = decodeServerMsg(event.data);
+                if (!msg) return;
+
+                if (msg.type === 'handshake') {
+                    handshakeReceived = true;
+                    setState('active');
+                    startMicCapture();
+                    return;
+                }
+
+                if (msg.type === 'audio') {
+                    // Feed Ogg Opus pages to decoder worker
+                    if (decoderWorker) {
+                        decoderWorker.postMessage(
+                            { command: 'decode', pages: msg.data },
+                            [msg.data.buffer]
+                        );
                     }
-                } else {
-                    // Text message — possibly transcript or control
-                    try {
-                        var msg = JSON.parse(event.data);
-                        if (msg.text) {
-                            appendTranscript(msg.role || 'ai', msg.text);
-                        }
-                    } catch(e) {
-                        // Plain text transcript
-                        if (event.data.trim()) {
-                            appendTranscript('ai', event.data);
-                        }
-                    }
+                    return;
+                }
+
+                if (msg.type === 'text') {
+                    textBuffer += msg.data;
+                    appendTranscript(msg.data);
+                    return;
                 }
             };
 
@@ -521,53 +388,104 @@
         }
     };
 
+    // ---- Mic capture with opus-recorder ----
+    function startMicCapture() {
+        if (!window.Recorder) {
+            showError('Opus recorder not loaded');
+            return;
+        }
+
+        recorder = new window.Recorder({
+            encoderPath: 'https://cdnjs.cloudflare.com/ajax/libs/opus-recorder/8.0.5/encoderWorker.min.js',
+            encoderFrameSize: 20,
+            encoderSampleRate: 24000,
+            maxFramesPerPage: 2,
+            numberOfChannels: 1,
+            recordingGain: 1,
+            resampleQuality: 3,
+            encoderComplexity: 0,
+            encoderApplication: 2049,  // OPUS_APPLICATION_VOIP
+            streamPages: true,
+        });
+
+        recorder.ondataavailable = function(data) {
+            // data is a Uint8Array of Ogg Opus page(s)
+            if (ws && ws.readyState === WebSocket.OPEN && handshakeReceived) {
+                var msg = encodeAudioMsg(data);
+                ws.send(msg.buffer);
+                lastAudioSendTime = Date.now();
+                if (currentState === 'active') setState('listening');
+            }
+        };
+
+        recorder.onstart = function() {
+            console.log('Mic recording started');
+        };
+
+        recorder.start().catch(function(err) {
+            showError('Microphone access denied: ' + err.message);
+            vcCleanup();
+        });
+    }
+
+    // Periodically check if user stopped speaking
+    var vadInterval = null;
+    function startVadCheck() {
+        vadInterval = setInterval(function() {
+            if (currentState === 'listening' && Date.now() - lastAudioSendTime > 500) {
+                setState('active');
+            }
+            // If we're in 'speaking' state but no audio has come from server recently,
+            // revert to active (handled by worklet message timing)
+        }, 200);
+    }
+    // Start VAD check when connected
+    var origSetState = setState;
+    setState = function(state) {
+        origSetState(state);
+        if (state === 'active' && !vadInterval) startVadCheck();
+    };
+
+    // ---- Stop ----
     window.vcStop = function() {
         vcCleanup();
     };
 
     function vcCleanup() {
-        // Close WebSocket
-        if (ws) {
-            try { ws.close(); } catch(e) {}
-            ws = null;
+        if (vadInterval) { clearInterval(vadInterval); vadInterval = null; }
+
+        if (ws) { try { ws.close(); } catch(e) {} ws = null; }
+
+        if (recorder) {
+            try { recorder.stop(); } catch(e) {}
+            recorder = null;
         }
 
-        // Stop microphone
-        if (micStream) {
-            micStream.getTracks().forEach(function(t) { t.stop(); });
-            micStream = null;
+        if (workletNode) {
+            try { workletNode.disconnect(); } catch(e) {}
+            workletNode = null;
         }
 
-        // Disconnect audio nodes
-        if (scriptNode) {
-            try { scriptNode.disconnect(); } catch(e) {}
-            scriptNode = null;
-        }
-        if (sourceNode) {
-            try { sourceNode.disconnect(); } catch(e) {}
-            sourceNode = null;
+        if (decoderWorker) {
+            try { decoderWorker.terminate(); } catch(e) {}
+            decoderWorker = null;
         }
 
-        // Close AudioContext
         if (audioCtx) {
             try { audioCtx.close(); } catch(e) {}
             audioCtx = null;
         }
 
-        // Reset state
-        playbackQueue = [];
-        isPlaying = false;
-        vadActive = false;
-        vadSilenceFrames = 0;
-
-        setState('idle');
+        handshakeReceived = false;
+        textBuffer = '';
+        currentState = 'idle';
+        container.className = 'vc-container vc-state-idle';
+        statusEl.textContent = 'Ready to connect';
         startBtn.classList.remove('d-none');
         stopBtn.classList.add('d-none');
     }
 
-    // Cleanup on page unload
     window.addEventListener('beforeunload', vcCleanup);
-
 })();
 </script>
 {% endblock %}

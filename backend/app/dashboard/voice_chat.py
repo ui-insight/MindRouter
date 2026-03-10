@@ -5,6 +5,7 @@ import json
 import os
 import ssl
 from typing import Optional
+from urllib.parse import urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, Depends, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -47,6 +48,24 @@ def _get_session_user_id_from_ws(websocket: WebSocket) -> Optional[int]:
         return int(user_id)
     except Exception:
         return None
+
+
+def _build_personaplex_url(base_url: str, voice_prompt: str, text_prompt: str) -> str:
+    """Build the PersonaPlex WebSocket URL with voice/text prompt query params.
+
+    PersonaPlex expects connections to /api/chat with query parameters:
+      ?voice_prompt=NATF2.pt&text_prompt=You+are+a+friendly+assistant
+    """
+    parsed = urlparse(base_url)
+    # Ensure path ends with /api/chat
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/api/chat"):
+        path = path + "/api/chat"
+    query = urlencode({
+        "voice_prompt": voice_prompt,
+        "text_prompt": text_prompt,
+    })
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", query, ""))
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +143,22 @@ async def save_voice_chat_persona(
 
 @voice_chat_router.websocket("/voice-chat/ws")
 async def voice_chat_ws(websocket: WebSocket):
-    """Bidirectional WebSocket proxy to PersonaPlex backend."""
+    """Bidirectional WebSocket proxy to PersonaPlex backend.
+
+    PersonaPlex protocol (binary frames):
+      0x00 = handshake (server → client, signals ready)
+      0x01 + opus_data = audio (bidirectional)
+      0x02 + utf8_text = text token (server → client)
+
+    Persona config format:
+      {
+        "name": "Nova",
+        "url": "wss://host:8998",
+        "voice_prompt": "NATF2.pt",
+        "text_prompt": "You are a friendly assistant...",
+        "description": "Friendly assistant"
+      }
+    """
     import websockets
 
     # 1. Auth
@@ -143,33 +177,39 @@ async def voice_chat_ws(websocket: WebSocket):
 
         personas = await crud.get_config_json(db, "voice_chat.personas", [])
 
-    # 3. Determine which persona/URL to connect to
+    # 3. Find the requested persona
     persona_name = websocket.query_params.get("persona", "")
-    pp_url = None
+    persona = None
     if personas:
         for p in personas:
             if p.get("name") == persona_name:
-                pp_url = p.get("url")
+                persona = p
                 break
-        # Fallback to first persona if none matched
-        if not pp_url and personas:
-            pp_url = personas[0].get("url")
+        # Fallback to first persona
+        if not persona:
+            persona = personas[0] if personas else None
 
-    if not pp_url:
-        await websocket.close(code=4002, reason="No PersonaPlex URL configured")
+    if not persona or not persona.get("url"):
+        await websocket.close(code=4002, reason="No PersonaPlex persona configured")
         return
 
-    # 4. Accept browser WebSocket
+    # 4. Build the PersonaPlex WebSocket URL with voice/text prompt params
+    pp_url = _build_personaplex_url(
+        persona["url"],
+        persona.get("voice_prompt", "NATF2.pt"),
+        persona.get("text_prompt", "You enjoy having a good conversation."),
+    )
+
+    # 5. Accept browser WebSocket
     await websocket.accept()
     logger.info(
         "voice_chat_ws_connected",
         user_id=user_id,
-        persona=persona_name,
-        backend_url=pp_url,
+        persona=persona.get("name", "unknown"),
+        backend_url=persona["url"],
     )
 
-    # 5. Connect to PersonaPlex backend
-    # Build SSL context that doesn't verify certs (internal cluster)
+    # 6. Connect to PersonaPlex backend
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -178,7 +218,8 @@ async def voice_chat_ws(websocket: WebSocket):
 
     try:
         async with websockets.connect(pp_url, **connect_kwargs) as pp_ws:
-            # 6. Bridge: two async tasks forwarding in each direction
+            # 7. Bridge: forward all frames bidirectionally
+            # PersonaPlex uses binary frames exclusively (0x00/0x01/0x02 prefixed)
             async def browser_to_pp():
                 try:
                     while True:
