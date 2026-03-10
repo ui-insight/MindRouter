@@ -717,6 +717,83 @@ response = client.chat.completions.create(
         </div>
     </div>
 
+    <!-- ── Feature: Voice AI (TTS/STT) ── -->
+    <div class="row align-items-center g-4 mt-2">
+        <div class="col-lg-12">
+            <div class="text-center mb-4">
+                <span class="badge bg-purple bg-opacity-10 text-purple mb-2 px-3 py-2" style="font-size:0.8rem; background-color:rgba(111,66,193,0.12)!important; color:#6f42c1!important;"><i class="bi bi-mic"></i> Voice AI</span>
+                <h3 class="fw-bold mt-2">Text-to-Speech &amp; Speech-to-Text</h3>
+                <p class="text-muted mx-auto" style="max-width:600px;">OpenAI-compatible TTS and STT endpoints powered by Kokoro and Whisper, running entirely on local GPU infrastructure. Drop-in replacements for the OpenAI Audio API.</p>
+            </div>
+        </div>
+
+        <!-- Curl command cards -->
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body p-0">
+                    <div class="d-flex align-items-center px-3 pt-3 pb-2">
+                        <i class="bi bi-volume-up me-2" style="font-size:1.2rem; color:#6f42c1;"></i>
+                        <h6 class="fw-bold mb-0">Text-to-Speech</h6>
+                    </div>
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/speech \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kokoro",
+    "input": "Hello from MindRouter!",
+    "voice": "af_heart",
+    "response_format": "mp3",
+    "speed": 1.0
+  }' \
+  -o output.mp3</code></pre>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body p-0">
+                    <div class="d-flex align-items-center px-3 pt-3 pb-2">
+                        <i class="bi bi-mic me-2" style="font-size:1.2rem; color:#6f42c1;"></i>
+                        <h6 class="fw-bold mb-0">Speech-to-Text</h6>
+                    </div>
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/transcriptions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@recording.mp3" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "language=en" \
+  -F "response_format=json"</code></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Feature bullets -->
+        <div class="col-lg-12">
+            <div class="row g-3 justify-content-center">
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-plug text-primary" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">OpenAI Compatible</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Drop-in replacement for the OpenAI Audio API &mdash; same endpoints, same request format, works with existing SDKs</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-soundwave" style="font-size:2rem; color:#6f42c1;"></i></div>
+                        <h6 class="fw-bold mb-1">Multiple Voices</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Kokoro TTS engine with configurable voices, adjustable speed (0.25x&ndash;4x), and multiple output formats (mp3, wav, opus, flac)</p>
+                    </div>
+                </div>
+                <div class="col-md-4 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-shield-lock text-success" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">On-Premise Privacy</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Audio processed entirely on institutional GPUs &mdash; your voice data never leaves your infrastructure</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ── Feature 9: Infrastructure ── -->
     <div class="row align-items-center g-4">
         <div class="col-lg-12">
