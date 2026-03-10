@@ -738,7 +738,7 @@ response = client.chat.completions.create(
                         <i class="bi bi-volume-up me-2" style="font-size:1.2rem; color:#6f42c1;"></i>
                         <h6 class="fw-bold mb-0">Text-to-Speech</h6>
                     </div>
-                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/speech \
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.example.com/v1/audio/speech \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -759,7 +759,7 @@ response = client.chat.completions.create(
                         <i class="bi bi-mic me-2" style="font-size:1.2rem; color:#6f42c1;"></i>
                         <h6 class="fw-bold mb-0">Speech-to-Text</h6>
                     </div>
-                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/transcriptions \
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.example.com/v1/audio/transcriptions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "file=@recording.mp3" \
   -F "model=whisper-large-v3-turbo" \
