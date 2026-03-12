@@ -93,6 +93,48 @@
                 </div>
             </div>
 
+            <!-- Most Active Users -->
+            <div class="card mb-4">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <span><i class="bi bi-people-fill"></i> Most Active Users</span>
+                    <div class="btn-group btn-group-sm" role="group" id="active-users-window">
+                        <button type="button" class="btn btn-outline-primary" data-window="1m">1 Min</button>
+                        <button type="button" class="btn btn-outline-primary active" data-window="1h">1 HR</button>
+                        <button type="button" class="btn btn-outline-primary" data-window="4h">4 HR</button>
+                        <button type="button" class="btn btn-outline-primary" data-window="12h">12 HR</button>
+                        <button type="button" class="btn btn-outline-primary" data-window="24h">24 HR</button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div id="active-users-loading" class="text-center py-3" style="display:none;">
+                        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                        <span class="ms-2 text-muted">Loading...</span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0" id="active-users-table">
+                            <caption class="sr-only">Most active users by token usage</caption>
+                            <thead>
+                                <tr>
+                                    <th scope="col">#</th>
+                                    <th scope="col">Username</th>
+                                    <th scope="col">Group</th>
+                                    <th scope="col">Status</th>
+                                    <th scope="col">Top Model</th>
+                                    <th scope="col">Requests</th>
+                                    <th scope="col">Input Tokens</th>
+                                    <th scope="col">Output Tokens</th>
+                                    <th scope="col">Total Tokens</th>
+                                    <th scope="col">Top API Key</th>
+                                </tr>
+                            </thead>
+                            <tbody id="active-users-body">
+                                <tr><td colspan="10" class="text-center text-muted py-3">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             {% set unhealthy_backends = [] %}
             {% for b in backends if b.status.value not in ['healthy', 'disabled'] %}
                 {% if unhealthy_backends.append(b) %}{% endif %}
@@ -194,4 +236,79 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    const body = document.getElementById('active-users-body');
+    const loading = document.getElementById('active-users-loading');
+    const btnGroup = document.getElementById('active-users-window');
+    let currentWindow = '1h';
+
+    function formatNumber(n) {
+        return Number(n).toLocaleString();
+    }
+
+    function truncateModel(name) {
+        const short = name.includes('/') ? name.split('/').pop() : name;
+        return short.length > 24 ? short.substring(0, 22) + '…' : short;
+    }
+
+    async function loadTopUsers(window) {
+        currentWindow = window;
+        loading.style.display = '';
+        body.innerHTML = '';
+
+        try {
+            const resp = await fetch('/api/admin/top-users?window=' + encodeURIComponent(window));
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+
+            if (!data.users || data.users.length === 0) {
+                body.innerHTML = '<tr><td colspan="10" class="text-center text-muted py-3">No activity in this time window.</td></tr>';
+                return;
+            }
+
+            let html = '';
+            data.users.forEach(function(u, i) {
+                const statusBadge = u.is_active
+                    ? '<span class="badge bg-success">Active</span>'
+                    : '<span class="badge bg-secondary">Inactive</span>';
+                const keyLink = u.top_api_key_id
+                    ? '<a href="/admin/api-keys">' + u.top_api_key_name + '</a>'
+                    : '—';
+                html += '<tr>' +
+                    '<td>' + (i + 1) + '</td>' +
+                    '<td><a href="/admin/users/' + u.user_id + '">' + u.username + '</a></td>' +
+                    '<td>' + u.group_name + '</td>' +
+                    '<td>' + statusBadge + '</td>' +
+                    '<td title="' + u.top_model + '"><code>' + truncateModel(u.top_model) + '</code></td>' +
+                    '<td>' + formatNumber(u.request_count) + '</td>' +
+                    '<td>' + formatNumber(u.prompt_tokens) + '</td>' +
+                    '<td>' + formatNumber(u.completion_tokens) + '</td>' +
+                    '<td><strong>' + formatNumber(u.total_tokens) + '</strong></td>' +
+                    '<td>' + keyLink + '</td>' +
+                    '</tr>';
+            });
+            body.innerHTML = html;
+        } catch (e) {
+            body.innerHTML = '<tr><td colspan="10" class="text-center text-danger py-3">Failed to load data.</td></tr>';
+        } finally {
+            loading.style.display = 'none';
+        }
+    }
+
+    btnGroup.addEventListener('click', function(e) {
+        const btn = e.target.closest('[data-window]');
+        if (!btn) return;
+        btnGroup.querySelectorAll('.btn').forEach(function(b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        loadTopUsers(btn.dataset.window);
+    });
+
+    // Initial load
+    loadTopUsers(currentWindow);
+})();
+</script>
 {% endblock %}

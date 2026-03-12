@@ -1559,3 +1559,32 @@ async def list_api_keys(
             for k in keys
         ],
     }
+
+
+# ── Top Active Users ────────────────────────────────────────
+
+WINDOW_CHOICES = {
+    "1m": 60,
+    "1h": 3600,
+    "4h": 14400,
+    "12h": 43200,
+    "24h": 86400,
+}
+
+
+@router.get("/top-users")
+async def get_top_active_users(
+    window: str = Query("1h", description="Time window: 1m, 1h, 4h, 12h, 24h"),
+    admin: User = Depends(require_admin_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Return top 10 most active users by token usage within a time window."""
+    window_seconds = WINDOW_CHOICES.get(window)
+    if window_seconds is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid window. Choose from: {', '.join(WINDOW_CHOICES)}",
+        )
+
+    rows = await crud.get_top_active_users(db, window_seconds=window_seconds, limit=10)
+    return {"window": window, "window_seconds": window_seconds, "users": rows}

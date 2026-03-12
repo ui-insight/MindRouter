@@ -2660,6 +2660,134 @@ async def get_active_users_trend(
     ]
 
 
+async def get_top_active_users(
+    db: AsyncSession, window_seconds: int = 3600, limit: int = 10
+) -> List[dict]:
+    """Get top users by total tokens within a time window.
+
+    Returns up to `limit` users sorted descending by total_tokens,
+    with per-user stats: username, group, status, top model, request count,
+    input/output tokens, and most-used API key.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+
+    # Aggregate per-user token usage and request counts
+    stmt = (
+        select(
+            Request.user_id,
+            func.coalesce(func.sum(Request.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.sum(Request.prompt_tokens), 0).label("prompt_tokens"),
+            func.coalesce(func.sum(Request.completion_tokens), 0).label("completion_tokens"),
+            func.count(Request.id).label("request_count"),
+        )
+        .where(
+            and_(
+                Request.created_at >= cutoff,
+                Request.total_tokens.isnot(None),
+            )
+        )
+        .group_by(Request.user_id)
+        .order_by(func.sum(Request.total_tokens).desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    if not rows:
+        return []
+
+    user_ids = [row[0] for row in rows]
+
+    # Fetch user objects with groups
+    user_result = await db.execute(
+        select(User).options(selectinload(User.group)).where(User.id.in_(user_ids))
+    )
+    users_by_id = {u.id: u for u in user_result.scalars().all()}
+
+    # Top model per user in the window
+    model_stmt = (
+        select(
+            Request.user_id,
+            Request.model,
+            func.count(Request.id).label("cnt"),
+        )
+        .where(
+            and_(
+                Request.created_at >= cutoff,
+                Request.user_id.in_(user_ids),
+            )
+        )
+        .group_by(Request.user_id, Request.model)
+    )
+    model_result = await db.execute(model_stmt)
+    top_model_by_user: dict[int, str] = {}
+    model_counts: dict[int, dict[str, int]] = {}
+    for uid, model_name, cnt in model_result.all():
+        model_counts.setdefault(uid, {})
+        model_counts[uid][model_name] = cnt
+    for uid, models in model_counts.items():
+        top_model_by_user[uid] = max(models, key=models.get)
+
+    # Most-used API key per user in the window
+    key_stmt = (
+        select(
+            Request.user_id,
+            Request.api_key_id,
+            func.count(Request.id).label("cnt"),
+        )
+        .where(
+            and_(
+                Request.created_at >= cutoff,
+                Request.user_id.in_(user_ids),
+            )
+        )
+        .group_by(Request.user_id, Request.api_key_id)
+    )
+    key_result = await db.execute(key_stmt)
+    top_key_by_user: dict[int, int] = {}
+    key_counts: dict[int, dict[int, int]] = {}
+    for uid, key_id, cnt in key_result.all():
+        key_counts.setdefault(uid, {})
+        key_counts[uid][key_id] = cnt
+    for uid, keys in key_counts.items():
+        top_key_by_user[uid] = max(keys, key=keys.get)
+
+    # Fetch API key prefixes
+    all_key_ids = list(top_key_by_user.values())
+    key_prefix_map: dict[int, str] = {}
+    if all_key_ids:
+        kp_result = await db.execute(
+            select(ApiKey.id, ApiKey.key_prefix, ApiKey.name).where(ApiKey.id.in_(all_key_ids))
+        )
+        for kid, prefix, kname in kp_result.all():
+            key_prefix_map[kid] = kname or prefix or str(kid)
+
+    # Build result
+    out = []
+    for row in rows:
+        uid = row[0]
+        user = users_by_id.get(uid)
+        if not user:
+            continue
+        top_key_id = top_key_by_user.get(uid)
+        out.append({
+            "user_id": uid,
+            "username": user.username,
+            "full_name": user.full_name or "",
+            "group_name": user.group.display_name if user.group else "—",
+            "is_active": user.is_active,
+            "top_model": top_model_by_user.get(uid, "—"),
+            "request_count": int(row[4]),
+            "prompt_tokens": int(row[2]),
+            "completion_tokens": int(row[3]),
+            "total_tokens": int(row[1]),
+            "top_api_key_id": top_key_id,
+            "top_api_key_name": key_prefix_map.get(top_key_id, "—") if top_key_id else "—",
+        })
+
+    return out
+
+
 async def cancel_active_requests_for_backends(
     db: AsyncSession, backend_ids: List[int]
 ) -> int:
