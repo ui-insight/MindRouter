@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # Application
     app_name: str = "MindRouter"
     app_version: str = Field(default_factory=_get_version)
+    app_base_url: str = "https://mindrouter.uidaho.edu"
     debug: bool = False
     reload: bool = False
 

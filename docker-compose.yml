@@ -18,6 +18,7 @@ services:
       - AZURE_AD_TENANT_ID=${AZURE_AD_TENANT_ID:-}
       - AZURE_AD_REDIRECT_URI=${AZURE_AD_REDIRECT_URI:-}
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
+      - APP_BASE_URL=${APP_BASE_URL:-https://mindrouter.uidaho.edu}
       - ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:${MYSQL_ARCHIVE_PASSWORD:-archive_password}@mariadb-archive:3306/mindrouter_archive
     volumes:
       - artifact_data:/data/artifacts

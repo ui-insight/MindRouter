@@ -77,6 +77,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'email' %}active{% endif %}" href="/admin/email" {% if active == 'email' %}aria-current="page"{% endif %}>
+                <i class="bi bi-envelope"></i> Email
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'retention' %}active{% endif %}" href="/admin/retention" {% if active == 'retention' %}aria-current="page"{% endif %}>
                 <i class="bi bi-archive"></i> Data Retention
             </a>

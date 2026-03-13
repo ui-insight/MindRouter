@@ -33,6 +33,7 @@ from backend.app.db.models import (
     BackendStatus,
     BackendTelemetry,
     BlogPost,
+    EmailLog,
     GPUDevice,
     GPUDeviceTelemetry,
     Group,
@@ -2568,6 +2569,113 @@ async def accept_agreement(db: AsyncSession, user_id: int, version: int) -> None
         )
     )
     await db.flush()
+
+
+# ---------------------------------------------------------------------------
+# Email helpers
+# ---------------------------------------------------------------------------
+
+
+async def create_email_log(
+    db: AsyncSession,
+    subject: str,
+    sent_by: int,
+    recipient_count: int,
+    body_preview: Optional[str] = None,
+    blog_post_id: Optional[int] = None,
+) -> EmailLog:
+    """Create an email log entry."""
+    log = EmailLog(
+        subject=subject,
+        body_preview=(body_preview or "")[:500],
+        recipient_count=recipient_count,
+        sent_by=sent_by,
+        blog_post_id=blog_post_id,
+        status="pending",
+    )
+    db.add(log)
+    await db.flush()
+    return log
+
+
+async def update_email_log(
+    db: AsyncSession, log_id: int, **kwargs
+) -> None:
+    """Update email log fields."""
+    result = await db.execute(select(EmailLog).where(EmailLog.id == log_id))
+    log = result.scalar_one_or_none()
+    if log:
+        for k, v in kwargs.items():
+            setattr(log, k, v)
+        await db.flush()
+
+
+async def get_email_logs(
+    db: AsyncSession, limit: int = 20
+) -> List[EmailLog]:
+    """Get recent email log entries."""
+    result = await db.execute(
+        select(EmailLog)
+        .options(selectinload(EmailLog.sender), selectinload(EmailLog.blog_post))
+        .order_by(EmailLog.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_emailable_users(
+    db: AsyncSession,
+    group_ids: Optional[List[int]] = None,
+    user_ids: Optional[List[int]] = None,
+    exclude_blog_optout: bool = False,
+) -> List[User]:
+    """Get active users for emailing, optionally filtered by group/user IDs.
+
+    If exclude_blog_optout=True, exclude users who set email_optout preference.
+    """
+    stmt = select(User).options(selectinload(User.group)).where(
+        User.is_active == True,  # noqa: E712
+        User.email.isnot(None),
+        User.email != "",
+    )
+    if group_ids:
+        stmt = stmt.where(User.group_id.in_(group_ids))
+    if user_ids:
+        stmt = stmt.where(User.id.in_(user_ids))
+
+    result = await db.execute(stmt)
+    users = list(result.scalars().all())
+
+    if exclude_blog_optout and users:
+        # Get opted-out user IDs from AppConfig
+        optout_keys = [f"user.{u.id}.email_optout" for u in users]
+        cfg_result = await db.execute(
+            select(AppConfig.key, AppConfig.value).where(AppConfig.key.in_(optout_keys))
+        )
+        opted_out_ids = set()
+        for key, value in cfg_result.all():
+            if value and value.strip('"').lower() in ("true", "1", "on"):
+                # Extract user_id from key "user.{id}.email_optout"
+                parts = key.split(".")
+                if len(parts) == 3:
+                    try:
+                        opted_out_ids.add(int(parts[1]))
+                    except ValueError:
+                        pass
+        users = [u for u in users if u.id not in opted_out_ids]
+
+    return users
+
+
+async def get_blog_email_log(db: AsyncSession, blog_post_id: int) -> Optional[EmailLog]:
+    """Get the most recent email log for a blog post."""
+    result = await db.execute(
+        select(EmailLog)
+        .where(EmailLog.blog_post_id == blog_post_id)
+        .order_by(EmailLog.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 # ---------------------------------------------------------------------------

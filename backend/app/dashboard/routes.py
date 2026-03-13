@@ -611,6 +611,9 @@ async def user_dashboard(
     user_tts_voice = await crud.get_config_json(db, f"user.{effective_id}.tts_voice", "")
     user_tts_speed = await crud.get_config_json(db, f"user.{effective_id}.tts_speed", None)
 
+    # Email opt-out preference
+    email_optout = await crud.get_config_json(db, f"user.{effective_id}.email_optout", "")
+
     return templates.TemplateResponse(
         "user/dashboard.html",
         {
@@ -634,6 +637,7 @@ async def user_dashboard(
             "tts_enabled": tts_enabled,
             "user_tts_voice": user_tts_voice or "",
             "user_tts_speed": user_tts_speed,
+            "email_optout": email_optout,
         },
     )
 
@@ -748,7 +752,7 @@ async def save_preference(
     body = await request.json()
     key = body.get("key", "")
     value = body.get("value", "")
-    allowed_keys = {"tts_voice", "tts_speed"}
+    allowed_keys = {"tts_voice", "tts_speed", "email_optout"}
     if key not in allowed_keys:
         return JSONResponse({"error": f"Invalid preference key: {key}"}, status_code=400)
     config_key = f"user.{effective_id}.{key}"
@@ -3123,6 +3127,10 @@ async def admin_settings(
     # Use agreement
     agreement = await crud.get_agreement(db)
 
+    # Email / SMTP config
+    from backend.app.services.email_service import get_smtp_config
+    smtp_config = await get_smtp_config(db)
+
     return templates.TemplateResponse(
         "admin/settings.html",
         {
@@ -3139,6 +3147,14 @@ async def admin_settings(
             "available_model_names": available_model_names,
             "agreement_text": agreement["text"],
             "agreement_version": agreement["version"],
+            "smtp_host": smtp_config["host"],
+            "smtp_port": smtp_config["port"],
+            "smtp_username": smtp_config["username"],
+            "smtp_password": smtp_config["password"],
+            "smtp_use_tls": smtp_config["use_tls"],
+            "smtp_default_sender": smtp_config["default_sender"],
+            "smtp_test_address": smtp_config["test_address"],
+            "smtp_blog_sender": smtp_config["blog_sender"],
             "success": success,
             "error": error,
         },
@@ -3226,6 +3242,52 @@ async def admin_settings_post(
         await db.commit()
         msg = "agreement_updated_and_bumped" if bump else "agreement_updated"
         return RedirectResponse(url=f"/admin/settings?success={msg}", status_code=302)
+
+    elif action == "set_email_config":
+        from backend.app.services import email_service
+        keys_map = {
+            "smtp_host": ("email.smtp_host", "SMTP server hostname"),
+            "smtp_port": ("email.smtp_port", "SMTP server port"),
+            "smtp_username": ("email.smtp_username", "SMTP username"),
+            "smtp_password": ("email.smtp_password", "SMTP password"),
+            "smtp_default_sender": ("email.default_sender", "Default sender address"),
+            "smtp_test_address": ("email.test_address", "Test recipient address"),
+            "smtp_blog_sender": ("email.blog_sender", "Blog notification sender address"),
+        }
+        for field, (config_key, desc) in keys_map.items():
+            val = form.get(field, "").strip()
+            # Skip empty password field (keep existing)
+            if field == "smtp_password" and not val:
+                continue
+            await crud.set_config(db, config_key, val, description=desc)
+        # TLS is a checkbox
+        use_tls = form.get("smtp_use_tls") == "on"
+        await crud.set_config(db, "email.use_tls", use_tls, description="Use TLS for SMTP")
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=email_config_updated", status_code=302)
+
+    elif action == "test_email":
+        from backend.app.services import email_service
+        smtp_config = await email_service.get_smtp_config(db)
+        if not email_service.is_smtp_configured(smtp_config):
+            return RedirectResponse(url="/admin/settings?error=SMTP+not+configured", status_code=302)
+        test_addr = smtp_config.get("test_address") or smtp_config.get("default_sender")
+        if not test_addr:
+            return RedirectResponse(url="/admin/settings?error=No+test+address+configured", status_code=302)
+        try:
+            smtp = await email_service._open_smtp(smtp_config)
+            try:
+                await email_service._send_one(
+                    smtp, smtp_config["default_sender"], test_addr,
+                    "MindRouter Test Email",
+                    email_service._wrap_html("<p>This is a test email from MindRouter.</p>"),
+                )
+            finally:
+                await smtp.quit()
+            return RedirectResponse(url=f"/admin/settings?success=test_email_sent", status_code=302)
+        except Exception as e:
+            from urllib.parse import quote_plus
+            return RedirectResponse(url=f"/admin/settings?error={quote_plus(str(e))}", status_code=302)
 
     return RedirectResponse(url="/admin/settings?error=Unknown+action", status_code=302)
 

@@ -825,6 +825,39 @@ class BlogPost(Base, TimestampMixin, SoftDeleteMixin):
     author: Mapped["User"] = relationship("User")
 
 
+class EmailStatus(str, PyEnum):
+    """Email send status."""
+    PENDING = "pending"
+    SENDING = "sending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class EmailLog(Base):
+    """Audit log of sent emails."""
+
+    __tablename__ = "email_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(500), nullable=False)
+    body_preview: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recipient_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    fail_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    sent_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    blog_post_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("blog_posts.id"), nullable=True)
+    status: Mapped[EmailStatus] = mapped_column(
+        Enum(EmailStatus, values_callable=_enum_values), nullable=False, server_default="pending"
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    sender: Mapped["User"] = relationship("User", foreign_keys=[sent_by])
+    blog_post: Mapped[Optional["BlogPost"]] = relationship("BlogPost")
+
+
 class AppConfig(Base, TimestampMixin):
     """Key-value application configuration stored in the database."""
 

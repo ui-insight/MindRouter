@@ -20,6 +20,8 @@
                 {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
                 {% elif success == 'agreement_updated' %}Use agreement text saved.
                 {% elif success == 'agreement_updated_and_bumped' %}Use agreement saved and version bumped. All users must re-accept.
+                {% elif success == 'email_config_updated' %}Email / SMTP configuration saved.
+                {% elif success == 'test_email_sent' %}Test email sent successfully.
                 {% else %}{{ success }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -163,6 +165,78 @@
                                 </div>
                             </form>
                             <div id="agreementPreview" class="border rounded p-3 mt-3 bg-light" style="display:none;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Email / SMTP Configuration -->
+                <div class="col-lg-12">
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0"><i class="bi bi-envelope me-2"></i>Email / SMTP Configuration</h5>
+                            {% if smtp_host %}
+                            <span class="badge bg-success">Configured</span>
+                            {% else %}
+                            <span class="badge bg-secondary">Not configured</span>
+                            {% endif %}
+                        </div>
+                        <div class="card-body">
+                            <p class="text-muted small">Configure the outbound SMTP server for sending emails (notifications, blog updates, admin emails).</p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_email_config">
+                                <div class="row">
+                                    <div class="col-md-8 mb-3">
+                                        <label for="smtpHost" class="form-label">SMTP Host</label>
+                                        <input type="text" class="form-control" name="smtp_host" id="smtpHost" value="{{ smtp_host }}" placeholder="smtp.example.com">
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label for="smtpPort" class="form-label">SMTP Port</label>
+                                        <input type="text" class="form-control" name="smtp_port" id="smtpPort" value="{{ smtp_port }}" placeholder="587">
+                                    </div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <label for="smtpUsername" class="form-label">Username</label>
+                                        <input type="text" class="form-control" name="smtp_username" id="smtpUsername" value="{{ smtp_username }}" placeholder="Optional">
+                                    </div>
+                                    <div class="col-md-6 mb-3">
+                                        <label for="smtpPassword" class="form-label">Password</label>
+                                        <input type="password" class="form-control" name="smtp_password" id="smtpPassword" placeholder="{% if smtp_password %}(password set){% else %}Optional{% endif %}">
+                                        <div class="form-text">Leave blank to keep current password.</div>
+                                    </div>
+                                </div>
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" name="smtp_use_tls" id="smtpUseTls" {% if smtp_use_tls %}checked{% endif %}>
+                                    <label class="form-check-label" for="smtpUseTls">Use TLS (STARTTLS)</label>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-4 mb-3">
+                                        <label for="smtpDefaultSender" class="form-label">Default Sender</label>
+                                        <input type="email" class="form-control" name="smtp_default_sender" id="smtpDefaultSender" value="{{ smtp_default_sender }}" placeholder="noreply@example.com">
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label for="smtpBlogSender" class="form-label">Blog Sender</label>
+                                        <input type="email" class="form-control" name="smtp_blog_sender" id="smtpBlogSender" value="{{ smtp_blog_sender }}" placeholder="do-not-reply@example.com">
+                                        <div class="form-text">Sender for blog notification emails.</div>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label for="smtpTestAddress" class="form-label">Test Address</label>
+                                        <input type="email" class="form-control" name="smtp_test_address" id="smtpTestAddress" value="{{ smtp_test_address }}" placeholder="admin@example.com">
+                                        <div class="form-text">Recipient for test emails.</div>
+                                    </div>
+                                </div>
+                                <div class="d-flex gap-2">
+                                    <button type="submit" class="btn btn-primary btn-sm">Save Email Config</button>
+                                </div>
+                            </form>
+                            <hr>
+                            <form method="post" action="/admin/settings" class="d-inline">
+                                <input type="hidden" name="action" value="test_email">
+                                <button type="submit" class="btn btn-outline-secondary btn-sm" {% if not smtp_host %}disabled{% endif %}>
+                                    <i class="bi bi-send me-1"></i>Send Test Email
+                                </button>
+                                <span class="text-muted small ms-2">Sends to the test address (or default sender if not set).</span>
+                            </form>
                         </div>
                     </div>
                 </div>

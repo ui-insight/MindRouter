@@ -22,6 +22,19 @@
         <div class="col-md-10 py-3">
             <h2>{{ 'Edit' if post else 'New' }} Blog Post</h2>
 
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {{ success }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
             <form method="post" action="{{ '/admin/blog/' ~ post.id ~ '/edit' if post else '/admin/blog/new' }}">
                 <div class="row">
                     <div class="col-md-8 mb-3">
@@ -76,6 +89,40 @@
                     <a href="/admin/blog" class="btn btn-outline-secondary">Cancel</a>
                 </div>
             </form>
+
+            {% if post and post.is_published and smtp_ready is defined and smtp_ready %}
+            <hr>
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-envelope me-2"></i>Email Distribution</h5>
+                </div>
+                <div class="card-body">
+                    {% if blog_email_log %}
+                    <div class="alert alert-info small mb-3">
+                        <i class="bi bi-info-circle me-1"></i>
+                        This post was emailed on {{ blog_email_log.created_at|localtime }}
+                        ({{ blog_email_log.success_count }}/{{ blog_email_log.recipient_count }} delivered).
+                    </div>
+                    {% endif %}
+
+                    <div class="d-flex gap-2 align-items-center">
+                        <form method="post" action="/admin/blog/{{ post.id }}/send-email" class="d-inline"
+                              onsubmit="return confirm('Send this blog post as email to all subscribed users?');">
+                            <button type="submit" class="btn btn-primary btn-sm">
+                                <i class="bi bi-send me-1"></i>{{ 'Re-send' if blog_email_log else 'Send' }} as Email
+                            </button>
+                        </form>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="blogTestEmailBtn">
+                            <i class="bi bi-envelope-check me-1"></i>Send Test
+                        </button>
+                        <span id="blogTestResult" class="small"></span>
+                    </div>
+                    <div class="form-text mt-1">
+                        Sends to all users with email addresses (excluding those who opted out of blog emails).
+                    </div>
+                </div>
+            </div>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -136,6 +183,31 @@
 
     function updatePreview() {
         previewPane.innerHTML = marked.parse(contentArea.value);
+    }
+
+    // Blog test email
+    var blogTestBtn = document.getElementById('blogTestEmailBtn');
+    if (blogTestBtn) {
+        blogTestBtn.addEventListener('click', function() {
+            var result = document.getElementById('blogTestResult');
+            result.textContent = 'Sending...';
+            result.className = 'small text-muted';
+            fetch('/admin/blog/{{ post.id if post else 0 }}/send-test-email', {method: 'POST'})
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.ok) {
+                    result.textContent = data.message;
+                    result.className = 'small text-success';
+                } else {
+                    result.textContent = data.error || 'Error';
+                    result.className = 'small text-danger';
+                }
+            })
+            .catch(function() {
+                result.textContent = 'Network error';
+                result.className = 'small text-danger';
+            });
+        });
     }
 </script>
 {% endblock %}

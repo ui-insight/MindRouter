@@ -1,0 +1,284 @@
+{% extends "base.html" %}
+
+{% block title %}Email - Admin - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "email" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-envelope"></i> Email</h1>
+            <p class="text-muted">Send emails to MindRouter users.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {{ success }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            {% if not smtp_ready %}
+            <div class="alert alert-warning">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                SMTP is not configured. <a href="/admin/settings">Configure it in Settings</a> before sending emails.
+            </div>
+            {% endif %}
+
+            <div class="row">
+                <div class="col-lg-8">
+                    <div class="card mb-4">
+                        <div class="card-header"><h5 class="mb-0">Compose Email</h5></div>
+                        <div class="card-body">
+                            <form method="post" action="/admin/email/send" id="emailForm">
+                                <!-- Recipients -->
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold">Recipients</label>
+                                    <div class="btn-group w-100 mb-2" role="group" aria-label="Recipient mode">
+                                        <input type="radio" class="btn-check" name="recipient_mode" id="modeAll" value="all" checked>
+                                        <label class="btn btn-outline-primary" for="modeAll">All Users</label>
+                                        <input type="radio" class="btn-check" name="recipient_mode" id="modeGroups" value="groups">
+                                        <label class="btn btn-outline-primary" for="modeGroups">By Group</label>
+                                        <input type="radio" class="btn-check" name="recipient_mode" id="modeUsers" value="users">
+                                        <label class="btn btn-outline-primary" for="modeUsers">Select Users</label>
+                                    </div>
+
+                                    <!-- Group selection -->
+                                    <div id="groupSelect" style="display:none;" class="mb-2">
+                                        <label class="form-label small text-muted">Select groups:</label>
+                                        {% for g in groups %}
+                                        <div class="form-check">
+                                            <input class="form-check-input group-check" type="checkbox" value="{{ g.id }}" id="group{{ g.id }}">
+                                            <label class="form-check-label" for="group{{ g.id }}">{{ g.display_name }} ({{ g.name }})</label>
+                                        </div>
+                                        {% endfor %}
+                                    </div>
+
+                                    <!-- User search/selection -->
+                                    <div id="userSelect" style="display:none;" class="mb-2">
+                                        <label class="form-label small text-muted">Search and add users:</label>
+                                        <input type="text" class="form-control form-control-sm mb-2" id="userSearch" placeholder="Type to search users...">
+                                        <div id="userSearchResults" class="list-group mb-2" style="max-height:200px; overflow-y:auto;"></div>
+                                        <div id="selectedUsers" class="d-flex flex-wrap gap-1"></div>
+                                    </div>
+
+                                    <!-- Hidden fields for form submission -->
+                                    <input type="hidden" name="group_ids" id="groupIdsField">
+                                    <input type="hidden" name="user_ids" id="userIdsField">
+
+                                    <div class="text-muted small">
+                                        <i class="bi bi-people me-1"></i>
+                                        <span id="recipientCount">Calculating...</span>
+                                    </div>
+                                </div>
+
+                                <!-- Subject -->
+                                <div class="mb-3">
+                                    <label for="emailSubject" class="form-label fw-bold">Subject</label>
+                                    <input type="text" class="form-control" name="subject" id="emailSubject" required placeholder="Email subject line">
+                                </div>
+
+                                <!-- Body -->
+                                <div class="mb-3">
+                                    <label for="emailBody" class="form-label fw-bold">Body (HTML)</label>
+                                    <textarea class="form-control font-monospace" name="body" id="emailBody" rows="12" required placeholder="Write your email content here..."></textarea>
+                                    <div class="form-text">
+                                        You can use HTML. Template variables: <code>{{'{{'}}username{{'}}'}}</code>, <code>{{'{{'}}full_name{{'}}'}}</code>, <code>{{'{{'}}email{{'}}'}}</code>
+                                    </div>
+                                </div>
+
+                                <div class="d-flex gap-2">
+                                    <button type="submit" class="btn btn-primary" {% if not smtp_ready %}disabled{% endif %}>
+                                        <i class="bi bi-send me-1"></i>Send Email
+                                    </button>
+                                    <button type="button" class="btn btn-outline-secondary" id="sendTestBtn" {% if not smtp_ready %}disabled{% endif %}>
+                                        <i class="bi bi-envelope-check me-1"></i>Send Test
+                                    </button>
+                                    <span id="testResult" class="align-self-center small"></span>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-4">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Recent Emails</h5></div>
+                        <div class="card-body p-0">
+                            {% if email_logs %}
+                            <div class="list-group list-group-flush">
+                                {% for log in email_logs %}
+                                <div class="list-group-item">
+                                    <div class="d-flex justify-content-between align-items-start">
+                                        <div>
+                                            <strong class="small">{{ log.subject }}</strong>
+                                            <div class="text-muted" style="font-size:0.75rem;">
+                                                {{ log.created_at|localtime }}
+                                            </div>
+                                        </div>
+                                        <div class="text-end">
+                                            {% if log.status.value == 'completed' %}
+                                            <span class="badge bg-success">{{ log.success_count }}/{{ log.recipient_count }}</span>
+                                            {% elif log.status.value == 'sending' %}
+                                            <span class="badge bg-warning">Sending...</span>
+                                            {% elif log.status.value == 'failed' %}
+                                            <span class="badge bg-danger">Failed</span>
+                                            {% else %}
+                                            <span class="badge bg-secondary">{{ log.status.value }}</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            {% else %}
+                            <div class="p-3 text-muted small">No emails sent yet.</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    const modeAll = document.getElementById('modeAll');
+    const modeGroups = document.getElementById('modeGroups');
+    const modeUsers = document.getElementById('modeUsers');
+    const groupSelect = document.getElementById('groupSelect');
+    const userSelect = document.getElementById('userSelect');
+    const groupIdsField = document.getElementById('groupIdsField');
+    const userIdsField = document.getElementById('userIdsField');
+    const recipientCount = document.getElementById('recipientCount');
+    const selectedUsersDiv = document.getElementById('selectedUsers');
+    const userSearchInput = document.getElementById('userSearch');
+    const userSearchResults = document.getElementById('userSearchResults');
+    const sendTestBtn = document.getElementById('sendTestBtn');
+    const testResult = document.getElementById('testResult');
+
+    let selectedUserIds = new Set();
+
+    function updateRecipientMode() {
+        const mode = document.querySelector('input[name="recipient_mode"]:checked').value;
+        groupSelect.style.display = mode === 'groups' ? '' : 'none';
+        userSelect.style.display = mode === 'users' ? '' : 'none';
+        updateRecipientCount();
+    }
+
+    function updateRecipientCount() {
+        const mode = document.querySelector('input[name="recipient_mode"]:checked').value;
+        const groupIds = [...document.querySelectorAll('.group-check:checked')].map(c => c.value);
+        const userIds = [...selectedUserIds];
+
+        groupIdsField.value = groupIds.join(',');
+        userIdsField.value = userIds.join(',');
+
+        fetch('/admin/email/recipient-count', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode, group_ids: groupIds, user_ids: userIds})
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.count !== undefined) {
+                recipientCount.textContent = data.count + ' recipient' + (data.count !== 1 ? 's' : '');
+            }
+        })
+        .catch(() => { recipientCount.textContent = 'Error loading count'; });
+    }
+
+    modeAll.addEventListener('change', updateRecipientMode);
+    modeGroups.addEventListener('change', updateRecipientMode);
+    modeUsers.addEventListener('change', updateRecipientMode);
+    document.querySelectorAll('.group-check').forEach(cb => cb.addEventListener('change', updateRecipientCount));
+
+    // User search
+    let searchTimeout;
+    userSearchInput.addEventListener('input', function() {
+        clearTimeout(searchTimeout);
+        const q = this.value.trim();
+        if (q.length < 2) { userSearchResults.innerHTML = ''; return; }
+        searchTimeout = setTimeout(() => {
+            fetch('/admin/email/user-search?q=' + encodeURIComponent(q))
+            .then(r => r.json())
+            .then(data => {
+                userSearchResults.innerHTML = '';
+                (data.users || []).forEach(u => {
+                    if (selectedUserIds.has(String(u.id))) return;
+                    const item = document.createElement('button');
+                    item.type = 'button';
+                    item.className = 'list-group-item list-group-item-action small py-1';
+                    item.textContent = u.username + (u.full_name ? ' (' + u.full_name + ')' : '') + ' - ' + u.email;
+                    item.addEventListener('click', () => addUser(u));
+                    userSearchResults.appendChild(item);
+                });
+            });
+        }, 300);
+    });
+
+    function addUser(u) {
+        selectedUserIds.add(String(u.id));
+        renderSelectedUsers(u);
+        userSearchResults.innerHTML = '';
+        userSearchInput.value = '';
+        updateRecipientCount();
+    }
+
+    function renderSelectedUsers(newUser) {
+        if (newUser) {
+            const badge = document.createElement('span');
+            badge.className = 'badge bg-primary d-flex align-items-center gap-1';
+            badge.dataset.userId = newUser.id;
+            badge.innerHTML = newUser.username + ' <button type="button" class="btn-close btn-close-white" style="font-size:0.5rem;" aria-label="Remove"></button>';
+            badge.querySelector('.btn-close').addEventListener('click', () => {
+                selectedUserIds.delete(String(newUser.id));
+                badge.remove();
+                updateRecipientCount();
+            });
+            selectedUsersDiv.appendChild(badge);
+        }
+    }
+
+    // Send test
+    sendTestBtn.addEventListener('click', function() {
+        const subject = document.getElementById('emailSubject').value;
+        const body = document.getElementById('emailBody').value;
+        if (!subject || !body) { testResult.textContent = 'Fill in subject and body first.'; return; }
+        testResult.textContent = 'Sending...';
+        testResult.className = 'align-self-center small text-muted';
+        fetch('/admin/email/send-test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({subject, body})
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                testResult.textContent = data.message;
+                testResult.className = 'align-self-center small text-success';
+            } else {
+                testResult.textContent = data.error || 'Error';
+                testResult.className = 'align-self-center small text-danger';
+            }
+        })
+        .catch(() => {
+            testResult.textContent = 'Network error';
+            testResult.className = 'align-self-center small text-danger';
+        });
+    });
+
+    updateRecipientMode();
+})();
+</script>
+{% endblock %}

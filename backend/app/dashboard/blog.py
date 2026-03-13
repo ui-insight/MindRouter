@@ -14,18 +14,20 @@
 
 """Blog routes for MindRouter."""
 
+import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Optional
 
 import markdown
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
 from backend.app.db.session import get_async_db
 from backend.app.dashboard.routes import get_session_user_id, templates
+from backend.app.services import email_service
 from backend.app.settings import get_settings
 
 blog_router = APIRouter(tags=["blog"])
@@ -174,6 +176,8 @@ async def admin_blog_create(
 async def admin_blog_edit(
     request: Request,
     post_id: int,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin: edit post form."""
@@ -185,9 +189,22 @@ async def admin_blog_edit(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
+    smtp_config = await email_service.get_smtp_config(db)
+    smtp_ready = email_service.is_smtp_configured(smtp_config)
+    blog_email_log = await crud.get_blog_email_log(db, post_id)
+
     return templates.TemplateResponse(
         "admin/blog_edit.html",
-        {"request": request, "user": user, "post": post, "active": "blog"},
+        {
+            "request": request,
+            "user": user,
+            "post": post,
+            "active": "blog",
+            "smtp_ready": smtp_ready,
+            "blog_email_log": blog_email_log,
+            "success": success,
+            "error": error,
+        },
     )
 
 
@@ -266,3 +283,107 @@ async def admin_blog_toggle_publish(
     await db.commit()
 
     return RedirectResponse("/admin/blog", status_code=302)
+
+
+@blog_router.post("/admin/blog/{post_id}/send-email")
+async def admin_blog_send_email(
+    request: Request,
+    post_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Send blog post as email to all users (excluding opt-outs)."""
+    user, redirect = await _require_admin(request, db)
+    if redirect:
+        return redirect
+
+    post = await crud.get_blog_post_by_id(db, post_id)
+    if not post or not post.is_published:
+        return RedirectResponse(f"/admin/blog/{post_id}/edit?error=Post+must+be+published", status_code=302)
+
+    smtp_config = await email_service.get_smtp_config(db)
+    if not email_service.is_smtp_configured(smtp_config):
+        return RedirectResponse(f"/admin/blog/{post_id}/edit?error=SMTP+not+configured", status_code=302)
+
+    users = await crud.get_emailable_users(db, exclude_blog_optout=True)
+    if not users:
+        return RedirectResponse(f"/admin/blog/{post_id}/edit?error=No+recipients", status_code=302)
+
+    settings = get_settings()
+    base_url = settings.app_base_url or "https://mindrouter.uidaho.edu"
+
+    subject = f"MindRouter Blog: {post.title}"
+    html_body = email_service._render_blog_email(
+        post.title, post.content, post.slug,
+        user.full_name or user.username, base_url,
+    )
+
+    sender = smtp_config.get("blog_sender") or smtp_config.get("default_sender")
+
+    log = await crud.create_email_log(
+        db, subject=subject, sent_by=user.id,
+        recipient_count=len(users), body_preview=post.title,
+        blog_post_id=post.id,
+    )
+    await db.commit()
+
+    recipient_list = [
+        {"email": u.email, "username": u.username, "full_name": u.full_name or ""}
+        for u in users
+    ]
+
+    asyncio.create_task(
+        email_service.send_bulk_email(
+            log.id, subject, html_body, recipient_list, sender, smtp_config,
+        )
+    )
+
+    return RedirectResponse(
+        f"/admin/blog/{post_id}/edit?success=Sending+to+{len(users)}+recipients", status_code=302
+    )
+
+
+@blog_router.post("/admin/blog/{post_id}/send-test-email")
+async def admin_blog_send_test_email(
+    request: Request,
+    post_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Send blog post as test email to the configured test address."""
+    user, redirect = await _require_admin(request, db)
+    if redirect:
+        return redirect
+
+    post = await crud.get_blog_post_by_id(db, post_id)
+    if not post:
+        return JSONResponse({"error": "Post not found"}, status_code=404)
+
+    smtp_config = await email_service.get_smtp_config(db)
+    if not email_service.is_smtp_configured(smtp_config):
+        return JSONResponse({"error": "SMTP not configured"}, status_code=400)
+
+    test_addr = smtp_config.get("test_address") or smtp_config.get("default_sender")
+    if not test_addr:
+        return JSONResponse({"error": "No test address configured"}, status_code=400)
+
+    settings = get_settings()
+    base_url = settings.app_base_url or "https://mindrouter.uidaho.edu"
+
+    subject = f"[TEST] MindRouter Blog: {post.title}"
+    html_body = email_service._render_blog_email(
+        post.title, post.content, post.slug,
+        user.full_name or user.username, base_url,
+    )
+    sender = smtp_config.get("blog_sender") or smtp_config.get("default_sender")
+
+    test_user = {"email": test_addr, "username": "testuser", "full_name": "Test User"}
+    personalized = email_service._personalize(html_body, test_user)
+
+    try:
+        smtp = await email_service._open_smtp(smtp_config)
+        try:
+            await email_service._send_one(smtp, sender, test_addr, subject, personalized)
+        finally:
+            await smtp.quit()
+        return JSONResponse({"ok": True, "message": f"Test sent to {test_addr}"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
