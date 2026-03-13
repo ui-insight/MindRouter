@@ -439,7 +439,9 @@ async def login(
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
 
-    response = RedirectResponse(url="/dashboard", status_code=302)
+    # Redirect to agreement page if user hasn't accepted current version
+    target = "/dashboard/agreement" if await _needs_agreement(db, user) else "/dashboard"
+    response = RedirectResponse(url=target, status_code=302)
     set_session_cookie(response, user.id)
     return response
 
@@ -450,6 +452,101 @@ async def logout():
     response = RedirectResponse(url="/", status_code=302)
     clear_session_cookie(response)
     return response
+
+
+# ---------------------------------------------------------------------------
+# Use Agreement
+# ---------------------------------------------------------------------------
+
+
+async def _needs_agreement(db, user) -> bool:
+    """Return True if the user needs to accept the current agreement."""
+    agreement = await crud.get_agreement(db)
+    if agreement["version"] is None:
+        return False  # no agreement configured
+    return user.agreement_version_accepted != agreement["version"]
+
+
+@dashboard_router.get("/dashboard/agreement", response_class=HTMLResponse)
+async def agreement_page(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Show the use agreement for acceptance."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+
+    agreement = await crud.get_agreement(db)
+    if agreement["version"] is None or user.agreement_version_accepted == agreement["version"]:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    return templates.TemplateResponse(
+        "user/agreement.html",
+        {
+            "request": request,
+            "user": user,
+            "agreement_text": agreement["text"],
+            "agreement_version": agreement["version"],
+        },
+    )
+
+
+@dashboard_router.post("/dashboard/agreement")
+async def accept_agreement(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle agreement acceptance."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    form = await request.form()
+    submitted_version = int(form.get("version", 0))
+
+    # Verify the submitted version matches the current version
+    agreement = await crud.get_agreement(db)
+    if agreement["version"] is None:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    if submitted_version != agreement["version"]:
+        # Agreement was updated while user was reading — show the new version
+        return RedirectResponse(url="/dashboard/agreement", status_code=302)
+
+    await crud.accept_agreement(db, user_id, submitted_version)
+    await db.commit()
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+
+@dashboard_router.get("/dashboard/use-agreement", response_class=HTMLResponse)
+async def view_agreement(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Read-only view of the current use agreement."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+
+    agreement = await crud.get_agreement(db)
+    return templates.TemplateResponse(
+        "user/use_agreement.html",
+        {
+            "request": request,
+            "user": user,
+            "agreement_text": agreement["text"],
+            "agreement_version": agreement["version"],
+        },
+    )
 
 
 # User Dashboard
@@ -475,6 +572,10 @@ async def user_dashboard(
     masquerade_user = None
     if effective_id != real_user_id:
         masquerade_user = user  # the target user we're viewing as
+
+    # Check agreement (skip for admin masquerade)
+    if not masquerade_user and await _needs_agreement(db, user):
+        return RedirectResponse(url="/dashboard/agreement", status_code=302)
 
     # Get user's API keys
     api_keys = await crud.get_user_api_keys(db, effective_id, include_revoked=True)
@@ -3019,6 +3120,9 @@ async def admin_settings(
     # Show current time in configured timezone as preview
     now_in_tz = localtime_filter(datetime.now(timezone.utc), "%Y-%m-%d %H:%M:%S %Z")
 
+    # Use agreement
+    agreement = await crud.get_agreement(db)
+
     return templates.TemplateResponse(
         "admin/settings.html",
         {
@@ -3033,6 +3137,8 @@ async def admin_settings(
             "enrich_api_key": enrich_api_key,
             "brave_api_key": brave_api_key,
             "available_model_names": available_model_names,
+            "agreement_text": agreement["text"],
+            "agreement_version": agreement["version"],
             "success": success,
             "error": error,
         },
@@ -3110,6 +3216,16 @@ async def admin_settings_post(
             )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=enrich_config_updated", status_code=302)
+
+    elif action == "set_agreement":
+        text = form.get("agreement_text", "").strip()
+        if not text:
+            return RedirectResponse(url="/admin/settings?error=Agreement+text+cannot+be+empty", status_code=302)
+        bump = form.get("bump_version") == "on"
+        await crud.set_agreement_text(db, text, bump_version=bump)
+        await db.commit()
+        msg = "agreement_updated_and_bumped" if bump else "agreement_updated"
+        return RedirectResponse(url=f"/admin/settings?success={msg}", status_code=302)
 
     return RedirectResponse(url="/admin/settings?error=Unknown+action", status_code=302)
 

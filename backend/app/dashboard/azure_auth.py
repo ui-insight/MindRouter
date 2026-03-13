@@ -203,10 +203,11 @@ async def azure_callback(
 
     await db.commit()
 
-    # Set signed session cookie and redirect to dashboard
-    from backend.app.dashboard.routes import set_session_cookie
+    # Set signed session cookie and redirect to dashboard (or agreement)
+    from backend.app.dashboard.routes import set_session_cookie, _needs_agreement
 
-    response = RedirectResponse(url="/dashboard", status_code=302)
+    target = "/dashboard/agreement" if await _needs_agreement(db, user) else "/dashboard"
+    response = RedirectResponse(url=target, status_code=302)
     set_session_cookie(response, user.id)
     # Clear the OAuth state cookie
     response.delete_cookie(key="azure_oauth_state")

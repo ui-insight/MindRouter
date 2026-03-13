@@ -297,6 +297,12 @@ async def chat_page(
 
     masquerade_user = user if effective_id != real_user_id else None
 
+    # Check agreement (skip for admin masquerade)
+    if not masquerade_user:
+        from backend.app.dashboard.routes import _needs_agreement
+        if await _needs_agreement(db, user):
+            return RedirectResponse(url="/dashboard/agreement", status_code=302)
+
     # Check if user has an API key
     api_keys = await crud.get_user_api_keys(db, effective_id, include_revoked=False)
     has_api_key = len(api_keys) > 0

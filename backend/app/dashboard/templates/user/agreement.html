@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Use Agreement - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container py-5" style="max-width: 800px;">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h4 class="mb-0"><i class="bi bi-file-earmark-text"></i> MindRouter Use Agreement</h4>
+            <span class="badge bg-secondary">Version {{ agreement_version }}</span>
+        </div>
+        <div class="card-body">
+            <div class="border rounded p-3 mb-4 bg-light" style="max-height: 400px; overflow-y: auto;">
+                {{ agreement_text|safe }}
+            </div>
+
+            <form method="POST" action="/dashboard/agreement" id="agreementForm">
+                <input type="hidden" name="version" value="{{ agreement_version }}">
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" id="acceptCheck" required>
+                    <label class="form-check-label" for="acceptCheck">
+                        I have read and accept the terms of this use agreement.
+                    </label>
+                </div>
+                <button type="submit" class="btn btn-primary" id="acceptBtn" disabled>
+                    <i class="bi bi-check-lg"></i> Accept and Continue
+                </button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var cb = document.getElementById('acceptCheck');
+    var btn = document.getElementById('acceptBtn');
+    cb.addEventListener('change', function() {
+        btn.disabled = !cb.checked;
+    });
+})();
+</script>
+{% endblock %}

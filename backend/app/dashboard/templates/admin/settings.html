@@ -18,6 +18,8 @@
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
                 {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
                 {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
+                {% elif success == 'agreement_updated' %}Use agreement text saved.
+                {% elif success == 'agreement_updated_and_bumped' %}Use agreement saved and version bumped. All users must re-accept.
                 {% else %}{{ success }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -128,8 +130,64 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Use Agreement -->
+                <div class="col-lg-12">
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">Use Agreement</h5>
+                            {% if agreement_version %}
+                            <span class="badge bg-secondary">Current version: {{ agreement_version }}</span>
+                            {% endif %}
+                        </div>
+                        <div class="card-body">
+                            <p class="text-muted small">
+                                The use agreement is shown to users on their first login and whenever the version is bumped.
+                                Users must accept before accessing the dashboard or chat. Content is rendered as HTML.
+                            </p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_agreement">
+                                <div class="mb-3">
+                                    <label for="agreementText" class="form-label">Agreement Text (HTML)</label>
+                                    <textarea class="form-control font-monospace" name="agreement_text" id="agreementText" rows="12">{{ agreement_text }}</textarea>
+                                </div>
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" name="bump_version" id="bumpVersion">
+                                    <label class="form-check-label" for="bumpVersion">
+                                        Bump version (require all users to re-accept)
+                                    </label>
+                                </div>
+                                <div class="d-flex gap-2">
+                                    <button type="submit" class="btn btn-primary btn-sm">Save Agreement</button>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm" id="previewAgreementBtn">Preview</button>
+                                </div>
+                            </form>
+                            <div id="agreementPreview" class="border rounded p-3 mt-3 bg-light" style="display:none;"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var previewBtn = document.getElementById('previewAgreementBtn');
+    var previewDiv = document.getElementById('agreementPreview');
+    var textarea = document.getElementById('agreementText');
+    previewBtn.addEventListener('click', function() {
+        if (previewDiv.style.display === 'none') {
+            previewDiv.innerHTML = textarea.value;
+            previewDiv.style.display = '';
+            previewBtn.textContent = 'Hide Preview';
+        } else {
+            previewDiv.style.display = 'none';
+            previewBtn.textContent = 'Preview';
+        }
+    });
+})();
+</script>
 {% endblock %}

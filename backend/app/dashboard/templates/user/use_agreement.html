@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Use Agreement - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container py-5" style="max-width: 800px;">
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h4 class="mb-0"><i class="bi bi-file-earmark-text"></i> MindRouter Use Agreement</h4>
+            {% if agreement_version %}
+            <span class="badge bg-secondary">Version {{ agreement_version }}</span>
+            {% endif %}
+        </div>
+        <div class="card-body">
+            {% if agreement_text %}
+            <div class="border rounded p-3 bg-light">
+                {{ agreement_text|safe }}
+            </div>
+            {% if user.agreement_version_accepted == agreement_version %}
+            <div class="mt-3 text-success">
+                <i class="bi bi-check-circle-fill"></i> You accepted this agreement{% if user.agreement_accepted_at %} on {{ user.agreement_accepted_at|localtime }}{% endif %}.
+            </div>
+            {% endif %}
+            {% else %}
+            <p class="text-muted">No use agreement has been configured.</p>
+            {% endif %}
+
+            <div class="mt-3">
+                <a href="/dashboard" class="btn btn-outline-secondary">
+                    <i class="bi bi-arrow-left"></i> Back to Dashboard
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

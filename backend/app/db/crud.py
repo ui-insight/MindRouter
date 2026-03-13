@@ -2536,6 +2536,41 @@ async def set_config(
 
 
 # ---------------------------------------------------------------------------
+# Use Agreement helpers
+# ---------------------------------------------------------------------------
+
+
+async def get_agreement(db: AsyncSession) -> dict:
+    """Return the current use agreement text and version."""
+    version = await get_config_json(db, "agreement.version", None)
+    text = await get_config_json(db, "agreement.text", "")
+    return {"version": int(version) if version is not None else None, "text": text}
+
+
+async def set_agreement_text(db: AsyncSession, text: str, bump_version: bool = False) -> int:
+    """Update agreement text and optionally bump the version (forces re-acceptance)."""
+    await set_config(db, "agreement.text", text, description="Use agreement HTML content")
+    version = int(await get_config_json(db, "agreement.version", 1))
+    if bump_version:
+        version += 1
+        await set_config(db, "agreement.version", version, description="Current use agreement version number")
+    return version
+
+
+async def accept_agreement(db: AsyncSession, user_id: int, version: int) -> None:
+    """Record that a user accepted a specific agreement version."""
+    await db.execute(
+        update(User)
+        .where(User.id == user_id)
+        .values(
+            agreement_version_accepted=version,
+            agreement_accepted_at=datetime.now(timezone.utc),
+        )
+    )
+    await db.flush()
+
+
+# ---------------------------------------------------------------------------
 # Node drain helpers
 # ---------------------------------------------------------------------------
 
