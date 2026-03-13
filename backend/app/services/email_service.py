@@ -133,8 +133,43 @@ def _personalize(text: str, user: Dict[str, str]) -> str:
     )
 
 
+def _style_code_blocks(html: str) -> str:
+    """Add inline CSS to code/pre blocks for email client compatibility."""
+    import re
+
+    _mono = "'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace"
+
+    # 1) Style <pre> blocks — wrap text and use smaller monospace font
+    html = re.sub(
+        r'<pre(?![^>]*style=)>',
+        f'<pre style="background:#f6f8fa;padding:12px 16px;border-radius:6px;'
+        f'overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;'
+        f'font-family:{_mono};font-size:13px;line-height:1.45;">',
+        html,
+    )
+
+    # 2) Style <code> inside <pre> — transparent background, inherit font
+    html = re.sub(
+        r'(<pre[^>]*>)\s*<code([^>]*)>',
+        rf'\1<code\2 style="font-family:inherit;font-size:inherit;'
+        rf'background:transparent;padding:0;white-space:inherit;word-wrap:inherit;">',
+        html,
+    )
+
+    # 3) Style remaining inline <code> tags (those not already styled by step 2)
+    html = re.sub(
+        r'<code(?![^>]*style=)([^>]*)>',
+        f'<code\\1 style="background:#f6f8fa;padding:2px 6px;border-radius:3px;'
+        f'font-family:{_mono};font-size:13px;">',
+        html,
+    )
+
+    return html
+
+
 def _wrap_html(content_html: str, footer_html: str = "", base_url: str = "") -> str:
     """Wrap content in the email base template."""
+    content_html = _style_code_blocks(content_html)
     footer = footer_html or _DEFAULT_FOOTER.format(base_url=base_url)
     return _EMAIL_WRAPPER.format(content=content_html, footer=footer)
 

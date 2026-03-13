@@ -832,12 +832,17 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens so it doesn't exceed model context_length
+            # Cap max_tokens so input + output fits within model context_length
             if models and hasattr(request, 'max_tokens') and request.max_tokens:
                 for m in models:
-                    if m.context_length and request.max_tokens >= m.context_length:
-                        # Reserve at least half the context for input
-                        request.max_tokens = m.context_length // 2
+                    if m.context_length:
+                        _buffer = 256
+                        _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
+                        _remaining = m.context_length - _input_est - _buffer
+                        if _remaining < 1:
+                            _remaining = m.context_length // 2
+                        if request.max_tokens > _remaining:
+                            request.max_tokens = _remaining
                     break
 
             # Inject num_ctx for Ollama backends from model config
@@ -969,11 +974,17 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens so it doesn't exceed model context_length
+            # Cap max_tokens so input + output fits within model context_length
             if _models and hasattr(request, 'max_tokens') and request.max_tokens:
                 for m in _models:
-                    if m.context_length and request.max_tokens >= m.context_length:
-                        request.max_tokens = m.context_length // 2
+                    if m.context_length:
+                        _buffer = 256
+                        _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
+                        _remaining = m.context_length - _input_est - _buffer
+                        if _remaining < 1:
+                            _remaining = m.context_length // 2
+                        if request.max_tokens > _remaining:
+                            request.max_tokens = _remaining
                     break
 
             tried_backends.add(backend.id)
