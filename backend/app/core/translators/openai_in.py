@@ -188,8 +188,8 @@ class OpenAIInTranslator:
                     id=tc["id"],
                     type=tc.get("type", "function"),
                     function=CanonicalFunctionCall(
-                        name=tc["function"]["name"],
-                        arguments=tc["function"]["arguments"],
+                        name=tc["function"].get("name") or "",
+                        arguments=tc["function"].get("arguments") or "{}",
                     ),
                 )
                 for tc in msg["tool_calls"]

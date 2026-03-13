@@ -292,11 +292,11 @@ class AnthropicInTranslator:
                         args = item.get("input", {})
                         tool_calls.append(
                             CanonicalToolCall(
-                                id=item.get("id", ""),
+                                id=item.get("id") or "",
                                 type="function",
                                 function=CanonicalFunctionCall(
-                                    name=item.get("name", ""),
-                                    arguments=json.dumps(args) if isinstance(args, dict) else str(args),
+                                    name=item.get("name") or "",
+                                    arguments=json.dumps(args) if isinstance(args, dict) else str(args or "{}"),
                                 ),
                             )
                         )
