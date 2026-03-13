@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Optional, Set, Tuple
 
 import httpx
+import tiktoken
 from fastapi import HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,10 +53,45 @@ from backend.app.settings import get_settings
 logger = get_logger(__name__)
 
 
-def _is_max_tokens_overflow(detail) -> bool:
-    """Check if a vLLM 400 error is a max_tokens overflow."""
-    text = str(detail)
-    return "input tokens" in text and "context length" in text
+# Module-level tiktoken encoder (lazy singleton)
+_tiktoken_encoder = None
+
+
+def _tiktoken_estimate(request: "CanonicalChatRequest") -> int:
+    """Estimate input tokens using tiktoken (fallback for Ollama / vLLM errors)."""
+    global _tiktoken_encoder
+    if _tiktoken_encoder is None:
+        try:
+            _tiktoken_encoder = tiktoken.get_encoding(get_settings().default_tokenizer)
+        except Exception:
+            _tiktoken_encoder = tiktoken.get_encoding("cl100k_base")
+
+    total = 0
+    for msg in request.messages or []:
+        content = msg.content
+        if isinstance(content, str):
+            total += len(_tiktoken_encoder.encode(content))
+        elif isinstance(content, list):
+            for block in content:
+                text = getattr(block, "text", None)
+                if text:
+                    total += len(_tiktoken_encoder.encode(text))
+        # Per-message overhead (role, separators)
+        total += 4
+
+    # Tool definitions contribute tokens too
+    if request.tools:
+        tool_text = json.dumps([t.model_dump() for t in request.tools])
+        total += len(_tiktoken_encoder.encode(tool_text))
+
+    return total
+
+
+# Hard cap on max_tokens to prevent any single response from being excessively large
+_MAX_OUTPUT_TOKENS = 65536
+
+# Buffer reserved for internal overhead (template tokens, special tokens, etc.)
+_TOKEN_BUFFER = 1024
 
 
 class InferenceService:
@@ -95,6 +131,84 @@ class InferenceService:
                 ),
             )
         return self._http_client
+
+    async def _count_input_tokens(
+        self,
+        request: CanonicalChatRequest,
+        backend: Backend,
+    ) -> Tuple[int, bool]:
+        """Count input tokens for a request.
+
+        For vLLM backends, calls the /tokenize endpoint which applies the full
+        chat template (including tool-calling overhead). Falls back to tiktoken
+        estimation on failure. For Ollama backends, uses tiktoken directly.
+
+        Returns:
+            (token_count, is_estimate) — is_estimate is False only when vLLM
+            /tokenize returned an authoritative count.
+        """
+        if backend.engine == BackendEngine.VLLM:
+            try:
+                payload = VLLMOutTranslator.translate_chat_request(request)
+                payload.pop("stream", None)
+                payload.pop("max_tokens", None)
+                client = await self._get_http_client()
+                resp = await asyncio.wait_for(
+                    client.post(f"{backend.url}/tokenize", json=payload),
+                    timeout=10.0,
+                )
+                resp.raise_for_status()
+                count = resp.json().get("count", 0)
+                return count, False
+            except Exception as e:
+                logger.warning(
+                    "tokenize_fallback",
+                    backend_id=backend.id,
+                    error=str(e),
+                )
+                # Fall through to tiktoken estimation
+
+        return _tiktoken_estimate(request), True
+
+    async def cap_max_tokens(
+        self,
+        request: CanonicalChatRequest,
+        backend: Backend,
+        context_length: int,
+    ) -> None:
+        """Cap max_tokens to fit within the model's context window.
+
+        Uses exact token counting for vLLM (via /tokenize) or tiktoken
+        estimation for Ollama, then applies:
+            remaining = context_length - input_tokens - buffer
+            max_tokens = min(requested, remaining, hard_cap)
+        """
+        input_tokens, is_estimate = await self._count_input_tokens(request, backend)
+
+        remaining = context_length - input_tokens - _TOKEN_BUFFER
+        if remaining <= 0:
+            logger.warning(
+                "context_overflow",
+                input_tokens=input_tokens,
+                context_length=context_length,
+                is_estimate=is_estimate,
+                model=request.model,
+            )
+            # Allow a minimal output — the backend may still reject it,
+            # but at least we give it a chance rather than failing here.
+            remaining = 256
+
+        requested = request.max_tokens if request.max_tokens is not None else _MAX_OUTPUT_TOKENS
+        request.max_tokens = min(requested, remaining, _MAX_OUTPUT_TOKENS)
+
+        logger.debug(
+            "max_tokens_capped",
+            input_tokens=input_tokens,
+            is_estimate=is_estimate,
+            context_length=context_length,
+            requested=requested,
+            capped=request.max_tokens,
+        )
 
     async def chat_completion(
         self,
@@ -838,16 +952,12 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens to fit within the model context window.
-            # We cap at context // 2 to leave room for input tokens.
-            # If vLLM still rejects (input > context // 2), we retry
-            # at context // 4 (see 400 handler below).
+            # Cap max_tokens using actual token count (vLLM /tokenize) or
+            # tiktoken estimate (Ollama / fallback).
             if models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in models if m.name == job.model), models[0])
                 if _target.context_length:
-                    _cap = _target.context_length // 2
-                    if request.max_tokens is None or request.max_tokens > _cap:
-                        request.max_tokens = _cap
+                    await self.cap_max_tokens(request, backend, _target.context_length)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -903,51 +1013,11 @@ class InferenceService:
                     await self._registry.report_live_failure(backend.id)
                     last_error = e
                 else:
-                    # 4xx — check if it's a max_tokens overflow we can retry
+                    # 4xx — not retryable
                     try:
                         detail = e.response.json()
                     except Exception:
                         detail = e.response.text or str(e)
-
-                    if (
-                        e.response.status_code == 400
-                        and hasattr(request, 'max_tokens')
-                        and not getattr(request, '_max_tokens_retried', False)
-                        and _is_max_tokens_overflow(detail)
-                    ):
-                        _target = next((m for m in models if m.name == job.model), models[0])
-                        if _target.context_length:
-                            request.max_tokens = _target.context_length // 4
-                            request._max_tokens_retried = True  # type: ignore[attr-defined]
-                            logger.info(
-                                "max_tokens_overflow_retry",
-                                new_max_tokens=request.max_tokens,
-                                context=_target.context_length,
-                            )
-                            # Retry directly on same backend (no re-routing)
-                            try:
-                                response = await asyncio.wait_for(
-                                    getattr(self, proxy_fn)(request, backend),
-                                    timeout=float(self._settings.backend_request_timeout_per_attempt),
-                                )
-                                elapsed_ms = (time.monotonic() - start_time) * 1000
-                                await self._registry.report_live_success(backend.id)
-                                await self._latency_tracker.record_latency(backend.id, elapsed_ms)
-                                return response, backend
-                            except Exception as retry_err:
-                                _retry_detail = None
-                                if hasattr(retry_err, 'response'):
-                                    try:
-                                        _retry_detail = retry_err.response.json()
-                                    except Exception:
-                                        _retry_detail = getattr(retry_err.response, 'text', None)
-                                logger.warning(
-                                    "max_tokens_retry_failed",
-                                    error=str(retry_err),
-                                    detail=_retry_detail,
-                                    max_tokens_sent=request.max_tokens,
-                                )
-                                # Fall through to normal 4xx handling
 
                     logger.warning(
                         "backend_4xx",
@@ -1023,9 +1093,7 @@ class InferenceService:
             if _models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if _target.context_length:
-                    _cap = _target.context_length // 2
-                    if request.max_tokens is None or request.max_tokens > _cap:
-                        request.max_tokens = _cap
+                    await self.cap_max_tokens(request, backend, _target.context_length)
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
@@ -1069,56 +1137,11 @@ class InferenceService:
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code < 500:
-                    # 4xx — check if it's a max_tokens overflow we can retry
+                    # 4xx — not retryable
                     try:
                         detail = e.response.json()
                     except Exception:
                         detail = e.response.text or str(e)
-
-                    if (
-                        e.response.status_code == 400
-                        and hasattr(request, 'max_tokens')
-                        and not getattr(request, '_max_tokens_retried', False)
-                        and _is_max_tokens_overflow(detail)
-                    ):
-                        _target = next((m for m in _models if m.name == job.model), _models[0])
-                        if _target.context_length:
-                            request.max_tokens = _target.context_length // 4
-                            request._max_tokens_retried = True  # type: ignore[attr-defined]
-                            logger.info(
-                                "max_tokens_overflow_retry",
-                                new_max_tokens=request.max_tokens,
-                                context=_target.context_length,
-                            )
-                            # Retry directly on same backend (don't re-route
-                            # — the response may already be streaming and
-                            # re-routing can 503 causing an unrecoverable crash).
-                            try:
-                                start_time = time.monotonic()
-                                async for chunk in getattr(self, proxy_fn)(request, backend):
-                                    if not first_chunk_received:
-                                        first_chunk_received = True
-                                        ttft_ms = (time.monotonic() - start_time) * 1000
-                                        await self._registry.report_live_success(backend.id)
-                                        await self._latency_tracker.record_ttft(backend.id, ttft_ms)
-                                    yield chunk, backend
-                                total_ms = (time.monotonic() - start_time) * 1000
-                                await self._latency_tracker.record_latency(backend.id, total_ms)
-                                return
-                            except Exception as retry_err:
-                                _retry_detail = None
-                                if hasattr(retry_err, 'response'):
-                                    try:
-                                        _retry_detail = retry_err.response.json()
-                                    except Exception:
-                                        _retry_detail = getattr(retry_err.response, 'text', None)
-                                logger.warning(
-                                    "max_tokens_retry_failed",
-                                    error=str(retry_err),
-                                    detail=_retry_detail,
-                                    max_tokens_sent=request.max_tokens,
-                                )
-                                # Fall through to normal 4xx handling
 
                     logger.warning(
                         "stream_backend_4xx",

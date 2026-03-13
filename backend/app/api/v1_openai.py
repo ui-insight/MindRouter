@@ -344,3 +344,85 @@ async def score(
     service = InferenceService(db)
     response = await service.score(canonical, user, api_key, request)
     return response
+
+
+@router.post("/tokenize")
+async def tokenize(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """
+    Count input tokens for a chat request.
+
+    Uses the backend's native tokenizer for vLLM models (exact count including
+    chat template and tool definitions). Falls back to tiktoken estimation for
+    Ollama models.
+
+    Returns:
+        count: number of input tokens
+        max_model_len: model context window size
+        is_estimate: true if count is a tiktoken estimate (Ollama or fallback)
+    """
+    user, api_key = auth
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body",
+        )
+
+    model = body.get("model")
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="'model' is required",
+        )
+
+    registry = get_registry()
+    if not await registry.model_exists(model):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": {
+                    "message": f"The model '{model}' does not exist",
+                    "type": "invalid_request_error",
+                    "code": "model_not_found",
+                }
+            },
+        )
+
+    # Translate to canonical format for token counting
+    try:
+        canonical = OpenAIInTranslator.translate_chat_request(body)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid request format: {str(e)}",
+        )
+
+    # Find a backend that has this model
+    backends = await registry.get_backends_with_model(model)
+    if not backends:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No healthy backends available for this model",
+        )
+
+    backend = backends[0]
+
+    # Get model context length
+    models = await crud.get_models_for_backend(db, backend.id)
+    target = next((m for m in models if m.name == model), None)
+    max_model_len = target.context_length if target else None
+
+    service = InferenceService(db)
+    count, is_estimate = await service._count_input_tokens(canonical, backend)
+
+    return {
+        "count": count,
+        "max_model_len": max_model_len,
+        "is_estimate": is_estimate,
+    }
