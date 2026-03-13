@@ -833,40 +833,22 @@ class InferenceService:
                     raise
 
             # Cap max_tokens so input + output fits within model context_length.
-            # When max_tokens is None, vLLM defaults to (context - input) which
-            # can be 1 token over due to rounding — always set it explicitly.
+            # Token estimates can severely undercount (system prompts, tool defs,
+            # chat templates add tokens not visible to tiktoken). We enforce:
+            # 1. max_tokens <= context - input_est * 2.5 - 256 (input-aware)
+            # 2. max_tokens <= context * 0.65 (absolute ceiling)
             if models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in models if m.name == job.model), models[0])
-                logger.info(
-                    "max_tokens_cap_check",
-                    model=job.model,
-                    target_name=_target.name,
-                    context_length=_target.context_length,
-                    input_est=getattr(job, 'estimated_prompt_tokens', 0),
-                    max_tokens_before=request.max_tokens,
-                    models_count=len(models),
-                )
                 if _target.context_length:
-                    _buffer = 256
+                    _ctx = _target.context_length
                     _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
-                    _remaining = _target.context_length - _input_est - _buffer
+                    _input_aware = _ctx - int(_input_est * 2.5) - 256
+                    _absolute = int(_ctx * 0.65)
+                    _remaining = min(_input_aware, _absolute)
                     if _remaining < 1:
-                        _remaining = _target.context_length // 2
+                        _remaining = _ctx // 4
                     if request.max_tokens is None or request.max_tokens > _remaining:
-                        logger.info(
-                            "max_tokens_capped",
-                            old=request.max_tokens,
-                            new=_remaining,
-                            context=_target.context_length,
-                            input_est=_input_est,
-                        )
                         request.max_tokens = _remaining
-            else:
-                logger.info(
-                    "max_tokens_cap_skipped",
-                    has_models=bool(models),
-                    has_attr=hasattr(request, 'max_tokens'),
-                )
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -997,17 +979,17 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens so input + output fits within model context_length.
-            # When max_tokens is None, vLLM defaults to (context - input) which
-            # can be 1 token over due to rounding — always set it explicitly.
+            # Cap max_tokens (same logic as non-streaming path above).
             if _models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if _target.context_length:
-                    _buffer = 256
+                    _ctx = _target.context_length
                     _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
-                    _remaining = _target.context_length - _input_est - _buffer
+                    _input_aware = _ctx - int(_input_est * 2.5) - 256
+                    _absolute = int(_ctx * 0.65)
+                    _remaining = min(_input_aware, _absolute)
                     if _remaining < 1:
-                        _remaining = _target.context_length // 2
+                        _remaining = _ctx // 4
                     if request.max_tokens is None or request.max_tokens > _remaining:
                         request.max_tokens = _remaining
 
