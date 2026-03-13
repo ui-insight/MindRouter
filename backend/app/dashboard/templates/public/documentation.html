@@ -77,6 +77,7 @@
                 <li class="nav-item"><a class="nav-link" href="#data-retention">Data Retention</a></li>
                 <li class="nav-item"><a class="nav-link" href="#chat-system">Chat System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#blog-system">Blog / CMS</a></li>
+                <li class="nav-item"><a class="nav-link" href="#email-system">Email System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#app-config">AppConfig System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#configuration-reference">Configuration Reference</a></li>
                 <li class="nav-item"><a class="nav-link" href="#status-enums">Status Enums Reference</a></li>
@@ -282,6 +283,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/embeddings</code></td><td>API Key</td><td>Generate embeddings</td></tr>
                         <tr><td>POST</td><td><code>/v1/rerank</code></td><td>API Key</td><td>Rerank documents against a query</td></tr>
                         <tr><td>POST</td><td><code>/v1/score</code></td><td>API Key</td><td>Score similarity between text pairs</td></tr>
+                        <tr><td>POST</td><td><code>/v1/tokenize</code></td><td>API Key</td><td>Count input tokens for a request</td></tr>
                         <tr><td>GET</td><td><code>/v1/models</code></td><td>API Key</td><td>List available models</td></tr>
                     </tbody>
                 </table>
@@ -444,6 +446,44 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
     "text_1": "What is machine learning?",
     "text_2": ["Machine learning is a subset of AI.", "The weather is sunny today."]
   }'</code></pre>
+
+                <h4>Tokenize</h4>
+                <p>Count the number of input tokens a request will consume. For <strong>vLLM</strong> backends, this returns an <strong>exact</strong> count from the backend's native tokenizer, including all chat template overhead and tool definitions. For <strong>Ollama</strong> backends, the count is a tiktoken-based estimate.</p>
+                <pre><code>curl -X POST http://localhost:8000/v1/tokenize \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-120b",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hello, how are you?"}
+    ],
+    "tools": [...]
+  }'</code></pre>
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "count": 847,
+  "max_model_len": 131072,
+  "is_estimate": false
+}</code></pre>
+                <p>Fields:</p>
+                <ul>
+                    <li><code>count</code> &mdash; number of input tokens (includes system prompt, messages, chat template overhead, and tool definitions)</li>
+                    <li><code>max_model_len</code> &mdash; model's context window size</li>
+                    <li><code>is_estimate</code> &mdash; <code>false</code> for vLLM (exact count), <code>true</code> for Ollama (tiktoken estimate)</li>
+                </ul>
+
+                <h4>Context Window Management</h4>
+                <p>MindRouter automatically caps <code>max_tokens</code> before dispatching each request to prevent context overflow errors. The logic is:</p>
+                <pre><code>input_tokens  = tokenize(request)            # exact for vLLM, estimated for Ollama
+remaining     = context_length - input_tokens - 1024   # 1024-token safety buffer
+max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
+                <ul>
+                    <li><strong>vLLM backends:</strong> MindRouter calls the backend's <code>/tokenize</code> endpoint to get the exact input token count, including chat template inflation (e.g. Hermes tool-calling templates can add thousands of tokens). If the <code>/tokenize</code> call fails, it falls back to tiktoken estimation.</li>
+                    <li><strong>Ollama backends:</strong> Uses tiktoken (<code>cl100k_base</code>) for estimation. The 1024-token buffer absorbs the estimation error and chat template overhead. Ollama also auto-adjusts context internally, so overflow errors are rare.</li>
+                    <li><strong>65,536 hard cap:</strong> No single response can exceed 65,536 output tokens, regardless of context window size.</li>
+                    <li><strong>Context overflow:</strong> If input tokens alone exceed the context window (minus buffer), MindRouter allows a minimal 256-token output. The backend may still reject the request if the input is genuinely too large for the model.</li>
+                </ul>
 
                 <h4>List Models</h4>
                 <pre><code>curl http://localhost:8000/v1/models \
@@ -1704,6 +1744,63 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
 
                 <h3>Soft Delete</h3>
                 <p>Deleting a post is a soft delete &mdash; the post is marked as deleted but remains in the database. Soft-deleted posts are hidden from the public blog listing but still visible in the admin list.</p>
+
+                <h3>Blog Email Notifications</h3>
+                <p>When publishing a blog post, admins can optionally send an email notification to all users who have opted in to blog email notifications. The email contains the full post rendered as HTML with a "Read on the Web" link. Users can manage their email preference from their dashboard settings.</p>
+            </section>
+
+            <hr>
+
+            <!-- Email System -->
+            <section id="email-system">
+                <h2>Email System</h2>
+                <p>MindRouter includes an email system for admin-to-user communication. Emails are sent asynchronously in the background and support personalization, HTML formatting, and recipient targeting.</p>
+
+                <h3>SMTP Configuration</h3>
+                <p>Email requires SMTP credentials configured via the <strong>Admin &gt; Settings</strong> page. The following AppConfig keys control SMTP:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Key</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>email.smtp_host</code></td><td>SMTP server hostname</td></tr>
+                        <tr><td><code>email.smtp_port</code></td><td>SMTP server port (default: 587)</td></tr>
+                        <tr><td><code>email.smtp_username</code></td><td>SMTP authentication username</td></tr>
+                        <tr><td><code>email.smtp_password</code></td><td>SMTP authentication password</td></tr>
+                        <tr><td><code>email.use_tls</code></td><td>Enable STARTTLS (default: true)</td></tr>
+                        <tr><td><code>email.default_sender</code></td><td>Default "From" address for emails</td></tr>
+                        <tr><td><code>email.blog_sender</code></td><td>"From" address for blog notification emails (falls back to default_sender)</td></tr>
+                        <tr><td><code>email.test_address</code></td><td>Recipient address for test emails</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Composing Emails</h3>
+                <p>Admin users can compose and send emails at <code>/admin/email</code>. The interface supports three recipient modes:</p>
+                <ul>
+                    <li><strong>All Users</strong> &mdash; Send to every registered user</li>
+                    <li><strong>By Group</strong> &mdash; Send to all members of a selected group</li>
+                    <li><strong>Select Users</strong> &mdash; Search and pick individual recipients</li>
+                </ul>
+
+                <h3>Template Variables</h3>
+                <p>The subject and body support personalization variables that are replaced per-recipient:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Variable</th><th>Replaced With</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>{{first_name}}</code></td><td>User's first name (from full_name)</td></tr>
+                        <tr><td><code>{{last_name}}</code></td><td>User's last name (from full_name)</td></tr>
+                        <tr><td><code>{{username}}</code></td><td>User's username</td></tr>
+                        <tr><td><code>{{email}}</code></td><td>User's email address</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Email Delivery</h3>
+                <p>Emails are sent asynchronously as a background task. A small throttle delay (50ms) is inserted between recipients to avoid overwhelming the SMTP server. Delivery progress is tracked in an email log visible at the bottom of the <code>/admin/email</code> page, showing status (sending, completed, failed), success/failure counts, and any error messages.</p>
+
+                <h3>Test Emails</h3>
+                <p>Before sending to real users, admins can send a test email to the configured test address to verify SMTP connectivity and email rendering.</p>
             </section>
 
             <hr>
@@ -1738,6 +1835,14 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>catalog.enrich_model</code></td><td>string</td><td><code>""</code></td><td>Model name used for LLM enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.enrich_api_key</code></td><td>string</td><td><code>""</code></td><td>API key for internal MindRouter enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.brave_api_key</code></td><td>string</td><td><code>""</code></td><td>Brave Search API key for enrichment (overrides env var)</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.smtp_host</code></td><td>string</td><td><code>""</code></td><td>SMTP server hostname</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.smtp_port</code></td><td>int</td><td><code>587</code></td><td>SMTP server port</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.smtp_username</code></td><td>string</td><td><code>""</code></td><td>SMTP authentication username</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.smtp_password</code></td><td>string</td><td><code>""</code></td><td>SMTP authentication password</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.use_tls</code></td><td>bool</td><td><code>true</code></td><td>Enable STARTTLS for SMTP</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.default_sender</code></td><td>string</td><td><code>""</code></td><td>Default "From" address for emails</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.blog_sender</code></td><td>string</td><td><code>""</code></td><td>"From" address for blog notification emails</td><td>Site Settings</td></tr>
+                        <tr><td><code>email.test_address</code></td><td>string</td><td><code>""</code></td><td>Recipient address for test emails</td><td>Site Settings</td></tr>
                     </tbody>
                 </table>
                 <p>All AppConfig values take effect immediately upon save &mdash; no application restart is required. These settings are managed via the <strong>Admin Dashboard</strong> under Site Settings and Chat Configuration.</p>
