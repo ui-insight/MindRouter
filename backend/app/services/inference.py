@@ -836,16 +836,15 @@ class InferenceService:
             # When max_tokens is None, vLLM defaults to (context - input) which
             # can be 1 token over due to rounding — always set it explicitly.
             if models and hasattr(request, 'max_tokens'):
-                for m in models:
-                    if m.context_length:
-                        _buffer = 256
-                        _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
-                        _remaining = m.context_length - _input_est - _buffer
-                        if _remaining < 1:
-                            _remaining = m.context_length // 2
-                        if request.max_tokens is None or request.max_tokens > _remaining:
-                            request.max_tokens = _remaining
-                    break
+                _target = next((m for m in models if m.name == job.model), models[0])
+                if _target.context_length:
+                    _buffer = 256
+                    _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
+                    _remaining = _target.context_length - _input_est - _buffer
+                    if _remaining < 1:
+                        _remaining = _target.context_length // 2
+                    if request.max_tokens is None or request.max_tokens > _remaining:
+                        request.max_tokens = _remaining
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -980,16 +979,15 @@ class InferenceService:
             # When max_tokens is None, vLLM defaults to (context - input) which
             # can be 1 token over due to rounding — always set it explicitly.
             if _models and hasattr(request, 'max_tokens'):
-                for m in _models:
-                    if m.context_length:
-                        _buffer = 256
-                        _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
-                        _remaining = m.context_length - _input_est - _buffer
-                        if _remaining < 1:
-                            _remaining = m.context_length // 2
-                        if request.max_tokens is None or request.max_tokens > _remaining:
-                            request.max_tokens = _remaining
-                    break
+                _target = next((m for m in _models if m.name == job.model), _models[0])
+                if _target.context_length:
+                    _buffer = 256
+                    _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
+                    _remaining = _target.context_length - _input_est - _buffer
+                    if _remaining < 1:
+                        _remaining = _target.context_length // 2
+                    if request.max_tokens is None or request.max_tokens > _remaining:
+                        request.max_tokens = _remaining
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
