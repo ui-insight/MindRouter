@@ -832,23 +832,16 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens so input + output fits within model context_length.
-            # Token estimates can severely undercount (system prompts, tool defs,
-            # chat templates add tokens not visible to tiktoken). We enforce:
-            # 1. max_tokens <= context - input_est * 2.5 - 256 (input-aware)
-            # 2. max_tokens <= context * 0.65 (absolute ceiling)
+            # Cap max_tokens to at most half the model context_length.
+            # tiktoken estimates are unreliable for tool-heavy requests (can
+            # undercount by 2-3x), so we avoid estimation entirely and just
+            # reserve half the context for input.
             if models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in models if m.name == job.model), models[0])
                 if _target.context_length:
-                    _ctx = _target.context_length
-                    _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
-                    _input_aware = _ctx - int(_input_est * 2.5) - 256
-                    _absolute = int(_ctx * 0.65)
-                    _remaining = min(_input_aware, _absolute)
-                    if _remaining < 1:
-                        _remaining = _ctx // 4
-                    if request.max_tokens is None or request.max_tokens > _remaining:
-                        request.max_tokens = _remaining
+                    _half = _target.context_length // 2
+                    if request.max_tokens is None or request.max_tokens > _half:
+                        request.max_tokens = _half
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -983,15 +976,9 @@ class InferenceService:
             if _models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if _target.context_length:
-                    _ctx = _target.context_length
-                    _input_est = getattr(job, 'estimated_prompt_tokens', 0) or 0
-                    _input_aware = _ctx - int(_input_est * 2.5) - 256
-                    _absolute = int(_ctx * 0.65)
-                    _remaining = min(_input_aware, _absolute)
-                    if _remaining < 1:
-                        _remaining = _ctx // 4
-                    if request.max_tokens is None or request.max_tokens > _remaining:
-                        request.max_tokens = _remaining
+                    _half = _target.context_length // 2
+                    if request.max_tokens is None or request.max_tokens > _half:
+                        request.max_tokens = _half
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
