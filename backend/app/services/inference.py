@@ -832,8 +832,10 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens so input + output fits within model context_length
-            if models and hasattr(request, 'max_tokens') and request.max_tokens:
+            # Cap max_tokens so input + output fits within model context_length.
+            # When max_tokens is None, vLLM defaults to (context - input) which
+            # can be 1 token over due to rounding — always set it explicitly.
+            if models and hasattr(request, 'max_tokens'):
                 for m in models:
                     if m.context_length:
                         _buffer = 256
@@ -841,7 +843,7 @@ class InferenceService:
                         _remaining = m.context_length - _input_est - _buffer
                         if _remaining < 1:
                             _remaining = m.context_length // 2
-                        if request.max_tokens > _remaining:
+                        if request.max_tokens is None or request.max_tokens > _remaining:
                             request.max_tokens = _remaining
                     break
 
@@ -974,8 +976,10 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens so input + output fits within model context_length
-            if _models and hasattr(request, 'max_tokens') and request.max_tokens:
+            # Cap max_tokens so input + output fits within model context_length.
+            # When max_tokens is None, vLLM defaults to (context - input) which
+            # can be 1 token over due to rounding — always set it explicitly.
+            if _models and hasattr(request, 'max_tokens'):
                 for m in _models:
                     if m.context_length:
                         _buffer = 256
@@ -983,7 +987,7 @@ class InferenceService:
                         _remaining = m.context_length - _input_est - _buffer
                         if _remaining < 1:
                             _remaining = m.context_length // 2
-                        if request.max_tokens > _remaining:
+                        if request.max_tokens is None or request.max_tokens > _remaining:
                             request.max_tokens = _remaining
                     break
 
