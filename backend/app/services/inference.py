@@ -915,19 +915,31 @@ class InferenceService:
                         and not getattr(request, '_max_tokens_retried', False)
                         and _is_max_tokens_overflow(detail)
                     ):
-                        # Halve max_tokens (from context//2 to context//4)
                         _target = next((m for m in models if m.name == job.model), models[0])
                         if _target.context_length:
                             request.max_tokens = _target.context_length // 4
                             request._max_tokens_retried = True  # type: ignore[attr-defined]
-                            tried_backends.discard(backend.id)
                             logger.info(
                                 "max_tokens_overflow_retry",
                                 new_max_tokens=request.max_tokens,
                                 context=_target.context_length,
                             )
-                            last_error = e
-                            continue  # retry same backend
+                            # Retry directly on same backend (no re-routing)
+                            try:
+                                response = await asyncio.wait_for(
+                                    getattr(self, proxy_fn)(request, backend),
+                                    timeout=float(self._settings.backend_request_timeout_per_attempt),
+                                )
+                                elapsed_ms = (time.monotonic() - start_time) * 1000
+                                await self._registry.report_live_success(backend.id)
+                                await self._latency_tracker.record_latency(backend.id, elapsed_ms)
+                                return response, backend
+                            except Exception as retry_err:
+                                logger.warning(
+                                    "max_tokens_retry_failed",
+                                    error=str(retry_err),
+                                )
+                                # Fall through to normal 4xx handling
 
                     logger.warning(
                         "backend_4xx",
@@ -1065,14 +1077,32 @@ class InferenceService:
                         if _target.context_length:
                             request.max_tokens = _target.context_length // 4
                             request._max_tokens_retried = True  # type: ignore[attr-defined]
-                            tried_backends.discard(backend.id)
                             logger.info(
                                 "max_tokens_overflow_retry",
                                 new_max_tokens=request.max_tokens,
                                 context=_target.context_length,
                             )
-                            last_error = e
-                            continue  # retry same backend
+                            # Retry directly on same backend (don't re-route
+                            # — the response may already be streaming and
+                            # re-routing can 503 causing an unrecoverable crash).
+                            try:
+                                start_time = time.monotonic()
+                                async for chunk in getattr(self, proxy_fn)(request, backend):
+                                    if not first_chunk_received:
+                                        first_chunk_received = True
+                                        ttft_ms = (time.monotonic() - start_time) * 1000
+                                        await self._registry.report_live_success(backend.id)
+                                        await self._latency_tracker.record_ttft(backend.id, ttft_ms)
+                                    yield chunk, backend
+                                total_ms = (time.monotonic() - start_time) * 1000
+                                await self._latency_tracker.record_latency(backend.id, total_ms)
+                                return
+                            except Exception as retry_err:
+                                logger.warning(
+                                    "max_tokens_retry_failed",
+                                    error=str(retry_err),
+                                )
+                                # Fall through to normal 4xx handling
 
                     logger.warning(
                         "stream_backend_4xx",
