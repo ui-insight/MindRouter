@@ -52,6 +52,39 @@ from backend.app.settings import get_settings
 logger = get_logger(__name__)
 
 
+def _parse_max_tokens_overflow(detail, log=None) -> int | None:
+    """Parse a vLLM max_tokens overflow 400 error and return a corrected max_tokens.
+
+    vLLM errors look like:
+      "You passed 14499 input tokens and requested 18270 output tokens.
+       However, the model's context length is only 32768 tokens ..."
+
+    Returns context_length - input_tokens - 1, or None if not parseable.
+    """
+    import re
+
+    text = str(detail)
+    m = re.search(
+        r"passed\s+(\d+)\s+input tokens.*context length is(?: only)?\s+(\d+)",
+        text,
+    )
+    if not m:
+        return None
+    actual_input = int(m.group(1))
+    context = int(m.group(2))
+    corrected = context - actual_input - 1
+    if corrected < 1:
+        return None
+    if log:
+        log.info(
+            "max_tokens_overflow_retry",
+            actual_input=actual_input,
+            context=context,
+            corrected_max_tokens=corrected,
+        )
+    return corrected
+
+
 class InferenceService:
     """
     Handles inference request processing.
@@ -832,16 +865,15 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens to at most half the model context_length.
-            # tiktoken estimates are unreliable for tool-heavy requests (can
-            # undercount by 2-3x), so we avoid estimation entirely and just
-            # reserve half the context for input.
-            if models and hasattr(request, 'max_tokens'):
+            # Set max_tokens when None so vLLM doesn't default to
+            # (context - input) which can overflow by 1.  We use context // 2
+            # as an initial guess; if vLLM still rejects it, the 400 handler
+            # below will parse the real input count and retry with the exact
+            # correct value.
+            if models and hasattr(request, 'max_tokens') and request.max_tokens is None:
                 _target = next((m for m in models if m.name == job.model), models[0])
                 if _target.context_length:
-                    _half = _target.context_length // 2
-                    if request.max_tokens is None or request.max_tokens > _half:
-                        request.max_tokens = _half
+                    request.max_tokens = _target.context_length // 2
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -897,11 +929,25 @@ class InferenceService:
                     await self._registry.report_live_failure(backend.id)
                     last_error = e
                 else:
-                    # 4xx = client error — don't retry, but convert to HTTPException
+                    # 4xx — check if it's a max_tokens overflow we can fix
                     try:
                         detail = e.response.json()
                     except Exception:
                         detail = e.response.text or str(e)
+
+                    if (
+                        e.response.status_code == 400
+                        and hasattr(request, 'max_tokens')
+                        and not getattr(request, '_max_tokens_retried', False)
+                    ):
+                        corrected = _parse_max_tokens_overflow(detail, logger)
+                        if corrected is not None:
+                            request.max_tokens = corrected
+                            request._max_tokens_retried = True  # type: ignore[attr-defined]
+                            tried_backends.discard(backend.id)
+                            last_error = e
+                            continue  # retry same backend with corrected value
+
                     logger.warning(
                         "backend_4xx",
                         backend_id=backend.id,
@@ -972,13 +1018,11 @@ class InferenceService:
                 else:
                     raise
 
-            # Cap max_tokens (same logic as non-streaming path above).
-            if _models and hasattr(request, 'max_tokens'):
+            # Set max_tokens when None (same logic as non-streaming path).
+            if _models and hasattr(request, 'max_tokens') and request.max_tokens is None:
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if _target.context_length:
-                    _half = _target.context_length // 2
-                    if request.max_tokens is None or request.max_tokens > _half:
-                        request.max_tokens = _half
+                    request.max_tokens = _target.context_length // 2
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
@@ -1022,11 +1066,25 @@ class InferenceService:
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code < 500:
-                    # 4xx = client error — convert to HTTPException
+                    # 4xx — check if it's a max_tokens overflow we can fix
                     try:
                         detail = e.response.json()
                     except Exception:
                         detail = e.response.text or str(e)
+
+                    if (
+                        e.response.status_code == 400
+                        and hasattr(request, 'max_tokens')
+                        and not getattr(request, '_max_tokens_retried', False)
+                    ):
+                        corrected = _parse_max_tokens_overflow(detail, logger)
+                        if corrected is not None:
+                            request.max_tokens = corrected
+                            request._max_tokens_retried = True  # type: ignore[attr-defined]
+                            tried_backends.discard(backend.id)
+                            last_error = e
+                            continue  # retry same backend with corrected value
+
                     logger.warning(
                         "stream_backend_4xx",
                         backend_id=backend.id,
