@@ -935,9 +935,17 @@ class InferenceService:
                                 await self._latency_tracker.record_latency(backend.id, elapsed_ms)
                                 return response, backend
                             except Exception as retry_err:
+                                _retry_detail = None
+                                if hasattr(retry_err, 'response'):
+                                    try:
+                                        _retry_detail = retry_err.response.json()
+                                    except Exception:
+                                        _retry_detail = getattr(retry_err.response, 'text', None)
                                 logger.warning(
                                     "max_tokens_retry_failed",
                                     error=str(retry_err),
+                                    detail=_retry_detail,
+                                    max_tokens_sent=request.max_tokens,
                                 )
                                 # Fall through to normal 4xx handling
 
@@ -1098,9 +1106,17 @@ class InferenceService:
                                 await self._latency_tracker.record_latency(backend.id, total_ms)
                                 return
                             except Exception as retry_err:
+                                _retry_detail = None
+                                if hasattr(retry_err, 'response'):
+                                    try:
+                                        _retry_detail = retry_err.response.json()
+                                    except Exception:
+                                        _retry_detail = getattr(retry_err.response, 'text', None)
                                 logger.warning(
                                     "max_tokens_retry_failed",
                                     error=str(retry_err),
+                                    detail=_retry_detail,
+                                    max_tokens_sent=request.max_tokens,
                                 )
                                 # Fall through to normal 4xx handling
 
