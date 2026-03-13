@@ -14,7 +14,6 @@
 
 """Blog routes for MindRouter."""
 
-import os
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,19 +21,14 @@ from typing import Optional
 import markdown
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
 from backend.app.db.session import get_async_db
-from backend.app.dashboard.routes import get_session_user_id
+from backend.app.dashboard.routes import get_session_user_id, templates
 from backend.app.settings import get_settings
 
 blog_router = APIRouter(tags=["blog"])
-
-# Setup templates
-templates_path = os.path.join(os.path.dirname(__file__), "templates")
-templates = Jinja2Templates(directory=templates_path)
 
 
 def _render_markdown(text: str) -> str:
