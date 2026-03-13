@@ -72,10 +72,9 @@ def _parse_max_tokens_overflow(detail, log=None) -> int | None:
         return None
     actual_input = int(m.group(1))
     context = int(m.group(2))
-    # Subtract 10 extra tokens as safety buffer — vLLM's reported input count
-    # can shift by a few tokens between attempts (observed +2 when max_tokens
-    # is set explicitly vs None).
-    corrected = context - actual_input - 10
+    # Subtract 100 tokens as safety buffer — vLLM's reported input token count
+    # shifts between attempts (observed +2 to +11 when max_tokens changes).
+    corrected = context - actual_input - 100
     if corrected < 1:
         return None
     if log:
