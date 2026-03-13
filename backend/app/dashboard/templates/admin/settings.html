@@ -14,7 +14,8 @@
 
             {% if success %}
             <div class="alert alert-success alert-dismissible fade show" role="alert">
-                {% if success == 'timezone_updated' %}Timezone updated.
+                {% if success == 'site_url_updated' %}Site URL updated.
+                {% elif success == 'timezone_updated' %}Timezone updated.
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
                 {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
                 {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
@@ -34,6 +35,23 @@
             {% endif %}
 
             <div class="row g-4">
+                <!-- Site URL -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Site URL</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">The public-facing base URL for this MindRouter installation. Used in email links and other external references.</p>
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_site_url">
+                                <div class="mb-3">
+                                    <input type="url" class="form-control" name="site_url" value="{{ site_url }}" placeholder="https://mindrouter.example.com" required>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save URL</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Timezone -->
                 <div class="col-lg-6">
                     <div class="card">

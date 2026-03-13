@@ -27,7 +27,19 @@ import markdown
 from backend.app.db import crud
 from backend.app.db.session import get_async_db_context
 
+from backend.app.settings import get_settings
+
 logger = logging.getLogger(__name__)
+
+
+async def get_base_url(db=None) -> str:
+    """Return the configured site URL from AppConfig, falling back to settings."""
+    async def _load(db):
+        return await crud.get_config_json(db, "app.base_url", get_settings().app_base_url)
+    if db:
+        return await _load(db)
+    async with get_async_db_context() as db:
+        return await _load(db)
 
 # ---------------------------------------------------------------------------
 # HTML email wrapper template (inline CSS for email client compatibility)

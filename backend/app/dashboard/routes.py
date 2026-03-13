@@ -3106,6 +3106,7 @@ async def admin_settings(
     if not user or (not user.group or not user.group.is_admin):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    site_url = await crud.get_config_json(db, "app.base_url", get_settings().app_base_url)
     current_tz = await crud.get_config_json(db, "app.timezone", "America/Los_Angeles")
     enforce_num_ctx = await crud.get_config_json(db, "ollama.enforce_num_ctx", True)
 
@@ -3136,6 +3137,7 @@ async def admin_settings(
         {
             "request": request,
             "user": user,
+            "site_url": site_url,
             "current_timezone": current_tz,
             "timezone_choices": _TIMEZONE_CHOICES,
             "now_in_tz": now_in_tz,
@@ -3178,7 +3180,17 @@ async def admin_settings_post(
     form = await request.form()
     action = form.get("action")
 
-    if action == "set_timezone":
+    if action == "set_site_url":
+        url = form.get("site_url", "").strip().rstrip("/")
+        if not url:
+            return RedirectResponse(url="/admin/settings?error=Site+URL+cannot+be+empty", status_code=302)
+        await crud.set_config(
+            db, "app.base_url", url, description="Public-facing base URL for this MindRouter installation"
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=site_url_updated", status_code=302)
+
+    elif action == "set_timezone":
         tz_name = form.get("timezone", "").strip()
         # Validate timezone
         try:
@@ -3280,7 +3292,7 @@ async def admin_settings_post(
                 await email_service._send_one(
                     smtp, smtp_config["default_sender"], test_addr,
                     "MindRouter Test Email",
-                    email_service._wrap_html("<p>This is a test email from MindRouter.</p>", base_url=get_settings().app_base_url),
+                    email_service._wrap_html("<p>This is a test email from MindRouter.</p>", base_url=await email_service.get_base_url(db)),
                 )
             finally:
                 await smtp.quit()

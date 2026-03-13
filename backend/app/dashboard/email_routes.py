@@ -25,7 +25,6 @@ from backend.app.db import crud
 from backend.app.db.session import get_async_db
 from backend.app.dashboard.routes import get_session_user_id, templates
 from backend.app.services import email_service
-from backend.app.settings import get_settings
 
 email_router = APIRouter(tags=["email"])
 
@@ -134,7 +133,7 @@ async def send_email(
         return RedirectResponse("/admin/email?error=No+recipients+found", status_code=302)
 
     # Wrap body in HTML email template
-    base_url = get_settings().app_base_url
+    base_url = await email_service.get_base_url(db)
     html_body = email_service._wrap_html(body, base_url=base_url)
 
     # Create log
@@ -186,7 +185,7 @@ async def send_test_compose(
         return JSONResponse({"error": "No test address configured"}, status_code=400)
 
     # Personalize with test values
-    base_url = get_settings().app_base_url
+    base_url = await email_service.get_base_url(db)
     html_body = email_service._wrap_html(content, base_url=base_url)
     test_user = {"email": test_addr, "username": "testuser", "full_name": "Test User"}
     personalized = email_service._personalize(html_body, test_user)

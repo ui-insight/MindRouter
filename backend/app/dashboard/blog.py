@@ -28,7 +28,6 @@ from backend.app.db import crud
 from backend.app.db.session import get_async_db
 from backend.app.dashboard.routes import get_session_user_id, templates
 from backend.app.services import email_service
-from backend.app.settings import get_settings
 
 blog_router = APIRouter(tags=["blog"])
 
@@ -308,8 +307,7 @@ async def admin_blog_send_email(
     if not users:
         return RedirectResponse(f"/admin/blog/{post_id}/edit?error=No+recipients", status_code=302)
 
-    settings = get_settings()
-    base_url = settings.app_base_url or "https://mindrouter.uidaho.edu"
+    base_url = await email_service.get_base_url(db)
 
     subject = f"MindRouter Blog: {post.title}"
     html_body = email_service._render_blog_email(
@@ -365,8 +363,7 @@ async def admin_blog_send_test_email(
     if not test_addr:
         return JSONResponse({"error": "No test address configured"}, status_code=400)
 
-    settings = get_settings()
-    base_url = settings.app_base_url or "https://mindrouter.uidaho.edu"
+    base_url = await email_service.get_base_url(db)
 
     subject = f"[TEST] MindRouter Blog: {post.title}"
     html_body = email_service._render_blog_email(
