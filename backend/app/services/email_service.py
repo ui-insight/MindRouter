@@ -57,8 +57,8 @@ _EMAIL_WRAPPER = """\
 </html>"""
 
 _DEFAULT_FOOTER = (
-    "You received this email because you are a registered MindRouter user at the "
-    "University of Idaho. To manage your email preferences, visit your "
+    "You received this email because you are a registered MindRouter user. "
+    "To manage your email preferences, visit your "
     '<a href="{base_url}/dashboard" style="color:#003DA5;">dashboard settings</a>.'
 )
 
@@ -194,7 +194,7 @@ async def _open_smtp(config: Dict[str, Any]) -> aiosmtplib.SMTP:
 # ---------------------------------------------------------------------------
 
 
-async def send_test_email(config: Dict[str, Any], recipient: str) -> str:
+async def send_test_email(config: Dict[str, Any], recipient: str, base_url: str = "") -> str:
     """Send a test email. Returns empty string on success, error message on failure."""
     if not recipient:
         return "No test address configured"
@@ -204,7 +204,7 @@ async def send_test_email(config: Dict[str, Any], recipient: str) -> str:
             body = _wrap_html(
                 "<p>This is a test email from <strong>MindRouter</strong>.</p>"
                 "<p>If you can read this, your SMTP configuration is working correctly.</p>",
-                _DEFAULT_FOOTER.format(base_url=""),
+                base_url=base_url,
             )
             await _send_one(smtp, config["default_sender"], recipient, "MindRouter Test Email", body)
         finally:

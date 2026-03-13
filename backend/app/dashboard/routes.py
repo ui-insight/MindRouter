@@ -3280,7 +3280,7 @@ async def admin_settings_post(
                 await email_service._send_one(
                     smtp, smtp_config["default_sender"], test_addr,
                     "MindRouter Test Email",
-                    email_service._wrap_html("<p>This is a test email from MindRouter.</p>"),
+                    email_service._wrap_html("<p>This is a test email from MindRouter.</p>", base_url=get_settings().app_base_url),
                 )
             finally:
                 await smtp.quit()
