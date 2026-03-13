@@ -52,39 +52,10 @@ from backend.app.settings import get_settings
 logger = get_logger(__name__)
 
 
-def _parse_max_tokens_overflow(detail, log=None) -> int | None:
-    """Parse a vLLM max_tokens overflow 400 error and return a corrected max_tokens.
-
-    vLLM errors look like:
-      "You passed 14499 input tokens and requested 18270 output tokens.
-       However, the model's context length is only 32768 tokens ..."
-
-    Returns context_length - input_tokens - 1, or None if not parseable.
-    """
-    import re
-
+def _is_max_tokens_overflow(detail) -> bool:
+    """Check if a vLLM 400 error is a max_tokens overflow."""
     text = str(detail)
-    m = re.search(
-        r"passed\s+(\d+)\s+input tokens.*context length is(?: only)?\s+(\d+)",
-        text,
-    )
-    if not m:
-        return None
-    actual_input = int(m.group(1))
-    context = int(m.group(2))
-    # Subtract 100 tokens as safety buffer — vLLM's reported input token count
-    # shifts between attempts (observed +2 to +11 when max_tokens changes).
-    corrected = context - actual_input - 100
-    if corrected < 1:
-        return None
-    if log:
-        log.info(
-            "max_tokens_overflow_retry",
-            actual_input=actual_input,
-            context=context,
-            corrected_max_tokens=corrected,
-        )
-    return corrected
+    return "input tokens" in text and "context length" in text
 
 
 class InferenceService:
@@ -867,15 +838,16 @@ class InferenceService:
                 else:
                     raise
 
-            # Set max_tokens when None so vLLM doesn't default to
-            # (context - input) which can overflow by 1.  We use context // 2
-            # as an initial guess; if vLLM still rejects it, the 400 handler
-            # below will parse the real input count and retry with the exact
-            # correct value.
-            if models and hasattr(request, 'max_tokens') and request.max_tokens is None:
+            # Cap max_tokens to fit within the model context window.
+            # We cap at context // 2 to leave room for input tokens.
+            # If vLLM still rejects (input > context // 2), we retry
+            # at context // 4 (see 400 handler below).
+            if models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in models if m.name == job.model), models[0])
                 if _target.context_length:
-                    request.max_tokens = _target.context_length // 2
+                    _cap = _target.context_length // 2
+                    if request.max_tokens is None or request.max_tokens > _cap:
+                        request.max_tokens = _cap
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -931,7 +903,7 @@ class InferenceService:
                     await self._registry.report_live_failure(backend.id)
                     last_error = e
                 else:
-                    # 4xx — check if it's a max_tokens overflow we can fix
+                    # 4xx — check if it's a max_tokens overflow we can retry
                     try:
                         detail = e.response.json()
                     except Exception:
@@ -941,14 +913,21 @@ class InferenceService:
                         e.response.status_code == 400
                         and hasattr(request, 'max_tokens')
                         and not getattr(request, '_max_tokens_retried', False)
+                        and _is_max_tokens_overflow(detail)
                     ):
-                        corrected = _parse_max_tokens_overflow(detail, logger)
-                        if corrected is not None:
-                            request.max_tokens = corrected
+                        # Halve max_tokens (from context//2 to context//4)
+                        _target = next((m for m in models if m.name == job.model), models[0])
+                        if _target.context_length:
+                            request.max_tokens = _target.context_length // 4
                             request._max_tokens_retried = True  # type: ignore[attr-defined]
                             tried_backends.discard(backend.id)
+                            logger.info(
+                                "max_tokens_overflow_retry",
+                                new_max_tokens=request.max_tokens,
+                                context=_target.context_length,
+                            )
                             last_error = e
-                            continue  # retry same backend with corrected value
+                            continue  # retry same backend
 
                     logger.warning(
                         "backend_4xx",
@@ -1020,11 +999,13 @@ class InferenceService:
                 else:
                     raise
 
-            # Set max_tokens when None (same logic as non-streaming path).
-            if _models and hasattr(request, 'max_tokens') and request.max_tokens is None:
+            # Cap max_tokens (same logic as non-streaming path).
+            if _models and hasattr(request, 'max_tokens'):
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if _target.context_length:
-                    request.max_tokens = _target.context_length // 2
+                    _cap = _target.context_length // 2
+                    if request.max_tokens is None or request.max_tokens > _cap:
+                        request.max_tokens = _cap
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
@@ -1068,7 +1049,7 @@ class InferenceService:
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code < 500:
-                    # 4xx — check if it's a max_tokens overflow we can fix
+                    # 4xx — check if it's a max_tokens overflow we can retry
                     try:
                         detail = e.response.json()
                     except Exception:
@@ -1078,14 +1059,20 @@ class InferenceService:
                         e.response.status_code == 400
                         and hasattr(request, 'max_tokens')
                         and not getattr(request, '_max_tokens_retried', False)
+                        and _is_max_tokens_overflow(detail)
                     ):
-                        corrected = _parse_max_tokens_overflow(detail, logger)
-                        if corrected is not None:
-                            request.max_tokens = corrected
+                        _target = next((m for m in _models if m.name == job.model), _models[0])
+                        if _target.context_length:
+                            request.max_tokens = _target.context_length // 4
                             request._max_tokens_retried = True  # type: ignore[attr-defined]
                             tried_backends.discard(backend.id)
+                            logger.info(
+                                "max_tokens_overflow_retry",
+                                new_max_tokens=request.max_tokens,
+                                context=_target.context_length,
+                            )
                             last_error = e
-                            continue  # retry same backend with corrected value
+                            continue  # retry same backend
 
                     logger.warning(
                         "stream_backend_4xx",
