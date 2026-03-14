@@ -1566,6 +1566,16 @@ class InferenceService:
         # if subsequent DB operations fail or hang.
         await self._scheduler.on_job_completed(job, backend_id, total_tokens)
 
+        # Mark the model as loaded so the scheduler prefers this backend
+        # for subsequent requests (bridges the 30s discovery poll gap).
+        try:
+            from backend.app.db.session import get_async_db_context
+            async with get_async_db_context() as mark_db:
+                await crud.mark_model_loaded(mark_db, backend_id, job.model)
+                await mark_db.commit()
+        except Exception:
+            pass  # Best-effort, don't break the completion path
+
         # DB bookkeeping — shielded from task cancellation so the commit
         # can't be interrupted mid-flush (which corrupts the session and
         # leaks the connection from the pool).
@@ -1626,6 +1636,15 @@ class InferenceService:
 
         # Release backend capacity FIRST
         await self._scheduler.on_job_completed(job, backend_id, total_tokens)
+
+        # Mark the model as loaded so the scheduler prefers this backend
+        try:
+            from backend.app.db.session import get_async_db_context
+            async with get_async_db_context() as mark_db:
+                await crud.mark_model_loaded(mark_db, backend_id, job.model)
+                await mark_db.commit()
+        except Exception:
+            pass
 
         await asyncio.shield(self._do_complete_streaming_db(
             db_request, backend_id, content, chunk_count,

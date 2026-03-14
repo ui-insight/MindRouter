@@ -1019,6 +1019,23 @@ async def update_backend_circuit_breaker(
 
 
 # Model CRUD
+async def mark_model_loaded(db: AsyncSession, backend_id: int, model_name: str) -> None:
+    """Mark a model as loaded on a backend (called after successful inference).
+
+    This bridges the gap between 30-second discovery polls so the scheduler
+    knows the model is warm and can prefer this backend for the next request.
+    """
+    result = await db.execute(
+        select(Model).where(
+            and_(Model.backend_id == backend_id, Model.name == model_name)
+        )
+    )
+    model = result.scalar_one_or_none()
+    if model and not model.is_loaded:
+        model.is_loaded = True
+        await db.flush()
+
+
 async def get_models_for_backend(db: AsyncSession, backend_id: int) -> List[Model]:
     """Get all models for a backend."""
     result = await db.execute(
