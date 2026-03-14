@@ -547,6 +547,7 @@ class InferenceService:
         routed_backend = None
         inflight_chars = 0
         inflight_total_tokens = 0
+        last_finish_reason = None
 
         try:
             async for chunk_data, backend in self._proxy_stream_with_retry(
@@ -563,6 +564,9 @@ class InferenceService:
                     thinking = chunk_data["message"].get("thinking", "")
                     if thinking:
                         inflight_chars += len(thinking)
+
+                if chunk_data.get("done"):
+                    last_finish_reason = chunk_data.get("done_reason", "stop")
 
                 # Flush estimated tokens to Redis every 10 chunks
                 if chunk_count % 10 == 0 and inflight_chars > 0:
@@ -581,7 +585,8 @@ class InferenceService:
 
             if routed_backend:
                 await self._complete_streaming_request(
-                    db_request, routed_backend.id, full_content, chunk_count, job
+                    db_request, routed_backend.id, full_content, chunk_count, job,
+                    finish_reason=last_finish_reason,
                 )
         except BaseException as e:
             # BaseException catches CancelledError and GeneratorExit from
@@ -1366,14 +1371,13 @@ class InferenceService:
         """Proxy chat request, return in Ollama format."""
         client = await self._get_http_client()
 
-        payload = OllamaOutTranslator.translate_chat_request(request)
-        payload["stream"] = False
-
         if backend.engine == BackendEngine.OLLAMA:
+            payload = OllamaOutTranslator.translate_chat_request(request)
+            payload["stream"] = False
             url = f"{backend.url}/api/chat"
         else:
-            # Need to translate through OpenAI and back
             payload = VLLMOutTranslator.translate_chat_request(request)
+            payload["stream"] = False
             url = f"{backend.url}/v1/chat/completions"
 
         response = await client.post(url, json=payload)
@@ -1453,12 +1457,13 @@ class InferenceService:
         """Proxy streaming request, yield Ollama format chunks."""
         client = await self._get_http_client()
 
-        payload = OllamaOutTranslator.translate_chat_request(request)
-        payload["stream"] = True
-
         if backend.engine == BackendEngine.OLLAMA:
+            payload = OllamaOutTranslator.translate_chat_request(request)
+            payload["stream"] = True
             url = f"{backend.url}/api/chat"
         else:
+            payload = VLLMOutTranslator.translate_chat_request(request)
+            payload["stream"] = True
             url = f"{backend.url}/v1/chat/completions"
 
         async with client.stream("POST", url, json=payload) as response:
