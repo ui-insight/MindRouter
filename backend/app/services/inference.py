@@ -959,6 +959,13 @@ class InferenceService:
                 if _target.context_length:
                     await self.cap_max_tokens(request, backend, _target.context_length)
 
+            # Strip thinking mode for models that don't support it
+            # (Ollama returns a 400 error if think=true on non-thinking models)
+            if models and hasattr(request, 'think') and request.think:
+                _target = next((m for m in models if m.name == job.model), models[0])
+                if not getattr(_target, 'supports_thinking', False):
+                    request.think = None
+
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
                 for m in models:
@@ -1094,6 +1101,12 @@ class InferenceService:
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if _target.context_length:
                     await self.cap_max_tokens(request, backend, _target.context_length)
+
+            # Strip thinking mode for models that don't support it
+            if _models and hasattr(request, 'think') and request.think:
+                _target = next((m for m in _models if m.name == job.model), _models[0])
+                if not getattr(_target, 'supports_thinking', False):
+                    request.think = None
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
