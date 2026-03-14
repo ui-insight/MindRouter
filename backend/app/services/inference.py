@@ -968,19 +968,17 @@ class InferenceService:
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
-                for m in models:
-                    if m.context_length:
-                        if request.backend_options is None:
-                            request.backend_options = {}
-                        # Check if admin wants to enforce context length
-                        from backend.app.db.session import get_async_db_context
-                        async with get_async_db_context() as cfg_db:
-                            enforce = await crud.get_config_json(cfg_db, "ollama.enforce_num_ctx", True)
-                        if enforce:
-                            request.backend_options["num_ctx"] = m.context_length
-                        else:
-                            request.backend_options.setdefault("num_ctx", m.context_length)
-                        break
+                _ctx_target = next((m for m in models if m.name == job.model), models[0])
+                if _ctx_target.context_length:
+                    if request.backend_options is None:
+                        request.backend_options = {}
+                    from backend.app.db.session import get_async_db_context
+                    async with get_async_db_context() as cfg_db:
+                        enforce = await crud.get_config_json(cfg_db, "ollama.enforce_num_ctx", True)
+                    if enforce:
+                        request.backend_options["num_ctx"] = _ctx_target.context_length
+                    else:
+                        request.backend_options.setdefault("num_ctx", _ctx_target.context_length)
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
@@ -1107,6 +1105,20 @@ class InferenceService:
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
+
+            # Inject num_ctx for Ollama backends from model config
+            if backend.engine == BackendEngine.OLLAMA and _models and hasattr(request, 'backend_options'):
+                _ctx_target = next((m for m in _models if m.name == job.model), _models[0])
+                if _ctx_target.context_length:
+                    if request.backend_options is None:
+                        request.backend_options = {}
+                    from backend.app.db.session import get_async_db_context
+                    async with get_async_db_context() as cfg_db:
+                        enforce = await crud.get_config_json(cfg_db, "ollama.enforce_num_ctx", True)
+                    if enforce:
+                        request.backend_options["num_ctx"] = _ctx_target.context_length
+                    else:
+                        request.backend_options.setdefault("num_ctx", _ctx_target.context_length)
 
             tried_backends.add(backend.id)
             start_time = time.monotonic()
