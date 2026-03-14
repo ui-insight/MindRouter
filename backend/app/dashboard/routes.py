@@ -268,6 +268,7 @@ async def models_catalog(
                         "embeddings": False,
                         "structured_output": True,
                         "thinking": False,
+                        "tools": False,
                     },
                     "context_length": None,
                     "model_max_context": None,
@@ -292,6 +293,8 @@ async def models_catalog(
                 md["capabilities"]["multimodal"] = True
             if model.supports_thinking:
                 md["capabilities"]["thinking"] = True
+            if model.supports_tools:
+                md["capabilities"]["tools"] = True
             if "embed" in model.name.lower():
                 md["capabilities"]["embeddings"] = True
 
