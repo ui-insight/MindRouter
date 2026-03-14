@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import (
+    AdminAuditLog,
     ApiKey,
     ApiKeyStatus,
     AppConfig,
@@ -3156,3 +3157,63 @@ async def import_config_tables(db: AsyncSession, data: dict) -> dict:
 
     await db.commit()
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Admin Audit Log
+# ---------------------------------------------------------------------------
+
+async def log_admin_action(
+    db: AsyncSession,
+    user_id: int,
+    action: str,
+    entity_type: str,
+    entity_id: Optional[str] = None,
+    before_value: Optional[dict] = None,
+    after_value: Optional[dict] = None,
+    ip_address: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> AdminAuditLog:
+    """Record an admin action to the persistent audit log."""
+    entry = AdminAuditLog(
+        user_id=user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=str(entity_id) if entity_id is not None else None,
+        before_value=before_value,
+        after_value=after_value,
+        ip_address=ip_address,
+        detail=detail,
+    )
+    db.add(entry)
+    await db.flush()
+    return entry
+
+
+async def get_admin_audit_log(
+    db: AsyncSession,
+    user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> Tuple[List[AdminAuditLog], int]:
+    """Query the admin audit log with filters and pagination."""
+    query = select(AdminAuditLog).options(selectinload(AdminAuditLog.user))
+    count_query = select(func.count(AdminAuditLog.id))
+
+    if user_id is not None:
+        query = query.where(AdminAuditLog.user_id == user_id)
+        count_query = count_query.where(AdminAuditLog.user_id == user_id)
+    if action is not None:
+        query = query.where(AdminAuditLog.action == action)
+        count_query = count_query.where(AdminAuditLog.action == action)
+    if entity_type is not None:
+        query = query.where(AdminAuditLog.entity_type == entity_type)
+        count_query = count_query.where(AdminAuditLog.entity_type == entity_type)
+
+    total = (await db.execute(count_query)).scalar() or 0
+    result = await db.execute(
+        query.order_by(AdminAuditLog.timestamp.desc()).offset(skip).limit(limit)
+    )
+    return list(result.scalars().all()), total

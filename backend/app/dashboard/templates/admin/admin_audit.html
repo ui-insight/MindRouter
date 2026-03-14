@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Audit Log - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "admin_audit" %}{% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-shield-check"></i> Admin Audit Log</h1>
+                <span class="text-muted">{{ total }} action{{ 's' if total != 1 else '' }}</span>
+            </div>
+
+            <!-- Filters -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <form method="GET" action="/admin/admin-audit" class="row g-3">
+                        <div class="col-md-3">
+                            <label for="action_filter" class="form-label">Action</label>
+                            <select class="form-select" id="action_filter" name="action">
+                                <option value="">All Actions</option>
+                                {% for a in actions %}
+                                <option value="{{ a }}" {% if action_filter == a %}selected{% endif %}>{{ a }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="entity_filter" class="form-label">Entity Type</label>
+                            <select class="form-select" id="entity_filter" name="entity_type">
+                                <option value="">All</option>
+                                {% for et in entity_types %}
+                                <option value="{{ et }}" {% if entity_filter == et %}selected{% endif %}>{{ et }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="user_filter" class="form-label">Admin User</label>
+                            <select class="form-select" id="user_filter" name="user_id">
+                                <option value="">All</option>
+                                {% for u in admin_users %}
+                                <option value="{{ u.id }}" {% if user_filter == u.id %}selected{% endif %}>{{ u.username }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end gap-2">
+                            <button type="submit" class="btn btn-primary"><i class="bi bi-funnel"></i> Filter</button>
+                            <a href="/admin/admin-audit" class="btn btn-outline-secondary">Clear</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <div class="table-responsive">
+                <table class="table table-hover table-sm">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="min-width:160px">Time</th>
+                            <th>Admin</th>
+                            <th>Action</th>
+                            <th>Entity</th>
+                            <th>Detail</th>
+                            <th>IP</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for entry in entries %}
+                        <tr class="audit-row" style="cursor:pointer" data-idx="{{ loop.index }}">
+                            <td><small>{{ entry.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</small></td>
+                            <td>
+                                {% if entry.user %}
+                                <code>{{ entry.user.username }}</code>
+                                {% else %}
+                                <span class="text-muted">ID {{ entry.user_id }}</span>
+                                {% endif %}
+                            </td>
+                            <td><span class="badge bg-primary">{{ entry.action }}</span></td>
+                            <td>
+                                <span class="text-muted">{{ entry.entity_type }}</span>
+                                {% if entry.entity_id %}
+                                <code>{{ entry.entity_id }}</code>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if entry.detail %}
+                                <small>{{ entry.detail[:80] }}{{ '...' if entry.detail|length > 80 }}</small>
+                                {% else %}
+                                <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
+                            <td><small class="text-muted">{{ entry.ip_address or '&mdash;' }}</small></td>
+                        </tr>
+                        <!-- Detail row -->
+                        <tr class="audit-detail d-none" id="detail-{{ loop.index }}">
+                            <td colspan="6">
+                                <div class="p-2" style="background: var(--bs-light); border-radius: 6px;">
+                                    <div class="row">
+                                        {% if entry.before_value %}
+                                        <div class="col-md-6">
+                                            <strong>Before:</strong>
+                                            <pre class="mb-0 mt-1" style="font-size:0.8em; max-height:200px; overflow:auto;">{{ entry.before_value | tojson(indent=2) }}</pre>
+                                        </div>
+                                        {% endif %}
+                                        {% if entry.after_value %}
+                                        <div class="col-md-6">
+                                            <strong>After:</strong>
+                                            <pre class="mb-0 mt-1" style="font-size:0.8em; max-height:200px; overflow:auto;">{{ entry.after_value | tojson(indent=2) }}</pre>
+                                        </div>
+                                        {% endif %}
+                                        {% if not entry.before_value and not entry.after_value %}
+                                        <div class="col-12 text-muted"><small>No before/after data recorded.</small></div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="text-center text-muted py-4">No audit entries found.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            {% if total > page_size %}
+            <nav>
+                <ul class="pagination justify-content-center">
+                    {% if page > 1 %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ page - 1 }}&action={{ action_filter or '' }}&entity_type={{ entity_filter or '' }}&user_id={{ user_filter or '' }}">Previous</a>
+                    </li>
+                    {% endif %}
+                    <li class="page-item disabled">
+                        <span class="page-link">Page {{ page }} of {{ (total + page_size - 1) // page_size }}</span>
+                    </li>
+                    {% if page * page_size < total %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ page + 1 }}&action={{ action_filter or '' }}&entity_type={{ entity_filter or '' }}&user_id={{ user_filter or '' }}">Next</a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </nav>
+            {% endif %}
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.querySelectorAll('.audit-row').forEach(row => {
+    row.addEventListener('click', () => {
+        const idx = row.dataset.idx;
+        const detail = document.getElementById('detail-' + idx);
+        if (detail) detail.classList.toggle('d-none');
+    });
+});
+</script>
+{% endblock %}

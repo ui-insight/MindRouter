@@ -34,7 +34,7 @@ from backend.app.core.telemetry.registry import get_registry
 from backend.app.dashboard.azure_auth import azure_router
 from backend.app.db import crud, chat_crud
 from backend.app.db.models import BackendEngine, QuotaRequestStatus, UserRole
-from backend.app.db.session import get_async_db
+from backend.app.db.session import get_async_db, get_async_db_context
 from backend.app.logging_config import get_logger
 from backend.app.security import generate_api_key, hash_password, verify_password
 from backend.app.settings import get_settings
@@ -971,10 +971,19 @@ async def admin_toggle_system_online(
         return RedirectResponse(url="/dashboard", status_code=302)
 
     registry = get_registry()
-    if registry.is_force_offline:
+    was_offline = registry.is_force_offline
+    if was_offline:
         await registry.force_online()
     else:
         await registry.force_offline()
+
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="system.toggle_online",
+            entity_type="system", detail=f"{'online' if was_offline else 'offline'}",
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
 
     return RedirectResponse(url="/admin", status_code=303)
 
@@ -1089,6 +1098,11 @@ async def approve_request(
         reviewer_id=user_id,
         status=QuotaRequestStatus.APPROVED,
     )
+    await crud.log_admin_action(
+        db, user_id=user_id, action="quota.approve",
+        entity_type="quota_request", entity_id=str(request_id),
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(url="/admin/requests", status_code=302)
@@ -1114,6 +1128,11 @@ async def deny_request(
         request_id=request_id,
         reviewer_id=user_id,
         status=QuotaRequestStatus.DENIED,
+    )
+    await crud.log_admin_action(
+        db, user_id=user_id, action="quota.deny",
+        entity_type="quota_request", entity_id=str(request_id),
+        ip_address=request.client.host if request.client else None,
     )
     await db.commit()
 
@@ -1195,6 +1214,12 @@ async def toggle_model_multimodal(
     # Toggle: flip the current supports_multimodal value and set as override for all
     new_value = not model.supports_multimodal
     await crud.set_multimodal_override_by_name(db, model_name, new_value)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.toggle_multimodal",
+        entity_type="model", entity_id=model_name,
+        after_value={"supports_multimodal": new_value},
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1218,6 +1243,11 @@ async def reset_model_multimodal(
         return RedirectResponse(url="/dashboard", status_code=302)
 
     await crud.set_multimodal_override_by_name(db, model_name, None)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.reset_multimodal",
+        entity_type="model", entity_id=model_name,
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1251,6 +1281,12 @@ async def toggle_model_thinking(
 
     new_value = not model.supports_thinking
     await crud.set_thinking_override_by_name(db, model_name, new_value)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.toggle_thinking",
+        entity_type="model", entity_id=model_name,
+        after_value={"supports_thinking": new_value},
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1274,6 +1310,11 @@ async def reset_model_thinking(
         return RedirectResponse(url="/dashboard", status_code=302)
 
     await crud.set_thinking_override_by_name(db, model_name, None)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.reset_thinking",
+        entity_type="model", entity_id=model_name,
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1308,6 +1349,12 @@ async def toggle_model_tools(
 
     new_value = not model.supports_tools
     await crud.set_tools_override_by_name(db, model_name, new_value)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.toggle_tools",
+        entity_type="model", entity_id=model_name,
+        after_value={"supports_tools": new_value},
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1331,6 +1378,11 @@ async def reset_model_tools(
         return RedirectResponse(url="/dashboard", status_code=302)
 
     await crud.set_tools_override_by_name(db, model_name, None)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.reset_tools",
+        entity_type="model", entity_id=model_name,
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1403,6 +1455,12 @@ async def update_model_metadata(
         overrides["capabilities_override"] = None
 
     await crud.update_model_overrides_by_name(db, model_name, overrides)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.update_metadata",
+        entity_type="model", entity_id=model_name,
+        after_value=overrides,
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1441,6 +1499,11 @@ async def reset_model_overrides(
         "model_url": None,
     }
     await crud.update_model_overrides_by_name(db, model_name, overrides)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.reset_overrides",
+        entity_type="model", entity_id=model_name,
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
 
     return RedirectResponse(
@@ -1530,6 +1593,14 @@ async def register_node(
             sidecar_url=sidecar_url_val,
             sidecar_key=sidecar_key_val,
         )
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="node.register",
+                entity_type="node", entity_id=name,
+                after_value={"hostname": hostname_val, "sidecar_url": sidecar_url_val},
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(url="/admin/nodes?success=registered", status_code=302)
     except Exception:
         return RedirectResponse(url="/admin/nodes?error=Registration+failed", status_code=302)
@@ -1579,6 +1650,14 @@ async def edit_node(
 
         registry = get_registry()
         await registry.update_node(node_id, **kwargs)
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="node.edit",
+                entity_type="node", entity_id=str(node_id),
+                after_value={"name": name, "hostname": hostname_val, "sidecar_url": sidecar_url_val},
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(url="/admin/nodes?success=updated", status_code=302)
     except Exception as e:
         error_msg = str(e).replace(" ", "+")
@@ -1603,6 +1682,13 @@ async def remove_node(
     registry = get_registry()
     removed = await registry.remove_node(node_id)
     if removed:
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="node.remove",
+                entity_type="node", entity_id=str(node_id),
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(url="/admin/nodes?success=removed", status_code=302)
     else:
         return RedirectResponse(
@@ -1627,6 +1713,13 @@ async def refresh_node(
 
     registry = get_registry()
     await registry.refresh_node(node_id)
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="node.refresh",
+            entity_type="node", entity_id=str(node_id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
     return RedirectResponse(url="/admin/nodes?success=refreshed", status_code=302)
 
 
@@ -1655,6 +1748,11 @@ async def take_node_offline(
         await registry.disable_backend(b.id)
 
     await crud.update_node_status(db, node_id, NodeStatus.OFFLINE)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="node.take_offline",
+        entity_type="node", entity_id=str(node_id),
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
     return JSONResponse({"ok": True})
 
@@ -1684,6 +1782,11 @@ async def bring_node_online(
         await registry.enable_backend(b.id)
 
     await crud.update_node_status(db, node_id, NodeStatus.ONLINE)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="node.bring_online",
+        entity_type="node", entity_id=str(node_id),
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
     return RedirectResponse(url="/admin/nodes?success=brought_online", status_code=302)
 
@@ -1729,6 +1832,12 @@ async def force_drain_node(
     backend_ids = [b.id for b in all_backends if b.node_id == node_id]
 
     cancelled = await crud.cancel_active_requests_for_backends(db, backend_ids)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="node.force_drain",
+        entity_type="node", entity_id=str(node_id),
+        detail=f"cancelled {cancelled} requests",
+        ip_address=request.client.host if request.client else None,
+    )
     await db.commit()
     return JSONResponse({"ok": True, "cancelled": cancelled})
 
@@ -1830,6 +1939,14 @@ async def register_backend(
             node_id=node_id_val,
             gpu_indices=gpu_indices_val,
         )
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="backend.register",
+                entity_type="backend", entity_id=name,
+                after_value={"url": url, "engine": engine, "max_concurrent": max_concurrent},
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(url="/admin/backends?success=registered", status_code=302)
     except Exception:
         return RedirectResponse(url="/admin/backends?error=Registration+failed", status_code=302)
@@ -1896,6 +2013,14 @@ async def edit_backend(
 
         registry = get_registry()
         await registry.update_backend(backend_id, **kwargs)
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="backend.edit",
+                entity_type="backend", entity_id=str(backend_id),
+                after_value={"name": name, "url": url, "engine": engine, "max_concurrent": max_concurrent},
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(url="/admin/backends?success=updated", status_code=302)
     except Exception as e:
         error_msg = str(e).replace(" ", "+")
@@ -1919,6 +2044,13 @@ async def disable_backend(
 
     registry = get_registry()
     await registry.disable_backend(backend_id)
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="backend.disable",
+            entity_type="backend", entity_id=str(backend_id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
     return RedirectResponse(url="/admin/backends?success=disabled", status_code=302)
 
 
@@ -1939,6 +2071,13 @@ async def drain_backend(
 
     registry = get_registry()
     await registry.drain_backend(backend_id)
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="backend.drain",
+            entity_type="backend", entity_id=str(backend_id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
     return RedirectResponse(url="/admin/backends?success=draining", status_code=302)
 
 
@@ -1959,6 +2098,13 @@ async def enable_backend(
 
     registry = get_registry()
     await registry.enable_backend(backend_id)
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="backend.enable",
+            entity_type="backend", entity_id=str(backend_id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
     return RedirectResponse(url="/admin/backends?success=enabled", status_code=302)
 
 
@@ -1980,6 +2126,13 @@ async def remove_backend(
     registry = get_registry()
     removed = await registry.remove_backend(backend_id)
     if removed:
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="backend.remove",
+                entity_type="backend", entity_id=str(backend_id),
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(url="/admin/backends?success=removed", status_code=302)
     else:
         return RedirectResponse(url="/admin/backends?error=Backend+not+found", status_code=302)
@@ -2002,6 +2155,13 @@ async def refresh_backend(
 
     registry = get_registry()
     await registry.refresh_backend(backend_id)
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="backend.refresh",
+            entity_type="backend", entity_id=str(backend_id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
     return RedirectResponse(url="/admin/backends?success=refreshed", status_code=302)
 
 
@@ -2271,6 +2431,75 @@ async def admin_audit_detail(
     return JSONResponse(detail)
 
 
+@dashboard_router.get("/admin/admin-audit", response_class=HTMLResponse)
+async def admin_admin_audit(
+    request: Request,
+    action: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    user_id: Optional[int] = None,
+    page: int = 1,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin audit log viewer — tracks all admin actions."""
+    session_user_id = get_session_user_id(request)
+    if not session_user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, session_user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    from sqlalchemy import select, distinct
+    from backend.app.db.models import AdminAuditLog, User
+
+    page_size = 50
+    skip = (page - 1) * page_size
+
+    entries, total = await crud.get_admin_audit_log(
+        db,
+        user_id=user_id,
+        action=action,
+        entity_type=entity_type,
+        skip=skip,
+        limit=page_size,
+    )
+
+    # Get distinct actions and entity types for filter dropdowns
+    actions_result = await db.execute(
+        select(distinct(AdminAuditLog.action)).order_by(AdminAuditLog.action)
+    )
+    actions = [r[0] for r in actions_result.all()]
+
+    entity_types_result = await db.execute(
+        select(distinct(AdminAuditLog.entity_type)).order_by(AdminAuditLog.entity_type)
+    )
+    entity_types = [r[0] for r in entity_types_result.all()]
+
+    # Get admin users for user filter
+    admin_users_result = await db.execute(
+        select(User).join(User.group).where(User.group.has(is_admin=True)).order_by(User.username)
+    )
+    admin_users = admin_users_result.scalars().all()
+
+    return templates.TemplateResponse(
+        "admin/admin_audit.html",
+        {
+            "request": request,
+            "user": user,
+            "entries": entries,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "actions": actions,
+            "entity_types": entity_types,
+            "admin_users": admin_users,
+            "action_filter": action,
+            "entity_filter": entity_type,
+            "user_filter": user_id,
+        },
+    )
+
+
 # Group management routes
 @dashboard_router.get("/admin/groups", response_class=HTMLResponse)
 async def admin_groups(
@@ -2344,6 +2573,12 @@ async def create_group(
             api_key_expiry_days=api_key_expiry_days,
             max_api_keys=max_api_keys,
         )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="group.create",
+            entity_type="group", entity_id=name,
+            after_value={"display_name": display_name, "token_budget": token_budget},
+            ip_address=request.client.host if request.client else None,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/groups?success=created", status_code=302)
     except Exception:
@@ -2387,6 +2622,12 @@ async def edit_group(
             api_key_expiry_days=api_key_expiry_days,
             max_api_keys=max_api_keys,
         )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="group.edit",
+            entity_type="group", entity_id=str(group_id),
+            after_value={"display_name": display_name, "token_budget": token_budget},
+            ip_address=request.client.host if request.client else None,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/groups?success=updated", status_code=302)
     except Exception as e:
@@ -2411,6 +2652,11 @@ async def delete_group(
 
     deleted = await crud.delete_group(db, group_id)
     if deleted:
+        await crud.log_admin_action(
+            db, user_id=user_id, action="group.delete",
+            entity_type="group", entity_id=str(group_id),
+            ip_address=request.client.host if request.client else None,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/groups?success=deleted", status_code=302)
     else:
@@ -2505,6 +2751,12 @@ async def edit_user(
             quota.weight_override = int(weight_override) if weight_override and weight_override.strip() else None
             await db.flush()
 
+        await crud.log_admin_action(
+            db, user_id=session_user_id, action="user.edit",
+            entity_type="user", entity_id=str(user_id),
+            after_value={"group_id": group_id, "full_name": full_name},
+            ip_address=request.client.host if request.client else None,
+        )
         await db.commit()
         return RedirectResponse(url=f"/admin/users/{user_id}?success=updated", status_code=302)
     except Exception as e:
@@ -2519,7 +2771,16 @@ async def edit_user(
 @dashboard_router.post("/admin/masquerade/stop")
 async def admin_masquerade_stop(request: Request):
     """Stop masquerading and return to admin view."""
-    logger.info("masquerade_stop", admin_user_id=get_session_user_id(request))
+    user_id = get_session_user_id(request)
+    logger.info("masquerade_stop", admin_user_id=user_id)
+    if user_id:
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="masquerade.stop",
+                entity_type="user",
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
     response = RedirectResponse(url="/admin/users", status_code=302)
     response.delete_cookie(key=_MASQUERADE_COOKIE)
     return response
@@ -2546,6 +2807,14 @@ async def admin_masquerade_start(
         return RedirectResponse(url="/admin/users?error=User+not+found", status_code=302)
 
     logger.info("masquerade_start", admin_user_id=user_id, target_user_id=target_user_id)
+
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db, user_id=user_id, action="masquerade.start",
+            entity_type="user", entity_id=str(target_user_id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await audit_db.commit()
 
     ser = _get_masquerade_serializer()
     signed = ser.dumps(target_user_id)
@@ -2908,15 +3177,25 @@ async def admin_chat_config_post(
     form = await request.form()
     action = form.get("action")
 
+    _ip = request.client.host if request.client else None
+
     if action == "set_default":
         default_model = form.get("default_model", "")
         await crud.set_config(db, "chat.default_model", default_model if default_model else None)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.set_default",
+            entity_type="config", detail=f"default_model={default_model}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=default_updated", status_code=302)
 
     elif action == "set_core_models":
         selected = form.getlist("core_models")
         await crud.set_config(db, "chat.core_models", selected)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.set_core_models",
+            entity_type="config", after_value={"core_models": selected}, ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=core_updated", status_code=302)
 
@@ -2927,11 +3206,19 @@ async def admin_chat_config_post(
         else:
             # Blank = remove override, revert to built-in default
             await crud.set_config(db, "chat.system_prompt", None)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.set_system_prompt",
+            entity_type="config", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=system_prompt_updated", status_code=302)
 
     elif action == "reset_system_prompt":
         await crud.set_config(db, "chat.system_prompt", None)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.reset_system_prompt",
+            entity_type="config", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=system_prompt_reset", status_code=302)
 
@@ -2942,6 +3229,10 @@ async def admin_chat_config_post(
         except (ValueError, TypeError):
             val = 16384
         await crud.set_config(db, "chat.max_tokens", val)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.set_max_tokens",
+            entity_type="config", detail=f"max_tokens={val}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=max_tokens_updated", status_code=302)
 
@@ -2956,6 +3247,10 @@ async def admin_chat_config_post(
             await crud.set_config(db, "chat.temperature", temp_val)
         else:
             await crud.set_config(db, "chat.temperature", None)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.set_temperature",
+            entity_type="config", detail=f"temperature={temp_str}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=temperature_updated", status_code=302)
 
@@ -2970,6 +3265,10 @@ async def admin_chat_config_post(
         else:
             think_val = None
         await crud.set_config(db, "chat.think", think_val)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.set_think",
+            entity_type="config", detail=f"think={think_val}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=think_updated", status_code=302)
 
@@ -2986,12 +3285,22 @@ async def admin_chat_config_post(
         await crud.set_config(db, "voice.tts_provider", tts_provider)
         await crud.set_config(db, "voice.tts_voice", tts_voice)
         await crud.set_config(db, "voice.tts_speed", tts_speed)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.save_tts",
+            entity_type="config",
+            after_value={"tts_enabled": tts_enabled, "tts_provider": tts_provider, "tts_voice": tts_voice},
+            ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=voice_tts_updated", status_code=302)
 
     elif action == "save_chat_stt":
         stt_enabled = form.get("stt_enabled") == "on"
         await crud.set_config(db, "voice.stt_enabled", stt_enabled)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.save_stt",
+            entity_type="config", detail=f"stt_enabled={stt_enabled}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/chat-config?success=voice_stt_updated", status_code=302)
 
@@ -3066,6 +3375,8 @@ async def admin_voice_config_post(
     form = await request.form()
     action = form.get("action")
 
+    _ip = request.client.host if request.client else None
+
     if action == "save_voice_tts_backend":
         tts_url = form.get("tts_url", "").strip() or None
         tts_api_key = form.get("tts_api_key", "").strip() or None
@@ -3076,6 +3387,11 @@ async def admin_voice_config_post(
         await crud.set_config(db, "voice.tts_api_key", tts_api_key)
         await crud.set_config(db, "voice_api.tts_voices", tts_voices)
         await crud.set_config(db, "voice_api.default_voice", default_voice)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="voice_config.save_tts_backend",
+            entity_type="config", after_value={"tts_url": tts_url, "default_voice": default_voice},
+            ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/voice-config?success=tts_backend_updated", status_code=302)
 
@@ -3087,6 +3403,11 @@ async def admin_voice_config_post(
         await crud.set_config(db, "voice.stt_url", stt_url)
         await crud.set_config(db, "voice.stt_api_key", stt_api_key)
         await crud.set_config(db, "voice.stt_model", stt_model)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="voice_config.save_stt_backend",
+            entity_type="config", after_value={"stt_url": stt_url, "stt_model": stt_model},
+            ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/voice-config?success=stt_backend_updated", status_code=302)
 
@@ -3103,6 +3424,12 @@ async def admin_voice_config_post(
             stt_qt = 200
         await crud.set_config(db, "voice_api.tts_quota_tokens", tts_qt)
         await crud.set_config(db, "voice_api.stt_quota_tokens", stt_qt)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="voice_config.save_quota",
+            entity_type="config",
+            after_value={"tts_quota_tokens": tts_qt, "stt_quota_tokens": stt_qt},
+            ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/voice-config?success=quota_updated", status_code=302)
 
@@ -3239,6 +3566,7 @@ async def admin_settings_post(
 
     form = await request.form()
     action = form.get("action")
+    _ip = request.client.host if request.client else None
 
     if action == "set_site_url":
         url = form.get("site_url", "").strip().rstrip("/")
@@ -3246,6 +3574,10 @@ async def admin_settings_post(
             return RedirectResponse(url="/admin/settings?error=Site+URL+cannot+be+empty", status_code=302)
         await crud.set_config(
             db, "app.base_url", url, description="Public-facing base URL for this MindRouter installation"
+        )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_site_url",
+            entity_type="config", detail=f"site_url={url}", ip_address=_ip,
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=site_url_updated", status_code=302)
@@ -3262,6 +3594,10 @@ async def admin_settings_post(
         await crud.set_config(
             db, "app.timezone", tz_name, description="IANA timezone for displaying dates in the web UI"
         )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_timezone",
+            entity_type="config", detail=f"timezone={tz_name}", ip_address=_ip,
+        )
         await db.commit()
         _refresh_tz_cache_sync(tz_name)
         return RedirectResponse(url="/admin/settings?success=timezone_updated", status_code=302)
@@ -3272,6 +3608,10 @@ async def admin_settings_post(
             db, "ollama.enforce_num_ctx", val,
             description="Override user-supplied num_ctx with model config context_length"
         )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_enforce_num_ctx",
+            entity_type="config", detail=f"enforce_num_ctx={val}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=enforce_num_ctx_updated", status_code=302)
 
@@ -3280,6 +3620,10 @@ async def admin_settings_post(
         await crud.set_config(
             db, "catalog.auto_enrich", val,
             description="Enable automatic model description enrichment"
+        )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_auto_enrich",
+            entity_type="config", detail=f"auto_enrich={val}", ip_address=_ip,
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=auto_enrich_updated", status_code=302)
@@ -3302,6 +3646,10 @@ async def admin_settings_post(
                 db, "catalog.brave_api_key", brave_key_val,
                 description="Brave Search API key for enrichment (overrides env var)"
             )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_enrich_config",
+            entity_type="config", detail=f"enrich_model={model_name}", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=enrich_config_updated", status_code=302)
 
@@ -3311,6 +3659,10 @@ async def admin_settings_post(
             return RedirectResponse(url="/admin/settings?error=Agreement+text+cannot+be+empty", status_code=302)
         bump = form.get("bump_version") == "on"
         await crud.set_agreement_text(db, text, bump_version=bump)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_agreement",
+            entity_type="config", detail=f"bump_version={bump}", ip_address=_ip,
+        )
         await db.commit()
         msg = "agreement_updated_and_bumped" if bump else "agreement_updated"
         return RedirectResponse(url=f"/admin/settings?success={msg}", status_code=302)
@@ -3335,6 +3687,10 @@ async def admin_settings_post(
         # TLS is a checkbox
         use_tls = form.get("smtp_use_tls") == "on"
         await crud.set_config(db, "email.use_tls", use_tls, description="Use TLS for SMTP")
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_email_config",
+            entity_type="config", ip_address=_ip,
+        )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=email_config_updated", status_code=302)
 
@@ -3495,6 +3851,11 @@ async def admin_retention_post(
                     pass
 
         await save_retention_config(db, updates)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="retention.update_policies",
+            entity_type="config", after_value=updates,
+            ip_address=request.client.host if request.client else None,
+        )
         await db.commit()
         return RedirectResponse(
             url="/admin/retention?success=policies_updated", status_code=302
@@ -3506,6 +3867,13 @@ async def admin_retention_post(
 
         # Run in background so the redirect completes quickly
         asyncio.create_task(run_retention_cycle())
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db, user_id=user_id, action="retention.run_now",
+                entity_type="config",
+                ip_address=request.client.host if request.client else None,
+            )
+            await audit_db.commit()
         return RedirectResponse(
             url="/admin/retention?success=retention_triggered", status_code=302
         )
@@ -3632,6 +4000,13 @@ async def admin_backup_restore(
 
     try:
         summary = await crud.import_config_tables(db, data)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="backup.restore",
+            entity_type="config",
+            detail=f"restored from uploaded backup",
+            ip_address=request.client.host if request.client else None,
+        )
+        await db.commit()
     except Exception as exc:
         logger.error("Backup restore failed", error=str(exc))
         return templates.TemplateResponse(

@@ -862,6 +862,32 @@ class EmailLog(Base):
     blog_post: Mapped[Optional["BlogPost"]] = relationship("BlogPost")
 
 
+class AdminAuditLog(Base):
+    """Persistent audit log of admin actions."""
+
+    __tablename__ = "admin_audit_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    before_value: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    after_value: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+
+    __table_args__ = (
+        Index("ix_admin_audit_timestamp", "timestamp"),
+        Index("ix_admin_audit_user_time", "user_id", "timestamp"),
+        Index("ix_admin_audit_entity", "entity_type", "entity_id"),
+        Index("ix_admin_audit_action", "action"),
+    )
+
+
 class AppConfig(Base, TimestampMixin):
     """Key-value application configuration stored in the database."""
 

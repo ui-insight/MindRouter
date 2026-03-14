@@ -25,13 +25,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
 
 from backend.app.api.auth import require_admin, require_admin_or_session
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
 from backend.app.db.models import BackendEngine, BackendStatus, Group, RequestStatus, User, UserRole
-from backend.app.db.session import get_async_db
+from backend.app.db.session import get_async_db, get_async_db_context
 from backend.app.logging_config import get_logger
 from backend.app.security.api_keys import generate_api_key
 from backend.app.security.password_hash import hash_password
@@ -282,6 +283,7 @@ class AuditRecord(BaseModel):
 # Backend Management
 @router.post("/backends/register", response_model=BackendResponse)
 async def register_backend(
+    http_request: Request,
     request: BackendRegisterRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -335,6 +337,18 @@ async def register_backend(
         name=backend.name,
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="backend.register",
+            entity_type="backend",
+            entity_id=str(backend.id),
+            after_value={"name": backend.name, "url": backend.url, "engine": backend.engine.value, "max_concurrent": backend.max_concurrent, "node_id": backend.node_id},
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return BackendResponse(
         id=backend.id,
         name=backend.name,
@@ -356,6 +370,7 @@ async def register_backend(
 @router.post("/backends/{backend_id}/disable")
 async def disable_backend(
     backend_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -376,12 +391,24 @@ async def disable_backend(
         backend_id=backend_id,
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="backend.disable",
+            entity_type="backend",
+            entity_id=str(backend_id),
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return {"status": "disabled", "backend_id": backend_id}
 
 
 @router.post("/backends/{backend_id}/enable")
 async def enable_backend(
     backend_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -402,12 +429,24 @@ async def enable_backend(
         backend_id=backend_id,
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="backend.enable",
+            entity_type="backend",
+            entity_id=str(backend_id),
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return {"status": "enabled", "backend_id": backend_id}
 
 
 @router.post("/backends/{backend_id}/refresh")
 async def refresh_backend(
     backend_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -423,6 +462,16 @@ async def refresh_backend(
     success = await registry.refresh_backend(backend_id)
 
     if success:
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db,
+                user_id=admin.id,
+                action="backend.refresh",
+                entity_type="backend",
+                entity_id=str(backend_id),
+                ip_address=http_request.client.host if http_request.client else None,
+            )
+            await audit_db.commit()
         return {"status": "refreshed", "backend_id": backend_id}
     else:
         raise HTTPException(
@@ -445,6 +494,7 @@ class OllamaDeleteRequest(BaseModel):
 @router.post("/backends/{backend_id}/ollama/pull")
 async def ollama_pull(
     backend_id: int,
+    http_request: Request,
     request: OllamaPullRequest,
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
@@ -480,6 +530,18 @@ async def ollama_pull(
         job_id=job_id,
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="ollama.pull",
+            entity_type="backend",
+            entity_id=str(backend_id),
+            after_value={"model": request.model, "job_id": job_id},
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return {"job_id": job_id, "status": "pulling"}
 
 
@@ -501,6 +563,7 @@ async def ollama_pull_status(
 @router.post("/backends/{backend_id}/ollama/delete")
 async def ollama_delete(
     backend_id: int,
+    http_request: Request,
     request: OllamaDeleteRequest,
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
@@ -542,6 +605,18 @@ async def ollama_delete(
         model=request.model,
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="ollama.delete",
+            entity_type="backend",
+            entity_id=str(backend_id),
+            before_value={"model": request.model},
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return {"status": "success", "model": request.model}
 
 
@@ -577,6 +652,7 @@ async def list_backends(
 @router.patch("/backends/{backend_id}", response_model=BackendResponse)
 async def update_backend(
     backend_id: int,
+    http_request: Request,
     request: BackendUpdateRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -625,6 +701,18 @@ async def update_backend(
         fields=list(raw.keys()),
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="backend.update",
+            entity_type="backend",
+            entity_id=str(backend_id),
+            after_value=raw,
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return BackendResponse(
         id=updated.id,
         name=updated.name,
@@ -646,6 +734,7 @@ async def update_backend(
 @router.patch("/nodes/{node_id}", response_model=NodeResponse)
 async def update_node(
     node_id: int,
+    http_request: Request,
     request: NodeUpdateRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -692,6 +781,18 @@ async def update_node(
         fields=list(raw.keys()),
     )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="node.update",
+            entity_type="node",
+            entity_id=str(node_id),
+            after_value=raw,
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return NodeResponse(
         id=updated.id,
         name=updated.name,
@@ -709,6 +810,7 @@ async def update_node(
 # Node Management
 @router.post("/nodes/register", response_model=NodeResponse)
 async def register_node(
+    http_request: Request,
     request: NodeRegisterRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -735,6 +837,18 @@ async def register_node(
         node_id=node.id,
         name=node.name,
     )
+
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="node.register",
+            entity_type="node",
+            entity_id=str(node.id),
+            after_value={"name": node.name, "hostname": node.hostname, "sidecar_url": node.sidecar_url},
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
 
     return NodeResponse(
         id=node.id,
@@ -777,6 +891,7 @@ async def list_nodes(
 @router.delete("/nodes/{node_id}")
 async def delete_node(
     node_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -796,12 +911,25 @@ async def delete_node(
             detail="Cannot delete node with active backends. Remove backends first.",
         )
 
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="node.delete",
+            entity_type="node",
+            entity_id=str(node_id),
+            before_value={"name": node.name, "hostname": node.hostname},
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
+
     return {"status": "deleted", "node_id": node_id}
 
 
 @router.post("/nodes/{node_id}/refresh")
 async def refresh_node(
     node_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -816,6 +944,16 @@ async def refresh_node(
     registry = get_registry()
     success = await registry.refresh_node(node_id)
     if success:
+        async with get_async_db_context() as audit_db:
+            await crud.log_admin_action(
+                audit_db,
+                user_id=admin.id,
+                action="node.refresh",
+                entity_type="node",
+                entity_id=str(node_id),
+                ip_address=http_request.client.host if http_request.client else None,
+            )
+            await audit_db.commit()
         return {"status": "refreshed", "node_id": node_id}
     else:
         raise HTTPException(
@@ -1034,6 +1172,7 @@ class QuotaReviewRequest(BaseModel):
 @router.post("/quota-requests/{request_id}/review")
 async def review_quota_request(
     request_id: int,
+    http_request: Request,
     review: QuotaReviewRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -1063,6 +1202,18 @@ async def review_quota_request(
         request_id=request_id,
         approved=review.approved,
     )
+
+    async with get_async_db_context() as audit_db:
+        await crud.log_admin_action(
+            audit_db,
+            user_id=admin.id,
+            action="quota.review",
+            entity_type="quota_request",
+            entity_id=str(request_id),
+            after_value={"approved": review.approved, "notes": review.notes, "granted_tokens": review.granted_tokens},
+            ip_address=http_request.client.host if http_request.client else None,
+        )
+        await audit_db.commit()
 
     return {"status": "reviewed", "approved": review.approved}
 
@@ -1110,6 +1261,7 @@ class CreateApiKeyResponse(BaseModel):
 
 @router.post("/users", response_model=CreateUserResponse)
 async def create_user(
+    http_request: Request,
     request: CreateUserRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -1162,6 +1314,16 @@ async def create_user(
         max_concurrent=group.max_concurrent,
     )
 
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="user.create",
+        entity_type="user",
+        entity_id=str(user.id),
+        after_value={"username": user.username, "email": user.email, "role": user.role.value, "group_id": group.id},
+        ip_address=http_request.client.host if http_request.client else None,
+    )
+
     await db.commit()
 
     logger.info(
@@ -1188,6 +1350,7 @@ async def create_user(
 @router.post("/users/{user_id}/api-keys", response_model=CreateApiKeyResponse)
 async def create_user_api_key(
     user_id: int,
+    http_request: Request,
     request: CreateApiKeyRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -1214,6 +1377,16 @@ async def create_user_api_key(
         expires_at=request.expires_at,
     )
 
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="apikey.create",
+        entity_type="api_key",
+        entity_id=str(api_key.id),
+        after_value={"key_prefix": key_prefix, "name": request.name, "target_user_id": user_id},
+        ip_address=http_request.client.host if http_request.client else None,
+    )
+
     await db.commit()
 
     logger.info(
@@ -1235,6 +1408,7 @@ async def create_user_api_key(
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1260,6 +1434,16 @@ async def delete_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete user",
         )
+
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="user.delete",
+        entity_type="user",
+        entity_id=str(user_id),
+        before_value={"username": user.username, "email": user.email},
+        ip_address=http_request.client.host if http_request.client else None,
+    )
 
     await db.commit()
 
@@ -1357,6 +1541,7 @@ class UpdateUserRequest(BaseModel):
 @router.patch("/users/{user_id}")
 async def update_user(
     user_id: int,
+    http_request: Request,
     request: UpdateUserRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -1386,6 +1571,17 @@ async def update_user(
             )
 
     updated = await crud.update_user(db, user_id, **updates)
+
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="user.update",
+        entity_type="user",
+        entity_id=str(user_id),
+        after_value=updates,
+        ip_address=http_request.client.host if http_request.client else None,
+    )
+
     await db.commit()
 
     return {"status": "updated", "user_id": user_id}
@@ -1443,6 +1639,7 @@ async def list_groups(
 
 @router.post("/groups")
 async def create_group(
+    http_request: Request,
     request: CreateGroupRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -1466,6 +1663,17 @@ async def create_group(
         scheduler_weight=request.scheduler_weight,
         is_admin=request.is_admin,
     )
+
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="group.create",
+        entity_type="group",
+        entity_id=str(group.id),
+        after_value={"name": group.name, "display_name": group.display_name, "token_budget": request.token_budget},
+        ip_address=http_request.client.host if http_request.client else None,
+    )
+
     await db.commit()
 
     logger.info("group_created", admin_id=admin.id, group_id=group.id, name=group.name)
@@ -1480,6 +1688,7 @@ async def create_group(
 @router.patch("/groups/{group_id}")
 async def update_group(
     group_id: int,
+    http_request: Request,
     request: UpdateGroupRequest,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
@@ -1498,6 +1707,17 @@ async def update_group(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",
         )
+
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="group.update",
+        entity_type="group",
+        entity_id=str(group_id),
+        after_value=updates,
+        ip_address=http_request.client.host if http_request.client else None,
+    )
+
     await db.commit()
 
     logger.info("group_updated", admin_id=admin.id, group_id=group_id, fields=list(updates.keys()))
@@ -1508,6 +1728,7 @@ async def update_group(
 @router.delete("/groups/{group_id}")
 async def delete_group(
     group_id: int,
+    http_request: Request,
     admin: User = Depends(require_admin()),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -1518,6 +1739,16 @@ async def delete_group(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot delete group with active users. Reassign users first.",
         )
+
+    await crud.log_admin_action(
+        db,
+        user_id=admin.id,
+        action="group.delete",
+        entity_type="group",
+        entity_id=str(group_id),
+        ip_address=http_request.client.host if http_request.client else None,
+    )
+
     await db.commit()
 
     logger.info("group_deleted", admin_id=admin.id, group_id=group_id)

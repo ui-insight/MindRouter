@@ -57,6 +57,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'admin_audit' %}active{% endif %}" href="/admin/admin-audit" {% if active == 'admin_audit' %}aria-current="page"{% endif %}>
+                <i class="bi bi-shield-check"></i> Admin Audit
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'conversations' %}active{% endif %}" href="/admin/conversations" {% if active == 'conversations' %}aria-current="page"{% endif %}>
                 <i class="bi bi-chat-dots"></i> Conversations
             </a>
