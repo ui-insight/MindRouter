@@ -60,6 +60,7 @@ async def list_models(
                         "embeddings": False,
                         "structured_output": True,
                         "thinking": False,
+                        "tools": False,
                     },
                     "created": int(model.created_at.timestamp()) if model.created_at else int(time.time()),
                     "context_length": None,
@@ -76,6 +77,8 @@ async def list_models(
                 model_data[model.name]["capabilities"]["multimodal"] = True
             if model.supports_thinking:
                 model_data[model.name]["capabilities"]["thinking"] = True
+            if model.supports_tools:
+                model_data[model.name]["capabilities"]["tools"] = True
             if "embed" in model.name.lower():
                 model_data[model.name]["capabilities"]["embeddings"] = True
 

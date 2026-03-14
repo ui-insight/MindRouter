@@ -1066,6 +1066,7 @@ class BackendRegistry:
                                     context_length=model_info.context_length,
                                     supports_multimodal=model_info.supports_multimodal,
                                     supports_thinking=model_info.supports_thinking,
+                                    supports_tools=model_info.supports_tools,
                                     supports_structured_output=model_info.supports_structured_output,
                                     is_loaded=model_info.is_loaded,
                                     quantization=model_info.quantization,

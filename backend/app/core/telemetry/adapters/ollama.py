@@ -259,6 +259,7 @@ class OllamaAdapter:
                         model.capabilities = caps
                         model.supports_multimodal = "vision" in caps
                         model.supports_thinking = "thinking" in caps
+                        model.supports_tools = "tools" in caps
 
                     # Format and parent model from details
                     show_details = show_data.get("details", {})

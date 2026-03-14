@@ -441,6 +441,10 @@ class Model(Base, TimestampMixin):
     supports_thinking: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     thinking_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
+    # Tool calling support
+    supports_tools: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    tools_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     # Admin-editable fields
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     model_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)

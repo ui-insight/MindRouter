@@ -1278,6 +1278,63 @@ async def reset_model_thinking(
     )
 
 
+@dashboard_router.post("/admin/models/toggle-tools")
+async def toggle_model_tools(
+    request: Request,
+    model_name: str = Form(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Toggle the tools override for all instances of a model."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    from sqlalchemy import select
+    from backend.app.db.models import Model
+
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    model = result.scalar_one_or_none()
+    if not model:
+        return RedirectResponse(
+            url="/admin/models?error=Model+not+found", status_code=302
+        )
+
+    new_value = not model.supports_tools
+    await crud.set_tools_override_by_name(db, model_name, new_value)
+    await db.commit()
+
+    return RedirectResponse(
+        url="/admin/models?success=updated", status_code=302
+    )
+
+
+@dashboard_router.post("/admin/models/reset-tools")
+async def reset_model_tools(
+    request: Request,
+    model_name: str = Form(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Reset tools override to auto-detect for all instances of a model."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    await crud.set_tools_override_by_name(db, model_name, None)
+    await db.commit()
+
+    return RedirectResponse(
+        url="/admin/models?success=reset", status_code=302
+    )
+
+
 @dashboard_router.post("/admin/models/update-metadata")
 async def update_model_metadata(
     request: Request,

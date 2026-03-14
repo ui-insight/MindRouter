@@ -244,6 +244,14 @@ class VLLMAdapter:
                     for x in ["qwen3", "gpt-oss", "deepseek-r1"]
                 )
 
+                # Auto-detect tool calling support
+                # vLLM tool support depends on --enable-auto-tool-choice flag
+                # (can't detect from API), so use model family heuristics
+                supports_tools = any(
+                    x in model_lower
+                    for x in ["qwen3", "qwen2.5", "gpt-oss", "llama3", "llama4", "gemma"]
+                )
+
                 # Try to extract parameter count
                 param_count = None
                 for size in ["70b", "34b", "13b", "7b", "3b", "1b"]:
@@ -261,6 +269,7 @@ class VLLMAdapter:
                         context_length=context_length,
                         supports_multimodal=supports_multimodal,
                         supports_thinking=supports_thinking,
+                        supports_tools=supports_tools,
                         supports_structured_output=True,
                         is_loaded=True,  # vLLM models are always loaded
                     )

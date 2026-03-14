@@ -1057,6 +1057,7 @@ async def upsert_model(
     context_length: Optional[int] = None,
     supports_multimodal: bool = False,
     supports_thinking: bool = False,
+    supports_tools: bool = False,
     supports_structured_output: bool = True,
     is_loaded: bool = False,
     quantization: Optional[str] = None,
@@ -1080,17 +1081,21 @@ async def upsert_model(
     # If admin has set an override, use it instead of auto-detected value
     effective_multimodal = supports_multimodal
     effective_thinking = supports_thinking
+    effective_tools = supports_tools
 
     if model:
         if model.multimodal_override is not None:
             effective_multimodal = model.multimodal_override
         if model.thinking_override is not None:
             effective_thinking = model.thinking_override
+        if model.tools_override is not None:
+            effective_tools = model.tools_override
         model.modality = modality
         model.context_length = model.context_length_override if model.context_length_override is not None else (context_length if context_length is not None else model.context_length)
         model.model_max_context = model_max_context if model_max_context is not None else model.model_max_context
         model.supports_multimodal = effective_multimodal
         model.supports_thinking = effective_thinking
+        model.supports_tools = effective_tools
         model.supports_structured_output = supports_structured_output
         model.is_loaded = is_loaded
         model.quantization = model.quantization_override if model.quantization_override is not None else quantization
@@ -1112,6 +1117,7 @@ async def upsert_model(
             model_max_context=model_max_context,
             supports_multimodal=supports_multimodal,
             supports_thinking=supports_thinking,
+            supports_tools=supports_tools,
             supports_structured_output=supports_structured_output,
             is_loaded=is_loaded,
             quantization=quantization,
@@ -1197,6 +1203,20 @@ async def set_thinking_override_by_name(
         m.thinking_override = value
         if value is not None:
             m.supports_thinking = value
+    await db.flush()
+    return len(models)
+
+
+async def set_tools_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set tools override for ALL model rows with the given name."""
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.tools_override = value
+        if value is not None:
+            m.supports_tools = value
     await db.flush()
     return len(models)
 

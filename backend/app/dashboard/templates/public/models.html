@@ -183,6 +183,7 @@
             <div class="d-flex flex-wrap gap-1" id="capPills">
                 <span class="badge border filter-pill" data-filter="cap" data-value="multimodal"><i class="bi bi-eye"></i> Vision</span>
                 <span class="badge border filter-pill" data-filter="cap" data-value="thinking"><i class="bi bi-lightbulb"></i> Thinking</span>
+                <span class="badge border filter-pill" data-filter="cap" data-value="tools"><i class="bi bi-tools"></i> Tools</span>
             </div>
         </div>
     </div>
@@ -460,6 +461,7 @@
             const caps = [];
             if (m.capabilities.multimodal) caps.push('<span class="badge bg-info cap-badge">Vision</span>');
             if (m.capabilities.thinking) caps.push('<span class="badge bg-warning text-dark cap-badge">Thinking</span>');
+            if (m.capabilities.tools) caps.push('<span class="badge cap-badge" style="background-color:#6f42c1">Tools</span>');
             if (m.capabilities.embeddings) caps.push('<span class="badge bg-success cap-badge">Embedding</span>');
 
             const stats = [];
@@ -533,6 +535,7 @@
         const capHtml = [];
         if (m.capabilities.multimodal) capHtml.push('<span class="badge bg-info me-1">Vision</span>');
         if (m.capabilities.thinking) capHtml.push('<span class="badge bg-warning text-dark me-1">Thinking</span>');
+        if (m.capabilities.tools) capHtml.push('<span class="badge me-1" style="background-color:#6f42c1">Tools</span>');
         if (m.capabilities.embeddings) capHtml.push('<span class="badge bg-success me-1">Embeddings</span>');
         if (m.capabilities.structured_output) capHtml.push('<span class="badge bg-secondary me-1">Structured Output</span>');
         document.getElementById('modalCaps').innerHTML = capHtml.join('');

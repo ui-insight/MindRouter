@@ -105,6 +105,7 @@
                             <th>Quant</th>
                             <th class="text-center">Multimodal</th>
                             <th class="text-center">Thinking</th>
+                            <th class="text-center">Tools</th>
                             <th class="text-center">Link</th>
                         </tr>
                     </thead>
@@ -146,6 +147,13 @@
                             </td>
                             <td class="text-center">
                                 {% if first.supports_thinking %}
+                                <i class="bi bi-check-circle-fill text-success"></i>
+                                {% else %}
+                                <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-center">
+                                {% if first.supports_tools %}
                                 <i class="bi bi-check-circle-fill text-success"></i>
                                 {% else %}
                                 <span class="text-muted">&mdash;</span>
@@ -286,6 +294,26 @@
                                                 </form>
                                                 {% if first.thinking_override is not none %}
                                                 <form method="POST" action="/admin/models/reset-thinking" class="d-inline">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <button type="submit" class="btn btn-sm btn-outline-secondary" title="Reset to Auto">
+                                                        <i class="bi bi-arrow-counterclockwise"></i>
+                                                    </button>
+                                                </form>
+                                                {% endif %}
+                                            </div>
+
+                                            <h6>Tools</h6>
+                                            <div class="d-flex align-items-center gap-2 mb-2">
+                                                <span class="badge {{ 'bg-success' if first.supports_tools else 'bg-secondary' }}">{{ 'ON' if first.supports_tools else 'OFF' }}</span>
+                                                <span class="badge {{ 'bg-info' if first.tools_override is not none else 'bg-secondary' }}">{{ 'Override' if first.tools_override is not none else 'Auto' }}</span>
+                                                <form method="POST" action="/admin/models/toggle-tools" class="d-inline">
+                                                    <input type="hidden" name="model_name" value="{{ model_name }}">
+                                                    <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if first.supports_tools else 'btn-outline-success' }}">
+                                                        <i class="bi {{ 'bi-toggle-on' if first.supports_tools else 'bi-toggle-off' }}"></i>
+                                                    </button>
+                                                </form>
+                                                {% if first.tools_override is not none %}
+                                                <form method="POST" action="/admin/models/reset-tools" class="d-inline">
                                                     <input type="hidden" name="model_name" value="{{ model_name }}">
                                                     <button type="submit" class="btn btn-sm btn-outline-secondary" title="Reset to Auto">
                                                         <i class="bi bi-arrow-counterclockwise"></i>
