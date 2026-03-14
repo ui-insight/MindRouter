@@ -879,6 +879,7 @@ message = client.messages.create(
                         <tr><td>API Keys</td><td><code>/admin/api-keys</code></td><td>All API keys across users with search, status filter, and pagination</td></tr>
                         <tr><td>Requests</td><td><code>/admin/requests</code></td><td>Pending API key and quota increase requests, approve/deny</td></tr>
                         <tr><td>Audit Log</td><td><code>/admin/audit</code></td><td>Inference request history with filtering, search, and CSV/JSON export</td></tr>
+                        <tr><td>Admin Audit</td><td><code>/admin/admin-audit</code></td><td>Persistent log of all admin actions with before/after snapshots, filterable by action, entity type, and admin user</td></tr>
                         <tr><td>Conversations</td><td><code>/admin/conversations</code></td><td>Browse and export all user conversations</td></tr>
                         <tr><td>Chat Configuration</td><td><code>/admin/chat-config</code></td><td>Configure chat UI defaults: core models, default model, system prompt, max tokens, temperature, thinking mode</td></tr>
                         <tr><td>Blog Management</td><td><code>/admin/blog</code></td><td>Blog CMS: create, edit, publish/unpublish, and delete blog posts</td></tr>
@@ -1024,6 +1025,44 @@ message = client.messages.create(
                 </table>
                 <p><strong>Export fields:</strong> <code>request_uuid</code>, <code>created_at</code>, <code>user_id</code>, <code>model</code>, <code>endpoint</code>, <code>status</code>, <code>prompt_tokens</code>, <code>completion_tokens</code>, <code>total_tokens</code>, <code>total_time_ms</code>, <code>error_message</code>. When <code>include_content=true</code>, additional fields are included: <code>messages</code>, <code>prompt</code>, <code>parameters</code>, <code>response_content</code>, <code>finish_reason</code>.</p>
                 <p>Exports are limited to 10,000 records. The file is downloaded as an attachment (<code>audit_log.csv</code> or <code>audit_log.json</code>).</p>
+
+                <h3 id="admin-audit-log">Admin Audit Log</h3>
+                <p>Every mutating admin action &mdash; whether triggered via the REST API (<code>/api/admin/...</code>) or the dashboard UI &mdash; is recorded in the <code>admin_audit_log</code> database table. This provides a persistent, tamper-evident record of all administrative changes to the system.</p>
+
+                <h4>What Gets Recorded</h4>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>timestamp</code></td><td>datetime</td><td>Auto-set by the database when the action occurs</td></tr>
+                        <tr><td><code>user_id</code></td><td>int (FK)</td><td>The admin user who performed the action</td></tr>
+                        <tr><td><code>action</code></td><td>string</td><td>Verb describing the action: <code>create</code>, <code>update</code>, <code>delete</code>, <code>enable</code>, <code>disable</code>, <code>toggle_tools</code>, <code>toggle_multimodal</code>, <code>toggle_thinking</code>, <code>drain</code>, <code>pull_model</code>, <code>delete_model</code>, <code>approve</code>, <code>deny</code>, etc.</td></tr>
+                        <tr><td><code>entity_type</code></td><td>string</td><td>What was acted on: <code>backend</code>, <code>model</code>, <code>node</code>, <code>user</code>, <code>group</code>, <code>api_key</code>, <code>setting</code>, <code>blog_post</code>, <code>quota_request</code>, <code>system</code>, etc.</td></tr>
+                        <tr><td><code>entity_id</code></td><td>string</td><td>ID or name of the specific entity (e.g., backend ID, model name, user ID)</td></tr>
+                        <tr><td><code>before_value</code></td><td>JSON</td><td>Snapshot of the entity's state before the change (when applicable)</td></tr>
+                        <tr><td><code>after_value</code></td><td>JSON</td><td>Snapshot of the entity's state after the change</td></tr>
+                        <tr><td><code>ip_address</code></td><td>string</td><td>Client IP address of the admin who made the request</td></tr>
+                        <tr><td><code>detail</code></td><td>text</td><td>Human-readable summary of the action (e.g., "Disabled backend vllm-aspen1")</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Coverage</h4>
+                <p>Admin audit logging is instrumented across two entry points:</p>
+                <ul>
+                    <li><strong>Admin API</strong> (<code>/api/admin/...</code>) &mdash; All mutating endpoints (create, update, delete, enable, disable, drain, register, refresh, etc.) log actions automatically.</li>
+                    <li><strong>Dashboard UI</strong> (<code>/admin/...</code>) &mdash; All admin form submissions and action buttons (toggle controls, pull/delete models, approve/deny requests, update settings, etc.) log actions automatically.</li>
+                </ul>
+                <p>Before/after JSON snapshots capture the entity state around each mutation. Create actions record only <code>after_value</code>, delete actions record only <code>before_value</code>, and updates capture both.</p>
+
+                <h4>Viewer</h4>
+                <p>The Admin Audit page at <code>/admin/admin-audit</code> provides a paginated, filterable table of all admin actions. Filters include:</p>
+                <ul>
+                    <li><strong>Action</strong> &mdash; Filter by action type (e.g., only show <code>delete</code> actions)</li>
+                    <li><strong>Entity Type</strong> &mdash; Filter by entity type (e.g., only show <code>backend</code> changes)</li>
+                    <li><strong>Admin User</strong> &mdash; Filter by which admin performed the action</li>
+                </ul>
+                <p>Clicking any row expands it to reveal the full before/after JSON diff for that action.</p>
 
                 <h3>Admin Chat Configuration</h3>
                 <p>The Chat Configuration page at <code>/admin/chat-config</code> allows administrators to control default settings for the built-in chat interface. All settings are stored in the <a href="#app-config">AppConfig</a> database and take effect immediately.</p>
