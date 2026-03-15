@@ -47,6 +47,7 @@ from backend.app.db.models import (
     Quota,
     QuotaRequest,
     QuotaRequestStatus,
+    RegistryMeta,
     Request,
     RequestStatus,
     Response,
@@ -3217,3 +3218,26 @@ async def get_admin_audit_log(
         query.order_by(AdminAuditLog.timestamp.desc()).offset(skip).limit(limit)
     )
     return list(result.scalars().all()), total
+
+
+# ---------------------------------------------------------------------------
+# Registry version (cross-worker synchronization)
+# ---------------------------------------------------------------------------
+
+
+async def get_registry_version(db: AsyncSession) -> int:
+    """Read the current registry version (single-row table)."""
+    result = await db.execute(
+        select(RegistryMeta.version).where(RegistryMeta.id == 1)
+    )
+    return result.scalar_one_or_none() or 0
+
+
+async def bump_registry_version(db: AsyncSession) -> None:
+    """Atomically increment the registry version."""
+    await db.execute(
+        update(RegistryMeta)
+        .where(RegistryMeta.id == 1)
+        .values(version=RegistryMeta.version + 1)
+    )
+    await db.flush()

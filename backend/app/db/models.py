@@ -888,6 +888,15 @@ class AdminAuditLog(Base):
     )
 
 
+class RegistryMeta(Base):
+    """Single-row table tracking registry mutation version for cross-worker sync."""
+
+    __tablename__ = "registry_meta"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+
 class AppConfig(Base, TimestampMixin):
     """Key-value application configuration stored in the database."""
 

@@ -80,6 +80,9 @@ class BackendRegistry:
         # Fast-poll set: backend_id -> fast_poll_until timestamp
         self._fast_poll_backends: Dict[int, datetime] = {}
 
+        # Cross-worker registry version (for detecting mutations by other workers)
+        self._registry_version: int = 0
+
         # Latency tracker
         self._latency_tracker = LatencyTracker(
             alpha=self._settings.latency_ema_alpha
@@ -94,6 +97,10 @@ class BackendRegistry:
         """Start the registry and begin polling."""
         # Load existing backends from database
         await self._load_backends_from_db()
+
+        # Capture current registry version for cross-worker sync
+        async with get_async_db_context() as db:
+            self._registry_version = await crud.get_registry_version(db)
 
         # Load persisted latency EMAs and reset stale failure counters.
         # On a fresh restart every backend gets a clean slate — the first
@@ -196,6 +203,7 @@ class BackendRegistry:
                 await crud.update_backend_status(db, b.id, BackendStatus.UNHEALTHY)
             await db.commit()
 
+        await self._bump_registry_version()
         logger.info("system_forced_offline")
 
     async def force_online(self) -> None:
@@ -224,6 +232,7 @@ class BackendRegistry:
         # Immediate full poll
         await self._poll_all_backends()
 
+        await self._bump_registry_version()
         logger.info("system_forced_online")
 
     async def register_backend(
@@ -303,6 +312,8 @@ class BackendRegistry:
                             sidecar_key=node.sidecar_key,
                         )
 
+        await self._bump_registry_version()
+
         # Run discovery outside the lock to avoid blocking telemetry reads
         await self._discover_backend(backend.id)
 
@@ -340,7 +351,8 @@ class BackendRegistry:
                 backend_id=backend_id,
                 status=BackendStatus.DISABLED,
             )
-            return backend is not None
+        await self._bump_registry_version()
+        return backend is not None
 
     async def drain_backend(self, backend_id: int) -> bool:
         """Start draining a backend — stops new requests while in-flight finish.
@@ -356,6 +368,7 @@ class BackendRegistry:
         if not backend:
             return False
 
+        await self._bump_registry_version()
         logger.info("backend_drain_started", backend_id=backend_id)
 
         # If queue depth is already 0, complete drain immediately
@@ -382,6 +395,7 @@ class BackendRegistry:
                 backend_id=backend_id,
                 status=BackendStatus.DISABLED,
             )
+        await self._bump_registry_version()
         logger.info("backend_drain_complete", backend_id=backend_id)
         return True
 
@@ -413,6 +427,7 @@ class BackendRegistry:
             deleted = await crud.delete_backend(db=db, backend_id=backend_id)
 
         if deleted:
+            await self._bump_registry_version()
             logger.info("backend_removed", backend_id=backend_id)
         return deleted
 
@@ -424,6 +439,8 @@ class BackendRegistry:
                 backend_id=backend_id,
                 status=BackendStatus.UNKNOWN,
             )
+
+        await self._bump_registry_version()
 
         # Trigger immediate health check
         if backend_id in self._adapters:
@@ -516,6 +533,7 @@ class BackendRegistry:
                     sidecar_key=sidecar_key,
                 )
 
+        await self._bump_registry_version()
         logger.info("node_registered", node_id=node.id, name=name)
 
         # Immediately poll the sidecar to discover GPUs
@@ -543,6 +561,7 @@ class BackendRegistry:
             deleted = await crud.delete_node(db=db, node_id=node_id)
 
         if deleted:
+            await self._bump_registry_version()
             logger.info("node_removed", node_id=node_id)
         return deleted
 
@@ -623,6 +642,8 @@ class BackendRegistry:
             if "gpu_indices" in kwargs or "gpu_indices" in clear_fields:
                 self._backend_gpu_indices[backend_id] = new_gpu_indices
 
+        await self._bump_registry_version()
+
         # Re-read the final object outside the lock for the return value
         async with get_async_db_context() as db:
             backend = await crud.get_backend_by_id(db, backend_id)
@@ -661,6 +682,8 @@ class BackendRegistry:
                         sidecar_key=new_sidecar_key,
                     )
                 self._node_sidecar_data.pop(node_id, None)
+
+        await self._bump_registry_version()
 
         # Re-read the final object for the return value
         async with get_async_db_context() as db:
@@ -858,6 +881,30 @@ class BackendRegistry:
         """Get the sidecar client for a given node, if one exists."""
         return self._sidecar_clients.get(node_id)
 
+    async def _reload_registry(self) -> None:
+        """Reload all backends/nodes from DB when another worker has mutated the registry."""
+        # Close existing adapters and sidecar clients
+        for adapter in self._adapters.values():
+            await adapter.close()
+        for client in self._sidecar_clients.values():
+            await client.close()
+
+        self._adapters.clear()
+        self._sidecar_clients.clear()
+        self._node_backends.clear()
+        self._backend_gpu_indices.clear()
+        self._node_sidecar_data.clear()
+
+        # Reload from DB
+        await self._load_backends_from_db()
+
+    async def _bump_registry_version(self) -> None:
+        """Bump the registry version so other workers know to reload."""
+        async with get_async_db_context() as db:
+            await crud.bump_registry_version(db)
+            await db.commit()
+        self._registry_version += 1
+
     async def _poll_loop(self) -> None:
         """Background polling loop with adaptive intervals for troubled backends."""
         # Fast startup polls — run 2 immediate full polls so backends/nodes
@@ -876,6 +923,21 @@ class BackendRegistry:
         last_full_poll = _time.monotonic()
         while True:
             try:
+                # Check if another worker mutated the registry
+                try:
+                    async with get_async_db_context() as db:
+                        db_version = await crud.get_registry_version(db)
+                    if db_version != self._registry_version:
+                        logger.info(
+                            "registry_version_changed",
+                            old=self._registry_version,
+                            new=db_version,
+                        )
+                        self._registry_version = db_version
+                        await self._reload_registry()
+                except Exception as e:
+                    logger.debug("registry_version_check_error", error=str(e))
+
                 now = datetime.now(timezone.utc)
 
                 # Clean up expired fast-poll entries
