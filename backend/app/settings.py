@@ -165,7 +165,7 @@ class Settings(BaseSettings):
     # Telemetry & GPU Metrics
     telemetry_retention_days: int = 30
     telemetry_cleanup_interval: int = 3600  # seconds
-    sidecar_timeout: int = 5  # seconds for sidecar HTTP calls
+    sidecar_timeout: int = 15  # seconds for sidecar HTTP calls
 
     # Observability
     metrics_enabled: bool = True
