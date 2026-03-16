@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
-from backend.app.api.auth import require_admin, require_admin_or_session
+from backend.app.api.auth import require_admin, require_admin_or_session, require_admin_read, require_admin_read_or_session
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
@@ -549,7 +549,7 @@ async def ollama_pull(
 async def ollama_pull_status(
     backend_id: int,
     job_id: str,
-    admin: User = Depends(require_admin_or_session()),
+    admin: User = Depends(require_admin_read_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Poll progress of an Ollama model pull (in-memory lookup)."""
@@ -622,7 +622,7 @@ async def ollama_delete(
 
 @router.get("/backends", response_model=List[BackendResponse])
 async def list_backends(
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """List all backends."""
@@ -866,7 +866,7 @@ async def register_node(
 
 @router.get("/nodes", response_model=List[NodeResponse])
 async def list_nodes(
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """List all nodes."""
@@ -965,7 +965,7 @@ async def refresh_node(
 # Queue Management
 @router.get("/queue")
 async def get_queue(
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
 ):
     """Get scheduler queue statistics."""
     scheduler = get_scheduler()
@@ -989,7 +989,7 @@ async def search_audit(
     search_text: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """
@@ -1036,7 +1036,7 @@ async def search_audit(
 @router.get("/audit/{request_id}")
 async def get_audit_detail(
     request_id: int,
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Get full details for an audit record including prompt and response."""
@@ -1104,7 +1104,7 @@ async def list_users(
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """List all users with optional group filter and search."""
@@ -1137,7 +1137,7 @@ async def list_users(
 @router.get("/quota-requests")
 async def list_quota_requests(
     status: Optional[str] = Query(None),
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """List pending quota requests."""
@@ -1461,7 +1461,7 @@ async def delete_user(
 @router.get("/users/{user_id}")
 async def get_user_detail(
     user_id: int,
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Get full user profile with usage stats, API keys, and monthly usage."""
@@ -1598,6 +1598,7 @@ class CreateGroupRequest(BaseModel):
     max_concurrent: int = Field(default=2, ge=1)
     scheduler_weight: int = Field(default=1, ge=1)
     is_admin: bool = False
+    is_auditor: bool = False
 
 
 class UpdateGroupRequest(BaseModel):
@@ -1609,11 +1610,12 @@ class UpdateGroupRequest(BaseModel):
     max_concurrent: Optional[int] = Field(None, ge=1)
     scheduler_weight: Optional[int] = Field(None, ge=1)
     is_admin: Optional[bool] = None
+    is_auditor: Optional[bool] = None
 
 
 @router.get("/groups")
 async def list_groups(
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """List all groups with user counts."""
@@ -1630,6 +1632,7 @@ async def list_groups(
                 "max_concurrent": g.max_concurrent,
                 "scheduler_weight": g.scheduler_weight,
                 "is_admin": g.is_admin,
+                "is_auditor": g.is_auditor,
                 "user_count": count,
             }
             for g, count in groups_with_counts
@@ -1662,6 +1665,7 @@ async def create_group(
         max_concurrent=request.max_concurrent,
         scheduler_weight=request.scheduler_weight,
         is_admin=request.is_admin,
+        is_auditor=request.is_auditor,
     )
 
     await crud.log_admin_action(
@@ -1670,7 +1674,7 @@ async def create_group(
         action="group.create",
         entity_type="group",
         entity_id=str(group.id),
-        after_value={"name": group.name, "display_name": group.display_name, "token_budget": request.token_budget},
+        after_value={"name": group.name, "display_name": group.display_name, "token_budget": request.token_budget, "is_auditor": group.is_auditor},
         ip_address=http_request.client.host if http_request.client else None,
     )
 
@@ -1763,7 +1767,7 @@ async def list_api_keys(
     key_status: Optional[str] = Query(None, alias="status"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
-    admin: User = Depends(require_admin()),
+    admin: User = Depends(require_admin_read()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """List all API keys with user info."""
@@ -1806,7 +1810,7 @@ WINDOW_CHOICES = {
 @router.get("/top-users")
 async def get_top_active_users(
     window: str = Query("1h", description="Time window: 1m, 1h, 4h, 12h, 24h"),
-    admin: User = Depends(require_admin_or_session()),
+    admin: User = Depends(require_admin_read_or_session()),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Return top 10 most active users by token usage within a time window."""

@@ -152,7 +152,7 @@ async def get_effective_user_id(request: Request, db: AsyncSession) -> Optional[
     if masquerade_id and masquerade_id != real_user_id:
         # Verify the real user is actually admin
         real_user = await crud.get_user_by_id(db, real_user_id)
-        if real_user and real_user.group and real_user.group.is_admin:
+        if real_user and real_user.group and real_user.group.has_admin_read:
             return masquerade_id
     return real_user_id
 
@@ -925,7 +925,7 @@ async def admin_dashboard(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     # Get backends
@@ -947,6 +947,7 @@ async def admin_dashboard(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "backends": backends,
             "nodes": nodes,
             "pending_requests": pending_requests,
@@ -1004,7 +1005,7 @@ async def admin_users(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     per_page = 25
@@ -1040,6 +1041,7 @@ async def admin_users(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "users": users,
             "groups": groups,
             "total": total,
@@ -1066,14 +1068,14 @@ async def admin_requests(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     pending_requests = await crud.get_pending_quota_requests(db)
 
     return templates.TemplateResponse(
         "admin/requests.html",
-        {"request": request, "user": user, "requests": pending_requests},
+        {"request": request, "user": user, "is_read_only": not user.group.is_admin, "requests": pending_requests},
     )
 
 
@@ -1152,7 +1154,7 @@ async def admin_models(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     grouped_models = await crud.get_models_grouped_by_name(db)
@@ -1178,6 +1180,7 @@ async def admin_models(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "grouped_models": grouped_models,
             "ollama_backends": ollama_backends,
             "success": success,
@@ -1524,7 +1527,7 @@ async def admin_nodes(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     nodes = await crud.get_all_nodes(db)
@@ -1549,6 +1552,7 @@ async def admin_nodes(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "nodes": node_data,
             "app_version": settings.app_version,
             "success": success,
@@ -1803,7 +1807,7 @@ async def node_active_requests(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     all_backends = await crud.get_all_backends(db)
@@ -1855,7 +1859,7 @@ async def admin_backends(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     registry = get_registry()
@@ -1878,6 +1882,7 @@ async def admin_backends(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "backends": backend_data,
             "nodes": nodes,
             "success": success,
@@ -2176,12 +2181,12 @@ async def admin_metrics(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     return templates.TemplateResponse(
         "admin/metrics.html",
-        {"request": request, "user": user},
+        {"request": request, "user": user, "is_read_only": not user.group.is_admin},
     )
 
 
@@ -2196,12 +2201,12 @@ async def admin_energy(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     return templates.TemplateResponse(
         "admin/energy.html",
-        {"request": request, "user": user},
+        {"request": request, "user": user, "is_read_only": not user.group.is_admin},
     )
 
 
@@ -2223,7 +2228,7 @@ async def admin_audit(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     from backend.app.db.models import RequestStatus
@@ -2269,6 +2274,7 @@ async def admin_audit(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "audit_requests": audit_requests,
             "total": total,
             "page": page,
@@ -2302,7 +2308,7 @@ async def admin_audit_export(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, session_user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     from backend.app.db.models import RequestStatus
@@ -2404,7 +2410,7 @@ async def admin_audit_detail(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     user = await crud.get_user_by_id(db, session_user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     from sqlalchemy import select
@@ -2446,7 +2452,7 @@ async def admin_admin_audit(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, session_user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     from sqlalchemy import select, distinct
@@ -2486,6 +2492,7 @@ async def admin_admin_audit(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "entries": entries,
             "total": total,
             "page": page,
@@ -2514,7 +2521,7 @@ async def admin_groups(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     groups_with_counts = await crud.get_all_groups_with_counts(db)
@@ -2524,6 +2531,7 @@ async def admin_groups(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "groups": groups_with_counts,
             "success": success,
             "error": error,
@@ -2542,6 +2550,7 @@ async def create_group(
     max_concurrent: int = Form(2),
     scheduler_weight: int = Form(1),
     is_admin: Optional[str] = Form(None),
+    is_auditor: Optional[str] = Form(None),
     api_key_expiry_days: int = Form(45),
     max_api_keys: int = Form(8),
     db: AsyncSession = Depends(get_async_db),
@@ -2570,6 +2579,7 @@ async def create_group(
             max_concurrent=max_concurrent,
             scheduler_weight=scheduler_weight,
             is_admin=(is_admin == "on"),
+            is_auditor=(is_auditor == "on"),
             api_key_expiry_days=api_key_expiry_days,
             max_api_keys=max_api_keys,
         )
@@ -2596,6 +2606,7 @@ async def edit_group(
     max_concurrent: int = Form(2),
     scheduler_weight: int = Form(1),
     is_admin: Optional[str] = Form(None),
+    is_auditor: Optional[str] = Form(None),
     api_key_expiry_days: int = Form(45),
     max_api_keys: int = Form(8),
     db: AsyncSession = Depends(get_async_db),
@@ -2619,6 +2630,7 @@ async def edit_group(
             max_concurrent=max_concurrent,
             scheduler_weight=scheduler_weight,
             is_admin=(is_admin == "on"),
+            is_auditor=(is_auditor == "on"),
             api_key_expiry_days=api_key_expiry_days,
             max_api_keys=max_api_keys,
         )
@@ -2680,7 +2692,7 @@ async def admin_user_detail(
         return RedirectResponse(url="/login", status_code=302)
 
     admin_user = await crud.get_user_by_id(db, session_user_id)
-    if not admin_user or (not admin_user.group or not admin_user.group.is_admin):
+    if not admin_user or (not admin_user.group or not admin_user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     stats = await crud.get_user_with_stats(db, user_id)
@@ -2696,6 +2708,7 @@ async def admin_user_detail(
         {
             "request": request,
             "user": admin_user,
+            "is_read_only": not admin_user.group.is_admin,
             "detail_user": stats["user"],
             "stats": stats,
             "monthly_usage": monthly_usage,
@@ -2846,7 +2859,7 @@ async def admin_api_keys(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     per_page = 50
@@ -2867,6 +2880,7 @@ async def admin_api_keys(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "api_keys": keys,
             "total": total,
             "page": page,
@@ -2902,7 +2916,7 @@ async def admin_conversations(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, session_user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     per_page = 50
@@ -2939,6 +2953,7 @@ async def admin_conversations(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "conversations": conversations,
             "total": total,
             "page": page,
@@ -2964,7 +2979,7 @@ async def admin_conversation_messages(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     user = await crud.get_user_by_id(db, session_user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     messages = await chat_crud.get_conversation_messages_admin(db, conversation_id)
@@ -2996,7 +3011,7 @@ async def admin_conversations_export(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, session_user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     # Parse dates
@@ -3110,7 +3125,7 @@ async def admin_chat_config(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     # Get distinct model names from healthy backends (exclude embedding)
@@ -3142,6 +3157,7 @@ async def admin_chat_config(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "available_models": sorted(available_models),
             "core_models": core_models,
             "default_model": default_model,
@@ -3325,7 +3341,7 @@ async def admin_voice_config(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     tts_url = await crud.get_config_json(db, "voice.tts_url", None)
@@ -3343,6 +3359,7 @@ async def admin_voice_config(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "tts_url": tts_url,
             "tts_api_key": tts_api_key,
             "tts_voices": tts_voices,
@@ -3490,7 +3507,7 @@ async def admin_settings(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     site_url = await crud.get_config_json(db, "app.base_url", get_settings().app_base_url)
@@ -3524,6 +3541,7 @@ async def admin_settings(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "site_url": site_url,
             "current_timezone": current_tz,
             "timezone_choices": _TIMEZONE_CHOICES,
@@ -3749,7 +3767,7 @@ async def admin_retention(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     from backend.app.services.retention import (
@@ -3794,6 +3812,7 @@ async def admin_retention(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "tab": tab,
             "config": config,
             "app_counts": app_counts,
@@ -3901,7 +3920,7 @@ async def admin_backup(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     return templates.TemplateResponse(
@@ -3909,6 +3928,7 @@ async def admin_backup(
         {
             "request": request,
             "user": user,
+            "is_read_only": not user.group.is_admin,
             "success": success,
             "error": error,
             "restore_summary": None,
@@ -3927,7 +3947,7 @@ async def admin_backup_export(
         return RedirectResponse(url="/login", status_code=302)
 
     user = await crud.get_user_by_id(db, user_id)
-    if not user or (not user.group or not user.group.is_admin):
+    if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
     data = await crud.export_config_tables(db)

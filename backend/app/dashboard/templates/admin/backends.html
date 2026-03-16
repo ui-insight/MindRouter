@@ -32,6 +32,7 @@
             </div>
             {% endif %}
 
+            {% if not is_read_only %}
             <!-- Register New Backend -->
             <div class="card mb-4">
                 <div class="card-header">
@@ -100,6 +101,7 @@
                     </form>
                 </div>
             </div>
+            {% endif %}
 
             <!-- Registered Backends -->
             {% if backends %}
@@ -115,6 +117,7 @@
                     </span>
                     <span>
                         <span class="text-muted me-3">{{ item.backend.url }}</span>
+                        {% if not is_read_only %}
                         <button class="btn btn-sm btn-outline-secondary" type="button"
                                 data-bs-toggle="collapse" data-bs-target="#edit-backend-{{ item.backend.id }}"
                                 title="Edit backend">
@@ -158,10 +161,12 @@
                                 <i class="bi bi-trash"></i> Remove
                             </button>
                         </form>
+                        {% endif %}
                     </span>
                 </div>
                 <div class="card-body">
                     <!-- Collapsible Edit Form -->
+                    {% if not is_read_only %}
                     <div class="collapse mb-3" id="edit-backend-{{ item.backend.id }}">
                         <div class="card card-body bg-light">
                             <h6><i class="bi bi-pencil"></i> Edit Backend</h6>
@@ -233,6 +238,7 @@
                             </form>
                         </div>
                     </div>
+                    {% endif %}
 
                     <div class="row">
                         <div class="col-md-4">

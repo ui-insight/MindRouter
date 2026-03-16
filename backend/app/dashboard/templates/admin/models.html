@@ -30,7 +30,7 @@
             {% endif %}
 
             <!-- Ollama Model Pull Card -->
-            {% if ollama_backends %}
+            {% if ollama_backends and not is_read_only %}
             <div class="card mb-4">
                 <div class="card-header d-flex align-items-center justify-content-between" style="cursor:pointer"
                      data-bs-toggle="collapse" data-bs-target="#pullModelCard">
@@ -266,6 +266,7 @@
                                             <div class="d-flex align-items-center gap-2 mb-2">
                                                 <span class="badge {{ 'bg-success' if first.supports_multimodal else 'bg-secondary' }}">{{ 'ON' if first.supports_multimodal else 'OFF' }}</span>
                                                 <span class="badge {{ 'bg-info' if first.multimodal_override is not none else 'bg-secondary' }}">{{ 'Override' if first.multimodal_override is not none else 'Auto' }}</span>
+                                                {% if not is_read_only %}
                                                 <form method="POST" action="/admin/models/toggle-multimodal" class="d-inline">
                                                     <input type="hidden" name="model_name" value="{{ model_name }}">
                                                     <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if first.supports_multimodal else 'btn-outline-success' }}">
@@ -280,12 +281,14 @@
                                                     </button>
                                                 </form>
                                                 {% endif %}
+                                                {% endif %}
                                             </div>
 
                                             <h6>Thinking</h6>
                                             <div class="d-flex align-items-center gap-2 mb-2">
                                                 <span class="badge {{ 'bg-success' if first.supports_thinking else 'bg-secondary' }}">{{ 'ON' if first.supports_thinking else 'OFF' }}</span>
                                                 <span class="badge {{ 'bg-info' if first.thinking_override is not none else 'bg-secondary' }}">{{ 'Override' if first.thinking_override is not none else 'Auto' }}</span>
+                                                {% if not is_read_only %}
                                                 <form method="POST" action="/admin/models/toggle-thinking" class="d-inline">
                                                     <input type="hidden" name="model_name" value="{{ model_name }}">
                                                     <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if first.supports_thinking else 'btn-outline-success' }}">
@@ -300,12 +303,14 @@
                                                     </button>
                                                 </form>
                                                 {% endif %}
+                                                {% endif %}
                                             </div>
 
                                             <h6>Tools</h6>
                                             <div class="d-flex align-items-center gap-2 mb-2">
                                                 <span class="badge {{ 'bg-success' if first.supports_tools else 'bg-secondary' }}">{{ 'ON' if first.supports_tools else 'OFF' }}</span>
                                                 <span class="badge {{ 'bg-info' if first.tools_override is not none else 'bg-secondary' }}">{{ 'Override' if first.tools_override is not none else 'Auto' }}</span>
+                                                {% if not is_read_only %}
                                                 <form method="POST" action="/admin/models/toggle-tools" class="d-inline">
                                                     <input type="hidden" name="model_name" value="{{ model_name }}">
                                                     <button type="submit" class="btn btn-sm {{ 'btn-outline-warning' if first.supports_tools else 'btn-outline-success' }}">
@@ -319,6 +324,7 @@
                                                         <i class="bi bi-arrow-counterclockwise"></i>
                                                     </button>
                                                 </form>
+                                                {% endif %}
                                                 {% endif %}
                                             </div>
                                         </div>
@@ -365,11 +371,13 @@
                                                         {% endif %}
                                                     </td>
                                                     <td>
+                                                        {% if not is_read_only %}
                                                         {% if m.backend and m.backend.engine.value == 'ollama' and m.backend.node and m.backend.node.sidecar_url %}
                                                         <button class="btn btn-sm btn-outline-danger" title="Delete model from this backend"
                                                                 onclick="event.stopPropagation(); deleteModel({{ m.backend.id }}, '{{ model_name|e }}')">
                                                             <i class="bi bi-trash"></i>
                                                         </button>
+                                                        {% endif %}
                                                         {% endif %}
                                                     </td>
                                                 </tr>
@@ -379,6 +387,7 @@
                                     </div>
 
                                     <!-- Edit Metadata -->
+                                    {% if not is_read_only %}
                                     {% set has_any_override = first.context_length_override is not none or first.embedding_length_override is not none or first.head_count_override is not none or first.layer_count_override is not none or first.feed_forward_length_override is not none or first.capabilities_override is not none or first.family_override is not none or first.parameter_count_override is not none or first.quantization_override is not none or first.model_format_override is not none or first.parent_model_override is not none or first.description or first.model_url %}
                                     <div class="mb-2">
                                         <button class="btn btn-sm btn-outline-primary" type="button"
@@ -499,6 +508,7 @@
                                             </div>
                                         </div>
                                     </div>
+                                    {% endif %}
                                 </div>
                             </td>
                         </tr>

@@ -15,11 +15,13 @@
                     <p class="text-muted mb-0">{{ detail_user.email }}</p>
                 </div>
                 <div>
+                    {% if not is_read_only %}
                     <form method="post" action="/admin/masquerade/{{ detail_user.id }}" class="d-inline me-2">
                         <button type="submit" class="btn btn-outline-warning" title="View the dashboard and chat as this user">
                             <i class="bi bi-eye"></i> Masquerade
                         </button>
                     </form>
+                    {% endif %}
                     <a href="/admin/users" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Back to Users</a>
                 </div>
             </div>
@@ -43,9 +45,11 @@
                     <div class="card h-100">
                         <div class="card-header d-flex justify-content-between align-items-center">
                             <span><i class="bi bi-person-badge"></i> Profile</span>
+                            {% if not is_read_only %}
                             <button class="btn btn-sm btn-outline-primary" data-bs-toggle="collapse" data-bs-target="#editProfile" aria-expanded="false" aria-controls="editProfile">
                                 <i class="bi bi-pencil"></i> Edit
                             </button>
+                            {% endif %}
                         </div>
                         <div class="card-body">
                             <dl class="row mb-0">
@@ -82,6 +86,7 @@
                             </dl>
                         </div>
 
+                        {% if not is_read_only %}
                         <!-- Edit Profile Form (collapsed) -->
                         <div class="collapse" id="editProfile">
                             <div class="card-body border-top">
@@ -132,6 +137,7 @@
                                 </form>
                             </div>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
 

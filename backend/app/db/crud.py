@@ -75,6 +75,7 @@ async def create_group(
     max_concurrent: int = 2,
     scheduler_weight: int = 1,
     is_admin: bool = False,
+    is_auditor: bool = False,
     api_key_expiry_days: int = 45,
     max_api_keys: int = 8,
 ) -> Group:
@@ -88,6 +89,7 @@ async def create_group(
         max_concurrent=max_concurrent,
         scheduler_weight=scheduler_weight,
         is_admin=is_admin,
+        is_auditor=is_auditor,
         api_key_expiry_days=api_key_expiry_days,
         max_api_keys=max_api_keys,
     )

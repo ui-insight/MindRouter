@@ -184,6 +184,21 @@ def require_admin():
     return check_admin
 
 
+def require_admin_read():
+    """Dependency that requires admin or auditor role (read-only admin access)."""
+    async def check_admin_read(
+        auth_result: Tuple[User, ApiKey] = Depends(authenticate_request),
+    ) -> User:
+        user, _ = auth_result
+        if not user.group or not user.group.has_admin_read:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin or auditor access required",
+            )
+        return user
+    return check_admin_read
+
+
 def require_admin_or_session():
     """
     Dependency that requires admin role via API key OR session cookie.
@@ -235,6 +250,56 @@ def require_admin_or_session():
             detail="Authentication required",
         )
     return check_admin
+
+
+def require_admin_read_or_session():
+    """
+    Dependency that requires admin or auditor role via API key OR session cookie.
+
+    Like require_admin_or_session but also allows auditor groups (read-only admin).
+    """
+    async def check_admin_read(
+        request: Request,
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+        db: AsyncSession = Depends(get_async_db),
+    ) -> User:
+        # Try API key auth first
+        api_key_str = None
+        if credentials and credentials.credentials:
+            api_key_str = credentials.credentials
+        if not api_key_str:
+            api_key_str = request.headers.get("X-API-Key")
+
+        if api_key_str:
+            from backend.app.security.api_keys import verify_api_key as _verify
+            api_key = await _verify(db, api_key_str)
+            if api_key and api_key.status == ApiKeyStatus.ACTIVE:
+                user = api_key.user
+                if user and user.is_active and user.group and user.group.has_admin_read:
+                    return user
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key or insufficient permissions",
+            )
+
+        # Fallback to session cookie
+        session_data = request.cookies.get("mindrouter_session")
+        if session_data:
+            try:
+                settings = get_settings()
+                serializer = URLSafeTimedSerializer(settings.secret_key, salt="session")
+                user_id = int(serializer.loads(session_data, max_age=86400 * 7))
+                user = await crud.get_user_by_id(db, user_id)
+                if user and user.is_active and user.group and user.group.has_admin_read:
+                    return user
+            except Exception:
+                pass
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+    return check_admin_read
 
 
 class AuthenticatedUser:

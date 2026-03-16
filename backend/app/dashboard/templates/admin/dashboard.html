@@ -80,6 +80,7 @@
                             {% endif %}
                         </p>
                     </div>
+                    {% if not is_read_only %}
                     <form method="POST" action="/admin/system/toggle-online">
                         <button type="submit" class="btn btn-lg {% if is_force_offline %}btn-success{% else %}btn-outline-danger{% endif %}"
                                 onclick="return confirm('{% if is_force_offline %}Bring MindRouter back online?{% else %}Take MindRouter offline? All backends will stop serving requests.{% endif %}')">
@@ -90,6 +91,7 @@
                             {% endif %}
                         </button>
                     </form>
+                    {% endif %}
                 </div>
             </div>
 

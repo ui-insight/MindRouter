@@ -37,6 +37,7 @@
                                 {{ req.justification }}
                             </blockquote>
                         </div>
+                        {% if not is_read_only %}
                         <div class="col-md-4 text-end">
                             <form method="POST" action="/admin/requests/{{ req.id }}/approve" class="d-inline">
                                 <button type="submit" class="btn btn-success">
@@ -49,6 +50,7 @@
                                 </button>
                             </form>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
             </div>

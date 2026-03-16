@@ -32,6 +32,7 @@
             </div>
             {% endif %}
 
+            {% if not is_read_only %}
             <!-- Register New Node -->
             <div class="card mb-4">
                 <div class="card-header">
@@ -67,6 +68,7 @@
                     </form>
                 </div>
             </div>
+            {% endif %}
 
             <!-- Registered Nodes -->
             {% if nodes %}
@@ -82,6 +84,7 @@
                         <small class="text-muted ms-2">{{ item.node.hostname }}</small>
                         {% endif %}
                     </span>
+                    {% if not is_read_only %}
                     <span>
                         {% if item.backends %}
                             {% set all_disabled = item.backends | selectattr('status.value', 'equalto', 'disabled') | list | length == item.backends | length %}
@@ -118,6 +121,7 @@
                             </button>
                         </form>
                     </span>
+                    {% endif %}
                 </div>
                 <div class="card-body">
                     {% if item.node.sidecar_version and app_version and item.node.sidecar_version != app_version %}
@@ -128,6 +132,7 @@
                     </div>
                     {% endif %}
 
+                    {% if not is_read_only %}
                     <!-- Draining Panel (hidden by default, shown via JS) -->
                     <div class="alert alert-warning d-none mb-3" id="drain-panel-{{ item.node.id }}">
                         <h6><i class="bi bi-hourglass-split"></i> Draining Node: <strong>{{ item.node.name }}</strong></h6>
@@ -183,6 +188,7 @@
                             </form>
                         </div>
                     </div>
+                    {% endif %}
 
                     <div class="row">
                         <div class="col-md-4">

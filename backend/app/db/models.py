@@ -122,8 +122,14 @@ class Group(Base, TimestampMixin):
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     scheduler_weight: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_auditor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     api_key_expiry_days: Mapped[int] = mapped_column(Integer, nullable=False, default=45)
     max_api_keys: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+
+    @property
+    def has_admin_read(self) -> bool:
+        """True if this group grants read-only admin access (admin or auditor)."""
+        return self.is_admin or self.is_auditor
 
     # Relationships
     users: Mapped[List["User"]] = relationship("User", back_populates="group")

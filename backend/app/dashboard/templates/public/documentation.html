@@ -696,7 +696,7 @@ message = client.messages.create(
                 </table>
 
                 <h3>Admin API Endpoints</h3>
-                <p>All admin endpoints require membership in a group with <code>is_admin = true</code>. They are mounted under <code>/api/admin/</code>.</p>
+                <p>Admin endpoints are mounted under <code>/api/admin/</code>. <strong>Read-only</strong> (GET) endpoints require membership in a group with <code>is_admin = true</code> or <code>is_auditor = true</code>. <strong>Mutating</strong> (POST/PATCH/DELETE) endpoints require <code>is_admin = true</code>. See <a href="#users-groups-quotas">Users, Groups &amp; Quotas</a> for details on the auditor role.</p>
 
                 <h4>Backend Management</h4>
                 <table class="table table-bordered table-sm">
@@ -862,7 +862,7 @@ message = client.messages.create(
                 </ul>
 
                 <h3>Admin Dashboard</h3>
-                <p>The admin dashboard has a persistent sidebar with links to all admin pages. Access requires membership in a group with <code>is_admin = true</code>.</p>
+                <p>The admin dashboard has a persistent sidebar with links to all admin pages. Access requires membership in a group with <code>is_admin = true</code> or <code>is_auditor = true</code>. Auditors see all admin pages in read-only mode &mdash; mutating controls (create, edit, delete, toggle) are hidden.</p>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
                         <tr><th>Page</th><th>URL</th><th>Description</th></tr>
@@ -1120,24 +1120,69 @@ message = client.messages.create(
 
                 <h3>Group System</h3>
                 <p>MindRouter uses a <strong>database-driven group system</strong> for authorization, quota defaults, and scheduler weights. Each user belongs to exactly one group. Groups are fully manageable via the admin UI at <code>/admin/groups</code>.</p>
-                <p>Admin privileges are determined by the group's <code>is_admin</code> flag. Users in an admin group can access the admin dashboard and admin API endpoints.</p>
+                <p>Each group has two privilege flags:</p>
+                <ul>
+                    <li><strong><code>is_admin</code></strong> &mdash; Full admin access. Users can view all admin pages and perform all administrative actions (create, edit, delete users/groups/backends/nodes, approve quotas, change settings, etc.).</li>
+                    <li><strong><code>is_auditor</code></strong> &mdash; Read-only admin access. Users can view all admin pages (dashboard, users, backends, nodes, metrics, audit logs, conversations, settings, etc.) but cannot make any changes. Mutating controls are hidden in the dashboard, and mutating API endpoints return HTTP 403.</li>
+                </ul>
+                <p>A group can have <code>is_admin</code>, <code>is_auditor</code>, or neither. Admin groups implicitly have auditor-level read access, so setting both flags is unnecessary (though harmless). The auditor role is intended for oversight, compliance review, or stakeholders who need visibility into system operations without the ability to modify state.</p>
 
                 <h3>Default Groups</h3>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
-                        <tr><th>Group</th><th>Token Budget</th><th>RPM</th><th>Max Concurrent</th><th>Sched. Weight</th><th>Admin</th></tr>
+                        <tr><th>Group</th><th>Token Budget</th><th>RPM</th><th>Max Concurrent</th><th>Sched. Weight</th><th>Role</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>students</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>No</td></tr>
-                        <tr><td><code>staff</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>No</td></tr>
-                        <tr><td><code>faculty</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>No</td></tr>
-                        <tr><td><code>researchers</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>No</td></tr>
-                        <tr><td><code>admin</code></td><td>10,000,000</td><td>1,000</td><td>50</td><td>10</td><td>Yes</td></tr>
-                        <tr><td><code>nerds</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>No</td></tr>
-                        <tr><td><code>other</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>No</td></tr>
+                        <tr><td><code>students</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>&mdash;</td></tr>
+                        <tr><td><code>staff</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>&mdash;</td></tr>
+                        <tr><td><code>faculty</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>&mdash;</td></tr>
+                        <tr><td><code>researchers</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>&mdash;</td></tr>
+                        <tr><td><code>admin</code></td><td>10,000,000</td><td>1,000</td><td>50</td><td>10</td><td>Admin</td></tr>
+                        <tr><td><code>auditor</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>Auditor</td></tr>
+                        <tr><td><code>nerds</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>&mdash;</td></tr>
+                        <tr><td><code>other</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>&mdash;</td></tr>
                     </tbody>
                 </table>
-                <p>These 7 groups are created automatically by the database migration. Admins can create additional groups, edit defaults, or delete empty groups via the admin UI or API.</p>
+                <p>These 8 groups are created automatically by the database migration. Admins can create additional groups, edit defaults, or delete empty groups via the admin UI or API.</p>
+
+                <h3>Auditor Role Details</h3>
+                <p>The auditor role provides complete read-only visibility into MindRouter administration. This is useful for:</p>
+                <ul>
+                    <li><strong>Compliance &amp; oversight</strong> &mdash; Auditors can review user accounts, API key usage, request audit logs, admin audit trails, and system configuration without risk of accidental changes.</li>
+                    <li><strong>Stakeholder visibility</strong> &mdash; Give managers or department leads a view into cluster health, usage metrics, and capacity without granting mutation rights.</li>
+                    <li><strong>Security review</strong> &mdash; Reviewers can inspect all admin pages and data to verify policies are being followed.</li>
+                </ul>
+                <h4>What auditors can access</h4>
+                <ul>
+                    <li>All admin dashboard pages (overview, backends, nodes, models, GPU metrics, energy, users, user detail, groups, API keys, requests, audit log, admin audit, conversations, chat config, voice config, settings, retention, backup)</li>
+                    <li>All read-only (GET) admin API endpoints</li>
+                    <li>Masquerade (view a user's dashboard as them) for investigation purposes</li>
+                    <li>Export features (audit CSV/JSON, conversation export, backup export)</li>
+                </ul>
+                <h4>What auditors cannot do</h4>
+                <ul>
+                    <li>Create, edit, or delete users, groups, backends, or nodes</li>
+                    <li>Enable, disable, or drain backends</li>
+                    <li>Approve or deny quota requests</li>
+                    <li>Pull or delete Ollama models</li>
+                    <li>Change system settings, retention policies, or chat/voice configuration</li>
+                    <li>Toggle the system online/offline</li>
+                    <li>Send emails or manage blog posts</li>
+                    <li>Restore backups</li>
+                </ul>
+                <h4>Setting up auditors</h4>
+                <p>To grant auditor access, either assign users to the built-in <code>auditor</code> group, or create a custom group with <code>is_auditor = true</code>. Via the API:</p>
+                <pre><code># Create a custom auditor group
+curl -X POST https://mindrouter.example.edu/api/admin/groups \
+  -H "X-API-Key: YOUR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "security-reviewers", "display_name": "Security Reviewers", "is_auditor": true}'
+
+# Move a user to the auditor group
+curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
+  -H "X-API-Key: YOUR_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"group_id": 8}'</code></pre>
 
                 <h3>User Profiles</h3>
                 <p>Each user has the following profile fields (editable by admins at <code>/admin/users/{id}</code>):</p>

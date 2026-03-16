@@ -34,6 +34,7 @@
             </div>
             {% endif %}
 
+            {% if not is_read_only %}
             <div class="row g-4">
                 <!-- Default Model -->
                 <div class="col-lg-6">
@@ -221,6 +222,11 @@
                     </div>
                 </div>
             </div>
+            {% else %}
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> Chat configuration is view-only for auditors. Contact an administrator to make changes.
+            </div>
+            {% endif %}
         </div>
     </div>
 </div>
