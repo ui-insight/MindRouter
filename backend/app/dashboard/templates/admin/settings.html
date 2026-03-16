@@ -210,9 +210,9 @@
                                     <button type="button" class="btn btn-outline-secondary btn-sm" id="previewAgreementBtn">Preview</button>
                                 </div>
                             </form>
-                            <div id="agreementPreview" class="border rounded p-3 mt-3 bg-light" style="display:none;"></div>
+                            <div id="agreementPreview" class="border rounded p-3 mt-3 bg-body-secondary" style="display:none;"></div>
                             {% else %}
-                            <div class="border rounded p-3 bg-light">
+                            <div class="border rounded p-3 bg-body-secondary">
                                 {{ agreement_text|safe if agreement_text else '<em class="text-muted">No agreement text configured.</em>'|safe }}
                             </div>
                             {% endif %}

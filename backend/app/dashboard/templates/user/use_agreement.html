@@ -13,7 +13,7 @@
         </div>
         <div class="card-body">
             {% if agreement_text %}
-            <div class="border rounded p-3 bg-light">
+            <div class="border rounded p-3 bg-body-secondary">
                 {{ agreement_text|safe }}
             </div>
             {% if user.agreement_version_accepted == agreement_version %}

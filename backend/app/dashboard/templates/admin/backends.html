@@ -168,7 +168,7 @@
                     <!-- Collapsible Edit Form -->
                     {% if not is_read_only %}
                     <div class="collapse mb-3" id="edit-backend-{{ item.backend.id }}">
-                        <div class="card card-body bg-light">
+                        <div class="card card-body bg-body-secondary">
                             <h6><i class="bi bi-pencil"></i> Edit Backend</h6>
                             <form method="POST" action="/admin/backends/{{ item.backend.id }}/edit">
                                 <div class="row">
