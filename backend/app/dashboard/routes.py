@@ -157,18 +157,25 @@ async def get_effective_user_id(request: Request, db: AsyncSession) -> Optional[
     return real_user_id
 
 
-async def _is_read_only_for_admin(request: Request, real_user: "User", db: AsyncSession) -> bool:
-    """Compute is_read_only, respecting masquerade.
+async def _admin_masquerade_context(request: Request, real_user: "User", db: AsyncSession) -> dict:
+    """Return masquerade-aware context keys for admin templates.
 
-    If an admin is masquerading as an auditor (or non-admin), show the
-    read-only view so they can preview what the target user sees.
+    Returns dict with:
+      - is_read_only: True when the effective user lacks is_admin
+      - masquerade_user: the target User object if masquerading, else None
     """
     masquerade_id = get_masquerade_user_id(request)
     if masquerade_id and masquerade_id != real_user.id:
         target_user = await crud.get_user_by_id(db, masquerade_id)
         if target_user and target_user.group:
-            return not target_user.group.is_admin
-    return not real_user.group.is_admin
+            return {
+                "is_read_only": not target_user.group.is_admin,
+                "masquerade_user": target_user,
+            }
+    return {
+        "is_read_only": not real_user.group.is_admin,
+        "masquerade_user": None,
+    }
 
 
 # Public Dashboard
@@ -956,12 +963,13 @@ async def admin_dashboard(
     scheduler = get_scheduler()
     scheduler_stats = await scheduler.get_stats()
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/dashboard.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "backends": backends,
             "nodes": nodes,
             "pending_requests": pending_requests,
@@ -1050,12 +1058,13 @@ async def admin_users(
         else:
             user_quota_tokens[u.id] = 0
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/users.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "users": users,
             "groups": groups,
             "total": total,
@@ -1087,9 +1096,10 @@ async def admin_requests(
 
     pending_requests = await crud.get_pending_quota_requests(db)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/requests.html",
-        {"request": request, "user": user, "is_read_only": await _is_read_only_for_admin(request, user, db), "requests": pending_requests},
+        {"request": request, "user": user, **masq, "requests": pending_requests},
     )
 
 
@@ -1189,12 +1199,13 @@ async def admin_models(
         if b.engine == BackendEngine.OLLAMA
     ]
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/models.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "grouped_models": grouped_models,
             "ollama_backends": ollama_backends,
             "success": success,
@@ -1561,12 +1572,13 @@ async def admin_nodes(
         })
 
     settings = get_settings()
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/nodes.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "nodes": node_data,
             "app_version": settings.app_version,
             "success": success,
@@ -1891,12 +1903,13 @@ async def admin_backends(
             "models": models,
         })
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/backends.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "backends": backend_data,
             "nodes": nodes,
             "success": success,
@@ -2198,9 +2211,10 @@ async def admin_metrics(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/metrics.html",
-        {"request": request, "user": user, "is_read_only": not user.group.is_admin},
+        {"request": request, "user": user, **masq},
     )
 
 
@@ -2218,9 +2232,10 @@ async def admin_energy(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/energy.html",
-        {"request": request, "user": user, "is_read_only": not user.group.is_admin},
+        {"request": request, "user": user, **masq},
     )
 
 
@@ -2283,12 +2298,13 @@ async def admin_audit(
     )
     total_pages = max(1, (total + per_page - 1) // per_page)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/audit.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "audit_requests": audit_requests,
             "total": total,
             "page": page,
@@ -2501,12 +2517,13 @@ async def admin_admin_audit(
     )
     admin_users = admin_users_result.scalars().all()
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/admin_audit.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "entries": entries,
             "total": total,
             "page": page,
@@ -2540,12 +2557,13 @@ async def admin_groups(
 
     groups_with_counts = await crud.get_all_groups_with_counts(db)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/groups.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "groups": groups_with_counts,
             "success": success,
             "error": error,
@@ -2717,12 +2735,13 @@ async def admin_user_detail(
     groups = await crud.get_all_groups(db)
     recent_ips = await crud.get_user_recent_ips(db, user_id, days=90)
 
+    masq = await _admin_masquerade_context(request, admin_user, db)
     return templates.TemplateResponse(
         "admin/user_detail.html",
         {
             "request": request,
             "user": admin_user,
-            "is_read_only": await _is_read_only_for_admin(request, admin_user, db),
+            **masq,
             "detail_user": stats["user"],
             "stats": stats,
             "monthly_usage": monthly_usage,
@@ -2889,12 +2908,13 @@ async def admin_api_keys(
     key_ids = [k.id for k in keys]
     key_last_ips = await crud.get_api_key_last_ips_batch(db, key_ids)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/api_keys.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "api_keys": keys,
             "total": total,
             "page": page,
@@ -2962,12 +2982,13 @@ async def admin_conversations(
     )
     total_pages = max(1, (total + per_page - 1) // per_page)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/conversations.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "conversations": conversations,
             "total": total,
             "page": page,
@@ -3166,12 +3187,13 @@ async def admin_chat_config(
     tts_speed = await crud.get_config_json(db, "voice.tts_speed", 1.0)
     stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/chat_config.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "available_models": sorted(available_models),
             "core_models": core_models,
             "default_model": default_model,
@@ -3368,12 +3390,13 @@ async def admin_voice_config(
     tts_quota_tokens = await crud.get_config_json(db, "voice_api.tts_quota_tokens", 100)
     stt_quota_tokens = await crud.get_config_json(db, "voice_api.stt_quota_tokens", 200)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/voice_config.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "tts_url": tts_url,
             "tts_api_key": tts_api_key,
             "tts_voices": tts_voices,
@@ -3550,12 +3573,13 @@ async def admin_settings(
     from backend.app.services.email_service import get_smtp_config
     smtp_config = await get_smtp_config(db)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/settings.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "site_url": site_url,
             "current_timezone": current_tz,
             "timezone_choices": _TIMEZONE_CHOICES,
@@ -3821,12 +3845,13 @@ async def admin_retention(
 
     total_pages = max(1, (browse_total + 49) // 50)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/retention.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "tab": tab,
             "config": config,
             "app_counts": app_counts,
@@ -3937,12 +3962,13 @@ async def admin_backup(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/backup.html",
         {
             "request": request,
             "user": user,
-            "is_read_only": await _is_read_only_for_admin(request, user, db),
+            **masq,
             "success": success,
             "error": error,
             "restore_summary": None,
