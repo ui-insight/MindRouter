@@ -23,14 +23,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
 from backend.app.db.session import get_async_db
-from backend.app.dashboard.routes import get_session_user_id, templates
+from backend.app.dashboard.routes import get_session_user_id, _admin_masquerade_context, templates
 from backend.app.services import email_service
 
 email_router = APIRouter(tags=["email"])
 
 
+async def _require_admin_read(request: Request, db: AsyncSession):
+    """Helper to require admin or auditor access (read-only admin)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return None, RedirectResponse("/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or not user.group or not user.group.has_admin_read:
+        return None, RedirectResponse("/dashboard", status_code=302)
+    return user, None
+
+
 async def _require_admin(request: Request, db: AsyncSession):
-    """Helper to require admin access."""
+    """Helper to require full admin access (mutating actions)."""
     user_id = get_session_user_id(request)
     if not user_id:
         return None, RedirectResponse("/login", status_code=302)
@@ -48,7 +59,7 @@ async def admin_email_page(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin email compose page."""
-    user, redirect = await _require_admin(request, db)
+    user, redirect = await _require_admin_read(request, db)
     if redirect:
         return redirect
 
@@ -57,11 +68,13 @@ async def admin_email_page(
     smtp_ready = email_service.is_smtp_configured(smtp_config)
     email_logs = await crud.get_email_logs(db, limit=15)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/email.html",
         {
             "request": request,
             "user": user,
+            **masq,
             "groups": groups,
             "smtp_ready": smtp_ready,
             "email_logs": email_logs,

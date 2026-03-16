@@ -35,6 +35,7 @@
             </div>
             {% endif %}
 
+            {% if not is_read_only %}
             <form method="post" action="{{ '/admin/blog/' ~ post.id ~ '/edit' if post else '/admin/blog/new' }}">
                 <div class="row">
                     <div class="col-md-8 mb-3">
@@ -122,6 +123,31 @@
                     </div>
                 </div>
             </div>
+            {% endif %}
+
+            {% else %}
+            {# Read-only view for auditor mode #}
+            {% if post %}
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h5 class="mb-0">{{ post.title }}</h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-2">
+                        <span class="badge bg-{{ 'success' if post.is_published else 'secondary' }}">
+                            {{ 'Published' if post.is_published else 'Draft' }}
+                        </span>
+                        <span class="text-muted ms-2 small">Slug: {{ post.slug }}</span>
+                    </div>
+                    {% if post.excerpt %}
+                    <p class="text-muted">{{ post.excerpt }}</p>
+                    {% endif %}
+                    <div class="preview-pane" id="readOnlyContent">{{ post.content }}</div>
+                </div>
+            </div>
+            {% endif %}
+            <div class="alert alert-info"><i class="bi bi-info-circle"></i> Blog editing is not available in auditor mode.</div>
+            <a href="/admin/blog" class="btn btn-outline-secondary">Back to Blog Posts</a>
             {% endif %}
         </div>
     </div>

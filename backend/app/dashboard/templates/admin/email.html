@@ -34,6 +34,7 @@
 
             <div class="row">
                 <div class="col-lg-8">
+                    {% if not is_read_only %}
                     <div class="card mb-4">
                         <div class="card-header"><h5 class="mb-0">Compose Email</h5></div>
                         <div class="card-body">
@@ -106,6 +107,9 @@
                             </form>
                         </div>
                     </div>
+                    {% else %}
+                    <div class="alert alert-info"><i class="bi bi-info-circle"></i> Email sending is not available in auditor mode.</div>
+                    {% endif %}
                 </div>
 
                 <div class="col-lg-4">

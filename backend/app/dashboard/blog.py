@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
 from backend.app.db.session import get_async_db
-from backend.app.dashboard.routes import get_session_user_id, templates
+from backend.app.dashboard.routes import get_session_user_id, _admin_masquerade_context, templates
 from backend.app.services import email_service
 
 blog_router = APIRouter(tags=["blog"])
@@ -96,8 +96,19 @@ async def blog_post(
 
 
 # Admin routes
+async def _require_admin_read(request: Request, db: AsyncSession):
+    """Helper to require admin or auditor access (read-only admin)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return None, RedirectResponse("/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or not user.group or not user.group.has_admin_read:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user, None
+
+
 async def _require_admin(request: Request, db: AsyncSession):
-    """Helper to require admin access."""
+    """Helper to require full admin access (mutating actions)."""
     user_id = get_session_user_id(request)
     if not user_id:
         return None, RedirectResponse("/login", status_code=302)
@@ -113,15 +124,16 @@ async def admin_blog_list(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin: list all blog posts."""
-    user, redirect = await _require_admin(request, db)
+    user, redirect = await _require_admin_read(request, db)
     if redirect:
         return redirect
 
     posts = await crud.get_all_blog_posts(db)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/blog.html",
-        {"request": request, "user": user, "posts": posts, "active": "blog"},
+        {"request": request, "user": user, **masq, "posts": posts, "active": "blog"},
     )
 
 
@@ -131,13 +143,14 @@ async def admin_blog_new(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin: new post form."""
-    user, redirect = await _require_admin(request, db)
+    user, redirect = await _require_admin_read(request, db)
     if redirect:
         return redirect
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/blog_edit.html",
-        {"request": request, "user": user, "post": None, "active": "blog"},
+        {"request": request, "user": user, **masq, "post": None, "active": "blog"},
     )
 
 
@@ -180,7 +193,7 @@ async def admin_blog_edit(
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin: edit post form."""
-    user, redirect = await _require_admin(request, db)
+    user, redirect = await _require_admin_read(request, db)
     if redirect:
         return redirect
 
@@ -192,11 +205,13 @@ async def admin_blog_edit(
     smtp_ready = email_service.is_smtp_configured(smtp_config)
     blog_email_log = await crud.get_blog_email_log(db, post_id)
 
+    masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/blog_edit.html",
         {
             "request": request,
             "user": user,
+            **masq,
             "post": post,
             "active": "blog",
             "smtp_ready": smtp_ready,
