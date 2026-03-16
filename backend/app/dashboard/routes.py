@@ -157,6 +157,20 @@ async def get_effective_user_id(request: Request, db: AsyncSession) -> Optional[
     return real_user_id
 
 
+async def _is_read_only_for_admin(request: Request, real_user: "User", db: AsyncSession) -> bool:
+    """Compute is_read_only, respecting masquerade.
+
+    If an admin is masquerading as an auditor (or non-admin), show the
+    read-only view so they can preview what the target user sees.
+    """
+    masquerade_id = get_masquerade_user_id(request)
+    if masquerade_id and masquerade_id != real_user.id:
+        target_user = await crud.get_user_by_id(db, masquerade_id)
+        if target_user and target_user.group:
+            return not target_user.group.is_admin
+    return not real_user.group.is_admin
+
+
 # Public Dashboard
 @dashboard_router.get("/", response_class=HTMLResponse)
 async def public_dashboard(
@@ -947,7 +961,7 @@ async def admin_dashboard(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "backends": backends,
             "nodes": nodes,
             "pending_requests": pending_requests,
@@ -1041,7 +1055,7 @@ async def admin_users(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "users": users,
             "groups": groups,
             "total": total,
@@ -1075,7 +1089,7 @@ async def admin_requests(
 
     return templates.TemplateResponse(
         "admin/requests.html",
-        {"request": request, "user": user, "is_read_only": not user.group.is_admin, "requests": pending_requests},
+        {"request": request, "user": user, "is_read_only": await _is_read_only_for_admin(request, user, db), "requests": pending_requests},
     )
 
 
@@ -1180,7 +1194,7 @@ async def admin_models(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "grouped_models": grouped_models,
             "ollama_backends": ollama_backends,
             "success": success,
@@ -1552,7 +1566,7 @@ async def admin_nodes(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "nodes": node_data,
             "app_version": settings.app_version,
             "success": success,
@@ -1882,7 +1896,7 @@ async def admin_backends(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "backends": backend_data,
             "nodes": nodes,
             "success": success,
@@ -2274,7 +2288,7 @@ async def admin_audit(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "audit_requests": audit_requests,
             "total": total,
             "page": page,
@@ -2492,7 +2506,7 @@ async def admin_admin_audit(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "entries": entries,
             "total": total,
             "page": page,
@@ -2531,7 +2545,7 @@ async def admin_groups(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "groups": groups_with_counts,
             "success": success,
             "error": error,
@@ -2708,7 +2722,7 @@ async def admin_user_detail(
         {
             "request": request,
             "user": admin_user,
-            "is_read_only": not admin_user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, admin_user, db),
             "detail_user": stats["user"],
             "stats": stats,
             "monthly_usage": monthly_usage,
@@ -2880,7 +2894,7 @@ async def admin_api_keys(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "api_keys": keys,
             "total": total,
             "page": page,
@@ -2953,7 +2967,7 @@ async def admin_conversations(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "conversations": conversations,
             "total": total,
             "page": page,
@@ -3157,7 +3171,7 @@ async def admin_chat_config(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "available_models": sorted(available_models),
             "core_models": core_models,
             "default_model": default_model,
@@ -3359,7 +3373,7 @@ async def admin_voice_config(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "tts_url": tts_url,
             "tts_api_key": tts_api_key,
             "tts_voices": tts_voices,
@@ -3541,7 +3555,7 @@ async def admin_settings(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "site_url": site_url,
             "current_timezone": current_tz,
             "timezone_choices": _TIMEZONE_CHOICES,
@@ -3812,7 +3826,7 @@ async def admin_retention(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "tab": tab,
             "config": config,
             "app_counts": app_counts,
@@ -3928,7 +3942,7 @@ async def admin_backup(
         {
             "request": request,
             "user": user,
-            "is_read_only": not user.group.is_admin,
+            "is_read_only": await _is_read_only_for_admin(request, user, db),
             "success": success,
             "error": error,
             "restore_summary": None,
