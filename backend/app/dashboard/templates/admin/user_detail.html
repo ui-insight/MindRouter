@@ -15,13 +15,11 @@
                     <p class="text-muted mb-0">{{ detail_user.email }}</p>
                 </div>
                 <div>
-                    {% if not is_read_only %}
                     <form method="post" action="/admin/masquerade/{{ detail_user.id }}" class="d-inline me-2">
                         <button type="submit" class="btn btn-outline-warning" title="View the dashboard and chat as this user">
                             <i class="bi bi-eye"></i> Masquerade
                         </button>
                     </form>
-                    {% endif %}
                     <a href="/admin/users" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Back to Users</a>
                 </div>
             </div>
