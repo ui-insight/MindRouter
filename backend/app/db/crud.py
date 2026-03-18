@@ -604,21 +604,25 @@ async def update_quota_usage(
 
     When Redis is unavailable, falls back to a direct DB increment that will
     be committed with the rest of the transaction.
+
+    lifetime_tokens_used is always incremented in the DB regardless of Redis
+    availability — it is a monotonic counter that never resets.
     """
     from backend.app.core.redis_client import is_available
 
-    if is_available():
-        # Redis is source of truth — don't increment here; caller does it
-        # post-commit via incr_quota_redis().
-        result = await db.execute(select(Quota).where(Quota.user_id == user_id))
-        return result.scalar_one_or_none()
-
-    # Fallback: direct DB update (original behavior)
     result = await db.execute(select(Quota).where(Quota.user_id == user_id))
     quota = result.scalar_one_or_none()
-    if quota:
+    if not quota:
+        return None
+
+    # Always increment lifetime counter in DB
+    quota.lifetime_tokens_used += tokens_used
+
+    if not is_available():
+        # Fallback: also increment period counter in DB
         quota.tokens_used += tokens_used
-        await db.flush()
+
+    await db.flush()
     return quota
 
 

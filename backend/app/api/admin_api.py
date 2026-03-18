@@ -1507,6 +1507,7 @@ async def get_user_detail(
         "quota": {
             "token_budget": stats["user"].group.token_budget if stats["user"].group else 0,
             "tokens_used": stats["quota"].tokens_used,
+            "lifetime_tokens_used": stats["quota"].lifetime_tokens_used,
             "rpm_limit": stats["quota"].rpm_limit,
             "max_concurrent": stats["quota"].max_concurrent,
             "weight_override": stats["quota"].weight_override,

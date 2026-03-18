@@ -625,10 +625,8 @@ async def user_dashboard(
     max_keys = user.group.max_api_keys if user.group else 8
     active_key_count = await crud.count_user_active_api_keys(db, effective_id)
 
-    # Lifetime token usage from requests
-    lifetime_map = await crud.get_user_token_totals(db, [effective_id])
-    lifetime_data = lifetime_map.get(effective_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-    lifetime_tokens = lifetime_data["total_tokens"]
+    # Lifetime token usage (monotonic counter, survives retention purges)
+    lifetime_tokens = quota.lifetime_tokens_used if quota else 0
 
     # TTS preferences
     tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
@@ -656,8 +654,8 @@ async def user_dashboard(
             "now_utc": datetime.now(timezone.utc),
             "masquerade_user": masquerade_user,
             "lifetime_tokens": lifetime_tokens,
-            "lifetime_prompt_tokens": lifetime_data["prompt_tokens"],
-            "lifetime_completion_tokens": lifetime_data["completion_tokens"],
+            "lifetime_prompt_tokens": 0,
+            "lifetime_completion_tokens": 0,
             "tts_enabled": tts_enabled,
             "user_tts_voice": user_tts_voice or "",
             "user_tts_speed": user_tts_speed,
@@ -750,16 +748,11 @@ async def dashboard_token_usage(
     else:
         tokens_used = quota.tokens_used
 
-    lifetime_map = await crud.get_user_token_totals(db, [effective_id])
-    lifetime_data = lifetime_map.get(effective_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-
     group_budget = user.group.token_budget if user.group else 0
     return JSONResponse({
         "tokens_used": tokens_used,
         "budget": group_budget,
-        "lifetime_tokens": lifetime_data["total_tokens"],
-        "lifetime_prompt_tokens": lifetime_data["prompt_tokens"],
-        "lifetime_completion_tokens": lifetime_data["completion_tokens"],
+        "lifetime_tokens": quota.lifetime_tokens_used,
     })
 
 
