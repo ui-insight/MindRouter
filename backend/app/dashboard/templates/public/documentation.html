@@ -2363,6 +2363,61 @@ docker run -d --name gpu-sidecar \
 
                 <p>In production, bind the sidecar to localhost only (as shown above) and use an nginx reverse proxy on port 8007 to handle external traffic.
                    The env file at <code>/etc/mindrouter/sidecar.env</code> persists the secret key across upgrades — generate it once per node and it's reused automatically.</p>
+
+                <h3>Nginx Reverse Proxy Configuration</h3>
+                <p>Each inference node runs an nginx reverse proxy that terminates TLS and forwards requests to the locally-bound inference engine (Ollama or vLLM) and GPU sidecar. This is required because inference engines bind to <code>127.0.0.1</code> for security — nginx handles external TLS traffic on the public-facing ports.</p>
+
+                <h4>Upload size for multimodal requests</h4>
+                <p>Multimodal inference requests (images sent to vision models like Qwen3-VL, gemma3, LLaVA, etc.) include base64-encoded image data in the JSON body, which can be significantly larger than text-only requests. A typical high-resolution image produces 1&ndash;10MB of base64 data. Nginx's default <code>client_max_body_size</code> is only 1MB, which will cause <strong>413 Request Entity Too Large</strong> errors for any image upload.</p>
+                <p><strong>You must set <code>client_max_body_size</code></strong> in every nginx proxy config that handles inference traffic (Ollama and vLLM proxies). A value of <code>50m</code> (50MB) is recommended to accommodate large images and multi-image requests:</p>
+
+                <h4>Example: Ollama proxy config</h4>
+<pre><code># /etc/nginx/conf.d/ollama-proxy.conf
+server {
+    listen 8001 ssl;
+    listen [::]:8001 ssl;
+    client_max_body_size 50m;    # Required for multimodal image uploads
+    server_name node.example.edu;
+
+    ssl_certificate     /etc/pki/tls/certs/node.example.edu.crt;
+    ssl_certificate_key /etc/pki/tls/private/node.example.edu.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:18001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 300s;    # Long timeout for inference
+        proxy_send_timeout 300s;
+    }
+}</code></pre>
+
+                <h4>Example: vLLM proxy config</h4>
+<pre><code># /etc/nginx/conf.d/vllm-proxy.conf
+# Multiple server blocks, one per vLLM instance on different ports
+server {
+    listen 8001 ssl;
+    client_max_body_size 50m;    # Required for multimodal image uploads
+    server_name node.example.edu;
+
+    ssl_certificate     /etc/pki/tls/certs/node.example.edu.crt;
+    ssl_certificate_key /etc/pki/tls/private/node.example.edu.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:18001;
+        proxy_set_header Host $host;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+}</code></pre>
+
+                <p><strong>Important:</strong> This setting must be applied on <em>every</em> inference node in the cluster, not just nodes currently running vision models. Any node may have a multimodal model deployed in the future, and missing this setting will cause silent failures (the request reaches MindRouter, gets routed to the backend, but nginx rejects it before it reaches the inference engine).</p>
+
+                <h4>Verifying the setting</h4>
+<pre><code># Check all nginx proxy configs across the cluster:
+for host in marten lynx webbyg1 webbyg2 calvin eunice aspen1 aspen2 aspen3 aspen4 aspen5; do
+    echo -n "$host: "
+    ssh $host "grep -r client_max_body_size /etc/nginx/conf.d/ 2>/dev/null || echo 'NOT SET - needs fix'"
+done</code></pre>
             </section>
 
             <hr>
