@@ -7,14 +7,39 @@
 <style>
     .blog-content { max-width: 800px; line-height: 1.8; }
     .blog-content h1, .blog-content h2, .blog-content h3 { margin-top: 1.5em; margin-bottom: 0.5em; }
-    .blog-content pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .blog-content pre { background: var(--bs-tertiary-bg); color: var(--bs-body-color); padding: 1rem; border-radius: 6px; overflow-x: auto; }
     .blog-content code { font-size: 0.9em; }
-    .blog-content p code { background: #f6f8fa; padding: 0.2em 0.4em; border-radius: 3px; }
+    .blog-content p code { background: var(--bs-tertiary-bg); color: var(--bs-body-color); padding: 0.2em 0.4em; border-radius: 3px; }
     .blog-content img { max-width: 100%; height: auto; }
     .blog-content table { width: 100%; margin-bottom: 1rem; }
-    .blog-content table th, .blog-content table td { padding: 0.5rem; border: 1px solid #dee2e6; }
-    .blog-content table th { background: #f8f9fa; }
-    .codehilite { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    .blog-content table th, .blog-content table td { padding: 0.5rem; border: 1px solid var(--bs-border-color); }
+    .blog-content table th { background: var(--bs-tertiary-bg); }
+    .codehilite { background: var(--bs-tertiary-bg); color: var(--bs-body-color); padding: 1rem; border-radius: 6px; overflow-x: auto; }
+    /* Override Pygments GitHub theme colors in dark mode */
+    [data-bs-theme="dark"] .codehilite,
+    [data-bs-theme="dark"] .blog-content pre { background: #1e1e2e; color: #cdd6f4; }
+    [data-bs-theme="dark"] .codehilite .c,
+    [data-bs-theme="dark"] .codehilite .cm,
+    [data-bs-theme="dark"] .codehilite .c1,
+    [data-bs-theme="dark"] .codehilite .cs { color: #6c7086; }
+    [data-bs-theme="dark"] .codehilite .k,
+    [data-bs-theme="dark"] .codehilite .kd,
+    [data-bs-theme="dark"] .codehilite .kn,
+    [data-bs-theme="dark"] .codehilite .kp,
+    [data-bs-theme="dark"] .codehilite .kr { color: #cba6f7; }
+    [data-bs-theme="dark"] .codehilite .s,
+    [data-bs-theme="dark"] .codehilite .s1,
+    [data-bs-theme="dark"] .codehilite .s2,
+    [data-bs-theme="dark"] .codehilite .se { color: #a6e3a1; }
+    [data-bs-theme="dark"] .codehilite .n,
+    [data-bs-theme="dark"] .codehilite .na,
+    [data-bs-theme="dark"] .codehilite .nb,
+    [data-bs-theme="dark"] .codehilite .nc,
+    [data-bs-theme="dark"] .codehilite .nf { color: #89b4fa; }
+    [data-bs-theme="dark"] .codehilite .mi,
+    [data-bs-theme="dark"] .codehilite .mf { color: #fab387; }
+    [data-bs-theme="dark"] .codehilite .o,
+    [data-bs-theme="dark"] .codehilite .p { color: #89dceb; }
 </style>
 {% endblock %}
 
