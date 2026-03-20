@@ -1,0 +1,379 @@
+{% extends "base.html" %}
+
+{% block title %}DLP - Admin - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "dlp" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-shield-lock"></i> Data Loss Prevention</h1>
+            <p class="text-muted">Detect sensitive data (PII, HIPAA/PHI, FERPA, PCI, CUI) in prompts and responses.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {{ success }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            <!-- Stats Cards -->
+            <div class="row mb-4">
+                <div class="col-md-2">
+                    <div class="card text-center">
+                        <div class="card-body py-2">
+                            <div class="text-muted small">Alerts (24h)</div>
+                            <div class="fs-4 fw-bold">{{ stats.total }}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="card text-center border-danger">
+                        <div class="card-body py-2">
+                            <div class="text-muted small">Major</div>
+                            <div class="fs-4 fw-bold text-danger">{{ stats.by_severity.get('major', 0) }}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="card text-center border-warning">
+                        <div class="card-body py-2">
+                            <div class="text-muted small">Moderate</div>
+                            <div class="fs-4 fw-bold text-warning">{{ stats.by_severity.get('moderate', 0) }}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="card text-center border-info">
+                        <div class="card-body py-2">
+                            <div class="text-muted small">Minor</div>
+                            <div class="fs-4 fw-bold text-info">{{ stats.by_severity.get('minor', 0) }}</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="card text-center">
+                        <div class="card-body py-2">
+                            <div class="text-muted small">Avg Latency</div>
+                            <div class="fs-4 fw-bold">{{ stats.avg_latency_ms }}ms</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <div class="card text-center">
+                        <div class="card-body py-2">
+                            <div class="text-muted small">Unacked</div>
+                            <div class="fs-4 fw-bold">{{ stats.unacknowledged }}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {% if not is_read_only %}
+            <!-- Configuration -->
+            <form method="post" action="/admin/dlp/config">
+                <!-- Master Toggle -->
+                <div class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">DLP Scanning</h5>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="enabled" name="enabled"
+                                   {% if config.enabled %}checked{% endif %}>
+                            <label class="form-check-label" for="enabled">
+                                {% if config.enabled %}
+                                <span class="badge bg-success">Active</span>
+                                {% else %}
+                                <span class="badge bg-secondary">Disabled</span>
+                                {% endif %}
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="col-lg-6">
+                        <!-- Regex Scanner -->
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="regex_enabled" name="regex_enabled"
+                                           {% if config.regex_enabled %}checked{% endif %}>
+                                    <label class="form-check-label fw-bold" for="regex_enabled">Regex &amp; Keyword Scanner</label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Built-in patterns detect SSNs, credit cards, emails, phone numbers. Add custom patterns below.</p>
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold" for="regex_patterns">Custom Patterns <small class="text-muted">(JSON array)</small></label>
+                                    <textarea class="form-control font-monospace" id="regex_patterns" name="regex_patterns" rows="4"
+                                              placeholder='[{"name": "Custom ID", "pattern": "\\bCUST-\\d+\\b", "category": "custom_id", "severity": "moderate"}]'>{{ config.regex_patterns | tojson }}</textarea>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold" for="regex_keywords">Keywords <small class="text-muted">(one per line)</small></label>
+                                    <textarea class="form-control" id="regex_keywords" name="regex_keywords" rows="3"
+                                              placeholder="confidential&#10;classified&#10;top secret">{% for kw in config.regex_keywords %}{{ kw }}{% if not loop.last %}&#10;{% endif %}{% endfor %}</textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- GLiNER NER Scanner -->
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="gliner_enabled" name="gliner_enabled"
+                                           {% if config.gliner_enabled %}checked{% endif %}>
+                                    <label class="form-check-label fw-bold" for="gliner_enabled">GLiNER NER Scanner</label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Neural entity recognition using GLiNER. Runs on CPU (~10ms/scan). Requires <code>pip install gliner</code>.</p>
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold" for="gliner_threshold">Confidence Threshold</label>
+                                    <input type="range" class="form-range" id="gliner_threshold" name="gliner_threshold"
+                                           min="0.1" max="0.95" step="0.05" value="{{ config.gliner_threshold }}">
+                                    <div class="text-center"><span id="threshold_val">{{ config.gliner_threshold }}</span></div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold">Entity Categories</label>
+                                    {% set all_categories = ["person", "phone number", "email", "credit card number", "social security number", "date of birth", "driver license number", "passport number", "bank account number", "medical record number", "student id"] %}
+                                    {% for cat in all_categories %}
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="gliner_categories" value="{{ cat }}" id="cat_{{ loop.index }}"
+                                               {% if cat in config.gliner_categories %}checked{% endif %}>
+                                        <label class="form-check-label" for="cat_{{ loop.index }}">{{ cat | title }}</label>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-lg-6">
+                        <!-- LLM Scanner -->
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="llm_enabled" name="llm_enabled"
+                                           {% if config.llm_enabled %}checked{% endif %}>
+                                    <label class="form-check-label fw-bold" for="llm_enabled">LLM Contextual Scanner</label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Uses an LLM for semantic analysis. Self-routes through MindRouter (~500ms). Ideal for FERPA/HIPAA contextual detection.</p>
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold" for="llm_model">Model</label>
+                                    <input type="text" class="form-control" id="llm_model" name="llm_model"
+                                           value="{{ config.llm_model }}" placeholder="openai/Qwen3.5-4B">
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label fw-bold" for="llm_system_prompt">System Prompt</label>
+                                    <textarea class="form-control" id="llm_system_prompt" name="llm_system_prompt" rows="5">{{ config.llm_system_prompt }}</textarea>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Severity Rules -->
+                        <div class="card mb-4">
+                            <div class="card-header"><h5 class="mb-0">Severity Rules</h5></div>
+                            <div class="card-body">
+                                <p class="text-muted small">Map entity categories to severity levels. JSON object: <code>{"category": "minor|moderate|major"}</code></p>
+                                <textarea class="form-control font-monospace" name="severity_rules" rows="6">{{ config.severity_rules | tojson(indent=2) }}</textarea>
+                            </div>
+                        </div>
+
+                        <!-- Email Notifications -->
+                        <div class="card mb-4">
+                            <div class="card-header"><h5 class="mb-0">Email Notifications</h5></div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <label class="form-label" for="email_minor"><span class="badge bg-info">Minor</span> Recipients</label>
+                                    <input type="text" class="form-control form-control-sm" id="email_minor" name="email_minor"
+                                           value="{{ config.email_minor }}" placeholder="user@example.com, admin@example.com">
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label" for="email_moderate"><span class="badge bg-warning text-dark">Moderate</span> Recipients</label>
+                                    <input type="text" class="form-control form-control-sm" id="email_moderate" name="email_moderate"
+                                           value="{{ config.email_moderate }}" placeholder="security@example.com">
+                                </div>
+                                <div class="mb-2">
+                                    <label class="form-label" for="email_major"><span class="badge bg-danger">Major</span> Recipients</label>
+                                    <input type="text" class="form-control form-control-sm" id="email_major" name="email_major"
+                                           value="{{ config.email_major }}" placeholder="ciso@example.com, compliance@example.com">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="text-end mb-4">
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Save Configuration</button>
+                </div>
+            </form>
+            {% endif %}
+
+            <!-- Alerts Table -->
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">DLP Alerts</h5>
+                    <div class="d-flex gap-2">
+                        <form method="get" action="/admin/dlp" class="d-flex gap-2">
+                            <select name="severity" class="form-select form-select-sm" style="width: auto;" onchange="this.form.submit()">
+                                <option value="">All Severities</option>
+                                <option value="major" {% if severity_filter == 'major' %}selected{% endif %}>Major</option>
+                                <option value="moderate" {% if severity_filter == 'moderate' %}selected{% endif %}>Moderate</option>
+                                <option value="minor" {% if severity_filter == 'minor' %}selected{% endif %}>Minor</option>
+                            </select>
+                            <select name="scanner" class="form-select form-select-sm" style="width: auto;" onchange="this.form.submit()">
+                                <option value="">All Scanners</option>
+                                <option value="regex" {% if scanner_filter == 'regex' %}selected{% endif %}>Regex</option>
+                                <option value="gliner" {% if scanner_filter == 'gliner' %}selected{% endif %}>GLiNER</option>
+                                <option value="llm" {% if scanner_filter == 'llm' %}selected{% endif %}>LLM</option>
+                            </select>
+                            <input type="text" name="search" class="form-control form-control-sm" placeholder="Search..."
+                                   value="{{ search }}" style="width: 150px;">
+                            <button type="submit" class="btn btn-sm btn-outline-secondary"><i class="bi bi-search"></i></button>
+                        </form>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Severity</th>
+                                    <th>Scanner</th>
+                                    <th>Categories</th>
+                                    <th>User</th>
+                                    <th>Request</th>
+                                    <th>Latency</th>
+                                    <th>Time</th>
+                                    <th>Status</th>
+                                    {% if not is_read_only %}<th>Action</th>{% endif %}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for alert in alerts %}
+                                <tr>
+                                    <td>{{ alert.id }}</td>
+                                    <td>
+                                        {% if alert.severity == 'major' %}
+                                        <span class="badge bg-danger">Major</span>
+                                        {% elif alert.severity == 'moderate' %}
+                                        <span class="badge bg-warning text-dark">Moderate</span>
+                                        {% else %}
+                                        <span class="badge bg-info">Minor</span>
+                                        {% endif %}
+                                    </td>
+                                    <td><span class="badge bg-secondary">{{ alert.scanner }}</span></td>
+                                    <td>
+                                        {% if alert.categories %}
+                                        {% for cat in alert.categories[:3] %}
+                                        <span class="badge bg-light text-dark">{{ cat }}</span>
+                                        {% endfor %}
+                                        {% if alert.categories | length > 3 %}
+                                        <span class="text-muted small">+{{ alert.categories | length - 3 }}</span>
+                                        {% endif %}
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ alert.user.email if alert.user else 'N/A' }}</td>
+                                    <td>
+                                        {% if alert.request_id %}
+                                        <a href="/admin/requests?search={{ alert.request_id }}" class="text-decoration-none">#{{ alert.request_id }}</a>
+                                        {% else %}
+                                        N/A
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ alert.scan_latency_ms }}ms</td>
+                                    <td><small>{{ alert.scanned_at.strftime('%Y-%m-%d %H:%M') if alert.scanned_at else '' }}</small></td>
+                                    <td>
+                                        {% if alert.acknowledged %}
+                                        <span class="badge bg-success" title="Acknowledged by {{ alert.acknowledger.email if alert.acknowledger else '?' }}">Acked</span>
+                                        {% else %}
+                                        <span class="badge bg-outline-secondary">Open</span>
+                                        {% endif %}
+                                    </td>
+                                    {% if not is_read_only %}
+                                    <td>
+                                        {% if not alert.acknowledged %}
+                                        <button class="btn btn-sm btn-outline-success" onclick="ackAlert({{ alert.id }})" title="Acknowledge">
+                                            <i class="bi bi-check-lg"></i>
+                                        </button>
+                                        {% endif %}
+                                    </td>
+                                    {% endif %}
+                                </tr>
+                                {% endfor %}
+                                {% if not alerts %}
+                                <tr>
+                                    <td colspan="10" class="text-center text-muted py-4">No DLP alerts found.</td>
+                                </tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                {% if total_pages > 1 %}
+                <div class="card-footer">
+                    <nav aria-label="DLP alerts pagination">
+                        <ul class="pagination justify-content-center mb-0">
+                            <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                                <a class="page-link" href="?page={{ page - 1 }}{% if severity_filter %}&severity={{ severity_filter }}{% endif %}{% if scanner_filter %}&scanner={{ scanner_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">Previous</a>
+                            </li>
+                            {% for p in range(1, total_pages + 1) %}
+                            {% if p == page or (p <= 3) or (p >= total_pages - 2) or (p >= page - 1 and p <= page + 1) %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="?page={{ p }}{% if severity_filter %}&severity={{ severity_filter }}{% endif %}{% if scanner_filter %}&scanner={{ scanner_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">{{ p }}</a>
+                            </li>
+                            {% elif p == 4 or p == total_pages - 3 %}
+                            <li class="page-item disabled"><span class="page-link">...</span></li>
+                            {% endif %}
+                            {% endfor %}
+                            <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                                <a class="page-link" href="?page={{ page + 1 }}{% if severity_filter %}&severity={{ severity_filter }}{% endif %}{% if scanner_filter %}&scanner={{ scanner_filter }}{% endif %}{% if search %}&search={{ search }}{% endif %}">Next</a>
+                            </li>
+                        </ul>
+                    </nav>
+                </div>
+                {% endif %}
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Threshold slider display
+const slider = document.getElementById('gliner_threshold');
+const valSpan = document.getElementById('threshold_val');
+if (slider && valSpan) {
+    slider.addEventListener('input', () => { valSpan.textContent = slider.value; });
+}
+
+// Acknowledge alert
+async function ackAlert(alertId) {
+    try {
+        const resp = await fetch(`/admin/dlp/acknowledge/${alertId}`, {method: 'POST'});
+        if (resp.ok) {
+            location.reload();
+        } else {
+            const data = await resp.json();
+            alert(data.error || 'Failed to acknowledge');
+        }
+    } catch (e) {
+        alert('Network error');
+    }
+}
+</script>
+{% endblock %}

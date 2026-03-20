@@ -84,6 +84,7 @@
                 <li class="nav-item"><a class="nav-link" href="#configuration-reference">Configuration Reference</a></li>
                 <li class="nav-item"><a class="nav-link" href="#status-enums">Status Enums Reference</a></li>
                 <li class="nav-item"><a class="nav-link" href="#security-hardening">Security Hardening</a></li>
+                <li class="nav-item"><a class="nav-link" href="#data-loss-prevention">Data Loss Prevention</a></li>
                 <li class="nav-item"><a class="nav-link" href="#deployment">Deployment</a></li>
                 <li class="nav-item"><a class="nav-link" href="#testing">Testing</a></li>
             </ul>
@@ -2303,6 +2304,72 @@ FROM information_schema.INNODB_TABLESPACES_ENCRYPTION
 WHERE ENCRYPTION_SCHEME = 1;</code></pre>
                 <p>After enabling TDE and restarting MariaDB, background encryption threads will encrypt existing tablespaces in-place.
                    This happens automatically and does not block normal queries.</p>
+            </section>
+
+            <hr>
+
+            <!-- Data Loss Prevention -->
+            <section id="data-loss-prevention">
+                <h2>Data Loss Prevention (DLP)</h2>
+                <p>MindRouter includes a built-in DLP system that scans prompts and responses for sensitive data
+                   including PII, HIPAA/PHI, FERPA, PCI, and CUI. Scanning happens <strong>asynchronously after
+                   the response is delivered</strong>, so there is zero impact on inference latency.</p>
+
+                <h3>Scanning Tiers</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Tier</th><th>Engine</th><th>Latency</th><th>Detects</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Regex &amp; Keywords</strong></td>
+                            <td>Built-in regex patterns + custom keywords</td>
+                            <td>~0.1ms</td>
+                            <td>SSNs, credit cards, emails, phone numbers, custom patterns</td>
+                        </tr>
+                        <tr>
+                            <td><strong>GLiNER NER</strong></td>
+                            <td>Neural entity recognition (CPU)</td>
+                            <td>~10ms</td>
+                            <td>Names, dates of birth, passport/license numbers, medical records, student IDs</td>
+                        </tr>
+                        <tr>
+                            <td><strong>LLM Contextual</strong></td>
+                            <td>Dedicated LLM (self-routed via MindRouter)</td>
+                            <td>~500ms</td>
+                            <td>FERPA violations, HIPAA/PHI context, CUI, semantic sensitive data</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>Severity Levels</h3>
+                <ul>
+                    <li><strong>Major</strong> &mdash; SSNs, credit card numbers, bank accounts, passport numbers, medical records. Immediate attention required.</li>
+                    <li><strong>Moderate</strong> &mdash; Driver license numbers, dates of birth, student IDs. Review recommended.</li>
+                    <li><strong>Minor</strong> &mdash; Names, email addresses, phone numbers. Informational.</li>
+                </ul>
+
+                <h3>Configuration</h3>
+                <p>Configure DLP in the admin dashboard at <strong>Admin &rarr; DLP</strong>. Settings include:</p>
+                <ul>
+                    <li>Master enable/disable toggle</li>
+                    <li>Per-scanner enable/disable and configuration</li>
+                    <li>GLiNER confidence threshold and entity categories</li>
+                    <li>LLM model selection and system prompt customization</li>
+                    <li>Custom regex patterns and keyword lists</li>
+                    <li>Severity rules mapping categories to severity levels</li>
+                    <li>Email notification recipients per severity level</li>
+                </ul>
+
+                <h3>Self-Routing Loop Prevention</h3>
+                <p>The LLM scanner uses a dedicated internal API key to route requests through MindRouter.
+                   Requests from this key are automatically excluded from DLP scanning to prevent infinite loops.</p>
+
+                <h3>Performance</h3>
+                <p>DLP scanning is completely asynchronous &mdash; it enqueues the request ID to a bounded queue
+                   (10,000 items) after the response is delivered. If the queue is full, scanning is silently
+                   skipped (best-effort). The GLiNER model loads lazily on first scan (~2-3s) and subsequent
+                   scans take ~10ms on CPU.</p>
             </section>
 
             <hr>

@@ -34,6 +34,8 @@ from backend.app.db.models import (
     BackendStatus,
     BackendTelemetry,
     BlogPost,
+    DlpAlert,
+    DlpSeverity,
     EmailLog,
     GPUDevice,
     GPUDeviceTelemetry,
@@ -3255,3 +3257,154 @@ async def bump_registry_version(db: AsyncSession) -> None:
         .values(version=RegistryMeta.version + 1)
     )
     await db.flush()
+
+
+# ---------------------------------------------------------------------------
+# DLP Alerts
+# ---------------------------------------------------------------------------
+
+
+async def create_dlp_alert(
+    db: AsyncSession,
+    request_id: Optional[int],
+    user_id: Optional[int],
+    severity: str,
+    scanner: str,
+    categories: Optional[list] = None,
+    entities: Optional[list] = None,
+    confidence: Optional[float] = None,
+    scan_latency_ms: Optional[int] = None,
+    detail: Optional[str] = None,
+) -> DlpAlert:
+    """Create a new DLP alert."""
+    alert = DlpAlert(
+        request_id=request_id,
+        user_id=user_id,
+        severity=severity,
+        scanner=scanner,
+        categories=categories,
+        entities=entities,
+        confidence=confidence,
+        scan_latency_ms=scan_latency_ms,
+        detail=detail,
+    )
+    db.add(alert)
+    await db.flush()
+    return alert
+
+
+async def get_dlp_alerts(
+    db: AsyncSession,
+    severity: Optional[str] = None,
+    scanner: Optional[str] = None,
+    user_id: Optional[int] = None,
+    search: Optional[str] = None,
+    acknowledged: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> Tuple[List[DlpAlert], int]:
+    """Query DLP alerts with filters and pagination."""
+    query = select(DlpAlert).options(
+        selectinload(DlpAlert.user),
+        selectinload(DlpAlert.acknowledger),
+    )
+    count_query = select(func.count(DlpAlert.id))
+
+    if severity is not None:
+        query = query.where(DlpAlert.severity == severity)
+        count_query = count_query.where(DlpAlert.severity == severity)
+    if scanner is not None:
+        query = query.where(DlpAlert.scanner == scanner)
+        count_query = count_query.where(DlpAlert.scanner == scanner)
+    if user_id is not None:
+        query = query.where(DlpAlert.user_id == user_id)
+        count_query = count_query.where(DlpAlert.user_id == user_id)
+    if acknowledged is not None:
+        query = query.where(DlpAlert.acknowledged == acknowledged)
+        count_query = count_query.where(DlpAlert.acknowledged == acknowledged)
+    if search:
+        like_pat = f"%{search}%"
+        filt = or_(
+            DlpAlert.detail.ilike(like_pat),
+            DlpAlert.severity.ilike(like_pat),
+        )
+        query = query.where(filt)
+        count_query = count_query.where(filt)
+
+    total = (await db.execute(count_query)).scalar() or 0
+    result = await db.execute(
+        query.order_by(DlpAlert.scanned_at.desc()).offset(skip).limit(limit)
+    )
+    return list(result.scalars().all()), total
+
+
+async def get_dlp_alert_by_id(db: AsyncSession, alert_id: int) -> Optional[DlpAlert]:
+    """Get a single DLP alert by ID."""
+    result = await db.execute(
+        select(DlpAlert)
+        .options(selectinload(DlpAlert.user), selectinload(DlpAlert.acknowledger))
+        .where(DlpAlert.id == alert_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def acknowledge_dlp_alert(
+    db: AsyncSession, alert_id: int, user_id: int
+) -> Optional[DlpAlert]:
+    """Acknowledge a DLP alert."""
+    alert = await get_dlp_alert_by_id(db, alert_id)
+    if alert is None:
+        return None
+    alert.acknowledged = True
+    alert.acknowledged_by = user_id
+    alert.acknowledged_at = datetime.now(timezone.utc)
+    await db.flush()
+    return alert
+
+
+async def get_dlp_stats(db: AsyncSession, hours: int = 24) -> dict:
+    """Get DLP statistics for the last N hours."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    # Total alerts
+    total = (await db.execute(
+        select(func.count(DlpAlert.id)).where(DlpAlert.scanned_at >= cutoff)
+    )).scalar() or 0
+
+    # By severity
+    sev_rows = (await db.execute(
+        select(DlpAlert.severity, func.count(DlpAlert.id))
+        .where(DlpAlert.scanned_at >= cutoff)
+        .group_by(DlpAlert.severity)
+    )).all()
+    by_severity = {row[0]: row[1] for row in sev_rows}
+
+    # By scanner
+    scan_rows = (await db.execute(
+        select(DlpAlert.scanner, func.count(DlpAlert.id))
+        .where(DlpAlert.scanned_at >= cutoff)
+        .group_by(DlpAlert.scanner)
+    )).all()
+    by_scanner = {row[0]: row[1] for row in scan_rows}
+
+    # Average latency
+    avg_lat = (await db.execute(
+        select(func.avg(DlpAlert.scan_latency_ms))
+        .where(DlpAlert.scanned_at >= cutoff)
+    )).scalar()
+
+    # Unacknowledged count
+    unack = (await db.execute(
+        select(func.count(DlpAlert.id))
+        .where(DlpAlert.scanned_at >= cutoff)
+        .where(DlpAlert.acknowledged == False)
+    )).scalar() or 0
+
+    return {
+        "total": total,
+        "by_severity": by_severity,
+        "by_scanner": by_scanner,
+        "avg_latency_ms": round(avg_lat, 1) if avg_lat else 0,
+        "unacknowledged": unack,
+        "hours": hours,
+    }

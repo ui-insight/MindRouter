@@ -1631,6 +1631,12 @@ class InferenceService:
             await self.db.commit()
             # Increment Redis quota only after DB commit succeeds to prevent drift
             await crud.incr_quota_redis(db_request.user_id, total_tokens)
+            # Enqueue for DLP scanning (best-effort, never affects inference)
+            try:
+                from backend.app.services.dlp_worker import enqueue_for_dlp
+                await enqueue_for_dlp(db_request.id)
+            except Exception:
+                pass
         except Exception:
             try:
                 await self.db.rollback()
@@ -1696,6 +1702,12 @@ class InferenceService:
             await self.db.commit()
             # Increment Redis quota only after DB commit succeeds to prevent drift
             await crud.incr_quota_redis(db_request.user_id, total_tokens)
+            # Enqueue for DLP scanning (best-effort, never affects inference)
+            try:
+                from backend.app.services.dlp_worker import enqueue_for_dlp
+                await enqueue_for_dlp(db_request.id)
+            except Exception:
+                pass
         except Exception:
             try:
                 await self.db.rollback()

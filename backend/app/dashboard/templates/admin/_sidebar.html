@@ -62,6 +62,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'dlp' %}active{% endif %}" href="/admin/dlp" {% if active == 'dlp' %}aria-current="page"{% endif %}>
+                <i class="bi bi-shield-lock"></i> DLP
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'conversations' %}active{% endif %}" href="/admin/conversations" {% if active == 'conversations' %}aria-current="page"{% endif %}>
                 <i class="bi bi-chat-dots"></i> Conversations
             </a>

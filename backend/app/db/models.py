@@ -32,6 +32,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -892,6 +893,45 @@ class AdminAuditLog(Base):
         Index("ix_admin_audit_user_time", "user_id", "timestamp"),
         Index("ix_admin_audit_entity", "entity_type", "entity_id"),
         Index("ix_admin_audit_action", "action"),
+    )
+
+
+class DlpSeverity(str, PyEnum):
+    """DLP alert severity levels."""
+    MINOR = "minor"
+    MODERATE = "moderate"
+    MAJOR = "major"
+
+
+class DlpAlert(Base):
+    """DLP (Data Loss Prevention) alert for sensitive data detected in requests."""
+
+    __tablename__ = "dlp_alerts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    request_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("requests.id"), nullable=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    scanner: Mapped[str] = mapped_column(String(20), nullable=False)
+    categories: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    entities: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    scan_latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("0"))
+    acknowledged_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[user_id])
+    request: Mapped[Optional["Request"]] = relationship("Request", foreign_keys=[request_id])
+    acknowledger: Mapped[Optional["User"]] = relationship("User", foreign_keys=[acknowledged_by])
+
+    __table_args__ = (
+        Index("ix_dlp_alerts_severity", "severity"),
+        Index("ix_dlp_alerts_user_time", "user_id", "scanned_at"),
+        Index("ix_dlp_alerts_request", "request_id"),
+        Index("ix_dlp_alerts_scanner", "scanner"),
     )
 
 
