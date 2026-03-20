@@ -437,10 +437,14 @@ function tempClass(val) {
     return 'text-success';
 }
 
+const SERVER_TZ = '{{ current_timezone }}';
+
 function formatTime(ts) {
     if (!ts) return '';
-    const d = new Date(ts);
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // API returns UTC timestamps — parse as UTC then format in server TZ
+    const d = new Date(ts + (ts.includes('Z') || ts.includes('+') ? '' : 'Z'));
+    if (isNaN(d.getTime())) return ts;
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: SERVER_TZ });
 }
 
 let currentView = 'node';
@@ -941,53 +945,112 @@ async function fetchChartData(timeRange) {
             Promise.all(reqPromises),
         ]);
 
-        // Update GPU utilization chart
-        updateChart(gpuUtilChart, backends, utilResults, 'value');
-        updateChart(gpuMemChart, backends, memResults, 'value');
-        updateChart(powerChart, backends, powerResults, 'value');
-        updateChart(requestChart, backends, reqResults, 'value');
+        // Update charts with aggregated data
+        updateAggregateChart(gpuUtilChart, utilResults, 'value', 'avg', 'Cluster Avg Utilization %');
+        updateAggregateMemChart(gpuMemChart, memResults);
+        updateAggregateChart(powerChart, powerResults, 'value', 'sum', 'Cluster Total Power (W)');
+        updateAggregateChart(requestChart, reqResults, 'value', 'sum', 'Cluster Total Requests');
 
     } catch (e) {
         console.error('Chart data fetch error:', e);
     }
 }
 
-function updateChart(chart, backends, results, valueKey) {
-    // Collect all unique timestamps across backends
-    let allTimestamps = new Set();
+function _aggregateResults(results, valueKey, mode) {
+    // Collect per-timestamp values across all backends
+    const tsMap = {};  // timestamp -> [values]
     results.forEach(r => {
         if (r && r.series) {
-            r.series.forEach(p => allTimestamps.add(p.timestamp));
+            r.series.forEach(p => {
+                const v = p[valueKey];
+                if (v == null) return;
+                if (!tsMap[p.timestamp]) tsMap[p.timestamp] = [];
+                tsMap[p.timestamp].push(v);
+            });
         }
     });
-    const labels = Array.from(allTimestamps).sort();
+    const labels = Object.keys(tsMap).sort();
+    const data = labels.map(ts => {
+        const vals = tsMap[ts];
+        if (!vals || vals.length === 0) return null;
+        if (mode === 'avg') return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10;
+        return Math.round(vals.reduce((a, b) => a + b, 0) * 10) / 10;  // sum
+    });
+    return { labels, data };
+}
 
-    const datasets = backends.map((backend, idx) => {
-        const result = results[idx];
-        const dataMap = {};
-        if (result && result.series) {
-            result.series.forEach(p => { dataMap[p.timestamp] = p[valueKey]; });
+function updateAggregateChart(chart, results, valueKey, mode, label) {
+    const agg = _aggregateResults(results, valueKey, mode);
+    chart.data.labels = agg.labels.map(ts => {
+        const d = new Date(ts);
+        return isNaN(d.getTime()) ? ts : formatTime(ts);
+    });
+    chart.data.datasets = [{
+        label: label,
+        data: agg.data,
+        borderColor: '#0d6efd',
+        backgroundColor: '#0d6efd20',
+        borderWidth: 2,
+        tension: 0.3,
+        fill: true,
+        pointRadius: 0,
+        pointHitRadius: 10,
+        spanGaps: true,
+    }];
+    chart.update('none');
+}
+
+function updateAggregateMemChart(chart, results) {
+    // Aggregate used and total memory across all backends per timestamp
+    const tsMap = {};  // timestamp -> { used: [], total: [] }
+    results.forEach(r => {
+        if (r && r.series) {
+            r.series.forEach(p => {
+                if (!tsMap[p.timestamp]) tsMap[p.timestamp] = { used: [], total: [] };
+                if (p.value != null) tsMap[p.timestamp].used.push(p.value);
+                if (p.total != null) tsMap[p.timestamp].total.push(p.total);
+            });
         }
-
-        return {
-            label: backend.name,
-            data: labels.map(ts => dataMap[ts] ?? null),
-            borderColor: BACKEND_COLORS[idx % BACKEND_COLORS.length],
-            backgroundColor: BACKEND_COLORS[idx % BACKEND_COLORS.length] + '20',
+    });
+    const labels = Object.keys(tsMap).sort();
+    const usedData = labels.map(ts => {
+        const vals = tsMap[ts].used;
+        return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) * 10) / 10 : null;
+    });
+    const totalData = labels.map(ts => {
+        const vals = tsMap[ts].total;
+        return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) * 10) / 10 : null;
+    });
+    chart.data.labels = labels.map(ts => {
+        const d = new Date(ts);
+        return isNaN(d.getTime()) ? ts : formatTime(ts);
+    });
+    chart.data.datasets = [
+        {
+            label: 'Cluster Used (GB)',
+            data: usedData,
+            borderColor: '#dc3545',
+            backgroundColor: '#dc354520',
+            borderWidth: 2,
+            tension: 0.3,
+            fill: true,
+            pointRadius: 0,
+            pointHitRadius: 10,
+            spanGaps: true,
+        },
+        {
+            label: 'Cluster Total (GB)',
+            data: totalData,
+            borderColor: '#198754',
+            backgroundColor: '#19875420',
             borderWidth: 2,
             tension: 0.3,
             fill: false,
             pointRadius: 0,
             pointHitRadius: 10,
             spanGaps: true,
-        };
-    });
-
-    chart.data.labels = labels.map(ts => {
-        const d = new Date(ts);
-        return isNaN(d.getTime()) ? ts : formatTime(ts);
-    });
-    chart.data.datasets = datasets;
+        },
+    ];
     chart.update('none');
 }
 

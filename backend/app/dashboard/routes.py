@@ -2216,9 +2216,10 @@ async def admin_metrics(
         return RedirectResponse(url="/dashboard", status_code=302)
 
     masq = await _admin_masquerade_context(request, user, db)
+    current_tz = await crud.get_config_json(db, "display.timezone", _tz_cache["name"])
     return templates.TemplateResponse(
         "admin/metrics.html",
-        {"request": request, "user": user, **masq},
+        {"request": request, "user": user, "current_timezone": current_tz, **masq},
     )
 
 
