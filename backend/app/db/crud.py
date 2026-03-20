@@ -2004,14 +2004,22 @@ async def get_cluster_power_history(
 
     query = text("""
         SELECT
-            CONCAT(DATE_FORMAT(timestamp, '%Y-%m-%d %H:'),
-                   LPAD(FLOOR(MINUTE(timestamp) / :res_min) * :res_min, 2, '0')) as time_bucket,
-            SUM(server_power_watts) as total_server_power_watts,
-            SUM(gpu_power_watts) as total_gpu_power_watts,
-            COUNT(DISTINCT node_id) as node_count
-        FROM node_telemetry
-        WHERE timestamp >= :start
-          AND timestamp <= :end
+            time_bucket,
+            SUM(avg_server_power) as total_server_power_watts,
+            SUM(avg_gpu_power) as total_gpu_power_watts,
+            COUNT(*) as node_count
+        FROM (
+            SELECT
+                CONCAT(DATE_FORMAT(timestamp, '%Y-%m-%d %H:'),
+                       LPAD(FLOOR(MINUTE(timestamp) / :res_min) * :res_min, 2, '0')) as time_bucket,
+                node_id,
+                AVG(server_power_watts) as avg_server_power,
+                AVG(gpu_power_watts) as avg_gpu_power
+            FROM node_telemetry
+            WHERE timestamp >= :start
+              AND timestamp <= :end
+            GROUP BY time_bucket, node_id
+        ) per_node
         GROUP BY time_bucket
         ORDER BY time_bucket
     """)
