@@ -2237,10 +2237,11 @@ async def admin_energy(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    current_tz = await crud.get_config_json(db, "display.timezone", _tz_cache["name"])
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/energy.html",
-        {"request": request, "user": user, **masq},
+        {"request": request, "user": user, **masq, "current_timezone": current_tz},
     )
 
 

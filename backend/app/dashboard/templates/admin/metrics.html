@@ -478,7 +478,7 @@ async function fetchLatestTelemetry() {
         updateBackendAccordions(data.backends);
         updateConfigTables(data.backends, data.nodes || []);
         document.getElementById('last-updated').textContent =
-            'Last updated: ' + new Date().toLocaleTimeString();
+            'Last updated: ' + new Date().toLocaleTimeString([], { timeZone: SERVER_TZ });
     } catch (e) {
         console.error('Telemetry poll error:', e);
     } finally {

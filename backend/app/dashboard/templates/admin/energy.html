@@ -250,14 +250,16 @@
         return Number(v).toFixed(decimals ?? 0);
     }
 
+    const SERVER_TZ = '{{ current_timezone }}';
+
     function fmtTime(ts) {
-        const d = new Date(ts.replace(' ', 'T'));
+        const d = new Date(ts.replace(' ', 'T') + (ts.includes('Z') || ts.includes('+') ? '' : 'Z'));
         if (isNaN(d.getTime())) return ts;
         if (currentRange === '7d' || currentRange === '30d') {
-            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
-                   d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: SERVER_TZ }) + ' ' +
+                   d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZone: SERVER_TZ });
         }
-        return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', timeZone: SERVER_TZ });
     }
 
     // -- Chart setup --
@@ -398,7 +400,7 @@
             // Export node filter
             updateExportNodeSelect(data.nodes || []);
 
-            document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+            document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString([], { timeZone: SERVER_TZ });
         } catch (e) {
             console.error('Live poll error:', e);
         }
