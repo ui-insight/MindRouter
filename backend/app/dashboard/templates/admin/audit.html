@@ -65,8 +65,19 @@
             <div class="card">
                 <div class="card-body">
                     <div class="table-responsive">
-                        <table class="table table-hover table-sm">
+                        <table class="table table-hover table-sm" style="table-layout: fixed;">
                             <caption class="sr-only">Inference request audit log</caption>
+                            <colgroup>
+                                <col style="width: 90px;">
+                                <col style="width: 120px;">
+                                <col style="width: 50px;">
+                                <col style="width: 160px;">
+                                <col style="width: 130px;">
+                                <col style="width: 80px;">
+                                <col style="width: 70px;">
+                                <col style="width: 80px;">
+                                <col style="width: 50px;">
+                            </colgroup>
                             <thead>
                                 <tr>
                                     <th scope="col">ID</th>
@@ -86,7 +97,7 @@
                                     <td><code>{{ req.request_uuid[:8] }}...</code></td>
                                     <td>{{ req.created_at|localtime('%m-%d %H:%M:%S') }}</td>
                                     <td><a href="/admin/users/{{ req.user_id }}">{{ req.user_id }}</a></td>
-                                    <td><span class="badge bg-secondary">{{ req.model }}</span></td>
+                                    <td style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"><span class="badge bg-secondary" title="{{ req.model }}">{{ req.model }}</span></td>
                                     <td>{{ req.endpoint }}</td>
                                     <td>
                                         <span class="badge {% if req.status.value == 'completed' %}bg-success{% elif req.status.value == 'failed' %}bg-danger{% else %}bg-warning{% endif %}">
@@ -102,8 +113,8 @@
                                     </td>
                                 </tr>
                                 <tr class="audit-detail-row" id="audit-detail-{{ req.request_uuid }}" style="display: none;">
-                                    <td colspan="9">
-                                        <div class="p-3 bg-body-secondary rounded" id="audit-content-{{ req.request_uuid }}">
+                                    <td colspan="9" style="overflow: hidden;">
+                                        <div class="p-3 bg-body-secondary rounded" id="audit-content-{{ req.request_uuid }}" style="max-width: 100%; overflow-x: auto;">
                                             <div class="text-muted">Loading...</div>
                                         </div>
                                     </td>
@@ -169,10 +180,10 @@
                             // Prompt/Messages
                             if (data.messages) {
                                 html += '<div class="mb-3"><strong>Messages:</strong>';
-                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(JSON.stringify(data.messages, null, 2)) + '</pre></div>';
+                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">' + escapeHtml(JSON.stringify(data.messages, null, 2)) + '</pre></div>';
                             } else if (data.prompt) {
                                 html += '<div class="mb-3"><strong>Prompt:</strong>';
-                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(data.prompt) + '</pre></div>';
+                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">' + escapeHtml(data.prompt) + '</pre></div>';
                             }
 
                             // Response
@@ -181,19 +192,19 @@
                                 if (data.finish_reason) {
                                     html += ' <span class="badge bg-info">' + escapeHtml(data.finish_reason) + '</span>';
                                 }
-                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(data.response_content) + '</pre></div>';
+                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">' + escapeHtml(data.response_content) + '</pre></div>';
                             }
 
                             // Error
                             if (data.error_message) {
                                 html += '<div class="mb-3"><strong class="text-danger">Error:</strong>';
-                                html += '<pre class="mt-1 p-2 bg-body-tertiary border border-danger rounded" style="font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(data.error_message) + '</pre></div>';
+                                html += '<pre class="mt-1 p-2 bg-body-tertiary border border-danger rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">' + escapeHtml(data.error_message) + '</pre></div>';
                             }
 
                             // Parameters
                             if (data.parameters) {
                                 html += '<div><strong>Parameters:</strong>';
-                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word;">' + escapeHtml(JSON.stringify(data.parameters, null, 2)) + '</pre></div>';
+                                html += '<pre class="mt-1 p-2 bg-body-tertiary border rounded" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;">' + escapeHtml(JSON.stringify(data.parameters, null, 2)) + '</pre></div>';
                             }
 
                             content.innerHTML = html || '<div class="text-muted">No detail available</div>';
