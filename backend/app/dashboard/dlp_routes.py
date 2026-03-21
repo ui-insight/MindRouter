@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
 from backend.app.db.session import get_async_db
-from backend.app.dashboard.routes import get_session_user_id, _admin_masquerade_context, templates
+from backend.app.dashboard.routes import get_client_ip, get_session_user_id, _admin_masquerade_context, templates
 
 dlp_router = APIRouter(tags=["dlp"])
 
@@ -189,7 +189,7 @@ async def save_dlp_config(
         await crud.log_admin_action(
             db, user.id, "update", "dlp_config",
             detail="DLP configuration updated",
-            ip_address=request.client.host if request.client else None,
+            ip_address=get_client_ip(request),
         )
         await db.commit()
 
@@ -217,7 +217,7 @@ async def acknowledge_alert(
     await crud.log_admin_action(
         db, user.id, "acknowledge", "dlp_alert",
         entity_id=str(alert_id),
-        ip_address=request.client.host if request.client else None,
+        ip_address=get_client_ip(request),
     )
     await db.commit()
 

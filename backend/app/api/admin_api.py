@@ -41,6 +41,18 @@ from backend.app.settings import get_settings
 logger = get_logger(__name__)
 router = APIRouter()
 
+
+def _get_client_ip(request: Request) -> Optional[str]:
+    """Extract the real client IP from proxy headers."""
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else None
+
+
 # In-memory pull job tracking (replaces sidecar-based tracking)
 _pull_jobs: Dict[str, dict] = {}
 
@@ -345,7 +357,7 @@ async def register_backend(
             entity_type="backend",
             entity_id=str(backend.id),
             after_value={"name": backend.name, "url": backend.url, "engine": backend.engine.value, "max_concurrent": backend.max_concurrent, "node_id": backend.node_id},
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -398,7 +410,7 @@ async def disable_backend(
             action="backend.disable",
             entity_type="backend",
             entity_id=str(backend_id),
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -436,7 +448,7 @@ async def enable_backend(
             action="backend.enable",
             entity_type="backend",
             entity_id=str(backend_id),
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -469,7 +481,7 @@ async def refresh_backend(
                 action="backend.refresh",
                 entity_type="backend",
                 entity_id=str(backend_id),
-                ip_address=http_request.client.host if http_request.client else None,
+                ip_address=_get_client_ip(http_request),
             )
             await audit_db.commit()
         return {"status": "refreshed", "backend_id": backend_id}
@@ -538,7 +550,7 @@ async def ollama_pull(
             entity_type="backend",
             entity_id=str(backend_id),
             after_value={"model": request.model, "job_id": job_id},
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -613,7 +625,7 @@ async def ollama_delete(
             entity_type="backend",
             entity_id=str(backend_id),
             before_value={"model": request.model},
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -709,7 +721,7 @@ async def update_backend(
             entity_type="backend",
             entity_id=str(backend_id),
             after_value=raw,
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -789,7 +801,7 @@ async def update_node(
             entity_type="node",
             entity_id=str(node_id),
             after_value=raw,
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -846,7 +858,7 @@ async def register_node(
             entity_type="node",
             entity_id=str(node.id),
             after_value={"name": node.name, "hostname": node.hostname, "sidecar_url": node.sidecar_url},
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -919,7 +931,7 @@ async def delete_node(
             entity_type="node",
             entity_id=str(node_id),
             before_value={"name": node.name, "hostname": node.hostname},
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -951,7 +963,7 @@ async def refresh_node(
                 action="node.refresh",
                 entity_type="node",
                 entity_id=str(node_id),
-                ip_address=http_request.client.host if http_request.client else None,
+                ip_address=_get_client_ip(http_request),
             )
             await audit_db.commit()
         return {"status": "refreshed", "node_id": node_id}
@@ -1211,7 +1223,7 @@ async def review_quota_request(
             entity_type="quota_request",
             entity_id=str(request_id),
             after_value={"approved": review.approved, "notes": review.notes, "granted_tokens": review.granted_tokens},
-            ip_address=http_request.client.host if http_request.client else None,
+            ip_address=_get_client_ip(http_request),
         )
         await audit_db.commit()
 
@@ -1321,7 +1333,7 @@ async def create_user(
         entity_type="user",
         entity_id=str(user.id),
         after_value={"username": user.username, "email": user.email, "role": user.role.value, "group_id": group.id},
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
@@ -1384,7 +1396,7 @@ async def create_user_api_key(
         entity_type="api_key",
         entity_id=str(api_key.id),
         after_value={"key_prefix": key_prefix, "name": request.name, "target_user_id": user_id},
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
@@ -1442,7 +1454,7 @@ async def delete_user(
         entity_type="user",
         entity_id=str(user_id),
         before_value={"username": user.username, "email": user.email},
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
@@ -1580,7 +1592,7 @@ async def update_user(
         entity_type="user",
         entity_id=str(user_id),
         after_value=updates,
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
@@ -1676,7 +1688,7 @@ async def create_group(
         entity_type="group",
         entity_id=str(group.id),
         after_value={"name": group.name, "display_name": group.display_name, "token_budget": request.token_budget, "is_auditor": group.is_auditor},
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
@@ -1720,7 +1732,7 @@ async def update_group(
         entity_type="group",
         entity_id=str(group_id),
         after_value=updates,
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
@@ -1751,7 +1763,7 @@ async def delete_group(
         action="group.delete",
         entity_type="group",
         entity_id=str(group_id),
-        ip_address=http_request.client.host if http_request.client else None,
+        ip_address=_get_client_ip(http_request),
     )
 
     await db.commit()
