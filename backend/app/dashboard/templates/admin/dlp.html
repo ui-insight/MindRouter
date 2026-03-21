@@ -2,6 +2,15 @@
 
 {% block title %}DLP - Admin - MindRouter{% endblock %}
 
+{% block extra_css %}
+<style>
+    .dlp-cat-input {
+        background-color: var(--bs-tertiary-bg) !important;
+        color: var(--bs-body-color) !important;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container-fluid py-4">
     <div class="row">
@@ -257,7 +266,7 @@
                                 <div id="severityRulesContainer">
                                     {% for cat, sev in config.severity_rules.items() %}
                                     <div class="severity-rule-row d-flex align-items-center gap-2 mb-2">
-                                        <input type="text" class="form-control form-control-sm sev-category" value="{{ cat }}" readonly style="background:#f8f9fa;">
+                                        <input type="text" class="form-control form-control-sm sev-category" value="{{ cat }}" readonly class="dlp-cat-input">
                                         <select class="form-select form-select-sm sev-level" style="width: 140px;">
                                             <option value="minor" {% if sev == 'minor' %}selected{% endif %}>
                                                 Minor
@@ -672,7 +681,7 @@ function addSeverityRule() {
     const div = document.createElement('div');
     div.className = 'severity-rule-row d-flex align-items-center gap-2 mb-2';
     div.innerHTML = `
-        <input type="text" class="form-control form-control-sm sev-category" value="${cat}" readonly style="background:#f8f9fa;">
+        <input type="text" class="form-control form-control-sm sev-category" value="${cat}" readonly class="dlp-cat-input">
         <select class="form-select form-select-sm sev-level" style="width: 140px;">
             <option value="minor" ${levSelect.value === 'minor' ? 'selected' : ''}>Minor</option>
             <option value="moderate" ${levSelect.value === 'moderate' ? 'selected' : ''}>Moderate</option>
