@@ -2313,63 +2313,124 @@ WHERE ENCRYPTION_SCHEME = 1;</code></pre>
                 <h2>Data Loss Prevention (DLP)</h2>
                 <p>MindRouter includes a built-in DLP system that scans prompts and responses for sensitive data
                    including PII, HIPAA/PHI, FERPA, PCI, and CUI. Scanning happens <strong>asynchronously after
-                   the response is delivered</strong>, so there is zero impact on inference latency.</p>
+                   the response is delivered</strong>, so there is zero impact on inference latency. DLP is a
+                   passive, bump-on-the-wire system &mdash; it never blocks, delays, or modifies requests or responses.</p>
+
+                <h3>Architecture</h3>
+                <p>After a request completes and the response is sent to the client, the request ID is enqueued
+                   (non-blocking) to a bounded in-memory queue. A background worker drains the queue and runs
+                   the configured scanners against the stored request/response text. If sensitive data is found,
+                   an alert is written to the <code>dlp_alerts</code> table and email notifications are sent if configured.</p>
+<pre><code>Request completes &rarr; enqueue request_id (non-blocking, ~100ns)
+                         |
+                    DLP Background Worker (separate task)
+                         |
+              +----------+----------+
+              |          |          |
+         Regex/KW    GLiNER      LLM Scanner
+         (~0.1ms)    (~10ms)    (~500ms, self-routed)
+              |          |          |
+              +----------+----------+
+                         |
+                  Merge findings &rarr; Classify severity &rarr; Write alert &rarr; Email</code></pre>
 
                 <h3>Scanning Tiers</h3>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
-                        <tr><th>Tier</th><th>Engine</th><th>Latency</th><th>Detects</th></tr>
+                        <tr><th>Tier</th><th>Engine</th><th>Latency</th><th>Detects</th><th>Best for</th></tr>
                     </thead>
                     <tbody>
                         <tr>
                             <td><strong>Regex &amp; Keywords</strong></td>
-                            <td>Built-in regex patterns + custom keywords</td>
+                            <td>Built-in regex patterns + custom patterns + keyword list</td>
                             <td>~0.1ms</td>
                             <td>SSNs, credit cards, emails, phone numbers, custom patterns</td>
+                            <td>Known formats with fixed structure. High precision, no false positives.</td>
                         </tr>
                         <tr>
                             <td><strong>GLiNER NER</strong></td>
-                            <td>Neural entity recognition (CPU)</td>
+                            <td>Neural entity recognition (<code>urchade/gliner_multi_pii-v1</code>, CPU)</td>
                             <td>~10ms</td>
                             <td>Names, dates of birth, passport/license numbers, medical records, student IDs</td>
+                            <td>Entities in natural language that don't match fixed patterns. Zero-shot &mdash; can detect custom entity types by name.</td>
                         </tr>
                         <tr>
                             <td><strong>LLM Contextual</strong></td>
-                            <td>Dedicated LLM (self-routed via MindRouter)</td>
+                            <td>Dedicated LLM, self-routed via <code>/v1/chat/completions</code></td>
                             <td>~500ms</td>
                             <td>FERPA violations, HIPAA/PHI context, CUI, semantic sensitive data</td>
+                            <td>Contextual understanding &mdash; e.g. detecting that "John got a B+ in CS101" is a FERPA violation even though no single word is PII.</td>
                         </tr>
                     </tbody>
                 </table>
 
                 <h3>Severity Levels</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light"><tr><th>Level</th><th>Meaning</th><th>Default categories</th><th>Action</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="badge bg-danger">Major</span></td>
+                            <td>High-risk data exposure</td>
+                            <td>SSN, credit card, bank account, passport, medical record</td>
+                            <td>Immediate attention. Email sent to major recipients.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge bg-warning text-dark">Moderate</span></td>
+                            <td>Potential compliance issue</td>
+                            <td>Driver license, date of birth, student ID</td>
+                            <td>Review recommended. Email sent to moderate recipients.</td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge bg-info">Minor</span></td>
+                            <td>Low-risk, informational</td>
+                            <td>Person name, email address, phone number</td>
+                            <td>Logged for audit. Email sent to minor recipients (if configured).</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p>The highest severity among all findings in a single scan determines the alert level. Categories not mapped in severity rules default to <strong>Moderate</strong>.</p>
+
+                <h3>Admin Configuration</h3>
+                <p>Configure DLP in the admin dashboard at <strong>Admin &rarr; DLP</strong>. Each section has a
+                   <i class="bi bi-question-circle"></i> help button with detailed instructions and examples.</p>
                 <ul>
-                    <li><strong>Major</strong> &mdash; SSNs, credit card numbers, bank accounts, passport numbers, medical records. Immediate attention required.</li>
-                    <li><strong>Moderate</strong> &mdash; Driver license numbers, dates of birth, student IDs. Review recommended.</li>
-                    <li><strong>Minor</strong> &mdash; Names, email addresses, phone numbers. Informational.</li>
+                    <li><strong>Master toggle</strong> &mdash; Enable or disable all DLP scanning. When disabled, the background worker skips all processing (zero overhead).</li>
+                    <li><strong>Regex &amp; Keyword Scanner</strong> &mdash; Toggle the fast pattern matcher. Add custom regex patterns with a visual builder (name, regex, category, severity). Add keywords one per line.</li>
+                    <li><strong>GLiNER NER Scanner</strong> &mdash; Toggle neural entity recognition. Adjust the confidence threshold (0.1&ndash;0.95). Check/uncheck built-in entity categories. Add custom entity categories for domain-specific detection (e.g. "vandal id", "grant number").</li>
+                    <li><strong>LLM Contextual Scanner</strong> &mdash; Toggle LLM-based semantic analysis. Choose the model (e.g. <code>qwen/qwen3.5-4b</code>). Customize the system prompt for your compliance regime (FERPA, HIPAA, CUI).</li>
+                    <li><strong>Severity Rules</strong> &mdash; Visual mapping of entity categories to severity levels. Add new mappings with the inline form. Remove mappings you don't need.</li>
+                    <li><strong>Email Notifications</strong> &mdash; Set email recipients per severity level (comma-separated). Requires SMTP to be configured in Settings.</li>
                 </ul>
 
-                <h3>Configuration</h3>
-                <p>Configure DLP in the admin dashboard at <strong>Admin &rarr; DLP</strong>. Settings include:</p>
+                <h3>Custom Entity Categories</h3>
+                <p>You can extend DLP detection beyond the built-in categories:</p>
                 <ul>
-                    <li>Master enable/disable toggle</li>
-                    <li>Per-scanner enable/disable and configuration</li>
-                    <li>GLiNER confidence threshold and entity categories</li>
-                    <li>LLM model selection and system prompt customization</li>
-                    <li>Custom regex patterns and keyword lists</li>
-                    <li>Severity rules mapping categories to severity levels</li>
-                    <li>Email notification recipients per severity level</li>
+                    <li><strong>Regex patterns</strong> &mdash; Click "Add Pattern" in the Regex scanner section. Provide a name, Python regex, category name, and default severity. Example: Name="Vandal ID", Regex=<code>\bV\d{8}\b</code>, Category="vandal id".</li>
+                    <li><strong>GLiNER categories</strong> &mdash; Type a descriptive category name in the "Add custom category" field and click Add. GLiNER is zero-shot and can detect entity types by description alone.</li>
+                    <li><strong>Severity rules</strong> &mdash; After adding a custom category, add a corresponding severity rule so the system knows how to classify findings in that category.</li>
                 </ul>
 
                 <h3>Self-Routing Loop Prevention</h3>
-                <p>The LLM scanner uses a dedicated internal API key to route requests through MindRouter.
-                   Requests from this key are automatically excluded from DLP scanning to prevent infinite loops.</p>
+                <p>When the LLM scanner is enabled, MindRouter automatically creates a dedicated internal API key.
+                   The LLM scanner uses this key to call <code>/v1/chat/completions</code> on itself. The DLP worker
+                   checks the API key on each incoming request &mdash; if it matches the internal key, the scan is skipped.
+                   This prevents an infinite scanning loop where the DLP scan triggers another DLP scan.</p>
 
-                <h3>Performance</h3>
-                <p>DLP scanning is completely asynchronous &mdash; it enqueues the request ID to a bounded queue
-                   (10,000 items) after the response is delivered. If the queue is full, scanning is silently
-                   skipped (best-effort). The GLiNER model loads lazily on first scan (~2-3s) and subsequent
-                   scans take ~10ms on CPU.</p>
+                <h3>Alerts &amp; Acknowledgment</h3>
+                <p>All DLP findings are stored in the <code>dlp_alerts</code> table and displayed on the Admin &rarr; DLP page.
+                   Alerts can be filtered by severity, scanner type, and free-text search. Admins can acknowledge alerts to
+                   mark them as reviewed. Stats cards show 24-hour alert counts, severity breakdown, average scan latency,
+                   and unacknowledged count. Auditors have read-only access to the alerts table.</p>
+
+                <h3>Performance &amp; Reliability</h3>
+                <ul>
+                    <li><strong>Zero latency impact</strong> &mdash; The only code in the request path is <code>queue.put_nowait(request_id)</code> (~100ns) wrapped in try/except. It cannot slow down or break inference.</li>
+                    <li><strong>Bounded queue</strong> &mdash; The queue holds up to 10,000 items. If full (e.g. during a traffic spike), new items are silently dropped with a log warning. Best-effort scanning.</li>
+                    <li><strong>Crash isolation</strong> &mdash; The DLP worker runs as an independent asyncio task with its own DB session. Any crash is caught, logged, and the worker continues processing the next item.</li>
+                    <li><strong>GLiNER lazy loading</strong> &mdash; The ~200MB model loads on first scan (~2-3s), then stays in memory. Subsequent scans take ~10ms on CPU.</li>
+                    <li><strong>Text truncation</strong> &mdash; The LLM scanner truncates input to 8,000 characters to limit token usage and cost.</li>
+                    <li><strong>Image content skipped</strong> &mdash; Multimodal image inputs are automatically excluded from scanning. Only text content (messages, prompts, responses) is scanned.</li>
+                </ul>
             </section>
 
             <hr>

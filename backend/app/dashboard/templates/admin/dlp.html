@@ -79,7 +79,11 @@
 
             {% if not is_read_only %}
             <!-- Configuration -->
-            <form method="post" action="/admin/dlp/config">
+            <form method="post" action="/admin/dlp/config" id="dlpForm">
+                <!-- Hidden fields for JSON data built by JavaScript -->
+                <input type="hidden" name="severity_rules" id="severity_rules_json">
+                <input type="hidden" name="regex_patterns" id="regex_patterns_json">
+
                 <!-- Master Toggle -->
                 <div class="card mb-4">
                     <div class="card-header d-flex justify-content-between align-items-center">
@@ -100,23 +104,56 @@
 
                 <div class="row">
                     <div class="col-lg-6">
-                        <!-- Regex Scanner -->
+                        <!-- ==================== Regex Scanner ==================== -->
                         <div class="card mb-4">
-                            <div class="card-header">
-                                <div class="form-check form-switch">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <div class="form-check form-switch mb-0">
                                     <input class="form-check-input" type="checkbox" id="regex_enabled" name="regex_enabled"
                                            {% if config.regex_enabled %}checked{% endif %}>
                                     <label class="form-check-label fw-bold" for="regex_enabled">Regex &amp; Keyword Scanner</label>
                                 </div>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpRegex" title="Help">
+                                    <i class="bi bi-question-circle"></i>
+                                </button>
                             </div>
                             <div class="card-body">
-                                <p class="text-muted small">Built-in patterns detect SSNs, credit cards, emails, phone numbers. Add custom patterns below.</p>
-                                <div class="mb-3">
-                                    <label class="form-label fw-bold" for="regex_patterns">Custom Patterns <small class="text-muted">(JSON array)</small></label>
-                                    <textarea class="form-control font-monospace" id="regex_patterns" name="regex_patterns" rows="4"
-                                              placeholder='[{"name": "Custom ID", "pattern": "\\bCUST-\\d+\\b", "category": "custom_id", "severity": "moderate"}]'>{{ config.regex_patterns | tojson }}</textarea>
+                                <p class="text-muted small">Built-in patterns detect SSNs, credit cards, emails, phone numbers. Add custom patterns and keywords below.</p>
+
+                                <!-- Custom Patterns Builder -->
+                                <label class="form-label fw-bold">Custom Patterns</label>
+                                <div id="patternsContainer">
+                                    {% for pat in config.regex_patterns %}
+                                    <div class="pattern-row border rounded p-2 mb-2 bg-light">
+                                        <div class="row g-2 align-items-center">
+                                            <div class="col-md-3">
+                                                <input type="text" class="form-control form-control-sm pat-name" placeholder="Name" value="{{ pat.name }}">
+                                            </div>
+                                            <div class="col-md-4">
+                                                <input type="text" class="form-control form-control-sm font-monospace pat-pattern" placeholder="Regex pattern" value="{{ pat.pattern }}">
+                                            </div>
+                                            <div class="col-md-2">
+                                                <input type="text" class="form-control form-control-sm pat-category" placeholder="Category" value="{{ pat.category }}">
+                                            </div>
+                                            <div class="col-md-2">
+                                                <select class="form-select form-select-sm pat-severity">
+                                                    <option value="minor" {% if pat.severity == 'minor' %}selected{% endif %}>Minor</option>
+                                                    <option value="moderate" {% if pat.severity == 'moderate' %}selected{% endif %}>Moderate</option>
+                                                    <option value="major" {% if pat.severity == 'major' %}selected{% endif %}>Major</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-1">
+                                                <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('.pattern-row').remove()" title="Remove"><i class="bi bi-x-lg"></i></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
                                 </div>
-                                <div class="mb-3">
+                                <button type="button" class="btn btn-sm btn-outline-primary mb-3" onclick="addPatternRow()">
+                                    <i class="bi bi-plus-lg"></i> Add Pattern
+                                </button>
+
+                                <!-- Keywords -->
+                                <div class="mb-0">
                                     <label class="form-label fw-bold" for="regex_keywords">Keywords <small class="text-muted">(one per line)</small></label>
                                     <textarea class="form-control" id="regex_keywords" name="regex_keywords" rows="3"
                                               placeholder="confidential&#10;classified&#10;top secret">{% for kw in config.regex_keywords %}{{ kw }}{% if not loop.last %}&#10;{% endif %}{% endfor %}</textarea>
@@ -124,17 +161,20 @@
                             </div>
                         </div>
 
-                        <!-- GLiNER NER Scanner -->
+                        <!-- ==================== GLiNER NER Scanner ==================== -->
                         <div class="card mb-4">
-                            <div class="card-header">
-                                <div class="form-check form-switch">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <div class="form-check form-switch mb-0">
                                     <input class="form-check-input" type="checkbox" id="gliner_enabled" name="gliner_enabled"
                                            {% if config.gliner_enabled %}checked{% endif %}>
                                     <label class="form-check-label fw-bold" for="gliner_enabled">GLiNER NER Scanner</label>
                                 </div>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpGliner" title="Help">
+                                    <i class="bi bi-question-circle"></i>
+                                </button>
                             </div>
                             <div class="card-body">
-                                <p class="text-muted small">Neural entity recognition using GLiNER. Runs on CPU (~10ms/scan). Requires <code>pip install gliner</code>.</p>
+                                <p class="text-muted small">Neural entity recognition using GLiNER. Runs on CPU (~10ms/scan). First scan takes ~2-3s to load the model.</p>
                                 <div class="mb-3">
                                     <label class="form-label fw-bold" for="gliner_threshold">Confidence Threshold</label>
                                     <input type="range" class="form-range" id="gliner_threshold" name="gliner_threshold"
@@ -143,56 +183,113 @@
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label fw-bold">Entity Categories</label>
+                                    <p class="text-muted small mb-2">Select which categories GLiNER should detect. Add custom categories below.</p>
                                     {% set all_categories = ["person", "phone number", "email", "credit card number", "social security number", "date of birth", "driver license number", "passport number", "bank account number", "medical record number", "student id"] %}
-                                    {% for cat in all_categories %}
-                                    <div class="form-check">
-                                        <input class="form-check-input" type="checkbox" name="gliner_categories" value="{{ cat }}" id="cat_{{ loop.index }}"
-                                               {% if cat in config.gliner_categories %}checked{% endif %}>
-                                        <label class="form-check-label" for="cat_{{ loop.index }}">{{ cat | title }}</label>
+                                    <div class="row">
+                                        {% for cat in all_categories %}
+                                        <div class="col-md-6">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" name="gliner_categories" value="{{ cat }}" id="cat_{{ loop.index }}"
+                                                       {% if cat in config.gliner_categories %}checked{% endif %}>
+                                                <label class="form-check-label" for="cat_{{ loop.index }}">{{ cat | title }}</label>
+                                            </div>
+                                        </div>
+                                        {% endfor %}
+                                        {% for cat in config.gliner_categories if cat not in all_categories %}
+                                        <div class="col-md-6 custom-cat-row">
+                                            <div class="form-check d-flex align-items-center">
+                                                <input class="form-check-input" type="checkbox" name="gliner_categories" value="{{ cat }}" id="custom_cat_{{ loop.index }}" checked>
+                                                <label class="form-check-label ms-1" for="custom_cat_{{ loop.index }}">{{ cat | title }} <small class="text-muted">(custom)</small></label>
+                                                <button type="button" class="btn btn-sm btn-link text-danger p-0 ms-2" onclick="this.closest('.custom-cat-row').remove()" title="Remove"><i class="bi bi-x"></i></button>
+                                            </div>
+                                        </div>
+                                        {% endfor %}
                                     </div>
-                                    {% endfor %}
+                                </div>
+                                <!-- Add custom category -->
+                                <div class="input-group input-group-sm mb-0">
+                                    <input type="text" class="form-control" id="newCategoryInput" placeholder="Add custom category (e.g. 'vandal id', 'grant number')">
+                                    <button type="button" class="btn btn-outline-primary" onclick="addCustomCategory()"><i class="bi bi-plus-lg"></i> Add</button>
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     <div class="col-lg-6">
-                        <!-- LLM Scanner -->
+                        <!-- ==================== LLM Scanner ==================== -->
                         <div class="card mb-4">
-                            <div class="card-header">
-                                <div class="form-check form-switch">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <div class="form-check form-switch mb-0">
                                     <input class="form-check-input" type="checkbox" id="llm_enabled" name="llm_enabled"
                                            {% if config.llm_enabled %}checked{% endif %}>
                                     <label class="form-check-label fw-bold" for="llm_enabled">LLM Contextual Scanner</label>
                                 </div>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpLlm" title="Help">
+                                    <i class="bi bi-question-circle"></i>
+                                </button>
                             </div>
                             <div class="card-body">
                                 <p class="text-muted small">Uses an LLM for semantic analysis. Self-routes through MindRouter (~500ms). Ideal for FERPA/HIPAA contextual detection.</p>
                                 <div class="mb-3">
                                     <label class="form-label fw-bold" for="llm_model">Model</label>
                                     <input type="text" class="form-control" id="llm_model" name="llm_model"
-                                           value="{{ config.llm_model }}" placeholder="openai/Qwen3.5-4B">
+                                           value="{{ config.llm_model }}" placeholder="qwen/qwen3.5-4b">
+                                    <div class="form-text">Enter a model name available in MindRouter (e.g. <code>qwen/qwen3.5-4b</code>). The DLP scanner will self-route requests through the <code>/v1/chat/completions</code> API using a dedicated internal API key.</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label fw-bold" for="llm_system_prompt">System Prompt</label>
                                     <textarea class="form-control" id="llm_system_prompt" name="llm_system_prompt" rows="5">{{ config.llm_system_prompt }}</textarea>
+                                    <div class="form-text">The system prompt instructs the LLM what to look for. It should ask the model to return a JSON array of findings with <code>category</code>, <code>text</code>, and <code>confidence</code> fields.</div>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Severity Rules -->
+                        <!-- ==================== Severity Rules ==================== -->
                         <div class="card mb-4">
-                            <div class="card-header"><h5 class="mb-0">Severity Rules</h5></div>
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">Severity Rules</h5>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#helpSeverity" title="Help">
+                                    <i class="bi bi-question-circle"></i>
+                                </button>
+                            </div>
                             <div class="card-body">
-                                <p class="text-muted small">Map entity categories to severity levels. JSON object: <code>{"category": "minor|moderate|major"}</code></p>
-                                <textarea class="form-control font-monospace" name="severity_rules" rows="6">{{ config.severity_rules | tojson(indent=2) }}</textarea>
+                                <p class="text-muted small">Map each entity category to a severity level. When a finding matches a category, the mapped severity is used. The highest severity among all findings determines the alert level.</p>
+                                <div id="severityRulesContainer">
+                                    {% for cat, sev in config.severity_rules.items() %}
+                                    <div class="severity-rule-row d-flex align-items-center gap-2 mb-2">
+                                        <input type="text" class="form-control form-control-sm sev-category" value="{{ cat }}" readonly style="background:#f8f9fa;">
+                                        <select class="form-select form-select-sm sev-level" style="width: 140px;">
+                                            <option value="minor" {% if sev == 'minor' %}selected{% endif %}>
+                                                Minor
+                                            </option>
+                                            <option value="moderate" {% if sev == 'moderate' %}selected{% endif %}>
+                                                Moderate
+                                            </option>
+                                            <option value="major" {% if sev == 'major' %}selected{% endif %}>
+                                                Major
+                                            </option>
+                                        </select>
+                                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('.severity-rule-row').remove()" title="Remove"><i class="bi bi-x-lg"></i></button>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                <div class="input-group input-group-sm mt-2">
+                                    <input type="text" class="form-control" id="newSevCategory" placeholder="New category name">
+                                    <select class="form-select" id="newSevLevel" style="width: 140px;">
+                                        <option value="minor">Minor</option>
+                                        <option value="moderate" selected>Moderate</option>
+                                        <option value="major">Major</option>
+                                    </select>
+                                    <button type="button" class="btn btn-outline-primary" onclick="addSeverityRule()"><i class="bi bi-plus-lg"></i> Add</button>
+                                </div>
                             </div>
                         </div>
 
-                        <!-- Email Notifications -->
+                        <!-- ==================== Email Notifications ==================== -->
                         <div class="card mb-4">
                             <div class="card-header"><h5 class="mb-0">Email Notifications</h5></div>
                             <div class="card-body">
+                                <p class="text-muted small">Configure email recipients for each severity level. Separate multiple addresses with commas. Requires SMTP to be configured in Settings.</p>
                                 <div class="mb-2">
                                     <label class="form-label" for="email_minor"><span class="badge bg-info">Minor</span> Recipients</label>
                                     <input type="text" class="form-control form-control-sm" id="email_minor" name="email_minor"
@@ -350,6 +447,155 @@
         </div>
     </div>
 </div>
+
+<!-- ==================== Help Modals ==================== -->
+
+<!-- Regex Scanner Help -->
+<div class="modal fade" id="helpRegex" tabindex="-1" aria-labelledby="helpRegexLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="helpRegexLabel"><i class="bi bi-question-circle"></i> Regex &amp; Keyword Scanner Help</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h6>How it works</h6>
+                <p>The regex scanner is the fastest tier (~0.1ms). It runs a set of <strong>built-in patterns</strong> plus any custom patterns you define against the full text of every request and response.</p>
+
+                <h6>Built-in patterns (always active)</h6>
+                <table class="table table-sm table-bordered">
+                    <thead class="table-light"><tr><th>Name</th><th>Detects</th><th>Example Match</th></tr></thead>
+                    <tbody>
+                        <tr><td>SSN</td><td>Social Security Numbers</td><td><code>123-45-6789</code></td></tr>
+                        <tr><td>Credit Card</td><td>13-19 digit card numbers</td><td><code>4111 1111 1111 1111</code></td></tr>
+                        <tr><td>Email</td><td>Email addresses</td><td><code>user@example.com</code></td></tr>
+                        <tr><td>Phone (US)</td><td>US phone numbers</td><td><code>(208) 885-6111</code></td></tr>
+                        <tr><td>Date of Birth</td><td>DOB mentions with dates</td><td><code>DOB: 01/15/1990</code></td></tr>
+                    </tbody>
+                </table>
+
+                <h6>Adding custom patterns</h6>
+                <p>Click <strong>Add Pattern</strong> and fill in:</p>
+                <ul>
+                    <li><strong>Name</strong> &mdash; A human-readable label (e.g. "Vandal ID")</li>
+                    <li><strong>Regex</strong> &mdash; A Python-compatible regular expression. Use <code>\b</code> for word boundaries. The match is case-insensitive.</li>
+                    <li><strong>Category</strong> &mdash; The entity category name (used in severity rules). Use lowercase with spaces (e.g. "vandal id").</li>
+                    <li><strong>Severity</strong> &mdash; Default severity if no severity rule is defined for this category.</li>
+                </ul>
+
+                <h6>Examples of custom patterns</h6>
+                <table class="table table-sm table-bordered">
+                    <thead class="table-light"><tr><th>Name</th><th>Regex</th><th>Category</th><th>What it catches</th></tr></thead>
+                    <tbody>
+                        <tr><td>Vandal ID</td><td><code>\bV\d{8}\b</code></td><td>vandal id</td><td>V00123456</td></tr>
+                        <tr><td>AWS Key</td><td><code>\bAKIA[0-9A-Z]{16}\b</code></td><td>aws access key</td><td>AKIAIOSFODNN7EXAMPLE</td></tr>
+                        <tr><td>IP Address</td><td><code>\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b</code></td><td>ip address</td><td>192.168.1.1</td></tr>
+                        <tr><td>IBAN</td><td><code>\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b</code></td><td>iban</td><td>DE89370400440532013000</td></tr>
+                    </tbody>
+                </table>
+
+                <h6>Keywords</h6>
+                <p>Keywords are simple case-insensitive text matches. Enter one keyword per line. Good for catching phrases like "confidential", "classified", "FERPA", "HIPAA", or project-specific terms.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- GLiNER Scanner Help -->
+<div class="modal fade" id="helpGliner" tabindex="-1" aria-labelledby="helpGlinerLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="helpGlinerLabel"><i class="bi bi-question-circle"></i> GLiNER NER Scanner Help</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h6>How it works</h6>
+                <p>GLiNER is a <strong>neural named entity recognition (NER) model</strong> that detects sensitive entities in natural language text. Unlike regex, it understands context &mdash; it can detect names, phone numbers, and IDs even when they don't match a fixed pattern.</p>
+                <p>The model (<code>urchade/gliner_multi_pii-v1</code>, ~200MB) loads lazily on the first scan (~2-3 seconds). Subsequent scans take approximately <strong>10ms on CPU</strong>.</p>
+
+                <h6>Confidence threshold</h6>
+                <p>The slider controls the minimum confidence score (0.0&ndash;1.0) for a detection to be reported. Lower values catch more entities but may produce false positives. Recommended: <strong>0.5</strong> for balanced detection, <strong>0.7</strong> for high precision.</p>
+
+                <h6>Entity categories</h6>
+                <p>Check the categories you want GLiNER to scan for. The built-in categories cover common PII types. You can also add <strong>custom categories</strong> by typing a name in the text field and clicking Add.</p>
+                <p>Custom categories work because GLiNER is a zero-shot model &mdash; it can detect entity types it wasn't explicitly trained on, as long as the category name is descriptive. Good custom categories:</p>
+                <ul>
+                    <li><code>vandal id</code> &mdash; University of Idaho student IDs</li>
+                    <li><code>grant number</code> &mdash; Federal grant identifiers</li>
+                    <li><code>diagnosis</code> &mdash; Medical diagnoses (HIPAA)</li>
+                    <li><code>grade</code> &mdash; Student grades (FERPA)</li>
+                    <li><code>medication</code> &mdash; Drug/prescription names (HIPAA)</li>
+                </ul>
+
+                <h6>Dependencies</h6>
+                <p>Requires the <code>gliner</code> Python package. The Docker image installs it automatically from <code>pyproject.toml</code>.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- LLM Scanner Help -->
+<div class="modal fade" id="helpLlm" tabindex="-1" aria-labelledby="helpLlmLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="helpLlmLabel"><i class="bi bi-question-circle"></i> LLM Contextual Scanner Help</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h6>How it works</h6>
+                <p>The LLM scanner sends the text to a dedicated language model for <strong>semantic analysis</strong>. Unlike regex or NER, the LLM understands context &mdash; it can detect that "my student John got a B+ in CS101" is a FERPA violation even though no single word is PII on its own.</p>
+                <p>The scanner <strong>self-routes through MindRouter's own API</strong> using a dedicated internal API key. This means it benefits from MindRouter's load balancing and model routing. The internal key's requests are automatically excluded from DLP scanning to prevent infinite loops.</p>
+
+                <h6>Model selection</h6>
+                <p>Enter any model name available in MindRouter. A small, fast model is ideal since DLP scans run in the background. Recommended: <code>qwen/qwen3.5-4b</code> or similar ~4B parameter model.</p>
+
+                <h6>System prompt</h6>
+                <p>The system prompt instructs the LLM what to look for and how to format its response. The default prompt asks for a JSON array of findings. You can customize it to focus on specific compliance regimes:</p>
+                <ul>
+                    <li><strong>FERPA focus</strong> &mdash; Add: "Pay special attention to student records, grades, enrollment status, financial aid, and disciplinary records."</li>
+                    <li><strong>HIPAA focus</strong> &mdash; Add: "Focus on protected health information including diagnoses, treatments, medications, lab results, and patient identifiers."</li>
+                    <li><strong>CUI focus</strong> &mdash; Add: "Look for controlled unclassified information including export-controlled data, law enforcement sensitive data, and ITAR/EAR restricted content."</li>
+                </ul>
+
+                <h6>Performance</h6>
+                <p>Typical latency is ~500ms depending on the model and text length. Text is truncated to 8,000 characters to limit token usage. The scan runs asynchronously after the response is delivered &mdash; it never delays user requests.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Severity Rules Help -->
+<div class="modal fade" id="helpSeverity" tabindex="-1" aria-labelledby="helpSeverityLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="helpSeverityLabel"><i class="bi bi-question-circle"></i> Severity Rules Help</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <h6>How severity works</h6>
+                <p>When DLP detects sensitive data, each finding has a <strong>category</strong> (e.g. "social security number", "email"). The severity rules map each category to a severity level. The <strong>highest severity</strong> among all findings in a single scan determines the alert level.</p>
+
+                <h6>Severity levels</h6>
+                <table class="table table-sm table-bordered">
+                    <thead class="table-light"><tr><th>Level</th><th>Meaning</th><th>Typical categories</th></tr></thead>
+                    <tbody>
+                        <tr><td><span class="badge bg-danger">Major</span></td><td>Immediate attention required. High-risk data exposure.</td><td>SSN, credit card, bank account, passport, medical record</td></tr>
+                        <tr><td><span class="badge bg-warning text-dark">Moderate</span></td><td>Review recommended. Potential compliance issue.</td><td>Driver license, date of birth, student ID, vandal ID</td></tr>
+                        <tr><td><span class="badge bg-info">Minor</span></td><td>Informational. Low-risk but worth logging.</td><td>Person name, email address, phone number</td></tr>
+                    </tbody>
+                </table>
+
+                <h6>Adding rules</h6>
+                <p>Type the category name (must match exactly what the scanner reports) and select a severity level. Categories from the GLiNER scanner match the checkbox labels in lowercase (e.g. "person", "social security number"). Custom regex pattern categories match the category field you defined.</p>
+                <p>If a detected category has no rule, it defaults to <strong>Moderate</strong>.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -375,5 +621,122 @@ async function ackAlert(alertId) {
         alert('Network error');
     }
 }
+
+// --- Custom Pattern Builder ---
+function addPatternRow(name, pattern, category, severity) {
+    const container = document.getElementById('patternsContainer');
+    const div = document.createElement('div');
+    div.className = 'pattern-row border rounded p-2 mb-2 bg-light';
+    div.innerHTML = `
+        <div class="row g-2 align-items-center">
+            <div class="col-md-3">
+                <input type="text" class="form-control form-control-sm pat-name" placeholder="Name" value="${name || ''}">
+            </div>
+            <div class="col-md-4">
+                <input type="text" class="form-control form-control-sm font-monospace pat-pattern" placeholder="Regex (e.g. \\bV\\d{8}\\b)" value="${pattern || ''}">
+            </div>
+            <div class="col-md-2">
+                <input type="text" class="form-control form-control-sm pat-category" placeholder="Category" value="${category || ''}">
+            </div>
+            <div class="col-md-2">
+                <select class="form-select form-select-sm pat-severity">
+                    <option value="minor" ${severity === 'minor' ? 'selected' : ''}>Minor</option>
+                    <option value="moderate" ${(!severity || severity === 'moderate') ? 'selected' : ''}>Moderate</option>
+                    <option value="major" ${severity === 'major' ? 'selected' : ''}>Major</option>
+                </select>
+            </div>
+            <div class="col-md-1">
+                <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('.pattern-row').remove()" title="Remove"><i class="bi bi-x-lg"></i></button>
+            </div>
+        </div>`;
+    container.appendChild(div);
+}
+
+// --- Severity Rules Builder ---
+function addSeverityRule() {
+    const catInput = document.getElementById('newSevCategory');
+    const levSelect = document.getElementById('newSevLevel');
+    const cat = catInput.value.trim().toLowerCase();
+    if (!cat) return;
+
+    // Check for duplicates
+    const existing = document.querySelectorAll('#severityRulesContainer .sev-category');
+    for (const el of existing) {
+        if (el.value.toLowerCase() === cat) {
+            catInput.value = '';
+            return;
+        }
+    }
+
+    const container = document.getElementById('severityRulesContainer');
+    const div = document.createElement('div');
+    div.className = 'severity-rule-row d-flex align-items-center gap-2 mb-2';
+    div.innerHTML = `
+        <input type="text" class="form-control form-control-sm sev-category" value="${cat}" readonly style="background:#f8f9fa;">
+        <select class="form-select form-select-sm sev-level" style="width: 140px;">
+            <option value="minor" ${levSelect.value === 'minor' ? 'selected' : ''}>Minor</option>
+            <option value="moderate" ${levSelect.value === 'moderate' ? 'selected' : ''}>Moderate</option>
+            <option value="major" ${levSelect.value === 'major' ? 'selected' : ''}>Major</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('.severity-rule-row').remove()" title="Remove"><i class="bi bi-x-lg"></i></button>`;
+    container.appendChild(div);
+    catInput.value = '';
+}
+
+// --- Custom GLiNER Category ---
+function addCustomCategory() {
+    const input = document.getElementById('newCategoryInput');
+    const cat = input.value.trim().toLowerCase();
+    if (!cat) return;
+
+    // Check for duplicates
+    const existing = document.querySelectorAll('input[name="gliner_categories"]');
+    for (const el of existing) {
+        if (el.value.toLowerCase() === cat) {
+            input.value = '';
+            return;
+        }
+    }
+
+    const container = document.querySelector('#dlpForm .row .col-md-6:first-child .row');
+    if (!container) return;
+
+    const div = document.createElement('div');
+    div.className = 'col-md-6 custom-cat-row';
+    const id = 'custom_cat_dyn_' + Date.now();
+    div.innerHTML = `
+        <div class="form-check d-flex align-items-center">
+            <input class="form-check-input" type="checkbox" name="gliner_categories" value="${cat}" id="${id}" checked>
+            <label class="form-check-label ms-1" for="${id}">${cat.replace(/\b\w/g, c => c.toUpperCase())} <small class="text-muted">(custom)</small></label>
+            <button type="button" class="btn btn-sm btn-link text-danger p-0 ms-2" onclick="this.closest('.custom-cat-row').remove()" title="Remove"><i class="bi bi-x"></i></button>
+        </div>`;
+    container.appendChild(div);
+    input.value = '';
+}
+
+// --- Serialize dynamic fields to JSON before submit ---
+document.getElementById('dlpForm')?.addEventListener('submit', function() {
+    // Severity rules
+    const rules = {};
+    document.querySelectorAll('#severityRulesContainer .severity-rule-row').forEach(row => {
+        const cat = row.querySelector('.sev-category')?.value;
+        const lev = row.querySelector('.sev-level')?.value;
+        if (cat) rules[cat] = lev;
+    });
+    document.getElementById('severity_rules_json').value = JSON.stringify(rules);
+
+    // Custom patterns
+    const patterns = [];
+    document.querySelectorAll('#patternsContainer .pattern-row').forEach(row => {
+        const name = row.querySelector('.pat-name')?.value?.trim();
+        const pattern = row.querySelector('.pat-pattern')?.value?.trim();
+        const category = row.querySelector('.pat-category')?.value?.trim();
+        const severity = row.querySelector('.pat-severity')?.value;
+        if (name && pattern) {
+            patterns.push({name, pattern, category: category || name.toLowerCase(), severity: severity || 'moderate'});
+        }
+    });
+    document.getElementById('regex_patterns_json').value = JSON.stringify(patterns);
+});
 </script>
 {% endblock %}
