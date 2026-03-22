@@ -382,12 +382,14 @@ class InferenceService:
             # Send done signal
             yield b"data: [DONE]\n\n"
 
-            # Update records
+            # Update records — shield the entire completion path so that
+            # CancelledError from client disconnect after [DONE] cannot
+            # interrupt unshielded scheduler awaits before the DB write.
             if routed_backend:
-                await self._complete_streaming_request(
+                await asyncio.shield(self._complete_streaming_request(
                     db_request, routed_backend.id, full_content, chunk_count, job,
                     finish_reason=last_finish_reason,
-                )
+                ))
 
             completed = True
         except BaseException as e:
@@ -396,8 +398,10 @@ class InferenceService:
             # of which would otherwise leak the scheduler queue depth counter.
             backend_id = routed_backend.id if routed_backend else None
             try:
-                await self._fail_request(db_request, backend_id, str(e), job)
-            except Exception:
+                await asyncio.shield(
+                    self._fail_request(db_request, backend_id, str(e), job)
+                )
+            except BaseException:
                 pass
             raise
         finally:
@@ -627,17 +631,19 @@ class InferenceService:
                     inflight_total_tokens += estimated
 
             if routed_backend:
-                await self._complete_streaming_request(
+                await asyncio.shield(self._complete_streaming_request(
                     db_request, routed_backend.id, full_content, chunk_count, job,
                     finish_reason=last_finish_reason,
-                )
+                ))
         except BaseException as e:
             # BaseException catches CancelledError and GeneratorExit from
             # client disconnects that would otherwise leak queue depth.
             backend_id = routed_backend.id if routed_backend else None
             try:
-                await self._fail_request(db_request, backend_id, str(e), job)
-            except Exception:
+                await asyncio.shield(
+                    self._fail_request(db_request, backend_id, str(e), job)
+                )
+            except BaseException:
                 pass
             raise
         finally:
