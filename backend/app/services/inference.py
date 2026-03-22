@@ -132,6 +132,47 @@ class InferenceService:
             )
         return self._http_client
 
+    async def _abort_backend_request(
+        self,
+        backend: Backend,
+        request_id: str,
+    ) -> None:
+        """Best-effort abort of an orphaned request on a vLLM backend.
+
+        When MindRouter times out waiting for a response, the backend may
+        still be processing the request.  We attempt to cancel it via the
+        Responses API cancel endpoint, then fall back to logging a warning
+        so operators know orphaned requests may be consuming slots.
+        """
+        if backend.engine != BackendEngine.VLLM:
+            return
+        try:
+            client = await self._get_http_client()
+            resp = await asyncio.wait_for(
+                client.post(
+                    f"{backend.url}/v1/responses/{request_id}/cancel",
+                ),
+                timeout=5.0,
+            )
+            if resp.status_code < 400:
+                logger.info(
+                    "backend_request_aborted",
+                    backend_id=backend.id,
+                    request_id=request_id,
+                )
+                return
+        except Exception:
+            pass
+        # Cancel endpoint unavailable or failed — log for visibility.
+        # The orphaned request will continue consuming a backend slot
+        # until it finishes naturally.
+        logger.warning(
+            "backend_request_orphaned",
+            backend_id=backend.id,
+            request_id=request_id,
+            detail="Timed-out request may still be running on backend",
+        )
+
     async def _count_input_tokens(
         self,
         request: CanonicalChatRequest,
@@ -1007,6 +1048,7 @@ class InferenceService:
                     max_attempts=max_attempts,
                     elapsed_ms=(time.monotonic() - start_time) * 1000,
                 )
+                await self._abort_backend_request(backend, job.request_id)
                 await self._scheduler.on_job_failed(job, backend.id)
                 await self._registry.report_live_failure(backend.id)
                 last_error = e
@@ -1161,6 +1203,8 @@ class InferenceService:
                     attempt=attempt + 1,
                     error=str(e),
                 )
+                if isinstance(e, (asyncio.TimeoutError, httpx.TimeoutException)):
+                    await self._abort_backend_request(backend, job.request_id)
                 await self._scheduler.on_job_failed(job, backend.id)
                 await self._registry.report_live_failure(backend.id)
                 last_error = e
