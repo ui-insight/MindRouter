@@ -12,6 +12,8 @@
     .preview-pane table { width: 100%; margin-bottom: 1rem; }
     .preview-pane table th, .preview-pane table td { padding: 0.5rem; border: 1px solid #dee2e6; }
     .preview-pane table th { background: #f8f9fa; }
+    .preview-pane img { max-width: 100%; height: auto; }
+    .btn-close-sm { font-size: 0.6rem; }
 </style>
 {% endblock %}
 
@@ -65,7 +67,7 @@
                         <div class="d-flex gap-2">
                             <label class="btn btn-sm btn-outline-primary mb-0" id="uploadImageLabel">
                                 <i class="bi bi-image me-1"></i>Upload Image
-                                <input type="file" id="imageUpload" accept="image/*" class="d-none">
+                                <input type="file" id="imageUpload" accept="image/*" class="d-none" multiple>
                             </label>
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="togglePreview">
                                 Show Preview
@@ -73,6 +75,18 @@
                         </div>
                     </div>
                     <div id="uploadStatus" class="small mb-2 d-none"></div>
+
+                    <!-- Image insert panel (shown after upload) -->
+                    <div id="imageInsertPanel" class="card mb-2 d-none">
+                        <div class="card-body py-2 px-3">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <strong class="small">Uploaded Images</strong>
+                                <button type="button" class="btn-close btn-close-sm" id="closeImagePanel" aria-label="Close"></button>
+                            </div>
+                            <div id="imageList"></div>
+                        </div>
+                    </div>
+
                     <div class="row">
                         <div class="col-md-12" id="editorCol">
                             <textarea class="form-control font-monospace" id="content" name="content"
@@ -218,51 +232,148 @@
         previewPane.innerHTML = marked.parse(contentArea.value);
     }
 
-    // Image upload
+    // Image upload with size/placement controls
     var imageUpload = document.getElementById('imageUpload');
     var uploadStatus = document.getElementById('uploadStatus');
+    var imageInsertPanel = document.getElementById('imageInsertPanel');
+    var imageList = document.getElementById('imageList');
+    var closeImagePanel = document.getElementById('closeImagePanel');
+
+    closeImagePanel.addEventListener('click', function() {
+        imageInsertPanel.classList.add('d-none');
+    });
+
+    function createImageRow(url, filename, filesize) {
+        var row = document.createElement('div');
+        row.className = 'border rounded p-2 mb-2 bg-light';
+        row.innerHTML =
+            '<div class="d-flex gap-2 align-items-start">' +
+                '<img src="' + url + '" style="width:60px;height:60px;object-fit:cover;border-radius:4px;" alt="' + filename + '">' +
+                '<div class="flex-grow-1">' +
+                    '<div class="small fw-bold mb-1">' + filename + ' <span class="text-muted fw-normal">(' + (filesize / 1024).toFixed(0) + ' KB)</span></div>' +
+                    '<div class="d-flex gap-2 align-items-center flex-wrap">' +
+                        '<div class="d-flex align-items-center gap-1">' +
+                            '<label class="form-label mb-0 small">Width:</label>' +
+                            '<select class="form-select form-select-sm img-width" style="width:auto;">' +
+                                '<option value="100%">100%</option>' +
+                                '<option value="75%">75%</option>' +
+                                '<option value="50%" selected>50%</option>' +
+                                '<option value="33%">33%</option>' +
+                                '<option value="25%">25%</option>' +
+                                '<option value="custom">Custom...</option>' +
+                            '</select>' +
+                            '<input type="text" class="form-control form-control-sm img-width-custom d-none" style="width:70px;" placeholder="e.g. 300px">' +
+                        '</div>' +
+                        '<div class="d-flex align-items-center gap-1">' +
+                            '<label class="form-label mb-0 small">Align:</label>' +
+                            '<div class="btn-group btn-group-sm" role="group">' +
+                                '<button type="button" class="btn btn-outline-secondary img-align" data-align="left" title="Left"><i class="bi bi-text-left"></i></button>' +
+                                '<button type="button" class="btn btn-outline-secondary img-align active" data-align="center" title="Center"><i class="bi bi-text-center"></i></button>' +
+                                '<button type="button" class="btn btn-outline-secondary img-align" data-align="right" title="Right"><i class="bi bi-text-right"></i></button>' +
+                            '</div>' +
+                        '</div>' +
+                        '<button type="button" class="btn btn-sm btn-primary img-insert-btn">Insert</button>' +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+
+        // Width dropdown: show custom input when "Custom..." selected
+        var widthSelect = row.querySelector('.img-width');
+        var widthCustom = row.querySelector('.img-width-custom');
+        widthSelect.addEventListener('change', function() {
+            if (this.value === 'custom') {
+                widthCustom.classList.remove('d-none');
+                widthCustom.focus();
+            } else {
+                widthCustom.classList.add('d-none');
+            }
+        });
+
+        // Alignment toggle
+        var alignBtns = row.querySelectorAll('.img-align');
+        alignBtns.forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                alignBtns.forEach(function(b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+            });
+        });
+
+        // Insert button
+        row.querySelector('.img-insert-btn').addEventListener('click', function() {
+            var width = widthSelect.value === 'custom' ? widthCustom.value.trim() : widthSelect.value;
+            if (!width) width = '50%';
+            var align = 'center';
+            alignBtns.forEach(function(b) { if (b.classList.contains('active')) align = b.dataset.align; });
+
+            var marginStyle = '';
+            if (align === 'left') marginStyle = 'margin-right: auto;';
+            else if (align === 'right') marginStyle = 'margin-left: auto;';
+            else marginStyle = 'margin-left: auto; margin-right: auto;';
+
+            var html = '\n<div style="text-align: ' + align + '; ' + marginStyle + ' max-width: ' + width + ';">\n' +
+                       '  <img src="' + url + '" alt="' + filename + '" style="width: 100%; height: auto;">\n' +
+                       '</div>\n';
+
+            var ta = document.getElementById('content');
+            var start = ta.selectionStart;
+            var text = ta.value;
+            ta.value = text.substring(0, start) + html + text.substring(ta.selectionEnd);
+            ta.selectionStart = ta.selectionEnd = start + html.length;
+            ta.focus();
+
+            if (previewVisible) { updatePreview(); }
+        });
+
+        return row;
+    }
+
     if (imageUpload) {
         imageUpload.addEventListener('change', function() {
-            var file = this.files[0];
-            if (!file) return;
+            var files = Array.from(this.files);
+            if (!files.length) return;
 
             uploadStatus.className = 'small mb-2 text-muted';
-            uploadStatus.textContent = 'Uploading ' + file.name + '...';
+            uploadStatus.textContent = 'Uploading ' + files.length + ' image' + (files.length > 1 ? 's' : '') + '...';
             uploadStatus.classList.remove('d-none');
 
-            var formData = new FormData();
-            formData.append('file', file);
+            var completed = 0;
+            var errors = [];
 
-            fetch('/admin/blog/upload-image', { method: 'POST', body: formData })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.error) {
-                    uploadStatus.className = 'small mb-2 text-danger';
-                    uploadStatus.textContent = data.error;
-                } else {
-                    // Insert markdown at cursor position
-                    var ta = document.getElementById('content');
-                    var start = ta.selectionStart;
-                    var end = ta.selectionEnd;
-                    var text = ta.value;
-                    ta.value = text.substring(0, start) + '\n' + data.markdown + '\n' + text.substring(end);
-                    ta.selectionStart = ta.selectionEnd = start + data.markdown.length + 2;
-                    ta.focus();
+            files.forEach(function(file) {
+                var formData = new FormData();
+                formData.append('file', file);
 
-                    uploadStatus.className = 'small mb-2 text-success';
-                    uploadStatus.textContent = 'Uploaded: ' + data.filename + ' (' + (data.size / 1024).toFixed(0) + ' KB)';
-
-                    // Update preview if visible
-                    if (previewVisible) { updatePreview(); }
-                }
-                // Clear the input so the same file can be re-uploaded
-                imageUpload.value = '';
-            })
-            .catch(function(err) {
-                uploadStatus.className = 'small mb-2 text-danger';
-                uploadStatus.textContent = 'Upload failed: ' + err;
-                imageUpload.value = '';
+                fetch('/admin/blog/upload-image', { method: 'POST', body: formData })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    completed++;
+                    if (data.error) {
+                        errors.push(file.name + ': ' + data.error);
+                    } else {
+                        imageList.appendChild(createImageRow(data.url, data.filename, data.size));
+                        imageInsertPanel.classList.remove('d-none');
+                    }
+                    if (completed === files.length) {
+                        if (errors.length) {
+                            uploadStatus.className = 'small mb-2 text-danger';
+                            uploadStatus.textContent = errors.join('; ');
+                        } else {
+                            uploadStatus.className = 'small mb-2 text-success';
+                            uploadStatus.textContent = completed + ' image' + (completed > 1 ? 's' : '') + ' uploaded. Configure size and placement, then click Insert.';
+                        }
+                    }
+                })
+                .catch(function(err) {
+                    completed++;
+                    errors.push(file.name + ': ' + err);
+                    if (completed === files.length) {
+                        uploadStatus.className = 'small mb-2 text-danger';
+                        uploadStatus.textContent = errors.join('; ');
+                    }
+                });
             });
+
+            imageUpload.value = '';
         });
     }
 
