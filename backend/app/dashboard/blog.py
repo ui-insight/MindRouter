@@ -20,16 +20,27 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import markdown
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
 from backend.app.db.session import get_async_db
 from backend.app.dashboard.routes import get_session_user_id, _admin_masquerade_context, templates
 from backend.app.services import email_service
+from backend.app.storage.artifacts import get_artifact_storage
 
 blog_router = APIRouter(tags=["blog"])
+
+# Allowed image MIME types for blog uploads
+_ALLOWED_IMAGE_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+}
+_MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 def _render_markdown(text: str) -> str:
@@ -399,3 +410,73 @@ async def admin_blog_send_test_email(
         return JSONResponse({"ok": True, "message": f"Test sent to {test_addr}"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Blog image upload & serving
+# ---------------------------------------------------------------------------
+
+@blog_router.post("/admin/blog/upload-image")
+async def admin_blog_upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Upload an image for use in blog posts. Returns the markdown image tag."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+
+    # Validate content type
+    content_type = file.content_type or ""
+    if content_type not in _ALLOWED_IMAGE_TYPES:
+        return JSONResponse(
+            {"error": f"Unsupported image type: {content_type}. Allowed: {', '.join(_ALLOWED_IMAGE_TYPES.keys())}"},
+            status_code=400,
+        )
+
+    # Read and validate size
+    data = await file.read()
+    if len(data) > _MAX_IMAGE_SIZE:
+        return JSONResponse(
+            {"error": f"Image too large ({len(data) / 1024 / 1024:.1f} MB). Maximum: {_MAX_IMAGE_SIZE / 1024 / 1024:.0f} MB"},
+            status_code=400,
+        )
+
+    # Store via artifact storage
+    storage = get_artifact_storage()
+    storage_path, sha256, size = await storage.store(data, file.filename or "image", content_type)
+
+    # Build the URL for the blog image
+    image_url = f"/blog/images/{storage_path}"
+    markdown_tag = f"![{file.filename or 'image'}]({image_url})"
+
+    return JSONResponse({
+        "url": image_url,
+        "markdown": markdown_tag,
+        "filename": file.filename,
+        "size": size,
+    })
+
+
+@blog_router.get("/blog/images/{path:path}")
+async def serve_blog_image(path: str):
+    """Serve a blog image from artifact storage."""
+    storage = get_artifact_storage()
+    data = await storage.retrieve(path)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Determine content type from extension
+    ext = "." + path.rsplit(".", 1)[-1] if "." in path else ""
+    content_types = {v: k for k, v in _ALLOWED_IMAGE_TYPES.items()}
+    content_type = content_types.get(ext, "application/octet-stream")
+
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
