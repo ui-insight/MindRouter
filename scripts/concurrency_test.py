@@ -134,7 +134,7 @@ async def send_request(
         stats.active -= 1
 
 
-async def worker(
+async def _run_and_release(
     sem: asyncio.Semaphore,
     client: httpx.AsyncClient,
     base_url: str,
@@ -146,11 +146,14 @@ async def worker(
     stream: bool,
     think: bool = False,
 ):
-    async with sem:
+    """Run a request then release the semaphore so the submit loop can send another."""
+    try:
         await send_request(
             client, base_url, api_key, model, max_tokens, stats, request_num, stream,
             think,
         )
+    finally:
+        sem.release()
 
 
 async def main():
@@ -227,11 +230,20 @@ async def main():
     t_start = time.monotonic()
     tasks = []
     request_num = 0
+    stop_event = asyncio.Event()
 
-    try:
-        while time.monotonic() - t_start < args.duration:
+    async def submit_loop():
+        nonlocal request_num
+        while not stop_event.is_set():
+            # Wait for a free slot before submitting — this prevents
+            # unbounded local queuing behind the semaphore.
+            await sem.acquire()
+            if stop_event.is_set():
+                sem.release()
+                break
+
             task = asyncio.create_task(
-                worker(
+                _run_and_release(
                     sem,
                     client,
                     args.base_url,
@@ -247,18 +259,22 @@ async def main():
             tasks.append(task)
             request_num += 1
 
-            # Submit fast enough to keep concurrency slots full
-            await asyncio.sleep(0.05)
-
-            # Progress update every 10s
+            # Progress update
             elapsed = time.monotonic() - t_start
-            if request_num % 50 == 0:
+            if request_num % 10 == 0:
                 print(
                     f"  {DIM}[{elapsed:5.0f}s]{RESET} "
                     f"sent={request_num} ok={stats.ok} err={stats.err} "
                     f"timeout={stats.timeouts} active={stats.active}/{args.concurrent} "
                     f"peak={stats.peak_active}"
                 )
+
+    try:
+        # Run the submit loop with a duration deadline
+        try:
+            await asyncio.wait_for(submit_loop(), timeout=args.duration)
+        except asyncio.TimeoutError:
+            stop_event.set()
 
         inflight = len([t for t in tasks if not t.done()])
         if inflight > 0:
