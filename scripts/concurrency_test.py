@@ -66,6 +66,7 @@ async def send_request(
     stats: Stats,
     request_num: int,
     stream: bool,
+    think: bool = False,
 ):
     prompt = PROMPTS[request_num % len(PROMPTS)]
     body = {
@@ -75,6 +76,8 @@ async def send_request(
     }
     if stream:
         body["stream"] = True
+    if think:
+        body["think"] = True
 
     headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -141,10 +144,12 @@ async def worker(
     stats: Stats,
     request_num: int,
     stream: bool,
+    think: bool = False,
 ):
     async with sem:
         await send_request(
-            client, base_url, api_key, model, max_tokens, stats, request_num, stream
+            client, base_url, api_key, model, max_tokens, stats, request_num, stream,
+            think,
         )
 
 
@@ -191,6 +196,12 @@ async def main():
         default=False,
         help="Use streaming requests",
     )
+    parser.add_argument(
+        "--think",
+        action="store_true",
+        default=False,
+        help="Enable thinking/reasoning mode",
+    )
     args = parser.parse_args()
 
     stats = Stats()
@@ -203,6 +214,7 @@ async def main():
     print(f"  Duration:    {args.duration}s")
     print(f"  Max tokens:  {args.max_tokens}")
     print(f"  Streaming:   {args.stream}")
+    print(f"  Thinking:    {args.think}")
     print(f"  Timeout:     {args.timeout}s")
     print()
 
@@ -229,6 +241,7 @@ async def main():
                     stats,
                     request_num,
                     args.stream,
+                    args.think,
                 )
             )
             tasks.append(task)
