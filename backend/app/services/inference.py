@@ -132,46 +132,48 @@ class InferenceService:
             )
         return self._http_client
 
-    async def _abort_backend_request(
+    def _make_inference_client(self) -> httpx.AsyncClient:
+        """Create a dedicated HTTP client for a single inference request.
+
+        Unlike the shared pool client, this client is meant to be closed
+        when the request completes or times out.  Closing it tears down
+        the underlying TCP connection, which signals vLLM to abort any
+        in-progress generation — preventing orphaned requests from
+        occupying backend slots after MindRouter gives up.
+        """
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=float(self._settings.backend_request_timeout_per_attempt),
+                write=10.0,
+                pool=10.0,
+            ),
+            limits=httpx.Limits(
+                max_connections=1,
+                max_keepalive_connections=0,
+            ),
+        )
+
+    async def _close_inference_client(
         self,
+        client: httpx.AsyncClient,
         backend: Backend,
         request_id: str,
     ) -> None:
-        """Best-effort abort of an orphaned request on a vLLM backend.
+        """Close a per-request inference client, aborting any in-flight work.
 
-        When MindRouter times out waiting for a response, the backend may
-        still be processing the request.  We attempt to cancel it via the
-        Responses API cancel endpoint, then fall back to logging a warning
-        so operators know orphaned requests may be consuming slots.
+        Tearing down the TCP connection signals vLLM to abort generation,
+        freeing the execution slot.
         """
-        if backend.engine != BackendEngine.VLLM:
-            return
         try:
-            client = await self._get_http_client()
-            resp = await asyncio.wait_for(
-                client.post(
-                    f"{backend.url}/v1/responses/{request_id}/cancel",
-                ),
-                timeout=5.0,
+            await client.aclose()
+            logger.info(
+                "backend_request_aborted",
+                backend_id=backend.id,
+                request_id=request_id,
             )
-            if resp.status_code < 400:
-                logger.info(
-                    "backend_request_aborted",
-                    backend_id=backend.id,
-                    request_id=request_id,
-                )
-                return
         except Exception:
             pass
-        # Cancel endpoint unavailable or failed — log for visibility.
-        # The orphaned request will continue consuming a backend slot
-        # until it finishes naturally.
-        logger.warning(
-            "backend_request_orphaned",
-            backend_id=backend.id,
-            request_id=request_id,
-            detail="Timed-out request may still be running on backend",
-        )
 
     async def _count_input_tokens(
         self,
@@ -1041,6 +1043,9 @@ class InferenceService:
                 return response, backend
 
             except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+                # The per-request httpx client's async-with block closes the
+                # TCP connection on cancellation, signalling vLLM to abort
+                # the in-progress generation and free the execution slot.
                 logger.warning(
                     "backend_timeout",
                     backend_id=backend.id,
@@ -1048,7 +1053,6 @@ class InferenceService:
                     max_attempts=max_attempts,
                     elapsed_ms=(time.monotonic() - start_time) * 1000,
                 )
-                await self._abort_backend_request(backend, job.request_id)
                 await self._scheduler.on_job_failed(job, backend.id)
                 await self._registry.report_live_failure(backend.id)
                 last_error = e
@@ -1203,8 +1207,6 @@ class InferenceService:
                     attempt=attempt + 1,
                     error=str(e),
                 )
-                if isinstance(e, (asyncio.TimeoutError, httpx.TimeoutException)):
-                    await self._abort_backend_request(backend, job.request_id)
                 await self._scheduler.on_job_failed(job, backend.id)
                 await self._registry.report_live_failure(backend.id)
                 last_error = e
@@ -1254,8 +1256,6 @@ class InferenceService:
         backend: Backend,
     ) -> Dict[str, Any]:
         """Proxy chat request to backend."""
-        client = await self._get_http_client()
-
         if backend.engine == BackendEngine.OLLAMA:
             payload = OllamaOutTranslator.translate_chat_request(request)
             url = f"{backend.url}/api/chat"
@@ -1265,9 +1265,10 @@ class InferenceService:
 
         payload["stream"] = False
 
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        async with self._make_inference_client() as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
         # Translate response to OpenAI format
         if backend.engine == BackendEngine.OLLAMA:
@@ -1297,8 +1298,6 @@ class InferenceService:
         backend: Backend,
     ) -> AsyncIterator[CanonicalStreamChunk]:
         """Proxy streaming request to backend."""
-        client = await self._get_http_client()
-
         if backend.engine == BackendEngine.OLLAMA:
             payload = OllamaOutTranslator.translate_chat_request(request)
             url = f"{backend.url}/api/chat"
@@ -1308,23 +1307,24 @@ class InferenceService:
 
         payload["stream"] = True
 
-        async with client.stream("POST", url, json=payload) as response:
-            if response.status_code >= 400:
-                await response.aread()
-                response.raise_for_status()
+        async with self._make_inference_client() as client:
+            async with client.stream("POST", url, json=payload) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    response.raise_for_status()
 
-            if backend.engine == BackendEngine.OLLAMA:
-                async for chunk in OllamaOutTranslator.translate_chat_stream(
-                    response.aiter_bytes(), request.request_id, request.model
-                ):
-                    yield chunk
-            else:
-                thinking_enabled = request.think if request.think is not None else True
-                async for chunk in VLLMOutTranslator.translate_chat_stream(
-                    response.aiter_bytes(), request.request_id, request.model,
-                    thinking_enabled=thinking_enabled,
-                ):
-                    yield chunk
+                if backend.engine == BackendEngine.OLLAMA:
+                    async for chunk in OllamaOutTranslator.translate_chat_stream(
+                        response.aiter_bytes(), request.request_id, request.model
+                    ):
+                        yield chunk
+                else:
+                    thinking_enabled = request.think if request.think is not None else True
+                    async for chunk in VLLMOutTranslator.translate_chat_stream(
+                        response.aiter_bytes(), request.request_id, request.model,
+                        thinking_enabled=thinking_enabled,
+                    ):
+                        yield chunk
 
     async def _proxy_embedding_request(
         self,
@@ -1332,8 +1332,6 @@ class InferenceService:
         backend: Backend,
     ) -> Dict[str, Any]:
         """Proxy embedding request to backend."""
-        client = await self._get_http_client()
-
         if backend.engine == BackendEngine.OLLAMA:
             payload = OllamaOutTranslator.translate_embedding_request(request)
             url = f"{backend.url}/api/embeddings"
@@ -1341,9 +1339,10 @@ class InferenceService:
             payload = VLLMOutTranslator.translate_embedding_request(request)
             url = f"{backend.url}/v1/embeddings"
 
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        async with self._make_inference_client() as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
         if backend.engine == BackendEngine.OLLAMA:
             canonical = OllamaOutTranslator.translate_embedding_response(
@@ -1366,13 +1365,13 @@ class InferenceService:
                 detail="Reranking is not supported on Ollama backends",
             )
 
-        client = await self._get_http_client()
-        payload = VLLMOutTranslator.translate_rerank_request(request)
-        url = f"{backend.url}/v1/rerank"
+        async with self._make_inference_client() as client:
+            payload = VLLMOutTranslator.translate_rerank_request(request)
+            url = f"{backend.url}/v1/rerank"
 
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
         canonical = VLLMOutTranslator.translate_rerank_response(data)
         result = canonical.model_dump(exclude_none=True, by_alias=True)
@@ -1396,13 +1395,13 @@ class InferenceService:
                 detail="Scoring is not supported on Ollama backends",
             )
 
-        client = await self._get_http_client()
-        payload = VLLMOutTranslator.translate_score_request(request)
-        url = f"{backend.url}/v1/score"
+        async with self._make_inference_client() as client:
+            payload = VLLMOutTranslator.translate_score_request(request)
+            url = f"{backend.url}/v1/score"
 
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
         canonical = VLLMOutTranslator.translate_score_response(data)
         return canonical.model_dump(exclude_none=True, by_alias=True)
@@ -1413,8 +1412,6 @@ class InferenceService:
         backend: Backend,
     ) -> Dict[str, Any]:
         """Proxy chat request, return in Ollama format."""
-        client = await self._get_http_client()
-
         if backend.engine == BackendEngine.OLLAMA:
             payload = OllamaOutTranslator.translate_chat_request(request)
             payload["stream"] = False
@@ -1424,9 +1421,10 @@ class InferenceService:
             payload["stream"] = False
             url = f"{backend.url}/v1/chat/completions"
 
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        async with self._make_inference_client() as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            data = response.json()
 
         # Convert OpenAI format to Ollama format when backend is not Ollama
         if backend.engine != BackendEngine.OLLAMA:
@@ -1499,8 +1497,6 @@ class InferenceService:
         backend: Backend,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Proxy streaming request, yield Ollama format chunks."""
-        client = await self._get_http_client()
-
         if backend.engine == BackendEngine.OLLAMA:
             payload = OllamaOutTranslator.translate_chat_request(request)
             payload["stream"] = True
@@ -1510,40 +1506,41 @@ class InferenceService:
             payload["stream"] = True
             url = f"{backend.url}/v1/chat/completions"
 
-        async with client.stream("POST", url, json=payload) as response:
-            if response.status_code >= 400:
-                await response.aread()
-                response.raise_for_status()
+        async with self._make_inference_client() as client:
+            async with client.stream("POST", url, json=payload) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    response.raise_for_status()
 
-            buffer = ""
-            async for chunk_bytes in response.aiter_bytes():
-                buffer += chunk_bytes.decode()
+                buffer = ""
+                async for chunk_bytes in response.aiter_bytes():
+                    buffer += chunk_bytes.decode()
 
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # Handle SSE format from vLLM
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        if data_str == "[DONE]":
-                            return
-                        try:
-                            data = json.loads(data_str)
-                            # Convert OpenAI chunk to Ollama format
-                            thinking_enabled = request.think if request.think is not None else True
-                            ollama_chunk = self._openai_chunk_to_ollama(data, thinking_enabled=thinking_enabled)
-                            yield ollama_chunk
-                        except json.JSONDecodeError:
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line:
                             continue
-                    else:
-                        # Native Ollama format
-                        try:
-                            yield json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+
+                        # Handle SSE format from vLLM
+                        if line.startswith("data:"):
+                            data_str = line[5:].strip()
+                            if data_str == "[DONE]":
+                                return
+                            try:
+                                data = json.loads(data_str)
+                                # Convert OpenAI chunk to Ollama format
+                                thinking_enabled = request.think if request.think is not None else True
+                                ollama_chunk = self._openai_chunk_to_ollama(data, thinking_enabled=thinking_enabled)
+                                yield ollama_chunk
+                            except json.JSONDecodeError:
+                                continue
+                        else:
+                            # Native Ollama format
+                            try:
+                                yield json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
 
     def _openai_chunk_to_ollama(
         self, openai_chunk: Dict, thinking_enabled: bool = True,
