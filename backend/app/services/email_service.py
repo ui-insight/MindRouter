@@ -178,6 +178,17 @@ def _render_blog_email(
     title: str, content_md: str, slug: str, author_name: str, base_url: str
 ) -> str:
     """Render a blog post as an HTML email body."""
+    # Convert relative image URLs to absolute so email clients can fetch them
+    content_md = re.sub(
+        r'src="(/blog/images/)',
+        f'src="{base_url}/blog/images/',
+        content_md,
+    )
+    content_md = re.sub(
+        r'!\[([^\]]*)\]\((/blog/images/[^)]+)\)',
+        rf'![\1]({base_url}\2)',
+        content_md,
+    )
     content_html = markdown.markdown(
         content_md,
         extensions=["fenced_code", "tables"],
