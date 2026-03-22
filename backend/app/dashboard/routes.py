@@ -1453,6 +1453,7 @@ async def update_model_metadata(
     capabilities: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
     model_url: Optional[str] = Form(None),
+    huggingface_url: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Update metadata overrides for all instances of a model."""
@@ -1490,6 +1491,7 @@ async def update_model_metadata(
         # Direct fields (admin-only)
         "description": _str_or_none(description),
         "model_url": _str_or_none(model_url),
+        "huggingface_url": _str_or_none(huggingface_url),
     }
 
     # Capabilities: comma-separated -> JSON array, or None to clear

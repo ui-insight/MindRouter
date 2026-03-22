@@ -1273,7 +1273,7 @@ async def update_model_overrides_by_name(
     }
 
     # Direct fields (admin-only, no auto-detect source)
-    direct_fields = {"description", "model_url"}
+    direct_fields = {"description", "model_url", "huggingface_url"}
 
     result = await db.execute(select(Model).where(Model.name == model_name))
     models = list(result.scalars().all())
