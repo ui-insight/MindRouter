@@ -234,7 +234,7 @@ async def _open_smtp(config: Dict[str, Any]) -> aiosmtplib.SMTP:
         port=int(config["port"]),
         start_tls=bool(config.get("use_tls", True)),
         timeout=30,
-        source_address=local_fqdn,
+        local_hostname=local_fqdn,
     )
     await smtp.connect()
     if config.get("username") and config.get("password"):
