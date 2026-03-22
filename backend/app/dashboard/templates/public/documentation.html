@@ -1377,6 +1377,7 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                     <li><strong>Fast fail on 4xx</strong> &mdash; Client errors (400, 401, 404, etc.) are never retried and return immediately.</li>
                     <li><strong>Streaming constraints</strong> &mdash; Retries can only occur before the first chunk is sent to the client. Once streaming has begun, a backend failure is terminal and the stream ends with an error.</li>
                     <li><strong>Backend rotation</strong> &mdash; Each retry attempt selects a different backend when multiple backends are available for the requested model, maximizing the chance of success.</li>
+                    <li><strong>Clean timeout cancellation</strong> &mdash; Each backend request uses a dedicated HTTP connection. When a request times out (default 180s per attempt), MindRouter closes the connection, which signals the backend (vLLM) to abort the in-progress generation and free the execution slot. This prevents orphaned requests from consuming backend capacity after MindRouter has given up.</li>
                 </ul>
 
                 <h3>Mid-Stream Error Behavior</h3>
@@ -1781,7 +1782,7 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                     <li>Backend streaming uses NDJSON (Ollama) or SSE (vLLM/OpenAI)</li>
                     <li>The chat UI renders tokens as they arrive</li>
                     <li>TTFT (time-to-first-token) is tracked for latency monitoring</li>
-                    <li>If the client disconnects, the backend request is not cancelled (to prevent DB corruption)</li>
+                    <li>If a backend request times out or the client disconnects, MindRouter closes the backend connection, signalling the backend to abort generation and free the slot</li>
                 </ul>
 
                 <h3>Conversation Retention</h3>
