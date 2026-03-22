@@ -291,7 +291,7 @@ async def send_bulk_email(
                     success += 1
                 except Exception as e:
                     errors.append(f"{user['email']}: {e}")
-                    logger.warning("email_send_failed", email=user["email"], error=str(e))
+                    logger.warning("email_send_failed: %s — %s", user["email"], e)
                 await asyncio.sleep(0.05)  # throttle
         finally:
             try:
@@ -311,7 +311,7 @@ async def send_bulk_email(
             await db.commit()
 
     except Exception as e:
-        logger.error("email_bulk_send_error", error=str(e))
+        logger.error("email_bulk_send_error: %s", e)
         try:
             async with get_async_db_context() as db:
                 await crud.update_email_log(
