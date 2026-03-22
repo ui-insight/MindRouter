@@ -16,6 +16,7 @@
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
