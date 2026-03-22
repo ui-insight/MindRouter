@@ -224,11 +224,17 @@ async def _send_one(
 
 async def _open_smtp(config: Dict[str, Any]) -> aiosmtplib.SMTP:
     """Open and authenticate an SMTP connection."""
+    import socket
+    local_fqdn = config.get("helo_hostname") or socket.getfqdn() or "mindrouter.uidaho.edu"
+    # If running in Docker the FQDN is the container ID — fall back to a real hostname
+    if "." not in local_fqdn:
+        local_fqdn = "mindrouter.uidaho.edu"
     smtp = aiosmtplib.SMTP(
         hostname=config["host"],
         port=int(config["port"]),
         start_tls=bool(config.get("use_tls", True)),
         timeout=30,
+        source_address=local_fqdn,
     )
     await smtp.connect()
     if config.get("username") and config.get("password"):
