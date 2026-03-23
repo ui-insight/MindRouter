@@ -687,7 +687,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         r = await client.post("/v1/chat/completions", headers=headers, json={
             "model": cfg.vllm_model,
             "stream": False,
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "scientist", "strict": True, "schema": COMPLEX_SCHEMA},
@@ -741,6 +741,61 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         record("skip", name, "timeout")
     except Exception as e:
         record("fail", name, str(e)[:150])
+
+    # JSON schema + thinking on every discovered thinking model
+    # (catches models like qwen3.5 that are always-thinking)
+    thinking_models = cfg.catalog.thinking_models
+    if thinking_models:
+        sem = asyncio.Semaphore(cfg.concurrency)
+
+        async def test_schema_thinking(model_id: str):
+            tname = f"JSON schema + thinking [{model_id}]"
+            async with sem:
+                try:
+                    payload = {
+                        "model": model_id,
+                        "stream": False,
+                        "max_tokens": 512,
+                        "response_format": {
+                            "type": "json_schema",
+                            "json_schema": {"name": "person", "strict": True, "schema": PERSON_SCHEMA},
+                        },
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    # Use reasoning_effort for gpt-oss, think:true for others
+                    if "gpt-oss" in model_id:
+                        payload["reasoning_effort"] = "low"
+                    else:
+                        payload["think"] = True
+                    r = await client.post("/v1/chat/completions", headers=headers, json=payload)
+                    if r.status_code == 200:
+                        body = r.json()
+                        msg = body.get("choices", [{}])[0].get("message", {})
+                        content = msg.get("content") or ""
+                        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                        parsed = parse_json_content(content)
+                        has_thinking = bool(reasoning and len(str(reasoning).strip()) > 0)
+                        if parsed is not None and validate_json_keys(parsed, PERSON_SCHEMA):
+                            record("pass", tname, f"schema_ok=True, thinking={has_thinking}")
+                        else:
+                            record("fail", tname, f"schema mismatch: {content[:100]}")
+                    elif r.status_code == 422:
+                        record("pass", tname, f"422: {r.json().get('detail', '')[:80]}")
+                    elif r.status_code == 400 and "not support thinking" in r.text:
+                        record("skip", tname, "model does not support thinking")
+                    elif r.status_code in (503, 504):
+                        record("skip", tname, f"status={r.status_code}")
+                    else:
+                        record("fail", tname, f"status={r.status_code} body={r.text[:200]}")
+                except httpx.TimeoutException:
+                    record("skip", tname, "timeout")
+                except Exception as e:
+                    record("fail", tname, str(e)[:150])
+
+        # Skip the model we already tested above to avoid duplication
+        extra_models = [m for m in thinking_models if m != cfg.vllm_model]
+        if extra_models:
+            await asyncio.gather(*[test_schema_thinking(m) for m in extra_models])
 
 
 # ---------------------------------------------------------------------------

@@ -1310,15 +1310,26 @@ class InferenceService:
                 c = choices[0]
                 content = (c.get("message") or {}).get("content")
                 finish = c.get("finish_reason")
-                if content is None and finish == "length":
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail=(
-                            "Structured output was requested but the model's reasoning/thinking "
-                            "consumed the entire token budget before generating content. "
-                            "Increase max_tokens or use a lower reasoning_effort."
-                        ),
-                    )
+                if content is None:
+                    if finish == "length":
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                "Structured output was requested but the model's reasoning/thinking "
+                                "consumed the entire token budget before generating content. "
+                                "Increase max_tokens or use a lower reasoning_effort."
+                            ),
+                        )
+                    elif finish == "stop":
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail=(
+                                "Structured output was requested but the model completed without "
+                                "generating any content. The model may not support structured "
+                                "output with thinking enabled. Try disabling thinking or use a "
+                                "different model."
+                            ),
+                        )
 
         return result
 
@@ -1471,15 +1482,26 @@ class InferenceService:
             content = msg.get("content")
             done_reason = data.get("done_reason")
             # Ollama uses done_reason; vLLM-converted uses done_reason from _openai_response_to_ollama
-            if not content and done_reason != "stop":
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=(
-                        "Structured output was requested but the model's reasoning/thinking "
-                        "consumed the entire token budget before generating content. "
-                        "Increase max_tokens (num_predict) or use a lower reasoning_effort."
-                    ),
-                )
+            if not content:
+                if done_reason != "stop":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            "Structured output was requested but the model's reasoning/thinking "
+                            "consumed the entire token budget before generating content. "
+                            "Increase max_tokens (num_predict) or use a lower reasoning_effort."
+                        ),
+                    )
+                elif msg.get("thinking") or msg.get("reasoning") or msg.get("reasoning_content"):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            "Structured output was requested but the model completed without "
+                            "generating any content. The model may not support structured "
+                            "output with thinking enabled. Try disabling thinking or use a "
+                            "different model."
+                        ),
+                    )
 
         return data
 
