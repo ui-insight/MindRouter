@@ -39,6 +39,7 @@ from backend.app.core.canonical_schemas import (
     CanonicalStreamChoice,
     CanonicalStreamDelta,
     MessageRole,
+    ResponseFormatType,
     UsageInfo,
 )
 from backend.app.core.scheduler.policy import get_scheduler
@@ -1296,6 +1297,29 @@ class InferenceService:
             if msg is not None and "content" not in msg:
                 msg["content"] = None
 
+        # Detect structured output requests where reasoning exhausted the
+        # token budget before any content was generated.  Returning a 200
+        # with content=None is misleading — the client asked for structured
+        # output and got nothing usable.
+        if (
+            request.response_format
+            and request.response_format.type in (ResponseFormatType.JSON_OBJECT, ResponseFormatType.JSON_SCHEMA)
+        ):
+            choices = result.get("choices", [])
+            if choices:
+                c = choices[0]
+                content = (c.get("message") or {}).get("content")
+                finish = c.get("finish_reason")
+                if content is None and finish == "length":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            "Structured output was requested but the model's reasoning/thinking "
+                            "consumed the entire token budget before generating content. "
+                            "Increase max_tokens or use a lower reasoning_effort."
+                        ),
+                    )
+
         return result
 
     async def _proxy_stream_request(
@@ -1436,6 +1460,26 @@ class InferenceService:
         if backend.engine != BackendEngine.OLLAMA:
             thinking_enabled = request.think if request.think is not None else True
             data = self._openai_response_to_ollama(data, thinking_enabled=thinking_enabled)
+
+        # Detect structured output requests where reasoning exhausted the
+        # token budget before any content was generated.
+        if (
+            request.response_format
+            and request.response_format.type in (ResponseFormatType.JSON_OBJECT, ResponseFormatType.JSON_SCHEMA)
+        ):
+            msg = data.get("message", {})
+            content = msg.get("content")
+            done_reason = data.get("done_reason")
+            # Ollama uses done_reason; vLLM-converted uses done_reason from _openai_response_to_ollama
+            if not content and done_reason != "stop":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Structured output was requested but the model's reasoning/thinking "
+                        "consumed the entire token budget before generating content. "
+                        "Increase max_tokens (num_predict) or use a lower reasoning_effort."
+                    ),
+                )
 
         return data
 
