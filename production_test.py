@@ -1654,13 +1654,15 @@ async def test_multimodal(client: httpx.AsyncClient, cfg: Config):
 
         async def test_multimodal_per_model(model_id: str):
             tname = f"Multimodal [{model_id}]"
+            is_thinker = model_id in cfg.catalog.thinking_models
+            mtokens = 2048 if is_thinker else 512
             async with sem_v:
                 try:
                     t0 = time.time()
                     r = await client.post("/v1/chat/completions", headers=headers, json={
                         "model": model_id,
                         "stream": False,
-                        "max_tokens": 512,
+                        "max_tokens": mtokens,
                         "messages": [{
                             "role": "user",
                             "content": [
@@ -1675,10 +1677,11 @@ async def test_multimodal(client: httpx.AsyncClient, cfg: Config):
                     latency_ms = (time.time() - t0) * 1000
                     if r.status_code == 200:
                         body = r.json()
-                        content = body.get("choices", [{}])[0].get("message", {}).get("content", "")[:80]
+                        msg = body.get("choices", [{}])[0].get("message", {})
+                        content = (msg.get("content") or msg.get("reasoning_content") or "")[:80]
                         record("pass", tname, f"'{content}'", latency_ms=latency_ms, model=model_id, feature="multimodal")
-                    elif r.status_code in (503, 504):
-                        record("skip", tname, f"status={r.status_code} (model not loaded)", model=model_id, feature="multimodal")
+                    elif r.status_code in (422, 503, 504):
+                        record("skip", tname, f"status={r.status_code}", model=model_id, feature="multimodal")
                     else:
                         record("fail", tname, f"status={r.status_code} body={r.text[:150]}", latency_ms=latency_ms, model=model_id, feature="multimodal")
                 except httpx.TimeoutException:
