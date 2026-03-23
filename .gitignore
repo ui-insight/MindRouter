@@ -88,6 +88,7 @@ docker-compose.override.yml
 # OS
 .DS_Store
 Thumbs.db
+~$*
 
 # Temporary files
 *.tmp
@@ -115,3 +116,13 @@ service-account.json
 
 # Test artifacts
 test.pdf
+
+# Manuscripts (unpublished drafts — never commit)
+manuscripts/
+
+# Security review (keep local)
+SECURITY_REVIEW.md
+MindRouter2_Security_Review.docx
+
+# Blog drafts (keep local)
+blog_drafts/
