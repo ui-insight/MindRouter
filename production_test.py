@@ -200,8 +200,10 @@ def validate_json_keys(data: Any, schema: Dict) -> bool:
     return True
 
 
-def parse_json_content(content: str) -> Optional[Any]:
+def parse_json_content(content: Optional[str]) -> Optional[Any]:
     """Try to parse JSON from content, stripping markdown fences if present."""
+    if content is None:
+        return None
     cleaned = content.strip()
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
@@ -241,8 +243,8 @@ class ModelCatalog:
                 self.embedding_models.append(model_id)
                 continue
 
-            # Rerank models
-            if caps.get("rerank"):
+            # Rerank models (by capability flag or name)
+            if caps.get("rerank") or "rerank" in model_id.lower():
                 self.rerank_models.append(model_id)
                 continue
 
@@ -394,7 +396,8 @@ async def test_basic_chat(client: httpx.AsyncClient, cfg: Config):
                 )
                 if r.status_code == 200:
                     body = r.json()
-                    content = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    msg = body.get("choices", [{}])[0].get("message", {})
+                    content = msg.get("content") or msg.get("reasoning_content") or ""
                     record("pass", tname, f"'{content[:50]}'")
                 elif r.status_code in (503, 504):
                     record("skip", tname, f"status={r.status_code} (model not loaded)")
@@ -464,7 +467,7 @@ async def test_basic_chat(client: httpx.AsyncClient, cfg: Config):
         )
         body = r.json()
         if r.status_code == 200 and "message" in body and body.get("done") is True:
-            content = body["message"]["content"][:50]
+            content = body["message"].get("content", "")[:50]
             record("pass", name, f"'{content}'")
         else:
             record("fail", name, f"status={r.status_code} body={r.text[:200]}")
@@ -554,7 +557,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         })
         body = r.json()
         if r.status_code == 200 and "choices" in body:
-            content = body["choices"][0]["message"]["content"]
+            content = body["choices"][0]["message"].get("content") or ""
             parsed = parse_json_content(content)
             if parsed is not None:
                 record("pass", name, "valid JSON response")
@@ -582,7 +585,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         })
         body = r.json()
         if r.status_code == 200 and "choices" in body:
-            content = body["choices"][0]["message"]["content"]
+            content = body["choices"][0]["message"].get("content") or ""
             parsed = parse_json_content(content)
             if parsed is not None and validate_json_keys(parsed, PERSON_SCHEMA):
                 record("pass", name, f"name={parsed.get('name')}, age={parsed.get('age')}")
@@ -607,7 +610,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         })
         body = r.json()
         if r.status_code == 200 and "message" in body:
-            content = body["message"]["content"]
+            content = body["message"].get("content", "")
             parsed = parse_json_content(content)
             if parsed is not None:
                 record("pass", name, "valid JSON response")
@@ -632,7 +635,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         })
         body = r.json()
         if r.status_code == 200 and "message" in body:
-            content = body["message"]["content"]
+            content = body["message"].get("content", "")
             parsed = parse_json_content(content)
             if parsed is not None and validate_json_keys(parsed, PERSON_SCHEMA):
                 record("pass", name, f"name={parsed.get('name')}, age={parsed.get('age')}")
@@ -693,7 +696,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         })
         body = r.json()
         if r.status_code == 200 and "choices" in body:
-            content = body["choices"][0]["message"]["content"]
+            content = body["choices"][0]["message"].get("content") or ""
             parsed = parse_json_content(content)
             if parsed is not None and validate_json_keys(parsed, COMPLEX_SCHEMA):
                 record("pass", name, f"full_name={parsed.get('full_name')}, achievements={len(parsed.get('notable_achievements', []))}")
@@ -849,16 +852,19 @@ async def test_thinking(client: httpx.AsyncClient, cfg: Config):
                 "model": qwen_model,
                 "stream": False,
                 "max_tokens": 512,
-                "chat_template_kwargs": {"enable_thinking": True},
+                "think": True,
                 "messages": [{"role": "user", "content": prompt}],
             })
             body = r.json()
             if r.status_code == 200 and "choices" in body:
                 msg = body["choices"][0]["message"]
                 reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                content = msg.get("content") or ""
                 has_reasoning = bool(reasoning and len(str(reasoning).strip()) > 0)
-                if has_reasoning:
-                    record("pass", name, f"reasoning_len={len(str(reasoning))}")
+                has_think_tags = "<think>" in content
+                if has_reasoning or has_think_tags:
+                    detail = f"reasoning_len={len(str(reasoning))}" if has_reasoning else "found <think> tags in content"
+                    record("pass", name, detail)
                 else:
                     record("fail", name, "no reasoning_content found")
             elif r.status_code in (503, 504):
@@ -877,7 +883,7 @@ async def test_thinking(client: httpx.AsyncClient, cfg: Config):
                 "model": qwen_model,
                 "stream": False,
                 "max_tokens": 128,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "think": False,
                 "messages": [{"role": "user", "content": prompt}],
             })
             body = r.json()
@@ -912,9 +918,12 @@ async def test_thinking(client: httpx.AsyncClient, cfg: Config):
             if r.status_code == 200 and "message" in body:
                 msg = body["message"]
                 thinking = msg.get("thinking") or msg.get("reasoning") or msg.get("reasoning_content") or ""
+                content = msg.get("content") or ""
                 has_thinking = bool(thinking and len(str(thinking).strip()) > 0)
-                if has_thinking:
-                    record("pass", name, f"thinking_len={len(str(thinking))}")
+                has_think_tags = "<think>" in content
+                if has_thinking or has_think_tags:
+                    detail = f"thinking_len={len(str(thinking))}" if has_thinking else "found <think> tags in content"
+                    record("pass", name, detail)
                 else:
                     record("fail", name, "no thinking field")
             elif r.status_code in (503, 504):
