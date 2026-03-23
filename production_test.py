@@ -184,8 +184,8 @@ CALC_TOOL = {
     },
 }
 
-# Tiny 1x1 red PNG for multimodal tests
-TEST_IMAGE_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+# 64x64 red PNG for multimodal tests (small but large enough for vision processors)
+TEST_IMAGE_B64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeElEQVR4nO3PQQkAMAzAwEqrf1ObiD2OQSACLnN2v264oAEtaEALGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS1oQAsa0ILHLvlF8VqfrMBeAAAAAElFTkSuQmCC"
 
 
 # ---------------------------------------------------------------------------
