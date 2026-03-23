@@ -551,7 +551,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         r = await client.post("/v1/chat/completions", headers=headers, json={
             "model": cfg.vllm_model,
             "stream": False,
-            "max_tokens": 128,
+            "max_tokens": 512,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "user", "content": prompt}],
         })
@@ -576,7 +576,7 @@ async def test_structured(client: httpx.AsyncClient, cfg: Config):
         r = await client.post("/v1/chat/completions", headers=headers, json={
             "model": cfg.vllm_model,
             "stream": False,
-            "max_tokens": 128,
+            "max_tokens": 512,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "person", "strict": True, "schema": PERSON_SCHEMA},
@@ -882,7 +882,7 @@ async def test_thinking(client: httpx.AsyncClient, cfg: Config):
             r = await client.post("/v1/chat/completions", headers=headers, json={
                 "model": qwen_model,
                 "stream": False,
-                "max_tokens": 128,
+                "max_tokens": 512,
                 "think": False,
                 "messages": [{"role": "user", "content": prompt}],
             })
@@ -1198,7 +1198,7 @@ async def test_multimodal(client: httpx.AsyncClient, cfg: Config):
         r = await client.post("/v1/chat/completions", headers=headers, json={
             "model": vision_model,
             "stream": False,
-            "max_tokens": 128,
+            "max_tokens": 512,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -1230,7 +1230,7 @@ async def test_multimodal(client: httpx.AsyncClient, cfg: Config):
     try:
         r = await client.post("/anthropic/v1/messages", headers=headers, json={
             "model": vision_model,
-            "max_tokens": 128,
+            "max_tokens": 512,
             "messages": [{
                 "role": "user",
                 "content": [
