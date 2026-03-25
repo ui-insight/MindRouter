@@ -124,28 +124,23 @@
                         </table>
                     </div>
 
-                    <!-- Pagination -->
-                    {% if total_pages > 1 %}
+                    <!-- Keyset Pagination -->
                     <nav aria-label="Audit log pagination">
                         <ul class="pagination justify-content-center mb-0">
-                            <li class="page-item {% if page <= 1 %}disabled{% endif %}">
-                                <a class="page-link" href="/admin/audit?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Previous</a>
+                            {% if cursor %}
+                            <li class="page-item">
+                                <a class="page-link" href="/admin/audit?{% if search %}search={{ search }}&{% endif %}{% if user_id_filter %}user_id_filter={{ user_id_filter }}&{% endif %}{% if model_filter %}model_filter={{ model_filter }}&{% endif %}{% if status_filter %}status_filter={{ status_filter }}&{% endif %}{% if start_date %}start_date={{ start_date }}&{% endif %}{% if end_date %}end_date={{ end_date }}&{% endif %}">First</a>
                             </li>
-                            {% for p in range(1, total_pages + 1) %}
-                            {% if p == page or (p >= page - 2 and p <= page + 2) or p == 1 or p == total_pages %}
-                            <li class="page-item {% if p == page %}active{% endif %}">
-                                <a class="page-link" href="/admin/audit?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">{{ p }}</a>
-                            </li>
-                            {% elif p == page - 3 or p == page + 3 %}
-                            <li class="page-item disabled"><span class="page-link">...</span></li>
                             {% endif %}
-                            {% endfor %}
-                            <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
-                                <a class="page-link" href="/admin/audit?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Next</a>
+                            {% if next_cursor %}
+                            <li class="page-item">
+                                <a class="page-link" href="/admin/audit?cursor={{ next_cursor }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Next &raquo;</a>
                             </li>
+                            {% else %}
+                            <li class="page-item disabled"><span class="page-link">End of results</span></li>
+                            {% endif %}
                         </ul>
                     </nav>
-                    {% endif %}
                 </div>
             </div>
         </div>

@@ -2173,21 +2173,15 @@ async def create_scheduler_decision(
 
 
 # Audit Search
-async def search_requests(
-    db: AsyncSession,
+def _build_request_filter_conditions(
     user_id: Optional[int] = None,
     model: Optional[str] = None,
     status: Optional[RequestStatus] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     search_text: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 100,
-) -> Tuple[List[Request], int]:
-    """Search requests with filters."""
-    query = select(Request)
-    count_query = select(func.count(Request.id))
-
+) -> list:
+    """Build shared filter conditions for request queries."""
     conditions = []
     if user_id:
         conditions.append(Request.user_id == user_id)
@@ -2206,21 +2200,102 @@ async def search_requests(
                 func.json_extract(Request.messages, "$").ilike(f"%{search_text}%"),
             )
         )
+    return conditions
 
-    if conditions:
-        query = query.where(and_(*conditions))
-        count_query = count_query.where(and_(*conditions))
 
-    # Get total count
-    count_result = await db.execute(count_query)
+async def search_requests(
+    db: AsyncSession,
+    user_id: Optional[int] = None,
+    model: Optional[str] = None,
+    status: Optional[RequestStatus] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    search_text: Optional[str] = None,
+    cursor_before: Optional[int] = None,
+    limit: int = 50,
+) -> Tuple[List[Request], int]:
+    """Search requests with keyset pagination.
+
+    cursor_before: fetch rows with id < this value (for next-page navigation).
+                   Omit for the first page.
+    """
+    conditions = _build_request_filter_conditions(
+        user_id, model, status, start_date, end_date, search_text
+    )
+
+    # Keyset cursor — uses primary key index, constant time regardless of depth
+    if cursor_before is not None:
+        conditions.append(Request.id < cursor_before)
+
+    where_clause = and_(*conditions) if conditions else True
+
+    # Total count (without cursor — shows overall matching rows)
+    base_conditions = _build_request_filter_conditions(
+        user_id, model, status, start_date, end_date, search_text
+    )
+    count_where = and_(*base_conditions) if base_conditions else True
+    count_result = await db.execute(
+        select(func.count(Request.id)).where(count_where)
+    )
     total = count_result.scalar_one()
 
-    # Get paginated results
-    query = query.order_by(Request.created_at.desc()).offset(skip).limit(limit)
-    result = await db.execute(query.options(selectinload(Request.response)))
+    # Paginated results via keyset
+    query = (
+        select(Request)
+        .where(where_clause)
+        .order_by(Request.id.desc())
+        .limit(limit)
+        .options(selectinload(Request.response))
+    )
+    result = await db.execute(query)
     requests = list(result.scalars().all())
 
     return requests, total
+
+
+async def iter_requests_batched(
+    db: AsyncSession,
+    user_id: Optional[int] = None,
+    model: Optional[str] = None,
+    status: Optional[RequestStatus] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    search_text: Optional[str] = None,
+    batch_size: int = 1000,
+):
+    """Yield all matching requests in batches using keyset pagination.
+
+    Memory-efficient: only one batch is loaded at a time.
+    """
+    conditions = _build_request_filter_conditions(
+        user_id, model, status, start_date, end_date, search_text
+    )
+    cursor = None
+
+    while True:
+        batch_conditions = list(conditions)
+        if cursor is not None:
+            batch_conditions.append(Request.id < cursor)
+
+        where_clause = and_(*batch_conditions) if batch_conditions else True
+        query = (
+            select(Request)
+            .where(where_clause)
+            .order_by(Request.id.desc())
+            .limit(batch_size)
+            .options(selectinload(Request.response))
+        )
+        result = await db.execute(query)
+        batch = list(result.scalars().all())
+        if not batch:
+            break
+
+        for req in batch:
+            yield req
+
+        cursor = batch[-1].id
+        if len(batch) < batch_size:
+            break
 
 
 # User stats/detail queries

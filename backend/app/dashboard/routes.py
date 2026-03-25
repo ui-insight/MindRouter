@@ -2270,10 +2270,10 @@ async def admin_audit(
     status_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    page: int = 1,
+    cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Admin audit log viewer with filters and pagination."""
+    """Admin audit log viewer with keyset pagination."""
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse(url="/login", status_code=302)
@@ -2285,7 +2285,6 @@ async def admin_audit(
     from backend.app.db.models import RequestStatus
 
     per_page = 50
-    skip = (page - 1) * per_page
 
     # Parse filters
     parsed_user_id: Optional[int] = None
@@ -2310,6 +2309,11 @@ async def admin_audit(
         except ValueError:
             pass
 
+    # Parse keyset cursor
+    cursor_before = None
+    if cursor and cursor.isdigit():
+        cursor_before = int(cursor)
+
     audit_requests, total = await crud.search_requests(
         db,
         user_id=parsed_user_id,
@@ -2318,10 +2322,14 @@ async def admin_audit(
         start_date=parsed_start,
         end_date=parsed_end,
         search_text=search,
-        skip=skip,
+        cursor_before=cursor_before,
         limit=per_page,
     )
-    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    # Build next-page cursor from the last row's ID
+    next_cursor = None
+    if len(audit_requests) == per_page:
+        next_cursor = audit_requests[-1].id
 
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
@@ -2332,8 +2340,8 @@ async def admin_audit(
             **masq,
             "audit_requests": audit_requests,
             "total": total,
-            "page": page,
-            "total_pages": total_pages,
+            "cursor": cursor or "",
+            "next_cursor": next_cursor,
             "search": search or "",
             "user_id_filter": user_id_filter or "",
             "model_filter": model_filter or "",
@@ -2391,21 +2399,15 @@ async def admin_audit_export(
         except ValueError:
             pass
 
-    audit_requests, _ = await crud.search_requests(
-        db,
-        user_id=parsed_user_id,
-        model=model_filter,
-        status=parsed_status,
-        start_date=parsed_start,
-        end_date=parsed_end,
-        search_text=search,
-        skip=0,
-        limit=10000,
-    )
+    fieldnames = [
+        "request_uuid", "created_at", "user_id", "model", "endpoint",
+        "status", "prompt_tokens", "completion_tokens", "total_tokens",
+        "total_time_ms", "error_message",
+    ]
+    if include_content:
+        fieldnames.extend(["messages", "prompt", "parameters", "response_content", "finish_reason"])
 
-    # Build export rows
-    rows = []
-    for req in audit_requests:
+    def _row(req) -> dict:
         row = {
             "request_uuid": req.request_uuid,
             "created_at": req.created_at.isoformat() if req.created_at else "",
@@ -2425,32 +2427,49 @@ async def admin_audit_export(
             row["parameters"] = json.dumps(req.parameters) if req.parameters else ""
             row["response_content"] = req.response.content if req.response else ""
             row["finish_reason"] = req.response.finish_reason if req.response else ""
-        rows.append(row)
+        return row
 
+    # Stream all matching rows using batched keyset pagination (no row limit)
     if format == "json":
-        content = json.dumps(rows, indent=2)
+        async def json_stream():
+            yield "[\n"
+            first = True
+            async for req in crud.iter_requests_batched(
+                db, user_id=parsed_user_id, model=model_filter,
+                status=parsed_status, start_date=parsed_start,
+                end_date=parsed_end, search_text=search,
+            ):
+                if not first:
+                    yield ",\n"
+                first = False
+                yield json.dumps(_row(req), indent=2)
+            yield "\n]\n"
+
         return StreamingResponse(
-            io.BytesIO(content.encode()),
+            json_stream(),
             media_type="application/json",
             headers={"Content-Disposition": "attachment; filename=audit_log.json"},
         )
 
-    # CSV format
-    output = io.StringIO()
-    fieldnames = [
-        "request_uuid", "created_at", "user_id", "model", "endpoint",
-        "status", "prompt_tokens", "completion_tokens", "total_tokens",
-        "total_time_ms", "error_message",
-    ]
-    if include_content:
-        fieldnames.extend(["messages", "prompt", "parameters", "response_content", "finish_reason"])
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in rows:
-        writer.writerow({k: row.get(k, "") for k in fieldnames})
+    # CSV format — stream rows as they're read
+    async def csv_stream():
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames)
+        writer.writeheader()
+        yield buf.getvalue()
+
+        async for req in crud.iter_requests_batched(
+            db, user_id=parsed_user_id, model=model_filter,
+            status=parsed_status, start_date=parsed_start,
+            end_date=parsed_end, search_text=search,
+        ):
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=fieldnames)
+            writer.writerow({k: _row(req).get(k, "") for k in fieldnames})
+            yield buf.getvalue()
 
     return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
+        csv_stream(),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
     )
