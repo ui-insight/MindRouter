@@ -177,7 +177,17 @@ async def _admin_masquerade_context(request: Request, real_user: "User", db: Asy
     Returns dict with:
       - is_read_only: True when the effective user lacks is_admin
       - masquerade_user: the target User object if masquerading, else None
+      - pending_requests_total: count of all pending requests (quota + service key)
     """
+    # Count pending requests for sidebar badge (best-effort, don't break page on error)
+    pending_total = 0
+    try:
+        pending_quota = await crud.count_pending_quota_requests(db)
+        pending_service = await crud.count_pending_service_key_requests(db)
+        pending_total = pending_quota + pending_service
+    except Exception:
+        pass
+
     masquerade_id = get_masquerade_user_id(request)
     if masquerade_id and masquerade_id != real_user.id:
         target_user = await crud.get_user_by_id(db, masquerade_id)
@@ -185,10 +195,12 @@ async def _admin_masquerade_context(request: Request, real_user: "User", db: Asy
             return {
                 "is_read_only": not target_user.group.is_admin,
                 "masquerade_user": target_user,
+                "pending_requests_total": pending_total,
             }
     return {
         "is_read_only": not real_user.group.is_admin,
         "masquerade_user": None,
+        "pending_requests_total": pending_total,
     }
 
 

@@ -1,3 +1,12 @@
+<style>
+@keyframes pulse-badge {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.15); }
+}
+.sidebar-pulse {
+    animation: pulse-badge 1.5s ease-in-out infinite;
+}
+</style>
 <div class="col-md-2 sidebar py-3" style="background: var(--mr-sidebar-bg);">
     <h6 class="px-3 text-muted">Admin Menu</h6>
     <ul class="nav flex-column" role="navigation" aria-label="Admin navigation">
@@ -47,8 +56,11 @@
             </a>
         </li>
         <li class="nav-item">
-            <a class="nav-link {% if active == 'requests' %}active{% endif %}" href="/admin/requests" {% if active == 'requests' %}aria-current="page"{% endif %}>
-                <i class="bi bi-inbox"></i> Requests
+            <a class="nav-link {% if active == 'requests' %}active{% endif %}{% if pending_requests_total %} text-danger fw-bold{% endif %}" href="/admin/requests" {% if active == 'requests' %}aria-current="page"{% endif %}>
+                <i class="bi bi-inbox{% if pending_requests_total %}-fill{% endif %}"></i> Requests
+                {% if pending_requests_total %}
+                <span class="badge bg-danger ms-1 sidebar-pulse">{{ pending_requests_total }}</span>
+                {% endif %}
             </a>
         </li>
         <li class="nav-item">
@@ -108,3 +120,37 @@
         </li>
     </ul>
 </div>
+
+{% if pending_requests_total %}
+<!-- Pending requests notification modal (shown once per session) -->
+<div class="modal fade" id="pendingRequestsModal" tabindex="-1" aria-labelledby="pendingRequestsModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title" id="pendingRequestsModalLabel">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i>Pending Requests
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>There {{ 'is' if pending_requests_total == 1 else 'are' }} <strong>{{ pending_requests_total }}</strong> pending request{{ 's' if pending_requests_total != 1 else '' }} awaiting your review.</p>
+                <p class="text-muted mb-0">This may include quota increase requests and service API key promotion requests.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Dismiss</button>
+                <a href="/admin/requests" class="btn btn-danger"><i class="bi bi-inbox-fill me-1"></i>Review Requests</a>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(function() {
+    var key = 'mr_pending_notified_' + {{ pending_requests_total }};
+    if (!sessionStorage.getItem(key)) {
+        sessionStorage.setItem(key, '1');
+        var modal = new bootstrap.Modal(document.getElementById('pendingRequestsModal'));
+        modal.show();
+    }
+})();
+</script>
+{% endif %}

@@ -2287,6 +2287,16 @@ async def count_pending_service_key_requests(db: AsyncSession) -> int:
     return result.scalar() or 0
 
 
+async def count_pending_quota_requests(db: AsyncSession) -> int:
+    """Count pending quota requests (for sidebar badge)."""
+    result = await db.execute(
+        select(func.count(QuotaRequest.id)).where(
+            QuotaRequest.status == QuotaRequestStatus.PENDING
+        )
+    )
+    return result.scalar() or 0
+
+
 # Scheduler Decision CRUD
 async def create_scheduler_decision(
     db: AsyncSession,
