@@ -182,7 +182,17 @@
             {% endif %}
 
             <!-- Keys Table -->
-            <div class="card">
+            <div class="card border-primary">
+                <div class="card-header bg-primary bg-opacity-10 d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="bi bi-key me-2"></i>All API Keys
+                        <span class="badge bg-primary ms-2">{{ total }}</span>
+                    </h5>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="hideRevokedAll">
+                        <label class="form-check-label small" for="hideRevokedAll">Hide revoked</label>
+                    </div>
+                </div>
                 <div class="card-body">
                     <div class="table-responsive">
                         <table class="table table-hover">
@@ -204,7 +214,7 @@
                             </thead>
                             <tbody>
                                 {% for k in api_keys %}
-                                <tr>
+                                <tr class="all-key-row" data-key-status="{{ k.status.value }}">
                                     <td><code>{{ k.key_prefix }}...</code></td>
                                     <td>
                                         {{ k.name }}
@@ -330,6 +340,17 @@ if (hideRevokedCb) {
         var rows = document.querySelectorAll('.service-key-row[data-status="revoked"]');
         rows.forEach(function(row) {
             row.style.display = hideRevokedCb.checked ? 'none' : '';
+        });
+    });
+}
+
+// Hide/show revoked keys in main table
+var hideRevokedAllCb = document.getElementById('hideRevokedAll');
+if (hideRevokedAllCb) {
+    hideRevokedAllCb.addEventListener('change', function() {
+        var rows = document.querySelectorAll('.all-key-row[data-key-status="revoked"]');
+        rows.forEach(function(row) {
+            row.style.display = hideRevokedAllCb.checked ? 'none' : '';
         });
     });
 }
