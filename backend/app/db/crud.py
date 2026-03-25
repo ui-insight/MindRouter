@@ -2212,24 +2212,18 @@ async def search_requests(
     end_date: Optional[datetime] = None,
     search_text: Optional[str] = None,
     cursor_before: Optional[int] = None,
+    page: Optional[int] = None,
+    last_page: bool = False,
     limit: int = 50,
 ) -> Tuple[List[Request], int]:
-    """Search requests with keyset pagination.
+    """Search requests with hybrid pagination.
 
-    cursor_before: fetch rows with id < this value (for next-page navigation).
-                   Omit for the first page.
+    Supports three modes:
+    - page=N (1-indexed): OFFSET-based, for numbered page links (pages 1-20)
+    - cursor_before=ID: keyset-based, for deep navigation via Next
+    - last_page=True: fetch the final page of results
+    - None of the above: first page (equivalent to page=1)
     """
-    conditions = _build_request_filter_conditions(
-        user_id, model, status, start_date, end_date, search_text
-    )
-
-    # Keyset cursor — uses primary key index, constant time regardless of depth
-    if cursor_before is not None:
-        conditions.append(Request.id < cursor_before)
-
-    where_clause = and_(*conditions) if conditions else True
-
-    # Total count (without cursor — shows overall matching rows)
     base_conditions = _build_request_filter_conditions(
         user_id, model, status, start_date, end_date, search_text
     )
@@ -2239,16 +2233,47 @@ async def search_requests(
     )
     total = count_result.scalar_one()
 
-    # Paginated results via keyset
-    query = (
-        select(Request)
-        .where(where_clause)
-        .order_by(Request.id.desc())
-        .limit(limit)
-        .options(selectinload(Request.response))
-    )
-    result = await db.execute(query)
-    requests = list(result.scalars().all())
+    conditions = list(base_conditions)
+
+    if last_page:
+        # Fetch the last N rows: query ascending, then reverse
+        where_clause = and_(*conditions) if conditions else True
+        query = (
+            select(Request)
+            .where(where_clause)
+            .order_by(Request.id.asc())
+            .limit(limit)
+            .options(selectinload(Request.response))
+        )
+        result = await db.execute(query)
+        requests = list(reversed(result.scalars().all()))
+    elif cursor_before is not None:
+        # Keyset pagination — constant time regardless of depth
+        conditions.append(Request.id < cursor_before)
+        where_clause = and_(*conditions) if conditions else True
+        query = (
+            select(Request)
+            .where(where_clause)
+            .order_by(Request.id.desc())
+            .limit(limit)
+            .options(selectinload(Request.response))
+        )
+        result = await db.execute(query)
+        requests = list(result.scalars().all())
+    else:
+        # OFFSET-based for numbered pages (fast for early pages)
+        offset = ((page or 1) - 1) * limit
+        where_clause = and_(*conditions) if conditions else True
+        query = (
+            select(Request)
+            .where(where_clause)
+            .order_by(Request.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .options(selectinload(Request.response))
+        )
+        result = await db.execute(query)
+        requests = list(result.scalars().all())
 
     return requests, total
 

@@ -124,23 +124,48 @@
                         </table>
                     </div>
 
-                    <!-- Keyset Pagination -->
+                    <!-- Hybrid Pagination: numbered pages 1-20, then cursor-based -->
+                    {% set fq = '' %}
+                    {% if search %}{% set fq = fq ~ '&search=' ~ search %}{% endif %}
+                    {% if user_id_filter %}{% set fq = fq ~ '&user_id_filter=' ~ user_id_filter %}{% endif %}
+                    {% if model_filter %}{% set fq = fq ~ '&model_filter=' ~ model_filter %}{% endif %}
+                    {% if status_filter %}{% set fq = fq ~ '&status_filter=' ~ status_filter %}{% endif %}
+                    {% if start_date %}{% set fq = fq ~ '&start_date=' ~ start_date %}{% endif %}
+                    {% if end_date %}{% set fq = fq ~ '&end_date=' ~ end_date %}{% endif %}
+
+                    {% if total_pages > 1 %}
                     <nav aria-label="Audit log pagination">
-                        <ul class="pagination justify-content-center mb-0">
-                            {% if cursor %}
-                            <li class="page-item">
-                                <a class="page-link" href="/admin/audit?{% if search %}search={{ search }}&{% endif %}{% if user_id_filter %}user_id_filter={{ user_id_filter }}&{% endif %}{% if model_filter %}model_filter={{ model_filter }}&{% endif %}{% if status_filter %}status_filter={{ status_filter }}&{% endif %}{% if start_date %}start_date={{ start_date }}&{% endif %}{% if end_date %}end_date={{ end_date }}&{% endif %}">First</a>
+                        <ul class="pagination justify-content-center mb-0 flex-wrap">
+                            {# First page #}
+                            <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/audit?page=1{{ fq }}">&laquo; First</a>
                             </li>
+
+                            {# Numbered pages 1 through show_numbered #}
+                            {% for p in range(1, show_numbered + 1) %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="/admin/audit?page={{ p }}{{ fq }}">{{ p }}</a>
+                            </li>
+                            {% endfor %}
+
+                            {# Ellipsis + Next (cursor-based) if there are more pages #}
+                            {% if total_pages > show_numbered %}
+                            <li class="page-item disabled"><span class="page-link">...</span></li>
                             {% endif %}
+
                             {% if next_cursor %}
-                            <li class="page-item">
-                                <a class="page-link" href="/admin/audit?cursor={{ next_cursor }}{% if search %}&search={{ search }}{% endif %}{% if user_id_filter %}&user_id_filter={{ user_id_filter }}{% endif %}{% if model_filter %}&model_filter={{ model_filter }}{% endif %}{% if status_filter %}&status_filter={{ status_filter }}{% endif %}{% if start_date %}&start_date={{ start_date }}{% endif %}{% if end_date %}&end_date={{ end_date }}{% endif %}">Next &raquo;</a>
+                            <li class="page-item {% if using_cursor %}active{% endif %}">
+                                <a class="page-link" href="/admin/audit?cursor={{ next_cursor }}{{ fq }}">Next &raquo;</a>
                             </li>
-                            {% else %}
-                            <li class="page-item disabled"><span class="page-link">End of results</span></li>
                             {% endif %}
+
+                            {# Last page #}
+                            <li class="page-item {% if not next_cursor and not using_cursor and page == total_pages %}disabled{% endif %}">
+                                <a class="page-link" href="/admin/audit?page=last{{ fq }}">Last ({{ total_pages }})</a>
+                            </li>
                         </ul>
                     </nav>
+                    {% endif %}
                 </div>
             </div>
         </div>

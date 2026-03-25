@@ -2270,10 +2270,16 @@ async def admin_audit(
     status_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    page: Optional[str] = None,
     cursor: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Admin audit log viewer with keyset pagination."""
+    """Admin audit log viewer with hybrid pagination.
+
+    Pages 1-20: OFFSET-based (fast, gives page numbers).
+    Beyond page 20 or cursor param: keyset-based (constant time).
+    page=last: jump to the final page.
+    """
     user_id = get_session_user_id(request)
     if not user_id:
         return RedirectResponse(url="/login", status_code=302)
@@ -2285,6 +2291,7 @@ async def admin_audit(
     from backend.app.db.models import RequestStatus
 
     per_page = 50
+    max_numbered_pages = 20
 
     # Parse filters
     parsed_user_id: Optional[int] = None
@@ -2309,27 +2316,53 @@ async def admin_audit(
         except ValueError:
             pass
 
-    # Parse keyset cursor
+    # Determine pagination mode
     cursor_before = None
-    if cursor and cursor.isdigit():
+    current_page = None
+    is_last_page = False
+    using_cursor = False
+
+    if page == "last":
+        is_last_page = True
+    elif cursor and cursor.isdigit():
         cursor_before = int(cursor)
+        using_cursor = True
+    elif page and page.isdigit():
+        current_page = max(1, int(page))
+    else:
+        current_page = 1
+
+    filter_kwargs = dict(
+        user_id=parsed_user_id, model=model_filter, status=parsed_status,
+        start_date=parsed_start, end_date=parsed_end, search_text=search,
+    )
 
     audit_requests, total = await crud.search_requests(
         db,
-        user_id=parsed_user_id,
-        model=model_filter,
-        status=parsed_status,
-        start_date=parsed_start,
-        end_date=parsed_end,
-        search_text=search,
+        **filter_kwargs,
         cursor_before=cursor_before,
+        page=current_page,
+        last_page=is_last_page,
         limit=per_page,
     )
+
+    total_pages = max(1, (total + per_page - 1) // per_page)
 
     # Build next-page cursor from the last row's ID
     next_cursor = None
     if len(audit_requests) == per_page:
         next_cursor = audit_requests[-1].id
+
+    # Determine which page numbers to show (up to max_numbered_pages)
+    show_numbered = min(total_pages, max_numbered_pages)
+
+    # Figure out the effective page for highlighting
+    if is_last_page:
+        effective_page = total_pages
+    elif using_cursor:
+        effective_page = None  # beyond numbered range
+    else:
+        effective_page = current_page
 
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
@@ -2340,8 +2373,11 @@ async def admin_audit(
             **masq,
             "audit_requests": audit_requests,
             "total": total,
-            "cursor": cursor or "",
+            "page": effective_page,
+            "total_pages": total_pages,
+            "show_numbered": show_numbered,
             "next_cursor": next_cursor,
+            "using_cursor": using_cursor,
             "search": search or "",
             "user_id_filter": user_id_filter or "",
             "model_filter": model_filter or "",
