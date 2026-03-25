@@ -69,12 +69,18 @@
                         <i class="bi bi-gear-fill me-2"></i>Service API Keys
                         <span class="badge bg-info ms-2">{{ service_keys|length }}</span>
                     </h5>
-                    <i class="bi bi-chevron-down"></i>
+                    <div class="d-flex align-items-center gap-3" onclick="event.stopPropagation();">
+                        <div class="form-check form-switch mb-0">
+                            <input class="form-check-input" type="checkbox" id="hideRevokedService" checked>
+                            <label class="form-check-label small" for="hideRevokedService">Hide revoked</label>
+                        </div>
+                        <i class="bi bi-chevron-down"></i>
+                    </div>
                 </div>
                 <div class="collapse show" id="serviceKeysBody">
                     <div class="card-body p-0">
                         {% for sk in service_keys %}
-                        <div class="border-bottom p-3{% if sk.revocation_requested_at %} bg-warning bg-opacity-10{% endif %}">
+                        <div class="border-bottom p-3 service-key-row{% if sk.revocation_requested_at %} bg-warning bg-opacity-10{% endif %}" data-status="{{ sk.status.value }}"{% if sk.status.value == 'revoked' %} style="display:none;"{% endif %}>
                             <div class="d-flex justify-content-between align-items-start mb-2">
                                 <div>
                                     <strong>{{ sk.service_name or sk.name }}</strong>
@@ -120,7 +126,7 @@
                                     <span class="badge bg-success">Low Risk</span>
                                     {% endif %}
                                     {% if sk.compliance_tags %}
-                                    {% for tag in sk.compliance_tags %}
+                                    {% for tag in sk.compliance_tags|fromjson %}
                                     <span class="badge bg-secondary ms-1">{{ tag }}</span>
                                     {% endfor %}
                                     {% endif %}
@@ -137,7 +143,7 @@
                                 <div class="col-md-4">
                                     <div class="text-muted mb-1">Alternative Contacts</div>
                                     {% if sk.service_contacts %}
-                                    {% for email in sk.service_contacts %}
+                                    {% for email in sk.service_contacts|fromjson %}
                                     <span class="d-block">{{ email }}</span>
                                     {% endfor %}
                                     {% else %}
@@ -315,6 +321,17 @@ function applySortKeys(val) {
     var parts = val.split('|');
     document.getElementById('sort_field').value = parts[0];
     document.getElementById('sort_dir').value = parts[1];
+}
+
+// Hide/show revoked service keys
+var hideRevokedCb = document.getElementById('hideRevokedService');
+if (hideRevokedCb) {
+    hideRevokedCb.addEventListener('change', function() {
+        var rows = document.querySelectorAll('.service-key-row[data-status="revoked"]');
+        rows.forEach(function(row) {
+            row.style.display = hideRevokedCb.checked ? 'none' : '';
+        });
+    });
 }
 </script>
 {% endblock %}
