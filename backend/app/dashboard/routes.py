@@ -1033,7 +1033,7 @@ async def admin_toggle_system_online(
 async def admin_users(
     request: Request,
     search: Optional[str] = None,
-    group_id: Optional[int] = None,
+    group_id: Optional[str] = None,
     sort: Optional[str] = None,
     dir: Optional[str] = None,
     page: int = 1,
@@ -1048,11 +1048,12 @@ async def admin_users(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    parsed_group_id = int(group_id) if group_id and group_id.strip().isdigit() else None
     per_page = 25
     skip = (page - 1) * per_page
     sort_dir = dir if dir in ("asc", "desc") else "desc"
     users, total = await crud.get_users(
-        db, skip=skip, limit=per_page, group_id=group_id, search=search,
+        db, skip=skip, limit=per_page, group_id=parsed_group_id, search=search,
         sort_by=sort, sort_dir=sort_dir,
     )
     groups = await crud.get_all_groups(db)
@@ -2555,7 +2556,7 @@ async def admin_admin_audit(
     request: Request,
     action: Optional[str] = None,
     entity_type: Optional[str] = None,
-    user_id: Optional[int] = None,
+    user_id: Optional[str] = None,
     page: int = 1,
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -2571,12 +2572,13 @@ async def admin_admin_audit(
     from sqlalchemy import select, distinct
     from backend.app.db.models import AdminAuditLog, User
 
+    parsed_uid = int(user_id) if user_id and user_id.strip().isdigit() else None
     page_size = 50
     skip = (page - 1) * page_size
 
     entries, total = await crud.get_admin_audit_log(
         db,
-        user_id=user_id,
+        user_id=parsed_uid,
         action=action,
         entity_type=entity_type,
         skip=skip,
@@ -3020,7 +3022,7 @@ async def admin_api_keys(
 async def admin_conversations(
     request: Request,
     search: Optional[str] = None,
-    user_id_filter: Optional[int] = None,
+    user_id_filter: Optional[str] = None,
     model_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -3036,6 +3038,7 @@ async def admin_conversations(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    parsed_uid = int(user_id_filter) if user_id_filter and user_id_filter.strip().isdigit() else None
     per_page = 50
     skip = (page - 1) * per_page
 
@@ -3055,7 +3058,7 @@ async def admin_conversations(
 
     conversations, total = await chat_crud.search_conversations_admin(
         db,
-        user_id=user_id_filter,
+        user_id=parsed_uid,
         model=model_filter,
         search_text=search,
         start_date=parsed_start,
@@ -3116,7 +3119,7 @@ async def admin_conversations_export(
     request: Request,
     format: str = "csv",
     search: Optional[str] = None,
-    user_id_filter: Optional[int] = None,
+    user_id_filter: Optional[str] = None,
     model_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -3131,6 +3134,8 @@ async def admin_conversations_export(
     user = await crud.get_user_by_id(db, session_user_id)
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
+
+    parsed_uid = int(user_id_filter) if user_id_filter and user_id_filter.strip().isdigit() else None
 
     # Parse dates
     parsed_start = None
@@ -3148,7 +3153,7 @@ async def admin_conversations_export(
 
     conversations, _ = await chat_crud.search_conversations_admin(
         db,
-        user_id=user_id_filter,
+        user_id=parsed_uid,
         model=model_filter,
         search_text=search,
         start_date=parsed_start,
@@ -3205,7 +3210,7 @@ async def admin_conversations_export(
 async def api_admin_conversations_export(
     request: Request,
     search: Optional[str] = None,
-    user_id_filter: Optional[int] = None,
+    user_id_filter: Optional[str] = None,
     model_filter: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -3877,7 +3882,7 @@ async def admin_retention(
     page: int = 1,
     category: str = "requests",
     model_filter: Optional[str] = None,
-    user_id_filter: Optional[int] = None,
+    user_id_filter: Optional[str] = None,
     success: Optional[str] = None,
     error: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
@@ -3899,6 +3904,7 @@ async def admin_retention(
     )
     from backend.app.settings import get_settings
 
+    parsed_uid = int(user_id_filter) if user_id_filter and user_id_filter.strip().isdigit() else None
     settings = get_settings()
     archive_configured = settings.archive_database_url is not None
 
@@ -3921,7 +3927,7 @@ async def admin_retention(
                         browse_rows, browse_total = await browse_archive(
                             archive_db, category, page, 50,
                             model_filter=model_filter,
-                            user_id_filter=user_id_filter,
+                            user_id_filter=parsed_uid,
                         )
             except Exception as e:
                 error = f"Archive DB error: {e}"
