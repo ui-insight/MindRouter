@@ -126,3 +126,4 @@ MindRouter2_Security_Review.docx
 
 # Blog drafts (keep local)
 blog_drafts/
+*.csv

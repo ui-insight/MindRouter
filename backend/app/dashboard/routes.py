@@ -33,7 +33,7 @@ from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.dashboard.azure_auth import azure_router
 from backend.app.db import crud, chat_crud
-from backend.app.db.models import BackendEngine, QuotaRequestStatus, UserRole
+from backend.app.db.models import ApiKeyStatus, BackendEngine, QuotaRequestStatus, ServiceKeyRequestStatus, UserRole
 from backend.app.db.session import get_async_db, get_async_db_context
 from backend.app.logging_config import get_logger
 from backend.app.security import generate_api_key, hash_password, verify_password
@@ -654,6 +654,9 @@ async def user_dashboard(
     # Email opt-out preference
     email_optout = await crud.get_config_json(db, f"user.{effective_id}.email_optout", "")
 
+    # Service key requests for this user (to show pending status)
+    service_key_requests = await crud.get_user_service_key_requests(db, effective_id)
+
     return templates.TemplateResponse(
         "user/dashboard.html",
         {
@@ -678,6 +681,7 @@ async def user_dashboard(
             "user_tts_voice": user_tts_voice or "",
             "user_tts_speed": user_tts_speed,
             "email_optout": email_optout,
+            "service_key_requests": service_key_requests,
         },
     )
 
@@ -952,6 +956,81 @@ async def submit_quota_request(
     return RedirectResponse(url="/dashboard", status_code=302)
 
 
+@dashboard_router.post("/dashboard/request-service-key")
+async def submit_service_key_request(
+    request: Request,
+    api_key_id: int = Form(...),
+    service_name: str = Form(...),
+    reason: str = Form(...),
+    alternative_contacts: str = Form(""),
+    data_risk_level: str = Form("low"),
+    compliance_other: str = Form(""),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Submit a request to promote an API key to a service key."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Get form data for compliance_tags (multi-select)
+    form = await request.form()
+    tags = form.getlist("compliance_tags")
+    compliance_tags_json = json.dumps(tags) if tags else None
+
+    # Validate key belongs to user, is active, not already service
+    key = await crud.get_api_key_by_id(db, api_key_id)
+    if not key or key.user_id != user_id:
+        return RedirectResponse(url="/dashboard", status_code=302)
+    if key.status != ApiKeyStatus.ACTIVE or key.is_service:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    # Check for existing pending request for this key
+    user_requests = await crud.get_user_service_key_requests(db, user_id)
+    for r in user_requests:
+        if r.api_key_id == api_key_id and r.status == ServiceKeyRequestStatus.PENDING:
+            return RedirectResponse(url="/dashboard", status_code=302)
+
+    contacts_json = json.dumps([c.strip() for c in alternative_contacts.split(",") if c.strip()]) if alternative_contacts.strip() else None
+
+    await crud.create_service_key_request(
+        db=db,
+        api_key_id=api_key_id,
+        user_id=user_id,
+        service_name=service_name,
+        reason=reason,
+        alternative_contacts=contacts_json,
+        data_risk_level=data_risk_level,
+        compliance_tags=compliance_tags_json,
+        compliance_other=compliance_other.strip() or None,
+    )
+    await db.commit()
+
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+
+@dashboard_router.post("/dashboard/request-service-key-revocation/{key_id}")
+async def request_service_key_revocation(
+    request: Request,
+    key_id: int,
+    reason: str = Form(""),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """User requests revocation of their service key."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    # Validate key belongs to user and is a service key
+    key = await crud.get_api_key_by_id(db, key_id)
+    if not key or key.user_id != user_id or not key.is_service:
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    await crud.request_service_key_revocation(db, key_id, reason or "User requested revocation")
+    await db.commit()
+
+    return RedirectResponse(url="/dashboard", status_code=302)
+
+
 # Admin Dashboard
 @dashboard_router.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard(
@@ -974,8 +1053,9 @@ async def admin_dashboard(
     # Get nodes
     nodes = await crud.get_all_nodes(db)
 
-    # Get pending requests
+    # Get pending requests (quota + service key)
     pending_requests = await crud.get_pending_quota_requests(db)
+    pending_service_key_requests = await crud.get_pending_service_key_requests(db)
 
     # Get scheduler stats
     scheduler = get_scheduler()
@@ -991,6 +1071,7 @@ async def admin_dashboard(
             "backends": backends,
             "nodes": nodes,
             "pending_requests": pending_requests,
+            "pending_service_key_requests": pending_service_key_requests,
             "scheduler_stats": scheduler_stats,
             "is_force_offline": registry.is_force_offline,
         },
@@ -1114,11 +1195,18 @@ async def admin_requests(
         return RedirectResponse(url="/dashboard", status_code=302)
 
     pending_requests = await crud.get_pending_quota_requests(db)
+    pending_service_key_requests = await crud.get_pending_service_key_requests(db)
 
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/requests.html",
-        {"request": request, "user": user, **masq, "requests": pending_requests},
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "requests": pending_requests,
+            "service_key_requests": pending_service_key_requests,
+        },
     )
 
 
@@ -1182,6 +1270,98 @@ async def deny_request(
     await db.commit()
 
     return RedirectResponse(url="/admin/requests", status_code=302)
+
+
+@dashboard_router.post("/admin/service-key-requests/{request_id}/approve")
+async def approve_service_key_request(
+    request: Request,
+    request_id: int,
+    review_notes: str = Form(""),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Approve a service key request."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    await crud.review_service_key_request(
+        db=db,
+        request_id=request_id,
+        reviewer_id=user_id,
+        approved=True,
+        review_notes=review_notes.strip() or None,
+    )
+    await crud.log_admin_action(
+        db, user_id=user_id, action="service_key.approve",
+        entity_type="service_key_request", entity_id=str(request_id),
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+
+    return RedirectResponse(url="/admin/requests", status_code=302)
+
+
+@dashboard_router.post("/admin/service-key-requests/{request_id}/deny")
+async def deny_service_key_request(
+    request: Request,
+    request_id: int,
+    review_notes: str = Form(""),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Deny a service key request."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    await crud.review_service_key_request(
+        db=db,
+        request_id=request_id,
+        reviewer_id=user_id,
+        approved=False,
+        review_notes=review_notes.strip() or None,
+    )
+    await crud.log_admin_action(
+        db, user_id=user_id, action="service_key.deny",
+        entity_type="service_key_request", entity_id=str(request_id),
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+
+    return RedirectResponse(url="/admin/requests", status_code=302)
+
+
+@dashboard_router.post("/admin/service-keys/{key_id}/revoke")
+async def admin_revoke_service_key(
+    request: Request,
+    key_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin revokes a service key."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    await crud.revoke_service_key(db, key_id)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="service_key.revoke",
+        entity_type="api_key", entity_id=str(key_id),
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+
+    return RedirectResponse(url="/admin/api-keys?type_filter=service", status_code=302)
 
 
 @dashboard_router.get("/admin/models", response_class=HTMLResponse)
@@ -2966,6 +3146,7 @@ async def admin_api_keys(
     request: Request,
     search: Optional[str] = None,
     key_status: Optional[str] = None,
+    type_filter: Optional[str] = None,
     sort: Optional[str] = None,
     dir: Optional[str] = None,
     page: int = 1,
@@ -2985,7 +3166,7 @@ async def admin_api_keys(
     sort_dir = dir if dir in ("asc", "desc") else "desc"
     keys, total = await crud.get_all_api_keys(
         db, skip=skip, limit=per_page, search=search, status_filter=key_status,
-        sort_by=sort, sort_dir=sort_dir,
+        sort_by=sort, sort_dir=sort_dir, type_filter=type_filter,
     )
     total_pages = max(1, (total + per_page - 1) // per_page)
 
@@ -3006,6 +3187,7 @@ async def admin_api_keys(
             "total_pages": total_pages,
             "search": search or "",
             "key_status": key_status or "",
+            "type_filter": type_filter or "",
             "sort": sort or "",
             "dir": sort_dir,
             "key_last_ips": key_last_ips,

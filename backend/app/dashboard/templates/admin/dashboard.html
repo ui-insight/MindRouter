@@ -55,7 +55,7 @@
                     <div class="card card-stat danger h-100">
                         <div class="card-body">
                             <h2 class="card-subtitle h6 mb-2 text-muted">Pending Requests</h2>
-                            <p class="card-title h2 mb-0">{{ pending_requests|length }}</p>
+                            <p class="card-title h2 mb-0">{{ pending_requests|length + pending_service_key_requests|length }}</p>
                         </div>
                     </div>
                 </div>
@@ -211,7 +211,7 @@
                             <i class="bi bi-inbox"></i> Pending Requests
                         </div>
                         <div class="card-body">
-                            {% if pending_requests %}
+                            {% if pending_requests or pending_service_key_requests %}
                             <ul class="list-group list-group-flush">
                                 {% for req in pending_requests[:5] %}
                                 <li class="list-group-item d-flex justify-content-between align-items-center">
@@ -222,10 +222,20 @@
                                     <a href="/admin/requests" class="btn btn-sm btn-outline-primary">Review</a>
                                 </li>
                                 {% endfor %}
+                                {% for req in pending_service_key_requests[:5] %}
+                                <li class="list-group-item d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>{{ req.user.full_name or req.user.username if req.user else 'User #' ~ req.user_id }}</strong><br>
+                                        <small class="text-muted"><span class="badge bg-info">Service Key</span> {{ req.service_name }}</small>
+                                    </div>
+                                    <a href="/admin/requests" class="btn btn-sm btn-outline-primary">Review</a>
+                                </li>
+                                {% endfor %}
                             </ul>
-                            {% if pending_requests|length > 5 %}
+                            {% set total_pending = pending_requests|length + pending_service_key_requests|length %}
+                            {% if total_pending > 5 %}
                             <div class="text-center mt-2">
-                                <a href="/admin/requests">View all {{ pending_requests|length }} requests</a>
+                                <a href="/admin/requests">View all {{ total_pending }} requests</a>
                             </div>
                             {% endif %}
                             {% else %}

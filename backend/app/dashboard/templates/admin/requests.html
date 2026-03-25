@@ -10,6 +10,8 @@
         <div class="col-md-10 py-3">
             <h1 class="mb-4"><i class="bi bi-inbox"></i> Pending Requests</h1>
 
+            <!-- Quota / API Key Requests -->
+            <h2 class="h4 mb-3"><i class="bi bi-arrow-up-circle me-1"></i> Quota &amp; API Key Requests</h2>
             {% if requests %}
             {% for req in requests %}
             <div class="card mb-3">
@@ -56,8 +58,92 @@
             </div>
             {% endfor %}
             {% else %}
+            <div class="alert alert-info mb-4">
+                <i class="bi bi-info-circle"></i> No pending quota/API key requests.
+            </div>
+            {% endif %}
+
+            <hr class="my-4">
+
+            <!-- Service Key Requests -->
+            <h2 class="h4 mb-3"><i class="bi bi-gear-fill me-1"></i> Service Key Requests</h2>
+            {% if service_key_requests %}
+            {% for req in service_key_requests %}
+            <div class="card mb-3 border-info">
+                <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-10">
+                    <span>
+                        <strong>{{ req.user.full_name or req.user.username if req.user else 'User #' ~ req.user_id }}</strong>
+                        <span class="badge bg-info ms-2">Service Key</span>
+                    </span>
+                    <span class="text-muted">{{ req.created_at|localtime }}</span>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            {% if req.user %}
+                            <p><strong>User:</strong> {{ req.user.username }} ({{ req.user.email }})</p>
+                            {% endif %}
+                            <p><strong>Key:</strong> <code>{{ req.api_key.key_prefix }}...</code> ({{ req.api_key.name }})</p>
+                            <p><strong>Service Name:</strong> {{ req.service_name }}</p>
+                            <p><strong>Data Risk Level:</strong>
+                                {% if req.data_risk_level == 'high' %}
+                                <span class="badge bg-danger">High</span>
+                                {% elif req.data_risk_level == 'medium' %}
+                                <span class="badge bg-warning text-dark">Medium</span>
+                                {% else %}
+                                <span class="badge bg-success">Low</span>
+                                {% endif %}
+                            </p>
+                            {% if req.compliance_tags %}
+                            <p><strong>Compliance Tags:</strong>
+                                {% for tag in req.compliance_tags|fromjson %}
+                                <span class="badge bg-secondary">{{ tag }}</span>
+                                {% endfor %}
+                            </p>
+                            {% endif %}
+                            {% if req.compliance_other %}
+                            <p><strong>Other Compliance:</strong> {{ req.compliance_other }}</p>
+                            {% endif %}
+                            {% if req.alternative_contacts %}
+                            <p><strong>Alternative Contacts:</strong>
+                                {% for c in req.alternative_contacts|fromjson %}
+                                {{ c }}{% if not loop.last %}, {% endif %}
+                                {% endfor %}
+                            </p>
+                            {% endif %}
+                            <p><strong>Justification:</strong></p>
+                            <blockquote class="blockquote bg-body-secondary p-3 rounded">
+                                {{ req.reason }}
+                            </blockquote>
+                        </div>
+                        {% if not is_read_only %}
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="review_notes_{{ req.id }}" class="form-label">Review Notes (optional)</label>
+                                <textarea class="form-control" id="review_notes_{{ req.id }}" form="approve_form_{{ req.id }}" name="review_notes" rows="2" placeholder="Optional notes..."></textarea>
+                            </div>
+                            <div class="d-flex gap-2 justify-content-end">
+                                <form id="approve_form_{{ req.id }}" method="POST" action="/admin/service-key-requests/{{ req.id }}/approve">
+                                    <button type="submit" class="btn btn-success">
+                                        <i class="bi bi-check-lg"></i> Approve
+                                    </button>
+                                </form>
+                                <form method="POST" action="/admin/service-key-requests/{{ req.id }}/deny">
+                                    <input type="hidden" name="review_notes" value="">
+                                    <button type="submit" class="btn btn-danger" onclick="this.form.review_notes.value = document.getElementById('review_notes_{{ req.id }}').value">
+                                        <i class="bi bi-x-lg"></i> Deny
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+            {% else %}
             <div class="alert alert-info">
-                <i class="bi bi-info-circle"></i> No pending requests.
+                <i class="bi bi-info-circle"></i> No pending service key requests.
             </div>
             {% endif %}
         </div>

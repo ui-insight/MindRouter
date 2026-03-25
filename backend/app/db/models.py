@@ -97,6 +97,13 @@ class QuotaRequestStatus(str, PyEnum):
     DENIED = "denied"
 
 
+class ServiceKeyRequestStatus(str, PyEnum):
+    """Service key request status."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
 class Modality(str, PyEnum):
     """Request modality types."""
     CHAT = "chat"
@@ -171,7 +178,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
 
     # Relationships
     group: Mapped[Optional["Group"]] = relationship("Group", back_populates="users")
-    api_keys: Mapped[List["ApiKey"]] = relationship("ApiKey", back_populates="user")
+    api_keys: Mapped[List["ApiKey"]] = relationship("ApiKey", back_populates="user", foreign_keys="ApiKey.user_id")
     quota: Mapped[Optional["Quota"]] = relationship("Quota", back_populates="user", uselist=False)
     quota_requests: Mapped[List["QuotaRequest"]] = relationship(
         "QuotaRequest", back_populates="user", foreign_keys="QuotaRequest.user_id"
@@ -205,12 +212,25 @@ class ApiKey(Base, TimestampMixin):
     rpm_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_concurrent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Service key fields
+    is_service: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    service_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    service_contacts: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    data_risk_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    compliance_tags: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    promoted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    promoted_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    revocation_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="api_keys")
+    user: Mapped["User"] = relationship("User", back_populates="api_keys", foreign_keys=[user_id])
+    promoted_by_user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[promoted_by])
     requests: Mapped[List["Request"]] = relationship("Request", back_populates="api_key")
 
     __table_args__ = (
         Index("ix_api_keys_status_user", "status", "user_id"),
+        Index("ix_api_keys_is_service", "is_service"),
     )
 
 
@@ -278,6 +298,41 @@ class QuotaRequest(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_quota_requests_status", "status"),
+    )
+
+
+class ServiceKeyRequest(Base, TimestampMixin):
+    """Request to promote an API key to a service key."""
+
+    __tablename__ = "service_key_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[int] = mapped_column(Integer, ForeignKey("api_keys.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    service_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    alternative_contacts: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    data_risk_level: Mapped[str] = mapped_column(String(20), nullable=False, default="low")
+    compliance_tags: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    compliance_other: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[ServiceKeyRequestStatus] = mapped_column(
+        Enum(ServiceKeyRequestStatus, values_callable=_enum_values),
+        nullable=False,
+        default=ServiceKeyRequestStatus.PENDING,
+    )
+
+    # Admin review
+    reviewed_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    api_key: Mapped["ApiKey"] = relationship("ApiKey")
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    reviewer: Mapped[Optional["User"]] = relationship("User", foreign_keys=[reviewed_by])
+
+    __table_args__ = (
+        Index("ix_service_key_requests_status", "status"),
     )
 
 

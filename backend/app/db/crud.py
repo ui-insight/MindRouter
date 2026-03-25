@@ -54,6 +54,8 @@ from backend.app.db.models import (
     RequestStatus,
     Response,
     SchedulerDecision,
+    ServiceKeyRequest,
+    ServiceKeyRequestStatus,
     User,
     UserRole,
 )
@@ -546,6 +548,12 @@ async def revoke_api_key(db: AsyncSession, api_key_id: int) -> Optional[ApiKey]:
         api_key.status = ApiKeyStatus.REVOKED
         await db.flush()
     return api_key
+
+
+async def get_api_key_by_id(db: AsyncSession, api_key_id: int) -> Optional[ApiKey]:
+    """Get an API key by its primary key ID."""
+    result = await db.execute(select(ApiKey).where(ApiKey.id == api_key_id))
+    return result.scalar_one_or_none()
 
 
 async def update_api_key_usage(db: AsyncSession, api_key_id: int) -> None:
@@ -2058,10 +2066,14 @@ async def delete_old_node_telemetry(
 async def delete_expired_api_keys(
     db: AsyncSession, grace_days: int = 15
 ) -> int:
-    """Delete API keys that have been expired for more than grace_days."""
+    """Delete API keys that have been expired for more than grace_days.
+
+    Service keys are excluded — they never expire and are admin-managed.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
     result = await db.execute(
         delete(ApiKey).where(
+            ApiKey.is_service.is_(False),
             ApiKey.expires_at.isnot(None),
             ApiKey.expires_at < cutoff,
             ApiKey.status.in_([ApiKeyStatus.ACTIVE, ApiKeyStatus.EXPIRED]),
@@ -2140,6 +2152,139 @@ async def review_quota_request(
         quota_request.review_notes = review_notes
         await db.flush()
     return quota_request
+
+
+# Service Key Request CRUD
+async def create_service_key_request(
+    db: AsyncSession,
+    api_key_id: int,
+    user_id: int,
+    service_name: str,
+    reason: str,
+    alternative_contacts: Optional[str] = None,
+    data_risk_level: str = "low",
+    compliance_tags: Optional[str] = None,
+    compliance_other: Optional[str] = None,
+) -> ServiceKeyRequest:
+    """Create a service key promotion request."""
+    req = ServiceKeyRequest(
+        api_key_id=api_key_id,
+        user_id=user_id,
+        service_name=service_name,
+        reason=reason,
+        alternative_contacts=alternative_contacts,
+        data_risk_level=data_risk_level,
+        compliance_tags=compliance_tags,
+        compliance_other=compliance_other,
+        status=ServiceKeyRequestStatus.PENDING,
+    )
+    db.add(req)
+    await db.flush()
+    return req
+
+
+async def get_pending_service_key_requests(db: AsyncSession) -> List[ServiceKeyRequest]:
+    """Get all pending service key requests with eager-loaded relations."""
+    result = await db.execute(
+        select(ServiceKeyRequest)
+        .where(ServiceKeyRequest.status == ServiceKeyRequestStatus.PENDING)
+        .options(
+            selectinload(ServiceKeyRequest.api_key),
+            selectinload(ServiceKeyRequest.user).selectinload(User.group),
+        )
+        .order_by(ServiceKeyRequest.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_user_service_key_requests(db: AsyncSession, user_id: int) -> List[ServiceKeyRequest]:
+    """Get all service key requests for a user."""
+    result = await db.execute(
+        select(ServiceKeyRequest)
+        .where(ServiceKeyRequest.user_id == user_id)
+        .options(selectinload(ServiceKeyRequest.api_key))
+        .order_by(ServiceKeyRequest.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def review_service_key_request(
+    db: AsyncSession,
+    request_id: int,
+    reviewer_id: int,
+    approved: bool,
+    review_notes: Optional[str] = None,
+) -> Optional[ServiceKeyRequest]:
+    """Approve or deny a service key request.
+
+    If approved, promotes the associated API key to service status.
+    """
+    result = await db.execute(
+        select(ServiceKeyRequest)
+        .where(ServiceKeyRequest.id == request_id)
+        .options(selectinload(ServiceKeyRequest.api_key))
+    )
+    req = result.scalar_one_or_none()
+    if not req:
+        return None
+
+    req.status = ServiceKeyRequestStatus.APPROVED if approved else ServiceKeyRequestStatus.DENIED
+    req.reviewed_by = reviewer_id
+    req.reviewed_at = datetime.now(timezone.utc)
+    req.review_notes = review_notes
+
+    if approved and req.api_key:
+        key = req.api_key
+        key.is_service = True
+        key.service_name = req.service_name
+        key.service_contacts = req.alternative_contacts
+        key.data_risk_level = req.data_risk_level
+        key.compliance_tags = req.compliance_tags
+        key.promoted_at = datetime.now(timezone.utc)
+        key.promoted_by = reviewer_id
+        key.expires_at = None  # Service keys never expire
+
+    await db.flush()
+    return req
+
+
+async def request_service_key_revocation(
+    db: AsyncSession,
+    api_key_id: int,
+    reason: str,
+) -> Optional[ApiKey]:
+    """User requests revocation of a service key (admin must execute)."""
+    result = await db.execute(
+        select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.is_service.is_(True))
+    )
+    key = result.scalar_one_or_none()
+    if key:
+        key.revocation_requested_at = datetime.now(timezone.utc)
+        key.revocation_reason = reason
+        await db.flush()
+    return key
+
+
+async def revoke_service_key(db: AsyncSession, api_key_id: int) -> Optional[ApiKey]:
+    """Admin revokes a service key."""
+    result = await db.execute(
+        select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.is_service.is_(True))
+    )
+    key = result.scalar_one_or_none()
+    if key:
+        key.status = ApiKeyStatus.REVOKED
+        await db.flush()
+    return key
+
+
+async def count_pending_service_key_requests(db: AsyncSession) -> int:
+    """Count pending service key requests (for sidebar badge)."""
+    result = await db.execute(
+        select(func.count(ServiceKeyRequest.id)).where(
+            ServiceKeyRequest.status == ServiceKeyRequestStatus.PENDING
+        )
+    )
+    return result.scalar() or 0
 
 
 # Scheduler Decision CRUD
@@ -2426,9 +2571,17 @@ async def get_all_api_keys(
     status_filter: Optional[str] = None,
     sort_by: Optional[str] = None,
     sort_dir: str = "desc",
+    type_filter: Optional[str] = None,
 ) -> Tuple[List[ApiKey], int]:
-    """Get all API keys with user info, paginated and sortable."""
+    """Get all API keys with user info, paginated and sortable.
+
+    type_filter: "service" for service keys only, "personal" for non-service only.
+    """
     conditions = []
+    if type_filter == "service":
+        conditions.append(ApiKey.is_service.is_(True))
+    elif type_filter == "personal":
+        conditions.append(ApiKey.is_service.is_(False))
     if search:
         search_pattern = f"%{search}%"
         conditions.append(

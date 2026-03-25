@@ -18,7 +18,7 @@
             <div class="card mb-4">
                 <div class="card-body">
                     <form method="GET" action="/admin/api-keys" class="row g-3">
-                        <div class="col-md-4">
+                        <div class="col-md-3">
                             <label for="search" class="form-label">Search</label>
                             <input type="text" class="form-control" id="search" name="search" value="{{ search }}" placeholder="Key name, prefix, username, or email...">
                         </div>
@@ -31,7 +31,15 @@
                                 <option value="expired" {% if key_status == 'expired' %}selected{% endif %}>Expired</option>
                             </select>
                         </div>
-                        <div class="col-md-3">
+                        <div class="col-md-2">
+                            <label for="type_filter" class="form-label">Type</label>
+                            <select class="form-select" id="type_filter" name="type_filter">
+                                <option value="">All</option>
+                                <option value="service" {% if type_filter == 'service' %}selected{% endif %}>Service</option>
+                                <option value="personal" {% if type_filter == 'personal' %}selected{% endif %}>Personal</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
                             <label for="sort_select" class="form-label">Sort</label>
                             <select class="form-select" id="sort_select" onchange="applySortKeys(this.value)">
                                 <option value="created|desc" {% if sort == 'created' and dir == 'desc' or (not sort) %}selected{% endif %}>Newest</option>
@@ -62,6 +70,7 @@
                                 <tr>
                                     <th scope="col">Prefix</th>
                                     <th scope="col">Name</th>
+                                    <th scope="col">Type</th>
                                     <th scope="col">User</th>
                                     <th scope="col">Status</th>
                                     <th scope="col">Expires</th>
@@ -69,13 +78,42 @@
                                     <th scope="col">Usage</th>
                                     <th scope="col">Last IP</th>
                                     <th scope="col">Created</th>
+                                    {% if not is_read_only %}<th scope="col">Actions</th>{% endif %}
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for k in api_keys %}
                                 <tr>
                                     <td><code>{{ k.key_prefix }}...</code></td>
-                                    <td>{{ k.name }}</td>
+                                    <td>
+                                        {{ k.name }}
+                                        {% if k.is_service and k.service_name %}
+                                        <br><small class="text-muted">{{ k.service_name }}</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if k.is_service %}
+                                        <span class="badge bg-info"><i class="bi bi-gear-fill me-1"></i>Service</span>
+                                        {% if k.data_risk_level %}
+                                        <br>
+                                        {% if k.data_risk_level == 'high' %}
+                                        <span class="badge bg-danger mt-1">High Risk</span>
+                                        {% elif k.data_risk_level == 'medium' %}
+                                        <span class="badge bg-warning text-dark mt-1">Medium Risk</span>
+                                        {% else %}
+                                        <span class="badge bg-success mt-1">Low Risk</span>
+                                        {% endif %}
+                                        {% endif %}
+                                        {% if k.compliance_tags %}
+                                        <br>
+                                        {% for tag in k.compliance_tags|fromjson %}
+                                        <span class="badge bg-secondary mt-1">{{ tag }}</span>
+                                        {% endfor %}
+                                        {% endif %}
+                                        {% else %}
+                                        <span class="badge bg-secondary">Personal</span>
+                                        {% endif %}
+                                    </td>
                                     <td>
                                         {% if k.user %}
                                         <a href="/admin/users/{{ k.user_id }}">{{ k.user.username }}</a>
@@ -84,7 +122,7 @@
                                         {% endif %}
                                     </td>
                                     <td>
-                                        {% if k.expires_at and k.expires_at.replace(tzinfo=None) < now_utc.replace(tzinfo=None) %}
+                                        {% if k.expires_at and not k.is_service and k.expires_at.replace(tzinfo=None) < now_utc.replace(tzinfo=None) %}
                                         <span class="badge bg-warning text-dark">expired</span>
                                         {% elif k.status.value == 'active' %}
                                         <span class="badge bg-success">active</span>
@@ -93,9 +131,14 @@
                                         {% else %}
                                         <span class="badge bg-secondary">{{ k.status.value }}</span>
                                         {% endif %}
+                                        {% if k.revocation_requested_at %}
+                                        <br><span class="badge bg-warning text-dark mt-1"><i class="bi bi-exclamation-triangle me-1"></i>Revocation Requested</span>
+                                        {% endif %}
                                     </td>
                                     <td>
-                                        {% if k.expires_at %}
+                                        {% if k.is_service %}
+                                        <span class="text-muted">Never</span>
+                                        {% elif k.expires_at %}
                                         {{ k.expires_at|localtime('%Y-%m-%d') }}
                                         {% else %}
                                         <span class="text-muted">Never</span>
@@ -105,6 +148,17 @@
                                     <td>{{ "{:,}".format(k.usage_count) }}</td>
                                     <td><code class="text-muted">{{ key_last_ips.get(k.id, '—') }}</code></td>
                                     <td>{{ k.created_at|localtime('%Y-%m-%d') }}</td>
+                                    {% if not is_read_only %}
+                                    <td>
+                                        {% if k.is_service and k.status.value == 'active' %}
+                                        <form method="POST" action="/admin/service-keys/{{ k.id }}/revoke" style="display: inline;">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this service key? This cannot be undone.')">
+                                                <i class="bi bi-x-lg"></i> Revoke
+                                            </button>
+                                        </form>
+                                        {% endif %}
+                                    </td>
+                                    {% endif %}
                                 </tr>
                                 {% endfor %}
                             </tbody>
@@ -116,19 +170,19 @@
                     <nav aria-label="API key pagination">
                         <ul class="pagination justify-content-center mb-0">
                             <li class="page-item {% if page <= 1 %}disabled{% endif %}">
-                                <a class="page-link" href="/admin/api-keys?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Previous</a>
+                                <a class="page-link" href="/admin/api-keys?page={{ page - 1 }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if type_filter %}&type_filter={{ type_filter }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Previous</a>
                             </li>
                             {% for p in range(1, total_pages + 1) %}
                             {% if p == page or (p >= page - 2 and p <= page + 2) or p == 1 or p == total_pages %}
                             <li class="page-item {% if p == page %}active{% endif %}">
-                                <a class="page-link" href="/admin/api-keys?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">{{ p }}</a>
+                                <a class="page-link" href="/admin/api-keys?page={{ p }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if type_filter %}&type_filter={{ type_filter }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">{{ p }}</a>
                             </li>
                             {% elif p == page - 3 or p == page + 3 %}
                             <li class="page-item disabled"><span class="page-link">...</span></li>
                             {% endif %}
                             {% endfor %}
                             <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
-                                <a class="page-link" href="/admin/api-keys?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Next</a>
+                                <a class="page-link" href="/admin/api-keys?page={{ page + 1 }}{% if search %}&search={{ search }}{% endif %}{% if key_status %}&key_status={{ key_status }}{% endif %}{% if type_filter %}&type_filter={{ type_filter }}{% endif %}{% if sort %}&sort={{ sort }}&dir={{ dir }}{% endif %}">Next</a>
                             </li>
                         </ul>
                     </nav>

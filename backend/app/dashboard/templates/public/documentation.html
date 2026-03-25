@@ -67,6 +67,7 @@
                 <li class="nav-item"><a class="nav-link" href="#api-reference">API Reference</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-dashboard">Web Dashboard</a></li>
                 <li class="nav-item"><a class="nav-link" href="#users-groups-quotas">Users, Groups &amp; Quotas</a></li>
+                <li class="nav-item"><a class="nav-link" href="#service-api-keys">Service API Keys</a></li>
                 <li class="nav-item"><a class="nav-link" href="#backend-management">Backend Management</a></li>
                 <li class="nav-item"><a class="nav-link" href="#scheduling-fair-share">Scheduling &amp; Fair Share</a></li>
                 <li class="nav-item"><a class="nav-link" href="#retry-failover">Retry &amp; Failover</a></li>
@@ -1235,6 +1236,54 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                     <li>Written justification</li>
                 </ul>
                 <p>Admins review requests at <code>/admin/requests</code> or via <code>POST /api/admin/quota-requests/{id}/review</code>, which can approve (with a custom granted token amount) or deny the request.</p>
+            </section>
+
+            <hr>
+
+            <!-- Service API Keys -->
+            <section id="service-api-keys">
+                <h2>Service API Keys</h2>
+
+                <h3>What Are Service Keys?</h3>
+                <p>Service API Keys are production-grade keys intended for long-running services, automated pipelines, and integrations that require uninterrupted API access. Unlike regular personal API keys, service keys:</p>
+                <ul>
+                    <li><strong>Never expire</strong> &mdash; no need to rotate keys on a schedule or worry about service disruptions from key expiration.</li>
+                    <li><strong>Are admin-managed</strong> &mdash; only administrators can approve, promote, and revoke service keys.</li>
+                    <li><strong>Carry metadata</strong> &mdash; each service key tracks the service name, data risk level, compliance tags, and alternative contacts.</li>
+                </ul>
+
+                <h3>How to Request a Service Key</h3>
+                <ol>
+                    <li>Go to your <strong>Dashboard</strong> and find the API key you want to promote.</li>
+                    <li>Click <strong>Request Service Key</strong> next to any active personal key.</li>
+                    <li>Fill in the required information:
+                        <ul>
+                            <li><strong>Service / Application Name</strong> &mdash; the name of the service or pipeline that will use this key.</li>
+                            <li><strong>Justification</strong> &mdash; why this service needs a non-expiring key.</li>
+                            <li><strong>Alternative Contacts</strong> &mdash; emails of people who can manage this key if you are unavailable.</li>
+                            <li><strong>Data Risk Level</strong> &mdash; Low, Medium, or High based on the sensitivity of data processed.</li>
+                            <li><strong>Compliance Tags</strong> &mdash; applicable data classifications (FERPA, HIPAA, CUI, FCI, PII, IP, or Other).</li>
+                        </ul>
+                    </li>
+                    <li>Submit the request. An administrator will review it.</li>
+                </ol>
+
+                <h3>Approval Process</h3>
+                <p>Administrators review service key requests from the <strong>Admin &rarr; Requests</strong> page. When approved:</p>
+                <ul>
+                    <li>The key is promoted to service status (the underlying key value does not change).</li>
+                    <li>The expiration date is removed (the key never expires).</li>
+                    <li>Service metadata (name, contacts, risk level, compliance tags) is attached to the key.</li>
+                </ul>
+                <p>If denied, the key remains a regular personal key with its original expiration.</p>
+
+                <h3>Revocation</h3>
+                <p>Service keys cannot be self-revoked by users. To revoke a service key:</p>
+                <ol>
+                    <li>The key owner submits a <strong>Revocation Request</strong> from the dashboard, providing a reason.</li>
+                    <li>An administrator reviews the request and executes the revocation from the admin panel.</li>
+                </ol>
+                <p>This two-step process prevents accidental revocation of keys that may be in active production use.</p>
             </section>
 
             <hr>

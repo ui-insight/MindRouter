@@ -96,8 +96,20 @@
                             <tbody>
                                 {% for key in api_keys %}
                                 {% set is_expired = key.expires_at and key.expires_at.replace(tzinfo=None) < now_utc.replace(tzinfo=None) %}
+                                {% set pending_svc_req = namespace(found=false) %}
+                                {% for sr in service_key_requests if sr.api_key_id == key.id and sr.status.value == 'pending' %}
+                                    {% set pending_svc_req.found = true %}
+                                {% endfor %}
                                 <tr{% if is_expired %} class="table-warning"{% endif %}>
-                                    <td>{{ key.name }}</td>
+                                    <td>
+                                        {{ key.name }}
+                                        {% if key.is_service %}
+                                        <span class="badge bg-info"><i class="bi bi-gear-fill me-1"></i>Service</span>
+                                        {% endif %}
+                                        {% if pending_svc_req.found %}
+                                        <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Service Pending</span>
+                                        {% endif %}
+                                    </td>
                                     <td><code>{{ key.key_prefix }}...</code></td>
                                     <td>
                                         {% if is_expired %}
@@ -111,7 +123,9 @@
                                         {% endif %}
                                     </td>
                                     <td>
-                                        {% if key.expires_at %}
+                                        {% if key.is_service %}
+                                        <span class="text-muted">Never</span>
+                                        {% elif key.expires_at %}
                                         {% set days_left = ((key.expires_at.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).days) %}
                                         {% if is_expired %}
                                         <span class="text-danger">Expired {{ key.expires_at|localtime('%Y-%m-%d') }}</span>
@@ -127,11 +141,26 @@
                                     <td>{{ key.last_used_at|localtime if key.last_used_at else 'Never' }}</td>
                                     <td>
                                         {% if key.status.value == 'active' and not is_expired %}
-                                        <form method="POST" action="/dashboard/revoke-key/{{ key.id }}" style="display: inline;">
-                                            <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Are you sure you want to revoke this key?')">
-                                                Revoke
-                                            </button>
-                                        </form>
+                                            {% if key.is_service %}
+                                                {% if key.revocation_requested_at %}
+                                                <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Revocation Requested</span>
+                                                {% else %}
+                                                <button type="button" class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#revokeServiceModal{{ key.id }}">
+                                                    <i class="bi bi-exclamation-triangle"></i> Request Revocation
+                                                </button>
+                                                {% endif %}
+                                            {% else %}
+                                                <form method="POST" action="/dashboard/revoke-key/{{ key.id }}" style="display: inline;">
+                                                    <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Are you sure you want to revoke this key?')">
+                                                        Revoke
+                                                    </button>
+                                                </form>
+                                                {% if not pending_svc_req.found %}
+                                                <button type="button" class="btn btn-sm btn-outline-info ms-1" data-bs-toggle="modal" data-bs-target="#serviceKeyModal{{ key.id }}">
+                                                    <i class="bi bi-gear"></i> Request Service Key
+                                                </button>
+                                                {% endif %}
+                                            {% endif %}
                                         {% endif %}
                                     </td>
                                 </tr>
@@ -286,6 +315,132 @@
         </div>
     </div>
 </div>
+
+<!-- Service Key Request Modals (one per active non-service key) -->
+{% for key in api_keys if key.status.value == 'active' and not key.is_service %}
+<div class="modal fade" id="serviceKeyModal{{ key.id }}" tabindex="-1" aria-labelledby="serviceKeyModalLabel{{ key.id }}">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="serviceKeyModalLabel{{ key.id }}">
+                    <i class="bi bi-gear-fill me-1"></i> Request Service Key Promotion
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="/dashboard/request-service-key">
+                <input type="hidden" name="api_key_id" value="{{ key.id }}">
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle me-1"></i>
+                        Service keys never expire and are managed by administrators. Your request will be reviewed by an admin.
+                    </div>
+                    <p class="text-muted">Key: <code>{{ key.key_prefix }}...</code> ({{ key.name }})</p>
+
+                    <div class="mb-3">
+                        <label for="service_name_{{ key.id }}" class="form-label">Service / Application Name <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="service_name_{{ key.id }}" name="service_name" required placeholder="e.g., My Research Pipeline">
+                    </div>
+                    <div class="mb-3">
+                        <label for="reason_{{ key.id }}" class="form-label">Justification <span class="text-danger">*</span></label>
+                        <textarea class="form-control" id="reason_{{ key.id }}" name="reason" rows="3" required placeholder="Why does this service need a non-expiring key?"></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label for="contacts_{{ key.id }}" class="form-label">Alternative Contacts</label>
+                        <input type="text" class="form-control" id="contacts_{{ key.id }}" name="alternative_contacts" placeholder="email1@uidaho.edu, email2@uidaho.edu">
+                        <div class="form-text">Comma-separated emails of people who can manage this key if you are unavailable.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Data Risk Level <span class="text-danger">*</span></label>
+                        <div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="data_risk_level" id="risk_low_{{ key.id }}" value="low" checked>
+                                <label class="form-check-label" for="risk_low_{{ key.id }}">Low</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="data_risk_level" id="risk_medium_{{ key.id }}" value="medium">
+                                <label class="form-check-label" for="risk_medium_{{ key.id }}">Medium</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="data_risk_level" id="risk_high_{{ key.id }}" value="high">
+                                <label class="form-check-label" for="risk_high_{{ key.id }}">High</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Compliance / Data Classification</label>
+                        <div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_ferpa_{{ key.id }}" value="FERPA">
+                                <label class="form-check-label" for="ct_ferpa_{{ key.id }}">FERPA</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_hipaa_{{ key.id }}" value="HIPAA">
+                                <label class="form-check-label" for="ct_hipaa_{{ key.id }}">HIPAA</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_cui_{{ key.id }}" value="CUI">
+                                <label class="form-check-label" for="ct_cui_{{ key.id }}">CUI</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_fci_{{ key.id }}" value="FCI">
+                                <label class="form-check-label" for="ct_fci_{{ key.id }}">FCI</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_pii_{{ key.id }}" value="PII">
+                                <label class="form-check-label" for="ct_pii_{{ key.id }}">PII</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_ip_{{ key.id }}" value="IP">
+                                <label class="form-check-label" for="ct_ip_{{ key.id }}">IP</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="checkbox" name="compliance_tags" id="ct_other_{{ key.id }}" value="Other">
+                                <label class="form-check-label" for="ct_other_{{ key.id }}">Other</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="compliance_other_{{ key.id }}" class="form-label">Other Compliance Details</label>
+                        <input type="text" class="form-control" id="compliance_other_{{ key.id }}" name="compliance_other" placeholder="If 'Other' selected, describe here...">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-info"><i class="bi bi-send me-1"></i>Submit Request</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endfor %}
+
+<!-- Service Key Revocation Request Modals (one per active service key without pending revocation) -->
+{% for key in api_keys if key.is_service and key.status.value == 'active' and not key.revocation_requested_at %}
+<div class="modal fade" id="revokeServiceModal{{ key.id }}" tabindex="-1" aria-labelledby="revokeServiceModalLabel{{ key.id }}">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="revokeServiceModalLabel{{ key.id }}">Request Service Key Revocation</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" action="/dashboard/request-service-key-revocation/{{ key.id }}">
+                <div class="modal-body">
+                    <p>Service keys can only be revoked by an administrator. Submit a revocation request and an admin will review it.</p>
+                    <p class="text-muted">Key: <code>{{ key.key_prefix }}...</code> ({{ key.name }} &mdash; {{ key.service_name }})</p>
+                    <div class="mb-3">
+                        <label for="revoke_reason_{{ key.id }}" class="form-label">Reason</label>
+                        <textarea class="form-control" id="revoke_reason_{{ key.id }}" name="reason" rows="2" placeholder="Why should this key be revoked?"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-warning"><i class="bi bi-exclamation-triangle me-1"></i>Request Revocation</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endfor %}
 {% endblock %}
 
 {% block extra_js %}
