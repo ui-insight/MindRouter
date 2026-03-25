@@ -648,7 +648,7 @@ async def user_dashboard(
         usage_percent = min(100, (tokens_used_display / group_budget) * 100)
 
     # Key limit info
-    max_keys = user.group.max_api_keys if user.group else 8
+    max_keys = user.group.max_api_keys if user.group else 16
     active_key_count = await crud.count_user_active_api_keys(db, effective_id)
 
     # Lifetime token usage: use the higher of the monotonic counter or SUM(requests)
@@ -874,7 +874,7 @@ async def create_api_key(
         return RedirectResponse(url="/login", status_code=302)
 
     # Check key limit
-    max_keys = user.group.max_api_keys if user.group else 8
+    max_keys = user.group.max_api_keys if user.group else 16
     active_count = await crud.count_user_active_api_keys(db, user_id)
     if active_count >= max_keys:
         return RedirectResponse(url="/dashboard?key_error=limit", status_code=302)
@@ -2861,7 +2861,7 @@ async def create_group(
     is_admin: Optional[str] = Form(None),
     is_auditor: Optional[str] = Form(None),
     api_key_expiry_days: int = Form(45),
-    max_api_keys: int = Form(8),
+    max_api_keys: int = Form(16),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Create a new group."""
@@ -2917,7 +2917,7 @@ async def edit_group(
     is_admin: Optional[str] = Form(None),
     is_auditor: Optional[str] = Form(None),
     api_key_expiry_days: int = Form(45),
-    max_api_keys: int = Form(8),
+    max_api_keys: int = Form(16),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Edit a group."""

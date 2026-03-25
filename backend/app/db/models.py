@@ -132,7 +132,7 @@ class Group(Base, TimestampMixin):
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_auditor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     api_key_expiry_days: Mapped[int] = mapped_column(Integer, nullable=False, default=45)
-    max_api_keys: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    max_api_keys: Mapped[int] = mapped_column(Integer, nullable=False, default=16)
 
     @property
     def has_admin_read(self) -> bool:

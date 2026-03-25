@@ -81,7 +81,7 @@ async def create_group(
     is_admin: bool = False,
     is_auditor: bool = False,
     api_key_expiry_days: int = 45,
-    max_api_keys: int = 8,
+    max_api_keys: int = 16,
 ) -> Group:
     """Create a new group."""
     group = Group(
