@@ -60,6 +60,121 @@
                 </div>
             </div>
 
+            <!-- Service API Keys Section -->
+            {% if service_keys %}
+            <div class="card mb-4 border-info">
+                <div class="card-header bg-info bg-opacity-10 d-flex justify-content-between align-items-center"
+                     data-bs-toggle="collapse" data-bs-target="#serviceKeysBody" role="button" aria-expanded="true">
+                    <h5 class="mb-0">
+                        <i class="bi bi-gear-fill me-2"></i>Service API Keys
+                        <span class="badge bg-info ms-2">{{ service_keys|length }}</span>
+                    </h5>
+                    <i class="bi bi-chevron-down"></i>
+                </div>
+                <div class="collapse show" id="serviceKeysBody">
+                    <div class="card-body p-0">
+                        {% for sk in service_keys %}
+                        <div class="border-bottom p-3{% if sk.revocation_requested_at %} bg-warning bg-opacity-10{% endif %}">
+                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                <div>
+                                    <strong>{{ sk.service_name or sk.name }}</strong>
+                                    <code class="ms-2 text-muted">{{ sk.key_prefix }}...</code>
+                                    {% if sk.status.value == 'active' %}
+                                    <span class="badge bg-success ms-1">active</span>
+                                    {% elif sk.status.value == 'revoked' %}
+                                    <span class="badge bg-danger ms-1">revoked</span>
+                                    {% endif %}
+                                    {% if sk.revocation_requested_at %}
+                                    <span class="badge bg-warning text-dark ms-1"><i class="bi bi-exclamation-triangle me-1"></i>Revocation Requested</span>
+                                    {% endif %}
+                                </div>
+                                <div class="d-flex gap-2">
+                                    {% if not is_read_only and sk.status.value == 'active' %}
+                                    <form method="POST" action="/admin/service-keys/{{ sk.id }}/revoke" style="display:inline;">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Revoke this service key? This cannot be undone.')">
+                                            <i class="bi bi-x-lg me-1"></i>Revoke
+                                        </button>
+                                    </form>
+                                    {% endif %}
+                                </div>
+                            </div>
+
+                            <div class="row g-3 small">
+                                <div class="col-md-4">
+                                    <div class="text-muted mb-1">Owner</div>
+                                    {% if sk.user %}
+                                    <a href="/admin/users/{{ sk.user_id }}">{{ sk.user.username }}</a>
+                                    {% if sk.user.full_name %}<span class="text-muted"> ({{ sk.user.full_name }})</span>{% endif %}
+                                    {% if sk.user.email %}<br><span class="text-muted">{{ sk.user.email }}</span>{% endif %}
+                                    {% else %}
+                                    <span class="text-muted">Unknown</span>
+                                    {% endif %}
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="text-muted mb-1">Data Classification</div>
+                                    {% if sk.data_risk_level == 'high' %}
+                                    <span class="badge bg-danger">High Risk</span>
+                                    {% elif sk.data_risk_level == 'medium' %}
+                                    <span class="badge bg-warning text-dark">Medium Risk</span>
+                                    {% else %}
+                                    <span class="badge bg-success">Low Risk</span>
+                                    {% endif %}
+                                    {% if sk.compliance_tags %}
+                                    {% for tag in sk.compliance_tags %}
+                                    <span class="badge bg-secondary ms-1">{{ tag }}</span>
+                                    {% endfor %}
+                                    {% endif %}
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="text-muted mb-1">Usage</div>
+                                    <span>{{ "{:,}".format(sk.usage_count) }} requests</span>
+                                    <br><span class="text-muted">Last used: {{ sk.last_used_at|localtime('%Y-%m-%d %H:%M') if sk.last_used_at else 'Never' }}</span>
+                                    <br><span class="text-muted">Last IP: <code>{{ service_last_ips.get(sk.id, '—') }}</code></span>
+                                </div>
+                            </div>
+
+                            <div class="row g-3 small mt-1">
+                                <div class="col-md-4">
+                                    <div class="text-muted mb-1">Alternative Contacts</div>
+                                    {% if sk.service_contacts %}
+                                    {% for email in sk.service_contacts %}
+                                    <span class="d-block">{{ email }}</span>
+                                    {% endfor %}
+                                    {% else %}
+                                    <span class="text-muted">None</span>
+                                    {% endif %}
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="text-muted mb-1">Promoted</div>
+                                    {{ sk.promoted_at|localtime('%Y-%m-%d') if sk.promoted_at else 'N/A' }}
+                                    {% if sk.promoted_by %}
+                                    <span class="text-muted">by admin #{{ sk.promoted_by }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="text-muted mb-1">Key Details</div>
+                                    <span class="text-muted">Created: {{ sk.created_at|localtime('%Y-%m-%d') }}</span>
+                                    <br><span class="text-muted">Expires: <strong>Never</strong></span>
+                                    <br><span class="text-muted">Name: {{ sk.name }}</span>
+                                </div>
+                            </div>
+
+                            {% if sk.revocation_requested_at %}
+                            <div class="alert alert-warning small mt-2 mb-0 py-2">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                <strong>Revocation requested</strong> on {{ sk.revocation_requested_at|localtime('%Y-%m-%d %H:%M') }}
+                                {% if sk.revocation_reason %}
+                                <br>Reason: {{ sk.revocation_reason }}
+                                {% endif %}
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- Keys Table -->
             <div class="card">
                 <div class="card-body">

@@ -3174,6 +3174,14 @@ async def admin_api_keys(
     key_ids = [k.id for k in keys]
     key_last_ips = await crud.get_api_key_last_ips_batch(db, key_ids)
 
+    # Fetch all active service keys for the dedicated section (with their request history)
+    service_keys, _ = await crud.get_all_api_keys(
+        db, skip=0, limit=200, type_filter="service",
+        sort_by="created", sort_dir="desc",
+    )
+    service_key_ids = [k.id for k in service_keys]
+    service_last_ips = await crud.get_api_key_last_ips_batch(db, service_key_ids)
+
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/api_keys.html",
@@ -3182,6 +3190,8 @@ async def admin_api_keys(
             "user": user,
             **masq,
             "api_keys": keys,
+            "service_keys": service_keys,
+            "service_last_ips": service_last_ips,
             "total": total,
             "page": page,
             "total_pages": total_pages,
