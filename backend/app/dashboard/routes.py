@@ -2265,7 +2265,7 @@ async def admin_energy(
 async def admin_audit(
     request: Request,
     search: Optional[str] = None,
-    user_id_filter: Optional[int] = None,
+    user_id_filter: Optional[str] = None,
     model_filter: Optional[str] = None,
     status_filter: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -2288,6 +2288,9 @@ async def admin_audit(
     skip = (page - 1) * per_page
 
     # Parse filters
+    parsed_user_id: Optional[int] = None
+    if user_id_filter and user_id_filter.strip().isdigit():
+        parsed_user_id = int(user_id_filter.strip())
     parsed_status = None
     if status_filter:
         try:
@@ -2309,7 +2312,7 @@ async def admin_audit(
 
     audit_requests, total = await crud.search_requests(
         db,
-        user_id=user_id_filter,
+        user_id=parsed_user_id,
         model=model_filter,
         status=parsed_status,
         start_date=parsed_start,
@@ -2346,7 +2349,7 @@ async def admin_audit_export(
     request: Request,
     format: str = "csv",
     search: Optional[str] = None,
-    user_id_filter: Optional[int] = None,
+    user_id_filter: Optional[str] = None,
     model_filter: Optional[str] = None,
     status_filter: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -2366,6 +2369,9 @@ async def admin_audit_export(
     from backend.app.db.models import RequestStatus
 
     # Parse filters
+    parsed_user_id: Optional[int] = None
+    if user_id_filter and user_id_filter.strip().isdigit():
+        parsed_user_id = int(user_id_filter.strip())
     parsed_status = None
     if status_filter:
         try:
@@ -2387,7 +2393,7 @@ async def admin_audit_export(
 
     audit_requests, _ = await crud.search_requests(
         db,
-        user_id=user_id_filter,
+        user_id=parsed_user_id,
         model=model_filter,
         status=parsed_status,
         start_date=parsed_start,
