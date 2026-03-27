@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import os
+import re
 import zoneinfo
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -48,6 +49,11 @@ dashboard_router.include_router(azure_router)
 templates_path = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=templates_path)
 templates.env.filters["fromjson"] = lambda s: json.loads(s) if s else []
+templates.env.filters["urlize"] = lambda s: re.sub(
+    r'(https?://[^\s<>\)]+)',
+    r'<a href="\1" target="_blank" rel="noopener">\1</a>',
+    s or "",
+)
 templates.env.globals["version"] = get_settings().app_version
 
 # ---------------------------------------------------------------------------
