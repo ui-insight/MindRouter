@@ -387,9 +387,10 @@
     }
 
     function inlineFmt(text) {
-        // Escape HTML first, then apply bold
+        // Escape HTML first, then apply bold and linkify URLs
         let s = escapeHtml(text);
         s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        s = s.replace(/(https?:\/\/[^\s&lt;)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
         return s;
     }
 
