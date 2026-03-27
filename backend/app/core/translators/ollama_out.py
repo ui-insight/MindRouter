@@ -57,6 +57,12 @@ class OllamaOutTranslator:
         for msg in canonical.messages:
             messages.append(OllamaOutTranslator._translate_message(msg))
 
+        # Ensure system messages come first — some backends reject
+        # requests where system messages appear after non-system messages.
+        system = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+        messages = system + non_system
+
         payload: Dict[str, Any] = {
             "model": canonical.model,
             "messages": messages,
