@@ -393,6 +393,19 @@ class InferenceService:
                 ))
 
             completed = True
+        except HTTPException as e:
+            # Backend returned a 4xx error. If no chunks have been yielded,
+            # we can emit the error as an SSE event so the client gets a
+            # clean error message instead of a truncated chunked response.
+            backend_id = routed_backend.id if routed_backend else None
+            try:
+                await asyncio.shield(
+                    self._fail_request(db_request, backend_id, str(e.detail), job)
+                )
+            except BaseException:
+                pass
+            error_body = json.dumps({"error": {"message": str(e.detail), "type": "backend_error", "code": e.status_code}})
+            yield f"data: {error_body}\n\ndata: [DONE]\n\n".encode()
         except BaseException as e:
             # BaseException catches CancelledError (not a subclass of Exception
             # in Python 3.9+) and GeneratorExit from client disconnects — both
@@ -636,6 +649,16 @@ class InferenceService:
                     db_request, routed_backend.id, full_content, chunk_count, job,
                     finish_reason=last_finish_reason,
                 ))
+        except HTTPException as e:
+            backend_id = routed_backend.id if routed_backend else None
+            try:
+                await asyncio.shield(
+                    self._fail_request(db_request, backend_id, str(e.detail), job)
+                )
+            except BaseException:
+                pass
+            error_body = json.dumps({"error": str(e.detail)})
+            yield (error_body + "\n").encode()
         except BaseException as e:
             # BaseException catches CancelledError and GeneratorExit from
             # client disconnects that would otherwise leak queue depth.
