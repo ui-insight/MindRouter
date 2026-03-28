@@ -49,11 +49,49 @@ dashboard_router.include_router(azure_router)
 templates_path = os.path.join(os.path.dirname(__file__), "templates")
 templates = Jinja2Templates(directory=templates_path)
 templates.env.filters["fromjson"] = lambda s: json.loads(s) if s else []
+def _mini_md(s: str) -> str:
+    """Lightweight markdown: bold, bullets, URLs, paragraphs."""
+    if not s:
+        return ""
+    import markupsafe
+    lines = s.split("\n")
+    parts = []
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if in_list:
+                parts.append("</ul>")
+                in_list = False
+            continue
+        # Bullet points
+        bullet = re.match(r'^[-*]\s+(.*)', stripped)
+        if bullet:
+            if not in_list:
+                parts.append('<ul class="mb-1">')
+                in_list = True
+            content = markupsafe.escape(bullet.group(1))
+            content = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', str(content))
+            content = re.sub(r'(https?://[^\s<>)]+)', r'<a href="\1" target="_blank" rel="noopener">\1</a>', str(content))
+            parts.append(f"<li>{content}</li>")
+        else:
+            if in_list:
+                parts.append("</ul>")
+                in_list = False
+            content = markupsafe.escape(stripped)
+            content = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', str(content))
+            content = re.sub(r'(https?://[^\s<>)]+)', r'<a href="\1" target="_blank" rel="noopener">\1</a>', str(content))
+            parts.append(f"<p class='mb-1'>{content}</p>")
+    if in_list:
+        parts.append("</ul>")
+    return "".join(parts)
+
 templates.env.filters["urlize"] = lambda s: re.sub(
     r'(https?://[^\s<>\)]+)',
     r'<a href="\1" target="_blank" rel="noopener">\1</a>',
     s or "",
 )
+templates.env.filters["mini_md"] = _mini_md
 templates.env.globals["version"] = get_settings().app_version
 
 # ---------------------------------------------------------------------------
