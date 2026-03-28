@@ -26,17 +26,23 @@ logger = get_logger(__name__)
 _ENRICH_SYSTEM_PROMPT = """\
 You are a technical writer creating concise model descriptions for an LLM catalog.
 Given information about a model (name, metadata, web search results), produce a
-structured markdown description with bullet points.
+description with a brief narrative paragraph followed by a structured bullet list.
 
 Format rules:
-- Use bullet points (- ) for each fact
-- Bold key specs with **bold**
-- Cover: architecture/family, parameter count, quantization, capabilities,
-  notable benchmarks or strengths, and recommended use cases
+- Start with a 2-3 sentence narrative paragraph summarizing what the model is,
+  its architecture, and what it is designed for. If a URL to the official model
+  page or announcement is available, include it naturally in the paragraph
+  (e.g. "Learn more at https://...").
+- Follow the paragraph with a blank line, then bullet points (- ) for key specs.
+- Bold key labels with **bold** (e.g. - **Architecture:** ...)
+- Cover: architecture/family, parameter count, context window, quantization,
+  capabilities, and recommended use cases
 - Keep it to 4-8 bullet points, concise and factual
 - Do NOT include the model name as a heading — it is shown separately
 - If information is unavailable, omit that bullet rather than guessing
-- Do NOT include any preamble or closing remarks — only the bullet list
+- Do NOT include any citation references, footnote markers, or source annotations
+  such as 【1†URL】, [1], (source), etc. Write clean prose only.
+- Do NOT include any preamble like "Here is..." or closing remarks
 """
 
 
@@ -147,5 +153,11 @@ Known metadata:
     )
 
     if result and result.strip():
-        return result.strip()
+        import re
+        # Strip citation references like 【1†URL】, 【metadata】, [1], etc.
+        cleaned = re.sub(r'【[^】]*】', '', result)
+        cleaned = re.sub(r'\[\d+†?[^\]]*\]', '', cleaned)
+        # Collapse any resulting double spaces
+        cleaned = re.sub(r'  +', ' ', cleaned)
+        return cleaned.strip()
     return None
