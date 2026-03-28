@@ -30,9 +30,8 @@ description with a brief narrative paragraph followed by a structured bullet lis
 
 Format rules:
 - Start with a 2-3 sentence narrative paragraph summarizing what the model is,
-  its architecture, and what it is designed for. If a URL to the official model
-  page or announcement is available, include it naturally in the paragraph
-  (e.g. "Learn more at https://...").
+  its architecture, and what it is designed for.
+- Do NOT include any URLs or hyperlinks in the description text.
 - Follow the paragraph with a blank line, then bullet points (- ) for key specs.
 - Bold key labels with **bold** (e.g. - **Architecture:** ...)
 - Cover: architecture/family, parameter count, context window, quantization,
@@ -42,6 +41,7 @@ Format rules:
 - If information is unavailable, omit that bullet rather than guessing
 - Do NOT include any citation references, footnote markers, or source annotations
   such as 【1†URL】, [1], (source), etc. Write clean prose only.
+- Do NOT include any URLs, links, or web addresses anywhere in the output.
 - Do NOT include any preamble like "Here is..." or closing remarks
 """
 
@@ -157,6 +157,11 @@ Known metadata:
         # Strip citation references like 【1†URL】, 【metadata】, [1], etc.
         cleaned = re.sub(r'【[^】]*】', '', result)
         cleaned = re.sub(r'\[\d+†?[^\]]*\]', '', cleaned)
+        # Strip any URLs that slipped through
+        cleaned = re.sub(r'https?://\S+', '', cleaned)
+        # Clean up artifacts: "Learn more at " with nothing after, trailing punctuation
+        cleaned = re.sub(r'[Ll]earn more at\s*\.?\s*', '', cleaned)
+        cleaned = re.sub(r'[Ss]ee\s*\.?\s*$', '', cleaned, flags=re.MULTILINE)
         # Collapse any resulting double spaces
         cleaned = re.sub(r'  +', ' ', cleaned)
         return cleaned.strip()
