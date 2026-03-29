@@ -2090,11 +2090,14 @@ document.addEventListener('mr-theme-changed', function(e) {
 
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) break;
+                if (done) {
+                    // Flush any remaining buffer content
+                    buffer += decoder.decode();
+                }
 
-                buffer += decoder.decode(value, { stream: true });
+                if (!done) buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
+                buffer = done ? '' : (lines.pop() || '');
 
                 for (const line of lines) {
                     const trimmed = line.trim();
@@ -2109,6 +2112,11 @@ document.addEventListener('mr-theme-changed', function(e) {
                             appendStreamDelta(`\n\n**Error:** ${msg}`);
                             break;
                         }
+                        // Server sends normalized content after stream ends
+                        if (chunk.normalized_content) {
+                            _streamFullContent = chunk.normalized_content;
+                            continue;
+                        }
                         const delta = chunk.choices?.[0]?.delta;
                         const contentDelta = delta?.content;
                         const reasoningDelta = delta?.reasoning_content;
@@ -2122,6 +2130,8 @@ document.addEventListener('mr-theme-changed', function(e) {
                         // skip malformed chunks
                     }
                 }
+
+                if (done) break;
             }
         } catch (e) {
             if (e.name === 'AbortError') {

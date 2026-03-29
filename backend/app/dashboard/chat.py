@@ -908,6 +908,7 @@ async def chat_completions(
         # We need to capture the full response to save as assistant message
         async def generate():
             full_content = ""
+            normalized = ""
             try:
                 async for chunk in service.stream_chat_completion(
                     canonical, user, api_key, request
@@ -931,6 +932,16 @@ async def chat_completions(
                                 pass
 
                     yield chunk
+
+                # Stream finished normally — normalize and send to client
+                # so it can re-render with proper LaTeX delimiters.
+                normalized = normalize_latex(full_content) if full_content else ""
+                if normalized and normalized != full_content:
+                    final_event = "data: " + json.dumps({
+                        "normalized_content": normalized
+                    }) + "\n\n"
+                    yield final_event.encode()
+
             except HTTPException as e:
                 detail = e.detail if isinstance(e.detail, str) else json.dumps(e.detail)
                 error_data = "data: " + json.dumps({"error": detail}) + "\n\n"
@@ -947,9 +958,10 @@ async def chat_completions(
                 # reading the stream, uvicorn may cancel the task — we must
                 # protect the DB write from that.
                 if full_content:
+                    saved = normalized or normalize_latex(full_content)
                     try:
                         await asyncio.shield(_save_assistant_message(
-                            conversation_id, normalize_latex(full_content)
+                            conversation_id, saved
                         ))
                     except asyncio.CancelledError:
                         pass

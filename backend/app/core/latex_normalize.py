@@ -62,7 +62,7 @@ _OPERATORS = (
 
 # Compiled patterns
 _BRACE_CMD_RE = re.compile(rf"\\({_BRACE_CMDS})\{{")
-_OPERATOR_RE = re.compile(rf"\\({_OPERATORS})\b")
+_OPERATOR_RE = re.compile(rf"\\({_OPERATORS})(?![a-zA-Z])")
 _BEGIN_END_RE = re.compile(
     r"(\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\2\})"
 )
@@ -189,8 +189,7 @@ def wrap_math_lines(text: str) -> str:
         dollar_pairs = len(_DOLLAR_PAIR_RE.findall(trimmed))
         backslash_cmds = len(_BACKSLASH_CMD_RE.findall(trimmed))
 
-        # Need at least 2 already-wrapped $…$ fragments to consolidate
-        if dollar_pairs < 2:
+        if dollar_pairs < 1:
             result.append(line)
             continue
 
@@ -204,7 +203,18 @@ def wrap_math_lines(text: str) -> str:
             result.append(line)
             continue
 
-        # This is a math-heavy line — strip all $ and wrap in $$
+        # Single $…$ block that dominates the line → promote to display $$
+        if dollar_pairs == 1:
+            m = _DOLLAR_PAIR_RE.search(trimmed)
+            if m and len(m.group(0)) > len(trimmed) * 0.5 and backslash_cmds >= 1:
+                content = trimmed.replace("$", "")
+                indent = line[: len(line) - len(line.lstrip())]
+                result.append(f"{indent}$${content}$$")
+                continue
+            result.append(line)
+            continue
+
+        # Multiple $…$ fragments on a math-heavy line — strip all $ and wrap in $$
         content = trimmed.replace("$", "")
         indent = line[: len(line) - len(line.lstrip())]
         result.append(f"{indent}$${content}$$")
