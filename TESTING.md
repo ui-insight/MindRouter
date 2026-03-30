@@ -54,6 +54,7 @@
 | `backend/app/tests/unit/test_model_enrichment.py` | 28 | Model auto-enrichment: brave_web_search api_key param, LLM call helper, enrichment pipeline, CRUD helpers, config gating |
 | `backend/app/tests/unit/test_voice_api.py` | 34 | Public voice API: TTSRequest validation, quota check, request recording, TTS endpoint (happy path, errors, content-type), STT endpoint (happy path, errors, timeout, language, model), Modality enum |
 | `backend/app/tests/unit/test_dlp.py` | 22 | DLP scanner: regex (SSN, CC, email, keywords, custom patterns), severity classification, text extraction (messages, images, response), LLM prompt construction, ScanResult/ScanFinding dataclasses |
+| `backend/app/tests/unit/test_latex_normalize.py` | 29 | LaTeX normalization: $$-block preservation (v2.4.2 regression), bare command/operator wrapping, display math promotion, inline preservation, mixed content, code block immunity, \\begin/\\end environments |
 
 **Shared fixtures:** `backend/app/tests/conftest.py`
 

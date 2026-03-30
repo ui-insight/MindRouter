@@ -10,6 +10,13 @@ Handles common LLM output issues:
 - Fragmented $...$ around individual symbols instead of full expressions
 - Nested $ inside subscripts/superscripts (e.g. _{$\\infty$})
 - Mixed bare and delimited LaTeX on display equation lines
+
+IMPORTANT (v2.4.2): Already-delimited math blocks ($$...$$, \\[...\\],
+\\(...\\)) are protected with placeholders BEFORE any wrapping phases run.
+This is critical — the wrapping phases use $-parity to detect bare LaTeX,
+and $$ confuses parity (two $ chars → even count → "not inside math").
+Without protection, normalize_latex corrupts every $$ block the LLM emits.
+See test_latex_normalize.py for regression tests.
 """
 
 import re
