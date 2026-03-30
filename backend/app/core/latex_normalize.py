@@ -381,6 +381,39 @@ def wrap_bare_environments(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Protection: shield already-delimited math from normalization
+# ---------------------------------------------------------------------------
+
+_DISPLAY_DOLLAR_RE = re.compile(r"\$\$[\s\S]+?\$\$")
+_DISPLAY_BRACKET_RE = re.compile(r"\\\[[\s\S]+?\\\]")
+_INLINE_PAREN_RE = re.compile(r"\\\([\s\S]+?\\\)")
+
+
+def _protect_delimited_math(text: str):
+    """Replace $$…$$, \\[…\\], and \\(…\\) with placeholders."""
+    placeholders = []
+    idx = [0]
+
+    def _make_placeholder(m):
+        token = f"\x00MATH{idx[0]}\x00"
+        placeholders.append((token, m.group(0)))
+        idx[0] += 1
+        return token
+
+    text = _DISPLAY_DOLLAR_RE.sub(_make_placeholder, text)
+    text = _DISPLAY_BRACKET_RE.sub(_make_placeholder, text)
+    text = _INLINE_PAREN_RE.sub(_make_placeholder, text)
+    return text, placeholders
+
+
+def _restore_delimited_math(text: str, placeholders):
+    """Restore placeholders back to original math blocks."""
+    for token, original in placeholders:
+        text = text.replace(token, original)
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -395,6 +428,10 @@ def normalize_latex(text: str) -> str:
     if not text or "\\" not in text:
         return text  # fast path: no LaTeX commands at all
 
+    # Protect already-delimited math blocks from being mangled by
+    # the wrapping phases (which use $-parity to detect bare LaTeX).
+    text, placeholders = _protect_delimited_math(text)
+
     text = strip_dollars_in_subscripts(text)
     text = wrap_bare_commands(text)
     text = wrap_bare_operators(text)
@@ -404,4 +441,5 @@ def normalize_latex(text: str) -> str:
     text = wrap_math_lines(text)
     text = wrap_bare_environments(text)
 
+    text = _restore_delimited_math(text, placeholders)
     return text
