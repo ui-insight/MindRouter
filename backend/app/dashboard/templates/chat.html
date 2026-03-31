@@ -1035,16 +1035,42 @@ document.addEventListener('mr-theme-changed', function(e) {
         return text;
     }
 
-    function restoreMath(html) {
-        for (const { token, content } of _mathPlaceholders) {
-            // Must use a function replacement — String.replace() treats $
-            // specially in replacement strings ($$ → $, $& → matched text,
-            // $' → text after match, $1 → capture group).  Math content
-            // always contains $ so a plain string replacement corrupts it.
-            html = html.replace(token, () => content);
+    function restoreMathInDom(el) {
+        // Restore math placeholders by walking the DOM and setting textContent.
+        // We CANNOT do string replacement on the HTML string because the raw
+        // math content contains & and < which the browser's HTML parser would
+        // interpret as entities/tags, corrupting the DOM.  By using textContent
+        // on text nodes, the math is inserted as safe text that KaTeX later
+        // renders.
+        if (!_mathPlaceholders.length) return;
+        const tokenMap = new Map(_mathPlaceholders.map(p => [p.token, p.content]));
+        const tokenPattern = /%%MATH\d+%%/g;
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        const nodesToProcess = [];
+        let node;
+        while (node = walker.nextNode()) {
+            if (tokenPattern.test(node.textContent)) {
+                tokenPattern.lastIndex = 0;
+                nodesToProcess.push(node);
+            }
+        }
+        for (const textNode of nodesToProcess) {
+            const parts = textNode.textContent.split(/(%%MATH\d+%%)/);
+            if (parts.length <= 1) continue;
+            const frag = document.createDocumentFragment();
+            for (const part of parts) {
+                if (tokenMap.has(part)) {
+                    // Create a span with math content as text — safe from HTML parsing
+                    const span = document.createElement('span');
+                    span.textContent = tokenMap.get(part);
+                    frag.appendChild(span);
+                } else if (part) {
+                    frag.appendChild(document.createTextNode(part));
+                }
+            }
+            textNode.parentNode.replaceChild(frag, textNode);
         }
         _mathPlaceholders = [];
-        return html;
     }
 
     function renderMath(el) {
@@ -1248,6 +1274,7 @@ document.addEventListener('mr-theme-changed', function(e) {
 
         addCopyButtons(div);
         if (role === 'assistant') {
+            restoreMathInDom(div);
             renderMath(div);
             if (content) addCopyResponseButton(div, content);
             if (content && voiceTtsEnabled) addTTSButton(div, content);
@@ -1259,8 +1286,9 @@ document.addEventListener('mr-theme-changed', function(e) {
         if (role === 'user') return escapeHtml(content || '').replace(/\n/g, '<br>');
         const protected_ = protectMath(content || '');
         const html = marked.parse(protected_);
-        const sanitized = DOMPurify.sanitize(html);
-        return restoreMath(sanitized);
+        return DOMPurify.sanitize(html);
+        // Note: %%MATH%% tokens remain in the HTML — they are restored
+        // in the DOM (via restoreMathInDom) after innerHTML is set.
     }
 
     // ---------------------------------------------------------------
@@ -1361,7 +1389,8 @@ document.addEventListener('mr-theme-changed', function(e) {
         if (!_streamRenderedEl) return;
         const protected_ = protectMath(_streamFullContent || '');
         const html = marked.parse(protected_);
-        _streamRenderedEl.innerHTML = restoreMath(DOMPurify.sanitize(html));
+        _streamRenderedEl.innerHTML = DOMPurify.sanitize(html);
+        restoreMathInDom(_streamRenderedEl);
         renderMath(_streamRenderedEl);
         if (_streamTailEl) {
             _streamTailEl.textContent = '';
@@ -1384,6 +1413,7 @@ document.addEventListener('mr-theme-changed', function(e) {
         const contentEl = last.querySelector('.message-content');
         contentEl.innerHTML = renderContent('assistant', content);
         addCopyButtons(last);
+        restoreMathInDom(last);
         renderMath(last);
         addCopyResponseButton(last, content);
         if (voiceTtsEnabled) addTTSButton(last, content);
