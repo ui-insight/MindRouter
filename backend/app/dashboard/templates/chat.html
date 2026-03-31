@@ -1037,7 +1037,11 @@ document.addEventListener('mr-theme-changed', function(e) {
 
     function restoreMath(html) {
         for (const { token, content } of _mathPlaceholders) {
-            html = html.replace(token, content);
+            // Must use a function replacement — String.replace() treats $
+            // specially in replacement strings ($$ → $, $& → matched text,
+            // $' → text after match, $1 → capture group).  Math content
+            // always contains $ so a plain string replacement corrupts it.
+            html = html.replace(token, () => content);
         }
         _mathPlaceholders = [];
         return html;
