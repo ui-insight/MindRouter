@@ -12,6 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     pkg-config \
     default-libmysqlclient-dev \
+    poppler-utils \
+    libreoffice-core \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user with explicit UID for predictable bind mount permissions

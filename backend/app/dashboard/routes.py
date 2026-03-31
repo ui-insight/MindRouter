@@ -3827,6 +3827,110 @@ async def admin_voice_config_post(
 
 
 # ---------------------------------------------------------------------------
+# Admin OCR Configuration
+# ---------------------------------------------------------------------------
+
+
+@dashboard_router.get("/admin/ocr-config")
+async def admin_ocr_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin OCR configuration page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/ocr_config.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "enabled": await crud.get_config_json(db, "ocr.enabled", True),
+            "default_model": await crud.get_config_json(db, "ocr.default_model", "qwen/qwen3.5-122b"),
+            "chunk_size": await crud.get_config_json(db, "ocr.chunk_size", 6),
+            "overlap": await crud.get_config_json(db, "ocr.overlap", 2),
+            "dpi": await crud.get_config_json(db, "ocr.dpi", 200),
+            "max_pages": await crud.get_config_json(db, "ocr.max_pages", 200),
+            "max_file_size_mb": await crud.get_config_json(db, "ocr.max_file_size_mb", 100),
+            "max_concurrent_chunks": await crud.get_config_json(db, "ocr.max_concurrent_chunks", 4),
+            "min_chars_per_page": await crud.get_config_json(db, "ocr.min_chars_per_page", 400),
+            "max_retries": await crud.get_config_json(db, "ocr.max_retries", 2),
+            "max_tokens": await crud.get_config_json(db, "ocr.max_tokens", 16384),
+            "temperature": await crud.get_config_json(db, "ocr.temperature", 0.1),
+            "success": success,
+            "error": error,
+        },
+    )
+
+
+@dashboard_router.post("/admin/ocr-config")
+async def admin_ocr_config_post(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle OCR config form submission."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+
+    await crud.set_config(db, "ocr.enabled", "enabled" in form)
+    await crud.set_config(db, "ocr.default_model", form.get("default_model", "").strip() or "qwen/qwen3.5-122b")
+
+    # Integer configs with bounds
+    int_configs = {
+        "ocr.chunk_size": ("chunk_size", 6, 1, 20),
+        "ocr.overlap": ("overlap", 2, 0, 10),
+        "ocr.dpi": ("dpi", 200, 72, 600),
+        "ocr.max_pages": ("max_pages", 200, 1, 1000),
+        "ocr.max_file_size_mb": ("max_file_size_mb", 100, 1, 500),
+        "ocr.max_concurrent_chunks": ("max_concurrent_chunks", 4, 1, 16),
+        "ocr.min_chars_per_page": ("min_chars_per_page", 400, 0, 2000),
+        "ocr.max_retries": ("max_retries", 2, 0, 5),
+        "ocr.max_tokens": ("max_tokens", 16384, 1024, 65536),
+    }
+    for key, (field, default, lo, hi) in int_configs.items():
+        try:
+            val = int(form.get(field, str(default)))
+            val = max(lo, min(hi, val))
+        except (ValueError, TypeError):
+            val = default
+        await crud.set_config(db, key, val)
+
+    # Float config
+    try:
+        temp = float(form.get("temperature", "0.1"))
+        temp = max(0.0, min(1.0, temp))
+    except (ValueError, TypeError):
+        temp = 0.1
+    await crud.set_config(db, "ocr.temperature", temp)
+
+    _ip = get_client_ip(request)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="ocr_config.save",
+        entity_type="config",
+        after_value={"model": form.get("default_model"), "enabled": "enabled" in form},
+        ip_address=_ip,
+    )
+    await db.commit()
+    return RedirectResponse(url="/admin/ocr-config?success=config_updated", status_code=302)
+
+
+# ---------------------------------------------------------------------------
 # Admin Site Settings (timezone, etc.)
 # ---------------------------------------------------------------------------
 

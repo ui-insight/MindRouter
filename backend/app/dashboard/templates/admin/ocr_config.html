@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block title %}OCR Config - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "ocr_config" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-file-earmark-text"></i> OCR Configuration</h1>
+            <p class="text-muted">Configure the <code>/v1/ocr</code> endpoint for document-to-text conversion using multimodal LLMs.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'config_updated' %}OCR configuration updated.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            {% if not is_read_only %}
+            <form method="post" action="/admin/ocr-config">
+                <input type="hidden" name="action" value="save_ocr_config">
+
+                <div class="row g-4">
+                    <!-- General Settings -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-gear"></i> General</h5></div>
+                            <div class="card-body">
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="enabled" name="enabled" {% if enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="enabled">Enable OCR endpoint</label>
+                                    <div class="form-text">When disabled, <code>/v1/ocr</code> returns 503.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="default_model" class="form-label">Default Model</label>
+                                    <input type="text" class="form-control" id="default_model" name="default_model" value="{{ default_model or 'qwen/qwen3.5-122b' }}">
+                                    <div class="form-text">Multimodal model used for OCR. Must support vision/image inputs.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_tokens" class="form-label">Max Tokens (per chunk)</label>
+                                    <input type="number" class="form-control" id="max_tokens" name="max_tokens" value="{{ max_tokens }}" min="1024" max="65536">
+                                    <div class="form-text">Maximum output tokens per chunk request.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="temperature" class="form-label">Temperature</label>
+                                    <input type="number" class="form-control" id="temperature" name="temperature" value="{{ temperature }}" min="0" max="1" step="0.05">
+                                    <div class="form-text">Lower = more deterministic OCR. Recommended: 0.1</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chunking Settings -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-layers"></i> Chunking</h5></div>
+                            <div class="card-body">
+                                <p class="text-muted small">Multi-page documents are split into overlapping chunks, OCR'd in parallel, then merged deterministically.</p>
+
+                                <div class="mb-3">
+                                    <label for="chunk_size" class="form-label">Chunk Size (pages)</label>
+                                    <input type="number" class="form-control" id="chunk_size" name="chunk_size" value="{{ chunk_size }}" min="1" max="20">
+                                    <div class="form-text">Pages per chunk. 6 works well for most models.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="overlap" class="form-label">Overlap (pages)</label>
+                                    <input type="number" class="form-control" id="overlap" name="overlap" value="{{ overlap }}" min="0" max="10">
+                                    <div class="form-text">Overlapping pages between chunks for reliable merging. Must be less than chunk size.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="dpi" class="form-label">DPI</label>
+                                    <input type="number" class="form-control" id="dpi" name="dpi" value="{{ dpi }}" min="72" max="600">
+                                    <div class="form-text">Image resolution for PDF/Office conversion. Higher = better quality but larger requests.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_concurrent_chunks" class="form-label">Max Concurrent Chunks</label>
+                                    <input type="number" class="form-control" id="max_concurrent_chunks" name="max_concurrent_chunks" value="{{ max_concurrent_chunks }}" min="1" max="16">
+                                    <div class="form-text">Parallel chunk processing limit.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Safety Limits -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-shield-check"></i> Limits</h5></div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label for="max_pages" class="form-label">Max Pages</label>
+                                    <input type="number" class="form-control" id="max_pages" name="max_pages" value="{{ max_pages }}" min="1" max="1000">
+                                    <div class="form-text">Maximum number of pages per document.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_file_size_mb" class="form-label">Max File Size (MB)</label>
+                                    <input type="number" class="form-control" id="max_file_size_mb" name="max_file_size_mb" value="{{ max_file_size_mb }}" min="1" max="500">
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="min_chars_per_page" class="form-label">Min Characters Per Page</label>
+                                    <input type="number" class="form-control" id="min_chars_per_page" name="min_chars_per_page" value="{{ min_chars_per_page }}" min="0" max="2000">
+                                    <div class="form-text">If a chunk produces fewer chars than this &times; pages, it retries with a stronger prompt.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_retries" class="form-label">Max Retries (per chunk)</label>
+                                    <input type="number" class="form-control" id="max_retries" name="max_retries" value="{{ max_retries }}" min="0" max="5">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- API Info -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-code-slash"></i> API Usage</h5></div>
+                            <div class="card-body">
+                                <p class="small">Send a multipart POST to <code>/v1/ocr</code> with your API key:</p>
+<pre class="bg-light p-3 rounded small"><code>curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@document.pdf" \
+  -F "output_format=markdown"</code></pre>
+                                <p class="small mb-0"><strong>Optional form fields:</strong> <code>model</code>, <code>output_format</code> (markdown|json), <code>chunk_size</code>, <code>overlap</code>, <code>dpi</code></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-4">
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save OCR Configuration</button>
+                </div>
+            </form>
+            {% else %}
+            <div class="alert alert-info">You have read-only admin access. Configuration changes require full admin privileges.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

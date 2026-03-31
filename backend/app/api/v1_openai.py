@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,7 @@ from backend.app.db.models import ApiKey, BackendEngine, Modality, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.inference import InferenceService
+from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/v1", tags=["openai"])
@@ -425,4 +426,163 @@ async def tokenize(
         "count": count,
         "max_model_len": max_model_len,
         "is_estimate": is_estimate,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /v1/ocr – Document OCR via multimodal LLM
+# ---------------------------------------------------------------------------
+
+_OCR_ALLOWED_TYPES = {
+    "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif",
+    "image/tiff", "image/bmp",
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/msword",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.ms-excel",
+}
+
+# Extension → MIME for cases where content_type is generic
+_OCR_EXT_MAP = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp", ".gif": "image/gif", ".tiff": "image/tiff",
+    ".tif": "image/tiff", ".bmp": "image/bmp", ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".doc": "application/msword",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".xls": "application/vnd.ms-excel",
+}
+
+
+@router.post("/ocr")
+async def ocr(
+    request: Request,
+    file: UploadFile = File(...),
+    model: Optional[str] = Form(None),
+    output_format: Optional[str] = Form("markdown"),
+    chunk_size: Optional[int] = Form(None),
+    overlap: Optional[int] = Form(None),
+    dpi: Optional[int] = Form(None),
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """
+    OCR endpoint: convert images, PDFs, and Office documents to markdown or JSON.
+
+    Accepts multipart file upload. For multi-page documents, pages are processed
+    in overlapping chunks and merged deterministically.
+    """
+    from backend.app.services.ocr import get_ocr_config, perform_ocr
+
+    user, api_key = auth
+    bind_request_context(request)
+
+    # Load OCR config from admin settings
+    ocr_config = await get_ocr_config(db)
+
+    if not ocr_config["enabled"]:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OCR is currently disabled by the administrator",
+        )
+
+    # Apply defaults from config
+    if model is None:
+        model = ocr_config["model"]
+    if chunk_size is None:
+        chunk_size = ocr_config["chunk_size"]
+    if overlap is None:
+        overlap = ocr_config["overlap"]
+    if dpi is None:
+        dpi = ocr_config["dpi"]
+
+    # Validate output format
+    if output_format not in ("markdown", "json"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="output_format must be 'markdown' or 'json'",
+        )
+
+    # Validate chunk params
+    if overlap >= chunk_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="overlap must be less than chunk_size",
+        )
+
+    # Resolve content type from file extension if generic
+    content_type = file.content_type or "application/octet-stream"
+    if content_type == "application/octet-stream" and file.filename:
+        import os
+        ext = os.path.splitext(file.filename)[1].lower()
+        content_type = _OCR_EXT_MAP.get(ext, content_type)
+
+    if content_type not in _OCR_ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {content_type}. Supported: images, PDF, DOCX, PPTX, XLSX",
+        )
+
+    # Validate model exists
+    registry = get_registry()
+    if not await registry.model_exists(model):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model '{model}' not found",
+        )
+
+    # Read file
+    file_bytes = await file.read()
+    max_size = ocr_config["max_file_size_mb"] * 1024 * 1024
+    if len(file_bytes) > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds maximum size of {ocr_config['max_file_size_mb']}MB",
+        )
+
+    request_id = f"ocr-{uuid.uuid4().hex[:24]}"
+    service = InferenceService(db)
+
+    try:
+        result = await perform_ocr(
+            file_bytes=file_bytes,
+            content_type=content_type,
+            filename=file.filename or "document",
+            model=model,
+            output_format=output_format,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            dpi=dpi,
+            ocr_config=ocr_config,
+            service=service,
+            user=user,
+            api_key=api_key,
+            http_request=request,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(e),
+        )
+
+    return {
+        "id": request_id,
+        "object": "ocr.result",
+        "created": int(time.time()),
+        "model": model,
+        "content": result["content"],
+        "format": result["format"],
+        "pages": result["pages"],
+        "chunks_processed": result["chunks_processed"],
+        "usage": result["usage"],
     }

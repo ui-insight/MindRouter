@@ -60,6 +60,9 @@ dependencies = [
     "pygments>=2.17.0",
     "aiosmtplib>=2.0.0",
     "gliner>=0.2.0",
+    "pdf2image>=1.17.0",
+    "Pillow>=10.0.0",
+    "python-pptx>=0.6.23",
 ]
 
 [project.optional-dependencies]
