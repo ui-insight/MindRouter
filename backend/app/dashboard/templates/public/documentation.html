@@ -1548,6 +1548,14 @@ result = response.json()
 print(result["content"])  # Markdown text
 print(f"Pages: {result['pages']}, Chunks: {result['chunks_processed']}")</code></pre>
 
+                <h4>Simplified Endpoint: <code>/v1/ocrmd</code></h4>
+                <p>For convenience, <code>POST /v1/ocrmd</code> returns <strong>raw markdown</strong> directly (not JSON-wrapped). The response body is plain text with <code>Content-Type: text/markdown</code>. This is useful for piping output directly to a file:</p>
+<pre><code>curl https://mindrouter.uidaho.edu/v1/ocrmd \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@document.pdf" \
+  > output.md</code></pre>
+                <p>Accepts the same optional parameters as <code>/v1/ocr</code> (<code>model</code>, <code>chunk_size</code>, <code>overlap</code>, <code>dpi</code>) except <code>output_format</code> (always markdown).</p>
+
                 <h4>Configuration</h4>
                 <p>Administrators can configure OCR settings via <strong>Admin &rarr; OCR</strong> in the web dashboard. Configurable options include:</p>
                 <ul>
