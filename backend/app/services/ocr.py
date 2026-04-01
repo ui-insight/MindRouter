@@ -642,12 +642,12 @@ async def _perform_ocr_pipelined(
 
     async def _convert_and_ocr(idx, start, end):
         """Convert this chunk's pages then immediately OCR them."""
-        # Convert just this chunk's page range (1-indexed for pdf2image)
-        chunk_images = await _pdf_to_images_range(
-            pdf_bytes, first_page=start + 1, last_page=end, dpi=dpi,
-        )
-        # Send to LLM as soon as pages are ready
+        # Semaphore gates both conversion and inference together to bound
+        # total CPU (pdftoppm processes) and memory (page images in RAM).
         async with semaphore:
+            chunk_images = await _pdf_to_images_range(
+                pdf_bytes, first_page=start + 1, last_page=end, dpi=dpi,
+            )
             return await ocr_chunk(
                 chunk_images, idx, start, end,
                 total_pages, total_chunks,

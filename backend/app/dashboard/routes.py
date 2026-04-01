@@ -3906,7 +3906,7 @@ async def admin_ocr_config_post(
         "ocr.dpi": ("dpi", 200, 72, 600),
         "ocr.max_pages": ("max_pages", 200, 1, 1000),
         "ocr.max_file_size_mb": ("max_file_size_mb", 100, 1, 500),
-        "ocr.max_concurrent_chunks": ("max_concurrent_chunks", 4, 1, 16),
+        "ocr.max_concurrent_chunks": ("max_concurrent_chunks", 4, 1, 32),
         "ocr.min_chars_per_page": ("min_chars_per_page", 400, 0, 2000),
         "ocr.max_retries": ("max_retries", 2, 0, 5),
         "ocr.max_tokens": ("max_tokens", 16384, 1024, 65536),
