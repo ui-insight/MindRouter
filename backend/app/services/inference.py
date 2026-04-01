@@ -749,6 +749,11 @@ class InferenceService:
 
         if hasattr(request, "messages"):
             messages = [m.model_dump() for m in request.messages]
+            # Extract inline base64 images to filesystem to avoid exceeding
+            # DB packet limits and bloating audit logs.  Each image is saved
+            # under /data/artifacts/request_images/<request_uuid>/ and the
+            # audit record stores a lightweight reference instead.
+            messages = self._extract_images_from_messages(messages)
         if hasattr(request, "prompt"):
             prompt = request.prompt if isinstance(request.prompt, str) else str(request.prompt)
 
@@ -783,6 +788,93 @@ class InferenceService:
         await self.db.commit()
 
         return db_request
+
+    def _extract_images_from_messages(self, messages: list) -> list:
+        """
+        Extract inline base64 images from serialized messages and save them
+        to the filesystem.  Replaces the image data in the messages dict with
+        a lightweight reference containing the storage path and size.
+
+        This prevents large multimodal requests (OCR, vision) from exceeding
+        MariaDB's max_allowed_packet and from bloating the audit log.
+        """
+        import base64 as _b64
+        from pathlib import Path
+
+        images_dir = None  # lazily created
+        img_idx = 0
+
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+
+                # Handle image_url blocks with data: URIs
+                iu = block.get("image_url")
+                if isinstance(iu, dict) and isinstance(iu.get("url"), str):
+                    url = iu["url"]
+                    if url.startswith("data:") and len(url) > 1024:
+                        if images_dir is None:
+                            images_dir = self._make_request_images_dir()
+                        path = self._save_audit_image(
+                            images_dir, img_idx, url
+                        )
+                        img_idx += 1
+                        iu["url"] = f"file://{path}"
+                        iu["_stored_size_bytes"] = path.stat().st_size if path.exists() else 0
+
+                # Handle image_base64 blocks
+                if block.get("type") == "image_base64" and isinstance(block.get("data"), str):
+                    data = block["data"]
+                    if len(data) > 1024:
+                        if images_dir is None:
+                            images_dir = self._make_request_images_dir()
+                        media_type = block.get("media_type", "image/png")
+                        ext = media_type.split("/")[-1].split(";")[0]
+                        path = images_dir / f"{img_idx}.{ext}"
+                        try:
+                            path.write_bytes(_b64.b64decode(data))
+                        except Exception:
+                            pass
+                        img_idx += 1
+                        block["data"] = f"file://{path}"
+                        block["_stored_size_bytes"] = path.stat().st_size if path.exists() else 0
+
+        return messages
+
+    def _make_request_images_dir(self):
+        """Create and return a directory for storing audit images."""
+        import uuid as _uuid
+        from pathlib import Path
+
+        base = Path(self._settings.artifact_storage_path) / "request_images"
+        dirname = _uuid.uuid4().hex[:16]
+        img_dir = base / dirname
+        img_dir.mkdir(parents=True, exist_ok=True)
+        return img_dir
+
+    @staticmethod
+    def _save_audit_image(images_dir, idx: int, data_url: str):
+        """Save a data: URI image to the filesystem. Returns the Path."""
+        import base64 as _b64
+
+        # Parse data:image/png;base64,AAAA...
+        header, _, b64_data = data_url.partition(",")
+        # Extract extension from media type
+        media = header.split(":")[1].split(";")[0] if ":" in header else "image/png"
+        ext = media.split("/")[-1]
+        if ext not in ("png", "jpeg", "jpg", "webp", "gif", "tiff", "bmp"):
+            ext = "png"
+        path = images_dir / f"{idx}.{ext}"
+        try:
+            path.write_bytes(_b64.b64decode(b64_data))
+        except Exception:
+            # If decode fails, write raw truncated reference
+            path.write_bytes(b"(decode failed)")
+        return path
 
     @staticmethod
     def _get_client_ip(http_request: Request) -> Optional[str]:
