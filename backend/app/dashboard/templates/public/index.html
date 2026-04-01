@@ -475,6 +475,87 @@ response = client.chat.completions.create(
         </div>
     </div>
 
+    <!-- ── Feature: Document OCR ── -->
+    <div class="row align-items-center g-4 mt-2">
+        <div class="col-lg-12">
+            <div class="text-center mb-4">
+                <span class="badge bg-info bg-opacity-10 text-info mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-file-earmark-text"></i> Document OCR</span>
+                <h3 class="fw-bold mt-2">Intelligent Document Extraction</h3>
+                <p class="text-muted mx-auto" style="max-width:600px;">Convert PDFs, images, and Office documents to structured markdown or JSON using multimodal LLMs. Multi-page documents are automatically chunked, processed in parallel, and merged seamlessly.</p>
+            </div>
+        </div>
+
+        <!-- Curl example + response -->
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body p-0">
+                    <div class="d-flex align-items-center px-3 pt-3 pb-2">
+                        <i class="bi bi-terminal me-2" style="font-size:1.2rem; color:#0dcaf0;"></i>
+                        <h6 class="fw-bold mb-0">API Request</h6>
+                    </div>
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@research_paper.pdf" \
+  -F "output_format=markdown"</code></pre>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body p-0">
+                    <div class="d-flex align-items-center px-3 pt-3 pb-2">
+                        <i class="bi bi-filetype-json me-2" style="font-size:1.2rem; color:#0dcaf0;"></i>
+                        <h6 class="fw-bold mb-0">Response</h6>
+                    </div>
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>{
+  "object": "ocr.result",
+  "model": "qwen/qwen3.5-122b",
+  "content": "# Research Paper Title\n\n## Abstract\n...",
+  "format": "markdown",
+  "pages": 12,
+  "chunks_processed": 3
+}</code></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Feature bullets -->
+        <div class="col-lg-12">
+            <div class="row g-3 justify-content-center">
+                <div class="col-md-3 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-files text-info" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Multi-Format</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">PDF, PNG, JPEG, WebP, DOCX, PPTX, XLSX &mdash; all converted to structured text</p>
+                    </div>
+                </div>
+                <div class="col-md-3 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-layers text-primary" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Smart Chunking</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Overlapping page chunks with deterministic merging &mdash; handles documents of any length</p>
+                    </div>
+                </div>
+                <div class="col-md-3 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-table text-success" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Layout Aware</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Preserves tables, headers, lists, and formatting as clean markdown</p>
+                    </div>
+                </div>
+                <div class="col-md-3 col-sm-6">
+                    <div class="card border-0 shadow-sm h-100 text-center p-3">
+                        <div class="mb-2"><i class="bi bi-lightning-charge text-warning" style="font-size:2rem;"></i></div>
+                        <h6 class="fw-bold mb-1">Parallel Processing</h6>
+                        <p class="text-muted mb-0" style="font-size:0.82rem;">Concurrent chunk OCR with configurable parallelism for fast throughput</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="my-5 opacity-10">
+
     <!-- ── Feature 6: Docs & Blog ── -->
     <div class="row align-items-center mb-5 g-4">
         <div class="col-lg-6">

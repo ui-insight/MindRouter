@@ -74,6 +74,7 @@
                 <li class="nav-item"><a class="nav-link" href="#circuit-breaker">Circuit Breaker</a></li>
                 <li class="nav-item"><a class="nav-link" href="#rate-limiting">Rate Limiting</a></li>
                 <li class="nav-item"><a class="nav-link" href="#tool-calling">Tool Calling</a></li>
+                <li class="nav-item"><a class="nav-link" href="#ocr">Document OCR</a></li>
                 <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
@@ -1471,6 +1472,94 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                     <li><strong>Cross-format support</strong> &mdash; Tool calls work whether the request arrives in OpenAI, Ollama, or Anthropic format. MindRouter translates tool definitions, tool calls, and tool results between all formats automatically.</li>
                     <li><strong>Backend requirement</strong> &mdash; The selected backend must support tool calling. For vLLM, this requires <code>--enable-auto-tool-choice</code> and the appropriate <code>--tool-call-parser</code> flag. For Ollama, tool calling is supported natively on compatible models.</li>
                 </ul>
+            </section>
+
+            <hr>
+
+            <!-- Document OCR -->
+            <section id="ocr">
+                <h2>Document OCR</h2>
+                <p>MindRouter provides a dedicated <code>POST /v1/ocr</code> endpoint that converts images, PDFs, and Office documents into structured markdown or JSON using a multimodal LLM. This is particularly useful for extracting text from scanned documents, research papers, forms, and spreadsheets while preserving layout, tables, and formatting.</p>
+
+                <h4>Supported Formats</h4>
+                <ul>
+                    <li><strong>Images:</strong> PNG, JPEG, WebP, GIF, TIFF, BMP (including multi-frame GIF/TIFF)</li>
+                    <li><strong>PDF:</strong> Converted to page images at configurable DPI (default 200)</li>
+                    <li><strong>Office:</strong> DOCX, PPTX, XLSX &mdash; converted to PDF via LibreOffice, then to images</li>
+                </ul>
+
+                <h4>How It Works</h4>
+                <ol>
+                    <li><strong>Document to images</strong> &mdash; The uploaded file is converted to a series of PNG page images.</li>
+                    <li><strong>Chunking</strong> &mdash; For multi-page documents, pages are split into overlapping chunks (default: 6 pages per chunk, 2-page overlap). This ensures no content is lost at page boundaries.</li>
+                    <li><strong>Parallel OCR</strong> &mdash; Each chunk is sent to a multimodal LLM as a chat completion request containing the page images and an OCR prompt. Chunks are processed concurrently for speed.</li>
+                    <li><strong>Completeness check</strong> &mdash; If a chunk&rsquo;s output is suspiciously short (below a configurable threshold per page), it is automatically retried with a stronger prompt.</li>
+                    <li><strong>Deterministic merge</strong> &mdash; Overlapping chunks are merged using <code>difflib</code> sequence matching to find the overlap boundary, then spliced together. No additional LLM calls are needed for merging.</li>
+                </ol>
+
+                <h4>API Usage</h4>
+                <p>Send a multipart <code>POST</code> request with your API key and the file:</p>
+<pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@document.pdf" \
+  -F "output_format=markdown"</code></pre>
+
+                <h5>Request Parameters (form fields)</h5>
+                <table class="table table-sm">
+                    <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>file</code></td><td>file</td><td><em>required</em></td><td>The document to OCR (image, PDF, or Office file)</td></tr>
+                        <tr><td><code>model</code></td><td>string</td><td>Admin-configured</td><td>Multimodal model to use (must support vision)</td></tr>
+                        <tr><td><code>output_format</code></td><td>string</td><td><code>markdown</code></td><td><code>markdown</code> or <code>json</code></td></tr>
+                        <tr><td><code>chunk_size</code></td><td>int</td><td>6</td><td>Pages per chunk for multi-page documents</td></tr>
+                        <tr><td><code>overlap</code></td><td>int</td><td>2</td><td>Overlapping pages between chunks</td></tr>
+                        <tr><td><code>dpi</code></td><td>int</td><td>200</td><td>Image resolution for PDF/Office conversion</td></tr>
+                    </tbody>
+                </table>
+
+                <h5>Response</h5>
+<pre><code>{
+  "id": "ocr-abc123...",
+  "object": "ocr.result",
+  "created": 1711700000,
+  "model": "qwen/qwen3.5-122b",
+  "content": "# Document Title\n\n## Section 1\n\nExtracted text...",
+  "format": "markdown",
+  "pages": 12,
+  "chunks_processed": 3,
+  "usage": {
+    "prompt_tokens": 45000,
+    "completion_tokens": 8000,
+    "total_tokens": 53000
+  }
+}</code></pre>
+
+                <h4>Python Example</h4>
+<pre><code>import requests
+
+response = requests.post(
+    "https://mindrouter.uidaho.edu/v1/ocr",
+    headers={"Authorization": "Bearer YOUR_API_KEY"},
+    files={"file": open("paper.pdf", "rb")},
+    data={"output_format": "markdown"},
+)
+
+result = response.json()
+print(result["content"])  # Markdown text
+print(f"Pages: {result['pages']}, Chunks: {result['chunks_processed']}")</code></pre>
+
+                <h4>Configuration</h4>
+                <p>Administrators can configure OCR settings via <strong>Admin &rarr; OCR</strong> in the web dashboard. Configurable options include:</p>
+                <ul>
+                    <li><strong>Default model</strong> &mdash; Which multimodal model to use (must support vision/image inputs)</li>
+                    <li><strong>Chunk size &amp; overlap</strong> &mdash; How many pages per chunk and how many pages overlap between chunks</li>
+                    <li><strong>DPI</strong> &mdash; Resolution for PDF and Office document conversion</li>
+                    <li><strong>Concurrency</strong> &mdash; How many chunks to process in parallel</li>
+                    <li><strong>Safety limits</strong> &mdash; Maximum pages, file size, retries per chunk</li>
+                    <li><strong>Temperature &amp; max tokens</strong> &mdash; LLM parameters for OCR requests</li>
+                    <li><strong>Enable/disable</strong> &mdash; Toggle the entire OCR endpoint</li>
+                </ul>
+                <p>All settings are stored in the <code>app_config</code> table and take effect immediately without restarting the application.</p>
             </section>
 
             <hr>

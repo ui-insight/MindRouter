@@ -3847,6 +3847,13 @@ async def admin_ocr_config(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
+    # Get multimodal model names for the dropdown
+    all_models = await crud.get_all_models_with_backends(db)
+    multimodal_models = sorted({
+        m.name for m in all_models
+        if m.supports_multimodal
+    })
+
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/ocr_config.html",
@@ -3854,6 +3861,7 @@ async def admin_ocr_config(
             "request": request,
             "user": user,
             **masq,
+            "multimodal_models": multimodal_models,
             "enabled": await crud.get_config_json(db, "ocr.enabled", True),
             "default_model": await crud.get_config_json(db, "ocr.default_model", "qwen/qwen3.5-122b"),
             "chunk_size": await crud.get_config_json(db, "ocr.chunk_size", 6),

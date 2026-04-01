@@ -44,8 +44,15 @@
 
                                 <div class="mb-3">
                                     <label for="default_model" class="form-label">Default Model</label>
-                                    <input type="text" class="form-control" id="default_model" name="default_model" value="{{ default_model or 'qwen/qwen3.5-122b' }}">
-                                    <div class="form-text">Multimodal model used for OCR. Must support vision/image inputs.</div>
+                                    <select class="form-select" id="default_model" name="default_model">
+                                        {% for m in multimodal_models %}
+                                        <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                                        {% endfor %}
+                                        {% if default_model and default_model not in multimodal_models %}
+                                        <option value="{{ default_model }}" selected>{{ default_model }} (not currently available)</option>
+                                        {% endif %}
+                                    </select>
+                                    <div class="form-text">Multimodal model used for OCR. Only models with vision/image support are shown.</div>
                                 </div>
 
                                 <div class="mb-3">
@@ -133,11 +140,16 @@
                             <div class="card-header"><h5 class="mb-0"><i class="bi bi-code-slash"></i> API Usage</h5></div>
                             <div class="card-body">
                                 <p class="small">Send a multipart POST to <code>/v1/ocr</code> with your API key:</p>
-<pre class="bg-light p-3 rounded small"><code>curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
+<pre class="bg-light p-3 rounded small" style="overflow-x:auto; white-space:pre; word-break:normal;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "file=@document.pdf" \
   -F "output_format=markdown"</code></pre>
-                                <p class="small mb-0"><strong>Optional form fields:</strong> <code>model</code>, <code>output_format</code> (markdown|json), <code>chunk_size</code>, <code>overlap</code>, <code>dpi</code></p>
+                                <p class="small mt-2 mb-0"><strong>Optional form fields:</strong></p>
+                                <ul class="small mb-0">
+                                    <li><code>model</code> &mdash; override default OCR model</li>
+                                    <li><code>output_format</code> &mdash; <code>markdown</code> (default) or <code>json</code></li>
+                                    <li><code>chunk_size</code>, <code>overlap</code>, <code>dpi</code> &mdash; override chunking/resolution</li>
+                                </ul>
                             </div>
                         </div>
                     </div>
