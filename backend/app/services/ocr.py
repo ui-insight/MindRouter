@@ -147,6 +147,31 @@ async def _pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> List[bytes]:
     return await asyncio.to_thread(_convert)
 
 
+async def _pdf_page_count(pdf_bytes: bytes) -> int:
+    """Get the number of pages in a PDF without converting to images."""
+    from pdf2image.pdf2image import pdfinfo_from_bytes
+    def _count():
+        info = pdfinfo_from_bytes(pdf_bytes)
+        return info.get("Pages", 0)
+    return await asyncio.to_thread(_count)
+
+
+async def _pdf_to_images_range(
+    pdf_bytes: bytes, first_page: int, last_page: int, dpi: int = 200
+) -> List[bytes]:
+    """Convert a range of PDF pages to PNG byte buffers (1-indexed)."""
+    from pdf2image import convert_from_bytes
+
+    def _convert():
+        pil_images = convert_from_bytes(
+            pdf_bytes, dpi=dpi, fmt="png",
+            first_page=first_page, last_page=last_page,
+        )
+        return [_image_to_png_bytes(img) for img in pil_images]
+
+    return await asyncio.to_thread(_convert)
+
+
 async def _office_to_pdf(file_bytes: bytes, suffix: str) -> bytes:
     """Convert Office document to PDF via LibreOffice headless."""
     lo_path = shutil.which("libreoffice") or shutil.which("soffice")
@@ -514,11 +539,82 @@ async def perform_ocr(
     """
     Full OCR pipeline: document → images → chunked LLM OCR → merge.
 
+    For PDFs, uses a pipelined approach: converts page ranges in parallel
+    and fires OCR chunks as soon as their pages are ready, overlapping
+    conversion with inference. For images and small documents, falls back
+    to the simpler convert-all-then-OCR path.
+
     Returns dict with content, pages, chunks_processed, usage.
     """
-    # Step 1: Convert document to page images
+    import time as _time
+
+    t_total_start = _time.monotonic()
+    is_pdf = (content_type == "application/pdf")
+
+    # For Office docs, convert to PDF first (then treat as PDF)
+    office_types = {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/msword": ".doc",
+        "application/vnd.ms-powerpoint": ".ppt",
+        "application/vnd.ms-excel": ".xls",
+    }
+    suffix = office_types.get(content_type)
+    if suffix is None and not is_pdf and not content_type.startswith("image/"):
+        ext = Path(filename).suffix.lower()
+        if ext in (".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"):
+            suffix = ext
+    if suffix:
+        t0 = _time.monotonic()
+        file_bytes = await _office_to_pdf(file_bytes, suffix)
+        is_pdf = True
+        logger.info("ocr_office_convert", ms=round((_time.monotonic() - t0) * 1000))
+
+    # For PDFs with multiple pages, use pipelined conversion + inference
+    if is_pdf:
+        return await _perform_ocr_pipelined(
+            file_bytes, model, output_format, chunk_size, overlap, dpi,
+            ocr_config, user, api_key, http_request, t_total_start,
+        )
+
+    # For images: simple path (single page, no chunking needed usually)
+    t0 = _time.monotonic()
     page_images = await document_to_images(file_bytes, content_type, filename, dpi)
-    total_pages = len(page_images)
+    t_convert = _time.monotonic() - t0
+
+    return await _perform_ocr_simple(
+        page_images, model, output_format, chunk_size, overlap,
+        ocr_config, user, api_key, http_request, t_total_start, t_convert,
+    )
+
+
+async def _perform_ocr_pipelined(
+    pdf_bytes: bytes,
+    model: str,
+    output_format: str,
+    chunk_size: int,
+    overlap: int,
+    dpi: int,
+    ocr_config: dict,
+    user: "User",
+    api_key: "ApiKey",
+    http_request: "Request",
+    t_total_start: float,
+) -> Dict[str, Any]:
+    """
+    Pipelined OCR for PDFs: convert page ranges and run inference concurrently.
+
+    Each chunk's pages are converted independently and in parallel. As soon
+    as a chunk's pages are ready, its OCR inference fires — no waiting for
+    the entire document to be converted first.
+    """
+    import time as _time
+
+    # Get page count without converting (fast)
+    t0 = _time.monotonic()
+    total_pages = await _pdf_page_count(pdf_bytes)
+    t_count = _time.monotonic() - t0
 
     if total_pages == 0:
         raise ValueError("Document produced no pages")
@@ -528,14 +624,123 @@ async def perform_ocr(
             f"of {ocr_config['max_pages']}"
         )
 
-    logger.info("ocr_start", pages=total_pages, model=model, format=output_format)
-
-    # Step 2: Create chunks
     chunk_ranges = make_chunks(total_pages, chunk_size, overlap)
     total_chunks = len(chunk_ranges)
 
-    # Step 3: OCR each chunk with concurrency control
+    logger.info(
+        "ocr_start",
+        pages=total_pages,
+        chunks=total_chunks,
+        model=model,
+        format=output_format,
+        pipeline="true",
+        page_count_ms=round(t_count * 1000),
+    )
+
     semaphore = asyncio.Semaphore(ocr_config["max_concurrent_chunks"])
+    t_inference_start = _time.monotonic()
+
+    async def _convert_and_ocr(idx, start, end):
+        """Convert this chunk's pages then immediately OCR them."""
+        # Convert just this chunk's page range (1-indexed for pdf2image)
+        chunk_images = await _pdf_to_images_range(
+            pdf_bytes, first_page=start + 1, last_page=end, dpi=dpi,
+        )
+        # Send to LLM as soon as pages are ready
+        async with semaphore:
+            return await ocr_chunk(
+                chunk_images, idx, start, end,
+                total_pages, total_chunks,
+                output_format, model, ocr_config,
+                user, api_key, http_request,
+            )
+
+    tasks = [
+        _convert_and_ocr(i, start, end)
+        for i, (start, end) in enumerate(chunk_ranges)
+    ]
+    results = await asyncio.gather(*tasks)
+    t_inference = _time.monotonic() - t_inference_start
+
+    # Sort by chunk index and extract text + usage
+    results = sorted(results, key=lambda r: r[0])
+    chunk_texts = [r[1] for r in results]
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for _, _, usage in results:
+        for k in total_usage:
+            total_usage[k] += usage.get(k, 0)
+
+    # Merge chunks
+    t0 = _time.monotonic()
+    if total_chunks == 1:
+        content = chunk_texts[0]
+    else:
+        content = await asyncio.to_thread(merge_chunks, chunk_texts)
+    t_merge = _time.monotonic() - t0
+
+    t_total = _time.monotonic() - t_total_start
+
+    logger.info(
+        "ocr_complete",
+        pages=total_pages,
+        chunks=total_chunks,
+        output_chars=len(content),
+        pipeline="true",
+        inference_ms=round(t_inference * 1000),
+        merge_ms=round(t_merge * 1000),
+        total_ms=round(t_total * 1000),
+    )
+
+    return {
+        "content": content,
+        "format": output_format,
+        "pages": total_pages,
+        "chunks_processed": total_chunks,
+        "usage": total_usage,
+    }
+
+
+async def _perform_ocr_simple(
+    page_images: List[bytes],
+    model: str,
+    output_format: str,
+    chunk_size: int,
+    overlap: int,
+    ocr_config: dict,
+    user: "User",
+    api_key: "ApiKey",
+    http_request: "Request",
+    t_total_start: float,
+    t_convert: float,
+) -> Dict[str, Any]:
+    """Simple OCR path for images (no pipelining needed)."""
+    import time as _time
+
+    total_pages = len(page_images)
+    if total_pages == 0:
+        raise ValueError("Document produced no pages")
+    if total_pages > ocr_config["max_pages"]:
+        raise ValueError(
+            f"Document has {total_pages} pages, exceeding the maximum "
+            f"of {ocr_config['max_pages']}"
+        )
+
+    total_image_bytes = sum(len(img) for img in page_images)
+    logger.info(
+        "ocr_start",
+        pages=total_pages,
+        model=model,
+        format=output_format,
+        pipeline="false",
+        convert_ms=round(t_convert * 1000),
+        total_image_kb=round(total_image_bytes / 1024),
+    )
+
+    chunk_ranges = make_chunks(total_pages, chunk_size, overlap)
+    total_chunks = len(chunk_ranges)
+
+    semaphore = asyncio.Semaphore(ocr_config["max_concurrent_chunks"])
+    t_inference_start = _time.monotonic()
 
     async def _bounded_ocr(idx, start, end):
         async with semaphore:
@@ -552,8 +757,8 @@ async def perform_ocr(
         for i, (start, end) in enumerate(chunk_ranges)
     ]
     results = await asyncio.gather(*tasks)
+    t_inference = _time.monotonic() - t_inference_start
 
-    # Sort by chunk index and extract text + usage
     results = sorted(results, key=lambda r: r[0])
     chunk_texts = [r[1] for r in results]
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -561,17 +766,25 @@ async def perform_ocr(
         for k in total_usage:
             total_usage[k] += usage.get(k, 0)
 
-    # Step 4: Merge chunks
+    t0 = _time.monotonic()
     if total_chunks == 1:
         content = chunk_texts[0]
     else:
         content = await asyncio.to_thread(merge_chunks, chunk_texts)
+    t_merge = _time.monotonic() - t0
+
+    t_total = _time.monotonic() - t_total_start
 
     logger.info(
         "ocr_complete",
         pages=total_pages,
         chunks=total_chunks,
         output_chars=len(content),
+        pipeline="false",
+        convert_ms=round(t_convert * 1000),
+        inference_ms=round(t_inference * 1000),
+        merge_ms=round(t_merge * 1000),
+        total_ms=round(t_total * 1000),
     )
 
     return {
