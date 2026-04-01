@@ -1113,7 +1113,10 @@ async def upsert_model(
     )
     model = result.scalar_one_or_none()
 
-    # If admin has set an override, use it instead of auto-detected value
+    # If admin has set an override, use it instead of auto-detected value.
+    # Check BOTH this instance's override AND any sibling instance with the
+    # same model name — model capabilities like multimodal are inherent to
+    # the model itself, not the backend serving it.
     effective_multimodal = supports_multimodal
     effective_thinking = supports_thinking
     effective_tools = supports_tools
@@ -1125,6 +1128,21 @@ async def upsert_model(
             effective_thinking = model.thinking_override
         if model.tools_override is not None:
             effective_tools = model.tools_override
+
+    # Inherit overrides from sibling instances of the same model name
+    # on other backends (model properties are model-level, not backend-level)
+    if not (model and model.multimodal_override is not None):
+        sibling_result = await db.execute(
+            select(Model).where(
+                and_(Model.name == name, Model.backend_id != backend_id)
+            )
+        )
+        for sibling in sibling_result.scalars().all():
+            if sibling.multimodal_override is not None:
+                effective_multimodal = sibling.multimodal_override
+                break
+            if sibling.supports_multimodal and not effective_multimodal:
+                effective_multimodal = True
         model.modality = modality
         model.context_length = model.context_length_override if model.context_length_override is not None else (context_length if context_length is not None else model.context_length)
         model.model_max_context = model_max_context if model_max_context is not None else model.model_max_context
@@ -1183,14 +1201,15 @@ async def set_model_multimodal_override(
 
     When value is True/False, admin's choice sticks regardless of auto-detect.
     When value is None, auto-detection controls the value.
+
+    Propagates to all instances of the same model name across all backends,
+    since multimodal is a model-level property, not backend-level.
     """
     model = await get_model_by_id(db, model_id)
     if not model:
         return None
-    model.multimodal_override = value
-    if value is not None:
-        model.supports_multimodal = value
-    await db.flush()
+    # Propagate to all instances with the same name
+    await set_multimodal_override_by_name(db, model.name, value)
     return model
 
 
