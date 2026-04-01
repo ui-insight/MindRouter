@@ -236,7 +236,7 @@
                     <span style="width:12px; height:12px; border-radius:50%; background:#f9e2af; display:inline-block; margin-right:6px;"></span>
                     <span class="ms-2" style="font-size:0.75rem; color:#6c7086;">curl &mdash; Chat Completions</span>
                 </div>
-                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#89b4fa;">curl</span> -X POST https://mindrouter.example.com/v1/chat/completions \
+                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#89b4fa;">curl</span> -X POST https://mindrouter.uidaho.edu/v1/chat/completions \
   -H <span style="color:#a6e3a1;">"Authorization: Bearer YOUR_API_KEY"</span> \
   -H <span style="color:#a6e3a1;">"Content-Type: application/json"</span> \
   -d <span style="color:#a6e3a1;">'{
@@ -276,7 +276,7 @@
                 <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#cba6f7;">from</span> <span style="color:#89b4fa;">openai</span> <span style="color:#cba6f7;">import</span> OpenAI
 
 client = OpenAI(
-    <span style="color:#fab387;">base_url</span>=<span style="color:#a6e3a1;">"https://mindrouter.example.com/v1"</span>,
+    <span style="color:#fab387;">base_url</span>=<span style="color:#a6e3a1;">"https://mindrouter.uidaho.edu/v1"</span>,
     <span style="color:#fab387;">api_key</span>=<span style="color:#a6e3a1;">"YOUR_API_KEY"</span>,
 )
 
@@ -476,81 +476,43 @@ response = client.chat.completions.create(
     </div>
 
     <!-- ── Feature: Document OCR ── -->
-    <div class="row align-items-center g-4 mt-2">
-        <div class="col-lg-12">
-            <div class="text-center mb-4">
-                <span class="badge bg-info bg-opacity-10 text-info mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-file-earmark-text"></i> Document OCR</span>
-                <h3 class="fw-bold mt-2">Intelligent Document Extraction</h3>
-                <p class="text-muted mx-auto" style="max-width:600px;">Convert PDFs, images, and Office documents to structured markdown or JSON using multimodal LLMs. Multi-page documents are automatically chunked, processed in parallel, and merged seamlessly.</p>
-            </div>
-        </div>
-
-        <!-- Curl example + response -->
+    <div class="row align-items-center mb-5 g-4">
         <div class="col-lg-6">
-            <div class="card border-0 shadow-sm h-100">
-                <div class="card-body p-0">
-                    <div class="d-flex align-items-center px-3 pt-3 pb-2">
-                        <i class="bi bi-terminal me-2" style="font-size:1.2rem; color:#0dcaf0;"></i>
-                        <h6 class="fw-bold mb-0">API Request</h6>
-                    </div>
-                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -F "file=@research_paper.pdf" \
-  -F "output_format=markdown"</code></pre>
+            <div class="rounded-3 shadow-lg overflow-hidden" style="background:#1e1e2e; border:1px solid #313244;">
+                <div class="d-flex align-items-center px-3 py-2" style="background:#181825; border-bottom:1px solid #313244;">
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f38ba8; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#a6e3a1; display:inline-block; margin-right:6px;"></span>
+                    <span style="width:12px; height:12px; border-radius:50%; background:#f9e2af; display:inline-block; margin-right:6px;"></span>
+                    <span class="ms-2" style="font-size:0.75rem; color:#6c7086;">ocr_example.sh</span>
                 </div>
-            </div>
-        </div>
-        <div class="col-lg-6">
-            <div class="card border-0 shadow-sm h-100">
-                <div class="card-body p-0">
-                    <div class="d-flex align-items-center px-3 pt-3 pb-2">
-                        <i class="bi bi-filetype-json me-2" style="font-size:1.2rem; color:#0dcaf0;"></i>
-                        <h6 class="fw-bold mb-0">Response</h6>
-                    </div>
-                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>{
-  "object": "ocr.result",
-  "model": "qwen/qwen3.5-122b",
-  "content": "# Research Paper Title\n\n## Abstract\n...",
-  "format": "markdown",
-  "pages": 12,
-  "chunks_processed": 3
+                <pre class="mb-0 p-3" style="background:transparent; color:#cdd6f4; font-size:0.82rem; line-height:1.6; overflow-x:auto;"><code><span style="color:#6c7086;"># Convert a PDF to markdown</span>
+curl -X POST https://mindrouter.uidaho.edu/v1/ocr \
+  -H <span style="color:#a6e3a1;">"Authorization: Bearer YOUR_API_KEY"</span> \
+  -F <span style="color:#a6e3a1;">"file=@research_paper.pdf"</span> \
+  -F <span style="color:#a6e3a1;">"output_format=markdown"</span>
+
+<span style="color:#6c7086;"># Response:</span>
+{
+  <span style="color:#a6e3a1;">"object"</span>: <span style="color:#a6e3a1;">"ocr.result"</span>,
+  <span style="color:#a6e3a1;">"model"</span>: <span style="color:#a6e3a1;">"qwen/qwen3.5-122b"</span>,
+  <span style="color:#a6e3a1;">"content"</span>: <span style="color:#a6e3a1;">"# Paper Title\n\n## Abstract\n..."</span>,
+  <span style="color:#a6e3a1;">"format"</span>: <span style="color:#a6e3a1;">"markdown"</span>,
+  <span style="color:#a6e3a1;">"pages"</span>: <span style="color:#fab387;">12</span>,
+  <span style="color:#a6e3a1;">"chunks_processed"</span>: <span style="color:#fab387;">3</span>
 }</code></pre>
-                </div>
             </div>
         </div>
-
-        <!-- Feature bullets -->
-        <div class="col-lg-12">
-            <div class="row g-3 justify-content-center">
-                <div class="col-md-3 col-sm-6">
-                    <div class="card border-0 shadow-sm h-100 text-center p-3">
-                        <div class="mb-2"><i class="bi bi-files text-info" style="font-size:2rem;"></i></div>
-                        <h6 class="fw-bold mb-1">Multi-Format</h6>
-                        <p class="text-muted mb-0" style="font-size:0.82rem;">PDF, PNG, JPEG, WebP, DOCX, PPTX, XLSX &mdash; all converted to structured text</p>
-                    </div>
-                </div>
-                <div class="col-md-3 col-sm-6">
-                    <div class="card border-0 shadow-sm h-100 text-center p-3">
-                        <div class="mb-2"><i class="bi bi-layers text-primary" style="font-size:2rem;"></i></div>
-                        <h6 class="fw-bold mb-1">Smart Chunking</h6>
-                        <p class="text-muted mb-0" style="font-size:0.82rem;">Overlapping page chunks with deterministic merging &mdash; handles documents of any length</p>
-                    </div>
-                </div>
-                <div class="col-md-3 col-sm-6">
-                    <div class="card border-0 shadow-sm h-100 text-center p-3">
-                        <div class="mb-2"><i class="bi bi-table text-success" style="font-size:2rem;"></i></div>
-                        <h6 class="fw-bold mb-1">Layout Aware</h6>
-                        <p class="text-muted mb-0" style="font-size:0.82rem;">Preserves tables, headers, lists, and formatting as clean markdown</p>
-                    </div>
-                </div>
-                <div class="col-md-3 col-sm-6">
-                    <div class="card border-0 shadow-sm h-100 text-center p-3">
-                        <div class="mb-2"><i class="bi bi-lightning-charge text-warning" style="font-size:2rem;"></i></div>
-                        <h6 class="fw-bold mb-1">Parallel Processing</h6>
-                        <p class="text-muted mb-0" style="font-size:0.82rem;">Concurrent chunk OCR with configurable parallelism for fast throughput</p>
-                    </div>
-                </div>
-            </div>
+        <div class="col-lg-6">
+            <span class="badge bg-info bg-opacity-10 text-info mb-2 px-3 py-2" style="font-size:0.8rem;"><i class="bi bi-file-earmark-text"></i> Document OCR</span>
+            <h3 class="fw-bold mt-2">Optical Character Recognition (OCR)</h3>
+            <p class="text-muted">Convert PDFs, images, and Office documents to structured markdown or JSON using multimodal LLMs. Multi-page documents are automatically chunked with overlapping pages, processed in parallel, and merged deterministically.</p>
+            <ul class="list-unstyled text-muted">
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>PDF, PNG, JPEG, WebP, DOCX, PPTX, XLSX support</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Overlapping chunks with deterministic merge</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Preserves tables, headers, and layout</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Parallel processing for fast throughput</li>
+                <li class="mb-1"><i class="bi bi-check-circle-fill text-success me-2"></i>Markdown or JSON output format</li>
+            </ul>
         </div>
     </div>
 
@@ -819,7 +781,7 @@ response = client.chat.completions.create(
                         <i class="bi bi-volume-up me-2" style="font-size:1.2rem; color:#6f42c1;"></i>
                         <h6 class="fw-bold mb-0">Text-to-Speech</h6>
                     </div>
-                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.example.com/v1/audio/speech \
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/speech \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -840,7 +802,7 @@ response = client.chat.completions.create(
                         <i class="bi bi-mic me-2" style="font-size:1.2rem; color:#6f42c1;"></i>
                         <h6 class="fw-bold mb-0">Speech-to-Text</h6>
                     </div>
-                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.example.com/v1/audio/transcriptions \
+                    <pre class="mb-0 rounded-bottom" style="background:#1e1e2e; color:#cdd6f4; padding:1rem; font-size:0.75rem; overflow-x:auto; margin:0;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/transcriptions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "file=@recording.mp3" \
   -F "model=whisper-large-v3-turbo" \
