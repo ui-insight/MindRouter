@@ -480,7 +480,8 @@ async def ocr(
     from backend.app.services.ocr import get_ocr_config, perform_ocr
 
     user, api_key = auth
-    bind_request_context(request)
+    request_id = f"ocr-{uuid.uuid4().hex[:24]}"
+    bind_request_context(request_id=request_id, user_id=user.id)
 
     # Load OCR config from admin settings
     ocr_config = await get_ocr_config(db)
@@ -545,7 +546,6 @@ async def ocr(
             detail=f"File exceeds maximum size of {ocr_config['max_file_size_mb']}MB",
         )
 
-    request_id = f"ocr-{uuid.uuid4().hex[:24]}"
     service = InferenceService(db)
 
     try:
