@@ -583,3 +583,87 @@ async def ocr(
         "chunks_processed": result["chunks_processed"],
         "usage": result["usage"],
     }
+
+
+@router.post("/ocrmd")
+async def ocrmd(
+    request: Request,
+    file: UploadFile = File(...),
+    model: Optional[str] = Form(None),
+    chunk_size: Optional[int] = Form(None),
+    overlap: Optional[int] = Form(None),
+    dpi: Optional[int] = Form(None),
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """
+    Simplified OCR endpoint that returns raw markdown (not JSON-wrapped).
+
+    Same pipeline as /v1/ocr but the response body is plain text/markdown.
+    """
+    from fastapi.responses import PlainTextResponse
+    from backend.app.services.ocr import get_ocr_config, perform_ocr
+
+    user, api_key = auth
+    request_id = f"ocr-{uuid.uuid4().hex[:24]}"
+    bind_request_context(request_id=request_id, user_id=user.id)
+
+    ocr_config = await get_ocr_config(db)
+
+    if not ocr_config["enabled"]:
+        return PlainTextResponse("OCR is currently disabled", status_code=503)
+
+    if model is None:
+        model = ocr_config["model"]
+    if chunk_size is None:
+        chunk_size = ocr_config["chunk_size"]
+    if overlap is None:
+        overlap = ocr_config["overlap"]
+    if dpi is None:
+        dpi = ocr_config["dpi"]
+
+    if overlap >= chunk_size:
+        return PlainTextResponse("overlap must be less than chunk_size", status_code=400)
+
+    content_type = file.content_type or "application/octet-stream"
+    if content_type == "application/octet-stream" and file.filename:
+        import os
+        ext = os.path.splitext(file.filename)[1].lower()
+        content_type = _OCR_EXT_MAP.get(ext, content_type)
+
+    if content_type not in _OCR_ALLOWED_TYPES:
+        return PlainTextResponse(f"Unsupported file type: {content_type}", status_code=400)
+
+    registry = get_registry()
+    if not await registry.model_exists(model):
+        return PlainTextResponse(f"Model '{model}' not found", status_code=404)
+
+    file_bytes = await file.read()
+    max_size = ocr_config["max_file_size_mb"] * 1024 * 1024
+    if len(file_bytes) > max_size:
+        return PlainTextResponse(
+            f"File exceeds maximum size of {ocr_config['max_file_size_mb']}MB",
+            status_code=413,
+        )
+
+    try:
+        result = await perform_ocr(
+            file_bytes=file_bytes,
+            content_type=content_type,
+            filename=file.filename or "document",
+            model=model,
+            output_format="markdown",
+            chunk_size=chunk_size,
+            overlap=overlap,
+            dpi=dpi,
+            ocr_config=ocr_config,
+            user=user,
+            api_key=api_key,
+            http_request=request,
+        )
+    except ValueError as e:
+        return PlainTextResponse(str(e), status_code=400)
+    except RuntimeError as e:
+        return PlainTextResponse(str(e), status_code=501)
+
+    return PlainTextResponse(result["content"], media_type="text/markdown")
