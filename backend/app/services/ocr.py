@@ -279,7 +279,6 @@ async def ocr_chunk(
     output_format: str,
     model: str,
     ocr_config: dict,
-    service: "InferenceService",
     user: "User",
     api_key: "ApiKey",
     http_request: "Request",
@@ -287,8 +286,14 @@ async def ocr_chunk(
     """
     Send a chunk of page images to the LLM and return OCR text.
 
+    Each chunk gets its own DB session and InferenceService to avoid
+    session state conflicts when multiple chunks run concurrently.
+
     Returns (chunk_idx, text, usage_dict).
     """
+    from backend.app.db.session import AsyncSessionLocal
+    from backend.app.services.inference import InferenceService
+
     num_pages = end_page - start_page
     max_retries = ocr_config["max_retries"]
 
@@ -313,54 +318,61 @@ async def ocr_chunk(
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     expected_min_chars = ocr_config["min_chars_per_page"] * num_pages
 
-    for attempt in range(max_retries + 1):
-        try:
-            result = await service.chat_completion(
-                canonical, user, api_key, http_request
+    # Each chunk gets its own DB session to avoid "prepared state" errors
+    # when multiple chunks are processed concurrently.
+    async with AsyncSessionLocal() as chunk_db:
+        service = InferenceService(chunk_db)
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = await service.chat_completion(
+                    canonical, user, api_key, http_request
+                )
+            except Exception as e:
+                logger.warning(
+                    "ocr_chunk_error",
+                    chunk=chunk_idx,
+                    attempt=attempt,
+                    error=str(e),
+                )
+                if attempt == max_retries:
+                    raise
+                # Reset session state for retry
+                await chunk_db.rollback()
+                continue
+
+            # Accumulate usage
+            usage = result.get("usage", {})
+            for k in total_usage:
+                total_usage[k] += usage.get(k, 0)
+
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            text = _strip_fences(text)
+
+            logger.info(
+                "ocr_chunk_result",
+                chunk=chunk_idx + 1,
+                total_chunks=total_chunks,
+                pages=f"{start_page + 1}-{end_page}",
+                chars=len(text),
+                attempt=attempt + 1,
             )
-        except Exception as e:
-            logger.warning(
-                "ocr_chunk_error",
-                chunk=chunk_idx,
-                attempt=attempt,
-                error=str(e),
+
+            if len(text) >= expected_min_chars or attempt == max_retries:
+                return chunk_idx, text, total_usage
+
+            # Retry with stronger prompt
+            logger.info(
+                "ocr_chunk_retry",
+                chunk=chunk_idx + 1,
+                chars=len(text),
+                expected=expected_min_chars,
             )
-            if attempt == max_retries:
-                raise
-            continue
-
-        # Accumulate usage
-        usage = result.get("usage", {})
-        for k in total_usage:
-            total_usage[k] += usage.get(k, 0)
-
-        text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        text = _strip_fences(text)
-
-        logger.info(
-            "ocr_chunk_result",
-            chunk=chunk_idx + 1,
-            total_chunks=total_chunks,
-            pages=f"{start_page + 1}-{end_page}",
-            chars=len(text),
-            attempt=attempt + 1,
-        )
-
-        if len(text) >= expected_min_chars or attempt == max_retries:
-            return chunk_idx, text, total_usage
-
-        # Retry with stronger prompt
-        logger.info(
-            "ocr_chunk_retry",
-            chunk=chunk_idx + 1,
-            chars=len(text),
-            expected=expected_min_chars,
-        )
-        retry_prompt = _build_ocr_prompt(
-            num_pages, output_format, is_retry=True, prev_length=len(text)
-        )
-        content_blocks[0] = TextContent(text=retry_prompt)
-        canonical.messages[0].content = content_blocks
+            retry_prompt = _build_ocr_prompt(
+                num_pages, output_format, is_retry=True, prev_length=len(text)
+            )
+            content_blocks[0] = TextContent(text=retry_prompt)
+            canonical.messages[0].content = content_blocks
 
     # Unreachable, but satisfy type checker
     return chunk_idx, "", total_usage
@@ -495,7 +507,6 @@ async def perform_ocr(
     overlap: int,
     dpi: int,
     ocr_config: dict,
-    service: "InferenceService",
     user: "User",
     api_key: "ApiKey",
     http_request: "Request",
@@ -533,7 +544,7 @@ async def perform_ocr(
                 idx, start, end,
                 total_pages, total_chunks,
                 output_format, model, ocr_config,
-                service, user, api_key, http_request,
+                user, api_key, http_request,
             )
 
     tasks = [

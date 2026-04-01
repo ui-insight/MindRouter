@@ -546,8 +546,6 @@ async def ocr(
             detail=f"File exceeds maximum size of {ocr_config['max_file_size_mb']}MB",
         )
 
-    service = InferenceService(db)
-
     try:
         result = await perform_ocr(
             file_bytes=file_bytes,
@@ -559,7 +557,6 @@ async def ocr(
             overlap=overlap,
             dpi=dpi,
             ocr_config=ocr_config,
-            service=service,
             user=user,
             api_key=api_key,
             http_request=request,
