@@ -31,6 +31,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -484,6 +485,9 @@ class Model(Base, TimestampMixin):
     """Model catalog - models available on backends."""
 
     __tablename__ = "models"
+    __table_args__ = (
+        UniqueConstraint("backend_id", "name", name="uq_models_backend_name"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     backend_id: Mapped[int] = mapped_column(Integer, ForeignKey("backends.id"), nullable=False)

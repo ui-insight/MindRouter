@@ -1105,11 +1105,16 @@ async def upsert_model(
     parent_model: Optional[str] = None,
     model_max_context: Optional[int] = None,
 ) -> Model:
-    """Create or update a model record."""
+    """Create or update a model record.
+
+    Uses SELECT FOR UPDATE to prevent race conditions where concurrent
+    discovery cycles could create duplicate rows for the same
+    (backend_id, name) pair.
+    """
     result = await db.execute(
         select(Model).where(
             and_(Model.backend_id == backend_id, Model.name == name)
-        )
+        ).with_for_update()
     )
     model = result.scalar_one_or_none()
 
