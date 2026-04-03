@@ -1189,7 +1189,25 @@ async def upsert_model(
         )
         db.add(model)
 
-    await db.flush()
+    try:
+        await db.flush()
+    except Exception as exc:
+        # Handle race condition: another thread inserted the same row
+        # between our SELECT and INSERT. Roll back and retry as UPDATE.
+        if "Duplicate entry" in str(exc) or "IntegrityError" in type(exc).__name__:
+            await db.rollback()
+            result = await db.execute(
+                select(Model).where(
+                    and_(Model.backend_id == backend_id, Model.name == name)
+                ).with_for_update()
+            )
+            model = result.scalar_one_or_none()
+            if model:
+                model.context_length = context_length if context_length is not None else model.context_length
+                model.is_loaded = is_loaded
+                await db.flush()
+                return model
+        raise
     return model
 
 
