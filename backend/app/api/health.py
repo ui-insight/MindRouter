@@ -202,7 +202,6 @@ async def cluster_status() -> Dict[str, Any]:
 
 
 _TOTAL_TOKENS_REDIS_KEY = "cluster:total_tokens"
-_TOTAL_TOKENS_TTL = 300  # seconds — full table scan takes 10s+ on large DBs
 
 # Per-worker fallback cache (used only when Redis is unavailable)
 _total_tokens_fallback: Dict[str, Any] = {
@@ -212,38 +211,44 @@ _total_tokens_fallback: Dict[str, Any] = {
 
 @router.get("/api/cluster/total-tokens")
 async def cluster_total_tokens() -> Dict[str, Any]:
-    """Public endpoint: total tokens ever served (cached 10s in Redis).
+    """Public endpoint: total tokens ever served.
 
-    Uses Redis as a shared cache so all uvicorn workers return the same
-    value, preventing the counter from appearing to fluctuate.
+    Reads from a live Redis counter that is atomically incremented on
+    every request completion.  Falls back to a DB scan only if the
+    counter hasn't been seeded yet (first startup).
     """
-    # Try Redis shared cache first
-    if redis_client.is_available():
+    # Try live Redis counter first
+    totals = await redis_client.get_cluster_tokens()
+    if totals is not None:
+        # Add the stats.token_offset for historical pre-DB usage
         try:
-            r = redis_client._redis
-            cached = await r.get(_TOTAL_TOKENS_REDIS_KEY)
-            if cached:
-                totals = json.loads(cached)
-                _total_tokens_fallback["value"] = totals
-                return totals
+            from backend.app.db import crud
+            async with AsyncSessionLocal() as db:
+                offset = await crud.get_config_json(db, "stats.token_offset", 0)
+            if offset:
+                totals["total_tokens"] += int(offset)
         except Exception:
             pass
+        _total_tokens_fallback["value"] = totals
+        return totals
 
-    # Cache miss or Redis unavailable — query DB
+    # Counter not seeded — seed from DB (one-time on first startup)
     try:
         from backend.app.db import crud
         async with AsyncSessionLocal() as db:
-            totals = await crud.get_global_token_total(db)
+            totals = await crud.get_global_token_total(db, include_offset=False)
+        await redis_client.seed_cluster_tokens(
+            totals["prompt_tokens"],
+            totals["completion_tokens"],
+            totals["total_tokens"],
+        )
+        # Re-read with offset
+        async with AsyncSessionLocal() as db:
+            offset = await crud.get_config_json(db, "stats.token_offset", 0)
+        if offset:
+            totals["total_tokens"] += int(offset)
     except Exception:
         return _total_tokens_fallback["value"]
-
-    # Store in Redis (shared across all workers)
-    if redis_client.is_available():
-        try:
-            r = redis_client._redis
-            await r.set(_TOTAL_TOKENS_REDIS_KEY, json.dumps(totals), ex=_TOTAL_TOKENS_TTL)
-        except Exception:
-            pass
 
     _total_tokens_fallback["value"] = totals
     return totals

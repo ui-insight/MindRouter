@@ -1813,6 +1813,12 @@ class InferenceService:
         # if subsequent DB operations fail or hang.
         await self._scheduler.on_job_completed(job, backend_id, total_tokens)
 
+        # Increment live cluster token counter in Redis
+        from backend.app.core import redis_client
+        await redis_client.incr_cluster_tokens(
+            prompt_tokens, completion_tokens, total_tokens
+        )
+
         # Mark the model as loaded so the scheduler prefers this backend
         # for subsequent requests (bridges the 30s discovery poll gap).
         try:
@@ -1889,6 +1895,12 @@ class InferenceService:
 
         # Release backend capacity FIRST
         await self._scheduler.on_job_completed(job, backend_id, total_tokens)
+
+        # Increment live cluster token counter in Redis
+        from backend.app.core import redis_client
+        await redis_client.incr_cluster_tokens(
+            prompt_tokens, completion_tokens, total_tokens
+        )
 
         # Mark the model as loaded so the scheduler prefers this backend
         try:

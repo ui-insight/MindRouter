@@ -13,6 +13,11 @@ _available = False
 
 INFLIGHT_KEY = "streaming:inflight_tokens"
 
+# Cluster-wide token totals (atomically incremented on each request completion)
+_CLUSTER_PROMPT_KEY = "cluster:prompt_tokens"
+_CLUSTER_COMPLETION_KEY = "cluster:completion_tokens"
+_CLUSTER_TOTAL_KEY = "cluster:total_tokens_counter"
+
 
 async def init_redis() -> None:
     """Initialize the Redis connection. No-op if redis_url is not configured."""
@@ -156,3 +161,61 @@ async def get_inflight_tokens() -> int:
     except Exception:
         logger.exception("redis_get_inflight_failed")
         return 0
+
+
+# ------------------------------------------------------------------
+# Cluster-wide token totals (live counter, no TTL)
+# ------------------------------------------------------------------
+
+
+async def incr_cluster_tokens(
+    prompt_tokens: int, completion_tokens: int, total_tokens: int
+) -> None:
+    """Atomically increment the cluster-wide token counters."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        pipe.incrby(_CLUSTER_PROMPT_KEY, prompt_tokens)
+        pipe.incrby(_CLUSTER_COMPLETION_KEY, completion_tokens)
+        pipe.incrby(_CLUSTER_TOTAL_KEY, total_tokens)
+        await pipe.execute()
+    except Exception:
+        pass  # Best-effort, don't break the completion path
+
+
+async def get_cluster_tokens() -> dict | None:
+    """Read cluster-wide token totals. Returns None if not seeded yet."""
+    if not _available or not _redis:
+        return None
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        pipe.get(_CLUSTER_PROMPT_KEY)
+        pipe.get(_CLUSTER_COMPLETION_KEY)
+        pipe.get(_CLUSTER_TOTAL_KEY)
+        vals = await pipe.execute()
+        if vals[2] is None:
+            return None  # Not seeded yet
+        return {
+            "prompt_tokens": int(vals[0] or 0),
+            "completion_tokens": int(vals[1] or 0),
+            "total_tokens": int(vals[2] or 0),
+        }
+    except Exception:
+        return None
+
+
+async def seed_cluster_tokens(
+    prompt_tokens: int, completion_tokens: int, total_tokens: int
+) -> None:
+    """Seed the cluster token counters (called once at startup from DB)."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        pipe.set(_CLUSTER_PROMPT_KEY, prompt_tokens)
+        pipe.set(_CLUSTER_COMPLETION_KEY, completion_tokens)
+        pipe.set(_CLUSTER_TOTAL_KEY, total_tokens)
+        await pipe.execute()
+    except Exception:
+        logger.exception("redis_seed_cluster_tokens_failed")

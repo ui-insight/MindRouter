@@ -287,16 +287,17 @@ async def public_dashboard(
     except Exception:
         active_users = 0
 
-    # Total tokens ever served — use Redis cache to avoid full table scan
+    # Total tokens ever served — use live Redis counter
     total_tokens = 0
     try:
         from backend.app.core import redis_client
-        import json as _json
-        if redis_client.is_available() and redis_client._redis:
-            cached = await redis_client._redis.get("cluster:total_tokens")
-            if cached:
-                total_tokens = _json.loads(cached).get("total_tokens", 0)
-        if not total_tokens:
+        totals = await redis_client.get_cluster_tokens()
+        if totals:
+            total_tokens = totals["total_tokens"]
+            offset = await crud.get_config_json(db, "stats.token_offset", 0)
+            if offset:
+                total_tokens += int(offset)
+        else:
             global_tokens = await crud.get_global_token_total(db)
             total_tokens = global_tokens["total_tokens"]
     except Exception:
