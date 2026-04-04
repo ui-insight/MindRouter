@@ -202,7 +202,7 @@ async def cluster_status() -> Dict[str, Any]:
 
 
 _TOTAL_TOKENS_REDIS_KEY = "cluster:total_tokens"
-_TOTAL_TOKENS_TTL = 10  # seconds
+_TOTAL_TOKENS_TTL = 300  # seconds — full table scan takes 10s+ on large DBs
 
 # Per-worker fallback cache (used only when Redis is unavailable)
 _total_tokens_fallback: Dict[str, Any] = {
