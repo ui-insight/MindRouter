@@ -287,10 +287,18 @@ async def public_dashboard(
     except Exception:
         active_users = 0
 
-    # Total tokens ever served
+    # Total tokens ever served — use Redis cache to avoid full table scan
+    total_tokens = 0
     try:
-        global_tokens = await crud.get_global_token_total(db)
-        total_tokens = global_tokens["total_tokens"]
+        from backend.app.core import redis_client
+        import json as _json
+        if redis_client.is_available() and redis_client._redis:
+            cached = await redis_client._redis.get("cluster:total_tokens")
+            if cached:
+                total_tokens = _json.loads(cached).get("total_tokens", 0)
+        if not total_tokens:
+            global_tokens = await crud.get_global_token_total(db)
+            total_tokens = global_tokens["total_tokens"]
     except Exception:
         total_tokens = 0
 
