@@ -1191,7 +1191,8 @@ class InferenceService:
                     await self._registry.report_live_failure(backend.id)
                     last_error = e
                 else:
-                    # 4xx — not retryable
+                    # 4xx — not retryable, but must release slot
+                    await self._scheduler.on_job_failed(job, backend.id)
                     try:
                         detail = e.response.json()
                     except Exception:
@@ -1335,7 +1336,8 @@ class InferenceService:
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code < 500:
-                    # 4xx — not retryable
+                    # 4xx — not retryable, but must release slot
+                    await self._scheduler.on_job_failed(job, backend.id)
                     try:
                         detail = e.response.json()
                     except Exception:
@@ -1949,14 +1951,22 @@ class InferenceService:
         error_message: str,
         job: Job,
     ) -> None:
-        """Record a failed request."""
+        """Record a failed request.
+
+        Always releases the scheduler slot properly.  If ``backend_id`` is not
+        provided explicitly, falls back to ``job.assigned_backend_id`` which is
+        set by ``route_job()`` when the slot is acquired.  This prevents slot
+        leaks when exceptions occur after routing but before the caller has
+        captured the backend reference.
+        """
+        # Resolve backend_id from job if not provided
+        effective_backend_id = backend_id or getattr(job, "assigned_backend_id", None)
+
         # Release backend capacity FIRST
-        if backend_id:
-            await self._scheduler.on_job_failed(job, backend_id)
+        if effective_backend_id:
+            await self._scheduler.on_job_failed(job, effective_backend_id)
         else:
-            # Even without a backend_id, the job may have been submitted to the
-            # queue (submit_job) or routed (route_job increments queue depth).
-            # Cancel it from the queue to prevent phantom entries.
+            # Job was never routed — just remove from queue
             await self._scheduler.cancel_job(job.request_id)
 
         await asyncio.shield(self._do_fail_db(db_request, error_message))
