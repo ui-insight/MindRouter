@@ -275,3 +275,92 @@ class ArchivedChatAttachment(ArchiveBase):
         Index("ix_arch_att_message", "message_id"),
         Index("ix_arch_att_archived_at", "archived_at"),
     )
+
+
+# ------------------------------------------------------------------
+# Telemetry archives
+# ------------------------------------------------------------------
+
+
+class ArchivedBackendTelemetry(ArchiveBase):
+    """Archived backend telemetry snapshot."""
+
+    __tablename__ = "archived_backend_telemetry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    backend_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    gpu_utilization: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_memory_used_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_memory_total_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_power_draw_watts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_fan_speed_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    active_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    queued_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    requests_per_second: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    loaded_models: Mapped[Optional[str]] = mapped_column(JSON, nullable=True)
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_arch_bt_backend_time", "backend_id", "timestamp"),
+        Index("ix_arch_bt_archived_at", "archived_at"),
+    )
+
+
+class ArchivedGPUDeviceTelemetry(ArchiveBase):
+    """Archived per-GPU device telemetry snapshot."""
+
+    __tablename__ = "archived_gpu_device_telemetry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    gpu_device_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    utilization_gpu: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    utilization_memory: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    memory_used_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    memory_free_gb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    temperature_gpu: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    temperature_memory: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    power_draw_watts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fan_speed_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    clock_sm_mhz: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    clock_memory_mhz: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_arch_gdt_device_time", "gpu_device_id", "timestamp"),
+        Index("ix_arch_gdt_archived_at", "archived_at"),
+    )
+
+
+class ArchivedNodeTelemetry(ArchiveBase):
+    """Archived node-level telemetry snapshot."""
+
+    __tablename__ = "archived_node_telemetry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    node_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    server_power_watts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gpu_power_watts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_arch_nt_node_time", "node_id", "timestamp"),
+        Index("ix_arch_nt_archived_at", "archived_at"),
+    )

@@ -32,12 +32,12 @@ logger = get_logger(__name__)
 
 # Default retention config values
 _DEFAULTS: dict[str, Any] = {
-    "retention.requests.tier1_days": 90,
+    "retention.requests.tier1_days": 30,
     "retention.requests.tier2_days": 730,
-    "retention.chat.tier1_days": 90,
+    "retention.chat.tier1_days": 30,
     "retention.chat.tier2_days": 730,
     "retention.telemetry.tier1_days": 30,
-    "retention.telemetry.tier2_days": 0,   # 0 = no archival, just delete
+    "retention.telemetry.tier2_days": 730,
     "retention.cleanup_interval": 3600,
     "retention.batch_size": 500,
 }
@@ -332,10 +332,73 @@ async def archive_expired_chats(
     return counts
 
 
+async def archive_expired_telemetry(
+    app_db: AsyncSession,
+    archive_db: AsyncSession,
+    cutoff: datetime,
+    batch_size: int,
+) -> dict[str, int]:
+    """Archive telemetry data older than cutoff, then delete from app DB.
+
+    Handles backend_telemetry, gpu_device_telemetry, and node_telemetry.
+    Returns counts of archived rows per table.
+    """
+    from backend.app.db.models import (
+        BackendTelemetry,
+        GPUDeviceTelemetry,
+        NodeTelemetry,
+    )
+    from backend.app.db.archive_models import (
+        ArchivedBackendTelemetry,
+        ArchivedGPUDeviceTelemetry,
+        ArchivedNodeTelemetry,
+    )
+
+    counts = {
+        "backend_telemetry": 0,
+        "gpu_device_telemetry": 0,
+        "node_telemetry": 0,
+    }
+
+    # Archive each telemetry table
+    for source_model, archive_model, key in [
+        (BackendTelemetry, ArchivedBackendTelemetry, "backend_telemetry"),
+        (GPUDeviceTelemetry, ArchivedGPUDeviceTelemetry, "gpu_device_telemetry"),
+        (NodeTelemetry, ArchivedNodeTelemetry, "node_telemetry"),
+    ]:
+        while True:
+            result = await app_db.execute(
+                select(source_model)
+                .where(source_model.timestamp < cutoff)
+                .limit(batch_size)
+            )
+            batch = list(result.scalars().all())
+            if not batch:
+                break
+
+            # Archive to archive DB
+            counts[key] += await _bulk_insert_ignore(
+                archive_db, archive_model,
+                [_row_to_dict(r) for r in batch],
+            )
+            await archive_db.flush()
+
+            # Delete from app DB
+            batch_ids = [r.id for r in batch]
+            await app_db.execute(
+                delete(source_model).where(source_model.id.in_(batch_ids))
+            )
+            await app_db.flush()
+            await app_db.commit()
+            await archive_db.commit()
+
+    return counts
+
+
 async def cleanup_expired_telemetry(
     app_db: AsyncSession, cutoff: datetime
 ) -> dict[str, int]:
-    """Delete expired telemetry data (no archival)."""
+    """Delete expired telemetry data (no archival). Legacy fallback."""
     from backend.app.db.crud import delete_old_gpu_telemetry, delete_old_telemetry
 
     backend_count = await delete_old_telemetry(app_db, cutoff)
@@ -356,9 +419,12 @@ async def purge_expired_archives(
     """Delete from archive DB where archived_at is older than tier2_days."""
     from backend.app.db.archive_models import (
         ArchivedArtifact,
+        ArchivedBackendTelemetry,
         ArchivedChatAttachment,
         ArchivedChatConversation,
         ArchivedChatMessage,
+        ArchivedGPUDeviceTelemetry,
+        ArchivedNodeTelemetry,
         ArchivedRequest,
         ArchivedResponse,
         ArchivedSchedulerDecision,
@@ -434,6 +500,20 @@ async def purge_expired_archives(
             )
             counts["chat_conversations"] = r.rowcount
 
+    # Purge telemetry archives
+    tel_tier2 = config.get("retention.telemetry.tier2_days", 0)
+    if tel_tier2 > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=tel_tier2)
+        for model, key in [
+            (ArchivedBackendTelemetry, "backend_telemetry"),
+            (ArchivedGPUDeviceTelemetry, "gpu_device_telemetry"),
+            (ArchivedNodeTelemetry, "node_telemetry"),
+        ]:
+            r = await archive_db.execute(
+                delete(model).where(model.archived_at < cutoff)
+            )
+            counts[key] = r.rowcount
+
     await archive_db.flush()
     await archive_db.commit()
     return counts
@@ -454,6 +534,9 @@ async def get_archive_stats(archive_db: AsyncSession) -> dict[str, Any]:
         "archived_chat_conversations",
         "archived_chat_messages",
         "archived_chat_attachments",
+        "archived_backend_telemetry",
+        "archived_gpu_device_telemetry",
+        "archived_node_telemetry",
     ]
 
     stats: dict[str, Any] = {"tables": {}, "total_rows": 0, "total_size_mb": 0.0}
@@ -657,8 +740,17 @@ async def run_retention_cycle() -> dict[str, Any]:
     telemetry_tier1 = config.get("retention.telemetry.tier1_days", 30)
     if telemetry_tier1 > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
-        async with get_async_db_context() as app_db:
-            summary["telemetry"] = await cleanup_expired_telemetry(app_db, cutoff)
+        telemetry_tier2 = config.get("retention.telemetry.tier2_days", 0)
+        if archive_configured and telemetry_tier2 > 0:
+            async with get_async_db_context() as app_db:
+                async with get_archive_db_context() as archive_db:
+                    summary["telemetry"] = await archive_expired_telemetry(
+                        app_db, archive_db, cutoff,
+                        config.get("retention.batch_size", 500),
+                    )
+        else:
+            async with get_async_db_context() as app_db:
+                summary["telemetry"] = await cleanup_expired_telemetry(app_db, cutoff)
 
     # Tier 2: purge old archives
     if archive_configured:
