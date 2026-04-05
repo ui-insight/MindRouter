@@ -1848,6 +1848,7 @@ class InferenceService:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 tokens_estimated=tokens_estimated,
+                backend_id=backend_id,
             )
 
             content = None
@@ -1929,6 +1930,7 @@ class InferenceService:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 tokens_estimated=True,
+                backend_id=backend_id,
             )
 
             await crud.create_response(

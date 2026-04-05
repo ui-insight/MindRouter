@@ -1496,6 +1496,7 @@ async def update_request_completed(
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
     tokens_estimated: bool = False,
+    backend_id: Optional[int] = None,
 ) -> Optional[Request]:
     """Update request when completed."""
     result = await db.execute(select(Request).where(Request.id == request_id))
@@ -1503,6 +1504,8 @@ async def update_request_completed(
     if request:
         request.status = RequestStatus.COMPLETED
         request.completed_at = datetime.now(timezone.utc)
+        if backend_id is not None:
+            request.backend_id = backend_id
         if request.started_at:
             processing_time = request.completed_at - _ensure_aware(request.started_at)
             request.processing_time_ms = int(processing_time.total_seconds() * 1000)
