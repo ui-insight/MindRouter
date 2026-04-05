@@ -236,7 +236,7 @@ class VLLMAdapter:
                 supports_multimodal = any(
                     x in model_lower
                     for x in ["llava", "vision", "vl", "multimodal",
-                              "qwen3.5", "gemma3", "gemma-3"]
+                              "qwen3.5", "gemma3", "gemma-3", "gemma4", "gemma-4"]
                 )
 
                 # Auto-detect thinking support for known model families
