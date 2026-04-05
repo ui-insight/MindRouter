@@ -50,6 +50,11 @@ from backend.app.core.canonical_schemas import (
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
+# Gemma 4 outputs thinking as "thought\n...<actual content>" when the
+# reasoning parser doesn't extract it.  The "thought\n" prefix comes
+# from the <|channel|>thought delimiter being partially consumed.
+_GEMMA4_THOUGHT_RE = re.compile(r"^thought\n(.*?)(?=\n(?:[A-Z]|\d|$))", re.DOTALL)
+
 
 def _extract_think_tags(content: str) -> tuple:
     """Extract <think>...</think> from content, returning (reasoning, cleaned_content).
@@ -62,6 +67,44 @@ def _extract_think_tags(content: str) -> tuple:
     reasoning = match.group(1).strip() or None
     cleaned = (content[: match.start()] + content[match.end() :]).strip()
     return reasoning, cleaned or None
+
+
+def _extract_gemma4_thought(content: str) -> tuple:
+    """Extract Gemma 4 'thought\\n...' prefix from content.
+
+    Gemma 4 prefixes thinking with 'thought\\n' followed by reasoning
+    lines, then the actual answer.  We split on the last reasoning line
+    by finding where the thinking ends (lines starting with non-whitespace
+    after a paragraph break).
+
+    Returns (reasoning, cleaned_content) or (None, original_content).
+    """
+    if not content.startswith("thought\n"):
+        return None, content
+
+    # Remove the "thought\n" prefix
+    rest = content[len("thought\n"):]
+
+    # Find the boundary between reasoning and answer.
+    # Reasoning lines are typically indented or analytical.  The answer
+    # is usually preceded by an empty line or starts with a direct statement.
+    lines = rest.split("\n")
+    split_idx = len(lines)  # default: everything is reasoning
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Empty line followed by non-empty = start of answer
+        if stripped == "" and i + 1 < len(lines) and lines[i + 1].strip():
+            # Check if the next line looks like answer (not reasoning)
+            next_line = lines[i + 1].strip()
+            if not next_line.startswith(("*", "-", "The user", "I need", "Let me", "So ", "This ")):
+                split_idx = i
+                break
+
+    reasoning = "\n".join(lines[:split_idx]).strip()
+    answer = "\n".join(lines[split_idx:]).strip()
+
+    return reasoning or None, answer or None
 
 
 class VLLMOutTranslator:
@@ -264,6 +307,10 @@ class VLLMOutTranslator:
             # doesn't separate reasoning (e.g. Qwen3-32B)
             if not reasoning and content and "<think>" in content:
                 reasoning, content = _extract_think_tags(content)
+
+            # Fallback: extract Gemma 4 "thought\n..." prefix
+            if not reasoning and content and content.startswith("thought\n"):
+                reasoning, content = _extract_gemma4_thought(content)
 
             # vLLM/Qwen3.5 bug: when thinking is disabled the model
             # may put all output into reasoning_content with content
