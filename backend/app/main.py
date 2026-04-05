@@ -129,11 +129,6 @@ async def _seed_redis_from_db() -> None:
             logger.info("redis_orphan_keys_cleaned", count=len(orphans))
 
         logger.info("redis_seeded_from_requests", users=seeded)
-
-        # Pre-warm cached queries that would otherwise cause 15+ second
-        # full table scans on the first page load.
-        await _warm_page_caches()
-
     except Exception:
         logger.exception("redis_seed_failed")
 
@@ -158,7 +153,7 @@ async def _warm_page_caches() -> None:
                 await _rc._redis.set(
                     "cache:model_token_totals",
                     _json.dumps(token_totals),
-                    ex=600,
+                    ex=3600,
                 )
 
             # Global token total (seed the live counter if not already set)
@@ -177,10 +172,14 @@ async def _warm_page_caches() -> None:
 
 
 async def _cache_warm_loop() -> None:
-    """Background loop: refresh expensive query caches every 5 minutes."""
+    """Background loop: warm caches immediately on start, then every 30 min."""
+    try:
+        await _warm_page_caches()
+    except Exception:
+        logger.exception("cache_warm_initial_error")
     while True:
         try:
-            await asyncio.sleep(300)
+            await asyncio.sleep(1800)
             await _warm_page_caches()
         except asyncio.CancelledError:
             break

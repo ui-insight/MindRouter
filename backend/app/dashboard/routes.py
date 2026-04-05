@@ -455,23 +455,17 @@ async def models_catalog(
             "backend_count": data["backend_count"],
         })
 
-    # Token usage for popularity chart — cached in Redis to avoid
-    # full table scan (GROUP BY on 4.6M+ rows takes 15+ seconds)
+    # Token usage for popularity chart — read from Redis cache only.
+    # The background _cache_warm_loop populates this every 30 min.
+    # Never block on a DB scan here; if cache is empty, show no chart.
     token_totals = []
     try:
         from backend.app.core import redis_client
         import json as _json
-        _CACHE_KEY = "cache:model_token_totals"
         if redis_client.is_available() and redis_client._redis:
-            cached = await redis_client._redis.get(_CACHE_KEY)
+            cached = await redis_client._redis.get("cache:model_token_totals")
             if cached:
                 token_totals = _json.loads(cached)
-        if not token_totals:
-            token_totals = await crud.get_model_token_totals(db, limit=15)
-            if redis_client.is_available() and redis_client._redis:
-                await redis_client._redis.set(
-                    _CACHE_KEY, _json.dumps(token_totals), ex=300,
-                )
     except Exception:
         token_totals = []
 
