@@ -129,8 +129,63 @@ async def _seed_redis_from_db() -> None:
             logger.info("redis_orphan_keys_cleaned", count=len(orphans))
 
         logger.info("redis_seeded_from_requests", users=seeded)
+
+        # Pre-warm cached queries that would otherwise cause 15+ second
+        # full table scans on the first page load.
+        await _warm_page_caches()
+
     except Exception:
         logger.exception("redis_seed_failed")
+
+
+async def _warm_page_caches() -> None:
+    """Pre-warm Redis caches for expensive dashboard queries.
+
+    Called on startup and periodically by _cache_warm_loop to ensure
+    page loads never trigger full table scans.
+    """
+    if not redis_is_available():
+        return
+    try:
+        import json as _json
+        from backend.app.core import redis_client as _rc
+        from backend.app.db import crud
+
+        async with get_async_db_context() as db:
+            # Model token totals (used by /models popularity chart)
+            token_totals = await crud.get_model_token_totals(db, limit=15)
+            if _rc._redis:
+                await _rc._redis.set(
+                    "cache:model_token_totals",
+                    _json.dumps(token_totals),
+                    ex=600,
+                )
+
+            # Global token total (seed the live counter if not already set)
+            existing = await _rc.get_cluster_tokens()
+            if existing is None:
+                totals = await crud.get_global_token_total(db, include_offset=False)
+                await _rc.seed_cluster_tokens(
+                    totals["prompt_tokens"],
+                    totals["completion_tokens"],
+                    totals["total_tokens"],
+                )
+
+        logger.info("page_caches_warmed")
+    except Exception:
+        logger.exception("page_cache_warm_failed")
+
+
+async def _cache_warm_loop() -> None:
+    """Background loop: refresh expensive query caches every 5 minutes."""
+    while True:
+        try:
+            await asyncio.sleep(300)
+            await _warm_page_caches()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("cache_warm_loop_error")
 
 
 async def _redis_sync_loop() -> None:
@@ -173,13 +228,14 @@ async def _redis_sync_loop() -> None:
 
 _cleanup_task: Optional[asyncio.Task] = None
 _redis_sync_task: Optional[asyncio.Task] = None
+_cache_warm_task: Optional[asyncio.Task] = None
 _dlp_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Application lifespan manager."""
-    global _cleanup_task, _redis_sync_task, _dlp_task
+    global _cleanup_task, _redis_sync_task, _dlp_task, _cache_warm_task
     logger.info("Starting MindRouter...")
 
     # Initialize components
@@ -218,6 +274,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _cleanup_task = asyncio.create_task(_retention_loop())
     if redis_is_available():
         _redis_sync_task = asyncio.create_task(_redis_sync_loop())
+        _cache_warm_task = asyncio.create_task(_cache_warm_loop())
 
     # Start DLP background worker
     from backend.app.services.dlp_worker import dlp_worker_loop
@@ -239,6 +296,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _redis_sync_task.cancel()
         try:
             await _redis_sync_task
+        except asyncio.CancelledError:
+            pass
+    if _cache_warm_task:
+        _cache_warm_task.cancel()
+        try:
+            await _cache_warm_task
         except asyncio.CancelledError:
             pass
     if _dlp_task:
