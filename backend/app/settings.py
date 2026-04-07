@@ -181,7 +181,7 @@ class Settings(BaseSettings):
     chat_upload_max_size_mb: int = 10
     chat_upload_allowed_extensions: List[str] = [
         ".txt", ".md", ".csv", ".json", ".html", ".htm", ".log",
-        ".docx", ".xlsx", ".pdf",
+        ".docx", ".xlsx", ".pptx", ".pdf",
         ".jpg", ".jpeg", ".png", ".gif", ".webp",
     ]
 

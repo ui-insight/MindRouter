@@ -177,6 +177,31 @@ def _extract_text_from_xlsx(file_bytes: bytes) -> str:
     return "\n".join(lines)
 
 
+def _extract_text_from_pptx(file_bytes: bytes) -> str:
+    """Extract text from a .pptx file (slides and notes)."""
+    from pptx import Presentation
+
+    prs = Presentation(io.BytesIO(file_bytes))
+    lines = []
+    for i, slide in enumerate(prs.slides, 1):
+        lines.append(f"--- Slide {i} ---")
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    text = paragraph.text.strip()
+                    if text:
+                        lines.append(text)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    lines.append("\t".join(cells))
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+            notes = slide.notes_slide.notes_text_frame.text.strip()
+            if notes:
+                lines.append(f"[Notes: {notes}]")
+    return "\n".join(lines)
+
+
 def _extract_text_from_pdf(file_bytes: bytes) -> str:
     """Extract text from a PDF file."""
     import pdfplumber
@@ -631,6 +656,8 @@ async def chat_upload(
             extracted_text = await asyncio.to_thread(_extract_text_from_docx, file_bytes)
         elif ext == ".xlsx":
             extracted_text = await asyncio.to_thread(_extract_text_from_xlsx, file_bytes)
+        elif ext == ".pptx":
+            extracted_text = await asyncio.to_thread(_extract_text_from_pptx, file_bytes)
         elif ext == ".pdf":
             extracted_text = await asyncio.to_thread(_extract_text_from_pdf, file_bytes)
         else:
