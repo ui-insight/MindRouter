@@ -260,11 +260,20 @@ def _build_llm_messages(messages_with_attachments, *, model_supports_multimodal:
                     except (OSError, IOError):
                         # File missing — skip
                         pass
-                elif att.extracted_text:
-                    content_blocks.append({
-                        "type": "text",
-                        "text": f"[File: {att.filename}]\n{att.extracted_text}",
-                    })
+                elif att.extracted_text or att.storage_path:
+                    # Read extracted text from filesystem (new) or DB (legacy)
+                    text = att.extracted_text
+                    if not text and att.storage_path and not att.is_image:
+                        try:
+                            with open(att.storage_path, "r", encoding="utf-8") as f:
+                                text = f.read()
+                        except (OSError, IOError):
+                            text = None
+                    if text:
+                        content_blocks.append({
+                            "type": "text",
+                            "text": f"[File: {att.filename}]\n{text}",
+                        })
 
             if content:
                 content_blocks.append({"type": "text", "text": content})
@@ -641,19 +650,30 @@ async def chat_upload(
         except Exception:
             pass
 
+    # Create attachment record (without extracted_text in DB)
     att = await chat_crud.create_attachment(
         db, user_id,
         filename=filename,
         content_type=content_type,
         is_image=False,
-        extracted_text=extracted_text,
+        extracted_text=None,  # stored on filesystem, not DB
         file_size=len(file_bytes),
     )
+
+    # Save extracted text to filesystem
+    files_dir = settings.chat_files_path
+    if extracted_text:
+        text_path = _sharded_path(files_dir, att.id, "_extracted.txt")
+        os.makedirs(os.path.dirname(text_path), exist_ok=True)
+        await asyncio.to_thread(
+            _write_file, text_path, extracted_text.encode("utf-8")
+        )
+        att.storage_path = text_path
+        await db.flush()
 
     # Save PDF thumbnail to filesystem
     thumb_url = None
     if thumb_bytes:
-        files_dir = settings.chat_files_path
         thumb_path = _sharded_path(files_dir, att.id, "_thumb.png")
         os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
         await asyncio.to_thread(_write_file, thumb_path, thumb_bytes)
@@ -669,6 +689,7 @@ async def chat_upload(
         "content_type": content_type,
         "is_image": False,
         "thumbnail": thumb_url,
+        "extracted_chars": len(extracted_text) if extracted_text else 0,
     })
 
 
@@ -800,6 +821,60 @@ async def chat_completions(
     # Link attachments to the user message
     if attachment_ids:
         await chat_crud.link_attachments_to_message(db, attachment_ids, user_msg.id, user.id)
+
+    # Check if attached files fit within 75% of model's context window
+    if attachment_ids:
+        total_attachment_chars = 0
+        for aid in attachment_ids:
+            att = await chat_crud.get_attachment(db, aid, user.id)
+            if att and not att.is_image:
+                if att.extracted_text:
+                    total_attachment_chars += len(att.extracted_text)
+                elif att.storage_path:
+                    try:
+                        total_attachment_chars += os.path.getsize(att.storage_path)
+                    except OSError:
+                        pass
+
+        if total_attachment_chars > 0:
+            # Estimate tokens (~4 chars per token)
+            estimated_tokens = total_attachment_chars // 4
+
+            # Look up model's context window
+            model_context = None
+            registry = get_registry()
+            for b in await registry.get_healthy_backends():
+                for m in await registry.get_backend_models(b.id):
+                    if m.name == model and m.context_length:
+                        model_context = m.context_length
+                        break
+                if model_context:
+                    break
+
+            if model_context:
+                max_file_tokens = int(model_context * 0.75)
+                if estimated_tokens > max_file_tokens:
+                    # Find models that could handle this file
+                    suggestions = set()
+                    for b in await registry.get_healthy_backends():
+                        for m in await registry.get_backend_models(b.id):
+                            if m.context_length and int(m.context_length * 0.75) >= estimated_tokens:
+                                suggestions.add((m.name, m.context_length))
+
+                    msg = (
+                        f"The attached file is approximately {estimated_tokens:,} tokens, "
+                        f"which exceeds 75% of {model}'s context window "
+                        f"({model_context:,} tokens, {max_file_tokens:,} usable). "
+                    )
+                    if suggestions:
+                        sorted_suggestions = sorted(suggestions, key=lambda x: x[1], reverse=True)[:5]
+                        model_list = ", ".join(
+                            f"{name} ({ctx:,} context)" for name, ctx in sorted_suggestions
+                        )
+                        msg += f"Try switching to: {model_list}. "
+                    msg += "Or trim your file to fit within the context window."
+
+                    return JSONResponse({"error": msg}, status_code=413)
 
     # Auto-title conversation from first user message
     if conv.title == "New Chat" and content:
