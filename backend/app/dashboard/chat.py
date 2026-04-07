@@ -871,8 +871,9 @@ async def chat_completions(
                         model_list = ", ".join(
                             f"{name} ({ctx:,} context)" for name, ctx in sorted_suggestions
                         )
-                        msg += f"Try switching to: {model_list}. "
-                    msg += "Or trim your file to fit within the context window."
+                        msg += f"Try switching to a model with a larger context window: {model_list}, or trim your file to fit."
+                    else:
+                        msg += "No models on MindRouter have a large enough context window for this file. Please trim or summarize your file before uploading."
 
                     return JSONResponse({"error": msg}, status_code=413)
 
