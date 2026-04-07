@@ -1894,13 +1894,24 @@ document.addEventListener('mr-theme-changed', function(e) {
     async function uploadFiles(fileList) {
         for (const file of fileList) {
             const chipId = 'chip-' + Math.random().toString(36).substr(2, 9);
+            const isPdf = file.name.toLowerCase().endsWith('.pdf');
             addFileChip(chipId, file.name, true);
+
+            // For PDFs, update overlay after a delay to indicate OCR may be running
+            let ocrTimer = null;
+            if (isPdf) {
+                ocrTimer = setTimeout(() => {
+                    const overlay = document.querySelector('#' + chipId + ' .uploading-overlay');
+                    if (overlay) overlay.innerHTML = '<i class="bi bi-eye spin"></i> Running OCR...';
+                }, 3000);
+            }
 
             const formData = new FormData();
             formData.append('file', file);
 
             try {
                 const res = await fetch('/chat/api/upload', { method: 'POST', body: formData });
+                if (ocrTimer) clearTimeout(ocrTimer);
                 const data = await res.json();
                 if (!res.ok) {
                     removeFileChip(chipId);
@@ -1911,11 +1922,23 @@ document.addEventListener('mr-theme-changed', function(e) {
                 }
                 updateFileChip(chipId, data);
                 pendingFiles.push(data);
+                if (data.processing_note) {
+                    showToast(data.processing_note);
+                }
             } catch (e) {
+                if (ocrTimer) clearTimeout(ocrTimer);
                 removeFileChip(chipId);
                 alert('Upload failed: ' + e.message);
             }
         }
+    }
+
+    function showToast(message) {
+        const toast = document.createElement('div');
+        toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--mr-card-bg,#333);color:var(--mr-text-primary,#fff);padding:10px 20px;border-radius:8px;z-index:9999;font-size:0.85rem;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 5000);
     }
 
     function addFileChip(id, name, loading) {
@@ -1927,6 +1950,7 @@ document.addEventListener('mr-theme-changed', function(e) {
         const icon = ext === 'pdf' ? 'bi-file-earmark-pdf'
             : ext === 'docx' ? 'bi-file-earmark-word'
             : ext === 'xlsx' ? 'bi-file-earmark-spreadsheet'
+            : ext === 'pptx' ? 'bi-file-earmark-slides'
             : isImg ? 'bi-image' : 'bi-file-earmark-text';
         el.innerHTML = `
             <div class="preview-doc-icon"><i class="bi ${icon}"></i></div>

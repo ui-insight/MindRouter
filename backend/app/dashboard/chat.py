@@ -558,6 +558,8 @@ async def chat_upload(
     if not user_id:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
+    used_ocr = False
+
     settings = get_settings()
     max_size = settings.chat_upload_max_size_mb * 1024 * 1024
 
@@ -660,6 +662,55 @@ async def chat_upload(
             extracted_text = await asyncio.to_thread(_extract_text_from_pptx, file_bytes)
         elif ext == ".pdf":
             extracted_text = await asyncio.to_thread(_extract_text_from_pdf, file_bytes)
+            # Detect scanned PDFs: if pdfplumber extracted very little text,
+            # fall back to multimodal OCR for better results
+            if extracted_text is not None:
+                import pdfplumber as _pdfplumber
+                with _pdfplumber.open(io.BytesIO(file_bytes)) as _pdf:
+                    num_pages = len(_pdf.pages)
+                chars_per_page = len(extracted_text) / max(num_pages, 1)
+                if chars_per_page < 100 and num_pages > 0:
+                    logger.info(
+                        "pdf_ocr_fallback",
+                        filename=filename,
+                        pages=num_pages,
+                        chars_per_page=round(chars_per_page),
+                    )
+                    try:
+                        from backend.app.services.ocr import get_ocr_config, perform_ocr
+                        from backend.app.db.session import get_async_db_context
+                        async with get_async_db_context() as ocr_db:
+                            ocr_config = await get_ocr_config(ocr_db)
+                        if ocr_config.get("enabled", True):
+                            # Get user and api_key for OCR audit trail
+                            ocr_user = await crud.get_user_by_id(db, user_id)
+                            ocr_api_keys = await crud.get_user_api_keys(
+                                db, user_id, include_revoked=False
+                            )
+                            if ocr_user and ocr_api_keys:
+                                ocr_result = await perform_ocr(
+                                    file_bytes=file_bytes,
+                                    content_type="application/pdf",
+                                    filename=filename,
+                                    model=ocr_config["model"],
+                                    output_format="markdown",
+                                    chunk_size=ocr_config["chunk_size"],
+                                    overlap=ocr_config["overlap"],
+                                    dpi=ocr_config["dpi"],
+                                    ocr_config=ocr_config,
+                                    user=ocr_user,
+                                    api_key=ocr_api_keys[0],
+                                    http_request=request,
+                                )
+                                extracted_text = ocr_result["content"]
+                                used_ocr = True
+                    except Exception as ocr_err:
+                        logger.warning(
+                            "pdf_ocr_fallback_failed",
+                            filename=filename,
+                            error=str(ocr_err),
+                        )
+                        # Keep whatever pdfplumber extracted
         else:
             extracted_text = file_bytes.decode("utf-8", errors="replace")
     except Exception as e:
@@ -710,14 +761,17 @@ async def chat_upload(
 
     await db.commit()
 
-    return JSONResponse({
+    resp = {
         "attachment_id": att.id,
         "filename": filename,
         "content_type": content_type,
         "is_image": False,
         "thumbnail": thumb_url,
         "extracted_chars": len(extracted_text) if extracted_text else 0,
-    })
+    }
+    if used_ocr:
+        resp["processing_note"] = "This PDF appeared to be scanned — OCR was used to extract the text."
+    return JSONResponse(resp)
 
 
 def _write_file(path: str, data: bytes):
