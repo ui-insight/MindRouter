@@ -4557,3 +4557,24 @@ async def admin_backup_restore(
             "restore_summary": summary,
         },
     )
+
+
+# ── Queue Monitor ──────────────────────────────────────────
+@dashboard_router.get("/admin/queue", response_class=HTMLResponse)
+async def admin_queue(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin queue monitor page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    return templates.TemplateResponse(
+        "admin/queue.html",
+        {"request": request, "user": user},
+    )

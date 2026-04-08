@@ -990,6 +990,138 @@ async def get_queue(
     }
 
 
+@router.get("/queue/monitor")
+async def get_queue_monitor(
+    window: int = Query(5, description="Time window in minutes (5, 60, or 1440)"),
+    admin: User = Depends(require_admin_read_or_session()),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Queue monitor with capacity and completion stats by model/user."""
+    from datetime import timedelta
+
+    from sqlalchemy import text
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window)
+
+    # 1. Currently queued requests by model
+    queued_rows = (
+        await db.execute(
+            text(
+                "SELECT r.model, COUNT(*) as queued, "
+                "MIN(r.queued_at) as oldest, MAX(r.queued_at) as newest "
+                "FROM requests r WHERE r.status = 'queued' "
+                "GROUP BY r.model ORDER BY queued DESC"
+            )
+        )
+    ).fetchall()
+
+    # 2. Backend capacity per model (deduplicated)
+    capacity_rows = (
+        await db.execute(
+            text(
+                "SELECT m.name as model, b.name as backend, b.status, "
+                "b.max_concurrent, b.current_concurrent "
+                "FROM models m JOIN backends b ON m.backend_id = b.id "
+                "WHERE b.status NOT IN ('disabled') "
+                "ORDER BY m.name, b.name"
+            )
+        )
+    ).fetchall()
+
+    # Build capacity summary per model
+    capacity_by_model: Dict[str, Any] = {}
+    for row in capacity_rows:
+        model = row.model
+        if model not in capacity_by_model:
+            capacity_by_model[model] = {
+                "backends": [],
+                "total_max_concurrent": 0,
+                "healthy_backends": 0,
+            }
+        capacity_by_model[model]["backends"].append(
+            {
+                "name": row.backend,
+                "status": row.status,
+                "max_concurrent": row.max_concurrent,
+                "current_concurrent": row.current_concurrent,
+            }
+        )
+        capacity_by_model[model]["total_max_concurrent"] += row.max_concurrent
+        if row.status == "healthy":
+            capacity_by_model[model]["healthy_backends"] += 1
+
+    # 3. Completion stats by model+user within window
+    stats_rows = (
+        await db.execute(
+            text(
+                "SELECT r.model, r.status, u.username, COUNT(*) as cnt, "
+                "ROUND(MIN(r.total_time_ms)/1000.0, 1) as min_s, "
+                "ROUND(AVG(r.total_time_ms)/1000.0, 1) as avg_s, "
+                "ROUND(MAX(r.total_time_ms)/1000.0, 1) as max_s "
+                "FROM requests r JOIN users u ON r.user_id = u.id "
+                "WHERE r.created_at >= :cutoff "
+                "GROUP BY r.model, r.status, u.username "
+                "ORDER BY r.model, r.status, cnt DESC"
+            ),
+            {"cutoff": cutoff},
+        )
+    ).fetchall()
+
+    # 4. Model-level summary within window
+    model_summary_rows = (
+        await db.execute(
+            text(
+                "SELECT r.model, r.status, COUNT(*) as cnt, "
+                "ROUND(MIN(r.total_time_ms)/1000.0, 1) as min_s, "
+                "ROUND(AVG(r.total_time_ms)/1000.0, 1) as avg_s, "
+                "ROUND(MAX(r.total_time_ms)/1000.0, 1) as max_s "
+                "FROM requests r "
+                "WHERE r.created_at >= :cutoff "
+                "GROUP BY r.model, r.status "
+                "ORDER BY cnt DESC"
+            ),
+            {"cutoff": cutoff},
+        )
+    ).fetchall()
+
+    return {
+        "window_minutes": window,
+        "queued": [
+            {
+                "model": r.model,
+                "queued": r.queued,
+                "oldest": r.oldest.isoformat() if r.oldest else None,
+                "newest": r.newest.isoformat() if r.newest else None,
+            }
+            for r in queued_rows
+        ],
+        "capacity": capacity_by_model,
+        "by_user": [
+            {
+                "model": r.model,
+                "status": r.status,
+                "username": r.username,
+                "count": r.cnt,
+                "min_s": float(r.min_s) if r.min_s is not None else None,
+                "avg_s": float(r.avg_s) if r.avg_s is not None else None,
+                "max_s": float(r.max_s) if r.max_s is not None else None,
+            }
+            for r in stats_rows
+        ],
+        "by_model": [
+            {
+                "model": r.model,
+                "status": r.status,
+                "count": r.cnt,
+                "min_s": float(r.min_s) if r.min_s is not None else None,
+                "avg_s": float(r.avg_s) if r.avg_s is not None else None,
+                "max_s": float(r.max_s) if r.max_s is not None else None,
+            }
+            for r in model_summary_rows
+        ],
+    }
+
+
 # Audit Search
 @router.get("/audit/search")
 async def search_audit(

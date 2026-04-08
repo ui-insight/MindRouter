@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+
+{% block title %}Queue Monitor - MindRouter{% endblock %}
+
+{% block extra_css %}
+<style>
+    .stat-value { font-size: 2rem; font-weight: bold; }
+    .stat-label { font-size: 0.85rem; color: #6c757d; }
+    .time-btn.active { background-color: #0d6efd; color: white; }
+    .fullness-bar { height: 22px; border-radius: 4px; }
+    .table-sm td, .table-sm th { font-size: 0.85rem; vertical-align: middle; }
+    .model-badge { font-size: 0.78rem; }
+    .fade-update { transition: opacity 0.3s; }
+    .loading-spinner { display: none; }
+    .loading .loading-spinner { display: inline-block; }
+    .capacity-cell { white-space: nowrap; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "queue" %}{% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1><i class="bi bi-hourglass-split"></i> Queue Monitor</h1>
+                <div>
+                    <div class="btn-group me-3" role="group" aria-label="Time window">
+                        <button type="button" class="btn btn-sm btn-outline-primary time-btn active" data-window="5">5 min</button>
+                        <button type="button" class="btn btn-sm btn-outline-primary time-btn" data-window="60">1 hr</button>
+                        <button type="button" class="btn btn-sm btn-outline-primary time-btn" data-window="1440">24 hr</button>
+                    </div>
+                    <span class="text-muted me-2" id="last-updated">Last updated: --</span>
+                    <span class="loading-spinner spinner-border spinner-border-sm text-primary" id="poll-spinner"></span>
+                    <button class="btn btn-sm btn-outline-secondary ms-1" id="btn-refresh" title="Refresh now">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Summary Cards -->
+            <div class="row mb-4" id="summary-cards">
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat primary h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-total-queued">--</div>
+                            <div class="stat-label">Total Queued</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat success h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-completed">--</div>
+                            <div class="stat-label">Completed (window)</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat warning h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-failed">--</div>
+                            <div class="stat-label">Failed (window)</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 mb-3">
+                    <div class="card card-stat info h-100">
+                        <div class="card-body text-center">
+                            <div class="stat-value" id="stat-models">--</div>
+                            <div class="stat-label">Active Models</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Queue Depth & Backend Capacity -->
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="bi bi-bar-chart-steps me-2"></i>Queue Depth & Backend Capacity</h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Model</th>
+                                    <th class="text-center">Queued</th>
+                                    <th class="text-center">Backends</th>
+                                    <th class="text-center">Total Capacity</th>
+                                    <th style="min-width:180px;">Fullness</th>
+                                    <th class="text-center">Completed</th>
+                                    <th class="text-center">Failed</th>
+                                    <th class="text-end">Min</th>
+                                    <th class="text-end">Avg</th>
+                                    <th class="text-end">Max</th>
+                                </tr>
+                            </thead>
+                            <tbody id="capacity-tbody">
+                                <tr><td colspan="10" class="text-center text-muted py-3">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Per-User Breakdown -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-people me-2"></i>Per-User Breakdown (within window)</h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-sm mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Model</th>
+                                    <th>User</th>
+                                    <th>Status</th>
+                                    <th class="text-center">Count</th>
+                                    <th class="text-end">Min</th>
+                                    <th class="text-end">Avg</th>
+                                    <th class="text-end">Max</th>
+                                </tr>
+                            </thead>
+                            <tbody id="user-tbody">
+                                <tr><td colspan="7" class="text-center text-muted py-3">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    let currentWindow = 5;
+    let pollTimer = null;
+    const POLL_INTERVAL = 15000;  // 15 seconds
+
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => document.querySelectorAll(sel);
+
+    function formatTime(s) {
+        if (s === null || s === undefined) return '-';
+        return s < 1 ? s.toFixed(2) + 's' : s.toFixed(1) + 's';
+    }
+
+    function statusBadge(status) {
+        const cls = {
+            'completed': 'bg-success',
+            'queued': 'bg-warning text-dark',
+            'processing': 'bg-info text-dark',
+            'failed': 'bg-danger',
+            'cancelled': 'bg-secondary',
+        }[status] || 'bg-secondary';
+        return `<span class="badge ${cls}">${status}</span>`;
+    }
+
+    function fullnessBar(queued, capacity) {
+        if (!capacity) return '<span class="text-muted">No backends</span>';
+        const pct = Math.min(100, Math.round((queued / capacity) * 100));
+        let color = 'bg-success';
+        if (pct > 75) color = 'bg-danger';
+        else if (pct > 40) color = 'bg-warning';
+        return `<div class="progress fullness-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-bar ${color}" style="width: ${pct}%">${pct}%</div>
+        </div>`;
+    }
+
+    async function fetchData() {
+        $('#poll-spinner').style.display = 'inline-block';
+        try {
+            const resp = await fetch(`/api/admin/queue/monitor?window=${currentWindow}`, {
+                credentials: 'same-origin',
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            render(data);
+            $('#last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+        } catch (err) {
+            console.error('Queue monitor fetch failed:', err);
+            $('#last-updated').textContent = 'Error: ' + err.message;
+        } finally {
+            $('#poll-spinner').style.display = 'none';
+        }
+    }
+
+    function render(data) {
+        // Build model-level lookup from by_model
+        const modelStats = {};
+        for (const row of data.by_model) {
+            if (!modelStats[row.model]) modelStats[row.model] = {};
+            modelStats[row.model][row.status] = row;
+        }
+
+        // Build queued lookup
+        const queuedMap = {};
+        let totalQueued = 0;
+        for (const q of data.queued) {
+            queuedMap[q.model] = q.queued;
+            totalQueued += q.queued;
+        }
+
+        // Collect all active models (any model with queued or window activity)
+        const allModels = new Set([
+            ...data.queued.map(q => q.model),
+            ...data.by_model.map(m => m.model),
+        ]);
+
+        // Summary cards
+        let totalCompleted = 0, totalFailed = 0;
+        for (const row of data.by_model) {
+            if (row.status === 'completed') totalCompleted += row.count;
+            if (row.status === 'failed') totalFailed += row.count;
+        }
+        $('#stat-total-queued').textContent = totalQueued;
+        $('#stat-completed').textContent = totalCompleted.toLocaleString();
+        $('#stat-failed').textContent = totalFailed;
+        $('#stat-models').textContent = allModels.size;
+
+        // Capacity table
+        const sorted = [...allModels].sort((a, b) => {
+            const aq = queuedMap[a] || 0, bq = queuedMap[b] || 0;
+            return bq - aq;  // Most queued first
+        });
+
+        let capHtml = '';
+        for (const model of sorted) {
+            const queued = queuedMap[model] || 0;
+            const cap = data.capacity[model];
+            const totalCap = cap ? cap.total_max_concurrent : 0;
+            const healthyCount = cap ? cap.healthy_backends : 0;
+            const completed = modelStats[model]?.completed;
+            const failed = modelStats[model]?.failed;
+
+            capHtml += `<tr>
+                <td><span class="badge bg-secondary model-badge">${model}</span></td>
+                <td class="text-center">${queued > 0 ? '<strong class="text-warning">' + queued + '</strong>' : '<span class="text-muted">0</span>'}</td>
+                <td class="text-center capacity-cell">${healthyCount} healthy</td>
+                <td class="text-center">${totalCap}</td>
+                <td>${fullnessBar(queued, totalCap)}</td>
+                <td class="text-center">${completed ? completed.count.toLocaleString() : '<span class="text-muted">0</span>'}</td>
+                <td class="text-center">${failed ? '<span class="text-danger">' + failed.count + '</span>' : '<span class="text-muted">0</span>'}</td>
+                <td class="text-end">${completed ? formatTime(completed.min_s) : '-'}</td>
+                <td class="text-end">${completed ? formatTime(completed.avg_s) : '-'}</td>
+                <td class="text-end">${completed ? formatTime(completed.max_s) : '-'}</td>
+            </tr>`;
+        }
+        if (!capHtml) capHtml = '<tr><td colspan="10" class="text-center text-muted py-3">No queue activity</td></tr>';
+        $('#capacity-tbody').innerHTML = capHtml;
+
+        // User breakdown table
+        let userHtml = '';
+        // Sort: queued first, then by count desc
+        const userRows = [...data.by_user].sort((a, b) => {
+            if (a.status === 'queued' && b.status !== 'queued') return -1;
+            if (b.status === 'queued' && a.status !== 'queued') return 1;
+            if (a.model !== b.model) return a.model.localeCompare(b.model);
+            return b.count - a.count;
+        });
+        for (const row of userRows) {
+            userHtml += `<tr>
+                <td><span class="badge bg-secondary model-badge">${row.model}</span></td>
+                <td>${row.username}</td>
+                <td>${statusBadge(row.status)}</td>
+                <td class="text-center">${row.count}</td>
+                <td class="text-end">${formatTime(row.min_s)}</td>
+                <td class="text-end">${formatTime(row.avg_s)}</td>
+                <td class="text-end">${formatTime(row.max_s)}</td>
+            </tr>`;
+        }
+        if (!userHtml) userHtml = '<tr><td colspan="7" class="text-center text-muted py-3">No activity in window</td></tr>';
+        $('#user-tbody').innerHTML = userHtml;
+    }
+
+    // Time window buttons
+    $$('.time-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            $$('.time-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentWindow = parseInt(btn.dataset.window);
+            fetchData();
+        });
+    });
+
+    // Manual refresh
+    $('#btn-refresh').addEventListener('click', fetchData);
+
+    // Initial load
+    fetchData();
+
+    // Auto-refresh
+    pollTimer = setInterval(fetchData, POLL_INTERVAL);
+
+    // Pause polling when tab is hidden
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        } else {
+            fetchData();
+            pollTimer = setInterval(fetchData, POLL_INTERVAL);
+        }
+    });
+})();
+</script>
+{% endblock %}

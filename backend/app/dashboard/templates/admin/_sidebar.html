@@ -31,6 +31,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'queue' %}active{% endif %}" href="/admin/queue" {% if active == 'queue' %}aria-current="page"{% endif %}>
+                <i class="bi bi-hourglass-split"></i> Queue
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'metrics' %}active{% endif %}" href="/admin/metrics" {% if active == 'metrics' %}aria-current="page"{% endif %}>
                 <i class="bi bi-gpu-card"></i> GPU Metrics
             </a>
