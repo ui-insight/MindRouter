@@ -17,6 +17,7 @@
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator, Optional
 
 from fastapi import FastAPI, Request
@@ -79,6 +80,36 @@ async def _retention_loop() -> None:
             break
         except Exception:
             logger.exception("retention_cycle_error")
+
+
+async def _cleanup_orphaned_requests() -> None:
+    """Mark stale 'queued' requests as failed on startup.
+
+    Any request still in 'queued' status from before this app instance
+    started is orphaned — the in-memory scheduler queue was lost on
+    restart, so these will never be routed.
+    """
+    try:
+        from backend.app.db.models import Request, RequestStatus
+        from sqlalchemy import update
+
+        # Requests older than 5 minutes in queued status are definitely orphaned
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        async with get_async_db_context() as db:
+            result = await db.execute(
+                update(Request)
+                .where(Request.status == RequestStatus.QUEUED)
+                .where(Request.created_at < cutoff)
+                .values(
+                    status=RequestStatus.FAILED,
+                    error_message="Orphaned: request was still queued after app restart",
+                )
+            )
+            await db.commit()
+            if result.rowcount > 0:
+                logger.info("orphaned_requests_cleaned", count=result.rowcount)
+    except Exception:
+        logger.exception("orphaned_request_cleanup_failed")
 
 
 async def _seed_redis_from_db() -> None:
@@ -244,6 +275,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Initialize storage
     storage = get_artifact_storage()
     await storage.initialize()
+
+    # Clean up orphaned queued requests from previous runs
+    await _cleanup_orphaned_requests()
 
     # Initialize Redis and seed counters from DB
     await init_redis()
