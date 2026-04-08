@@ -708,6 +708,7 @@ class Request(Base, TimestampMixin):
         Index("ix_requests_user_created", "user_id", "created_at"),
         Index("ix_requests_status", "status"),
         Index("ix_requests_model", "model"),
+        Index("ix_requests_created_model_status", "created_at", "model", "status"),
     )
 
 
