@@ -12,6 +12,7 @@ _redis = None
 _available = False
 
 INFLIGHT_KEY = "streaming:inflight_tokens"
+INFLIGHT_TTL_SECONDS = 30  # Auto-expire if no streaming activity
 
 # Cluster-wide token totals (atomically incremented on each request completion)
 _CLUSTER_PROMPT_KEY = "cluster:prompt_tokens"
@@ -130,11 +131,19 @@ async def get_all_token_keys() -> dict[int, int]:
 
 
 async def incr_inflight_tokens(amount: int) -> Optional[int]:
-    """Atomically increment the inflight streaming token counter."""
+    """Atomically increment the inflight streaming token counter.
+
+    Sets a TTL on the key so that leaked counters auto-expire if no
+    streaming activity refreshes it within INFLIGHT_TTL_SECONDS.
+    """
     if not _available or not _redis or amount <= 0:
         return None
     try:
-        return await _redis.incrby(INFLIGHT_KEY, amount)
+        pipe = _redis.pipeline(transaction=False)
+        pipe.incrby(INFLIGHT_KEY, amount)
+        pipe.expire(INFLIGHT_KEY, INFLIGHT_TTL_SECONDS)
+        results = await pipe.execute()
+        return results[0]
     except Exception:
         logger.exception("redis_incr_inflight_failed")
         return None

@@ -524,6 +524,13 @@ class BackendRouter:
                 if gc_counter % 2 == 0:
                     await self._gc_stale_jobs()
 
+                # DB orphan cleanup every 5 minutes: mark queued requests in
+                # the DB that aren't tracked by the in-memory scheduler as
+                # failed. These accumulate when the app restarts or a request
+                # falls through the cracks.
+                if gc_counter % 10 == 0:
+                    await self._cleanup_db_orphans()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -603,3 +610,67 @@ class BackendRouter:
 
         except Exception as e:
             logger.error("gc_stale_jobs_error", error=str(e))
+
+    async def _cleanup_db_orphans(self) -> None:
+        """Mark DB requests stuck in 'queued' that aren't in the scheduler.
+
+        Requests can become orphaned when the app restarts (losing the
+        in-memory queue) or when a routing path fails without updating
+        the DB status.  This runs periodically to catch them.
+        """
+        try:
+            from datetime import timedelta
+
+            from sqlalchemy import select, update
+
+            from backend.app.db.models import Request, RequestStatus
+            from backend.app.db.session import get_async_db_context
+
+            # Only clean up requests older than 5 minutes to avoid racing
+            # with requests that are still being routed
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+            # Get request IDs that the in-memory scheduler knows about
+            all_jobs = await self.queue.get_all_jobs()
+            known_request_ids = {job.request_id for job in all_jobs}
+
+            async with get_async_db_context() as db:
+                # Find DB requests in queued status older than cutoff
+                stale_rows = (
+                    await db.execute(
+                        select(Request.id, Request.request_uuid)
+                        .where(Request.status == RequestStatus.QUEUED)
+                        .where(Request.created_at < cutoff)
+                    )
+                ).fetchall()
+
+                if not stale_rows:
+                    return
+
+                # Filter to only those NOT tracked by the scheduler
+                orphan_ids = [
+                    r.id for r in stale_rows
+                    if r.request_uuid not in known_request_ids
+                ]
+
+                if not orphan_ids:
+                    return
+
+                result = await db.execute(
+                    update(Request)
+                    .where(Request.id.in_(orphan_ids))
+                    .values(
+                        status=RequestStatus.FAILED,
+                        error_message="Orphaned: queued request not tracked by scheduler",
+                    )
+                )
+                await db.commit()
+
+                if result.rowcount > 0:
+                    logger.warning(
+                        "db_orphan_requests_cleaned",
+                        count=result.rowcount,
+                    )
+
+        except Exception as e:
+            logger.error("db_orphan_cleanup_error", error=str(e))
