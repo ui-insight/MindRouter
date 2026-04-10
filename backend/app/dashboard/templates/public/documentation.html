@@ -2282,8 +2282,6 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>BACKEND_REQUEST_TIMEOUT</code></td><td>int</td><td><code>300</code></td><td>Total request timeout (seconds)</td></tr>
                         <tr><td><code>BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT</code></td><td>int</td><td><code>180</code></td><td>Per-attempt timeout (seconds, high for large model prefills)</td></tr>
                         <tr><td><code>BACKEND_RETRY_MAX_ATTEMPTS</code></td><td>int</td><td><code>3</code></td><td>Max total retry attempts</td></tr>
-                        <tr><td><code>BACKEND_RETRY_ATTEMPTS</code></td><td>int</td><td><code>2</code></td><td>Default retry attempts (deprecated &mdash; not currently used by retry logic)</td></tr>
-                        <tr><td><code>BACKEND_RETRY_BACKOFF</code></td><td>float</td><td><code>1.0</code></td><td>Retry backoff multiplier (deprecated &mdash; not currently used by retry logic)</td></tr>
                         <tr><td><code>STRUCTURED_OUTPUT_RETRY_ON_INVALID</code></td><td>bool</td><td><code>true</code></td><td>Retry on invalid structured output</td></tr>
                     </tbody>
                 </table>

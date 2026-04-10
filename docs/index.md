@@ -1781,8 +1781,6 @@ Azure AD SSO is enabled automatically when both `AZURE_AD_CLIENT_ID` and `AZURE_
 | `BACKEND_REQUEST_TIMEOUT` | int | `300` | Total request timeout (seconds) |
 | `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds) |
 | `BACKEND_RETRY_MAX_ATTEMPTS` | int | `3` | Max total retry attempts |
-| `BACKEND_RETRY_ATTEMPTS` | int | `2` | Default retry attempts (deprecated -- not currently used by retry logic; see `BACKEND_RETRY_MAX_ATTEMPTS`) |
-| `BACKEND_RETRY_BACKOFF` | float | `1.0` | Retry backoff multiplier (deprecated -- not currently used by retry logic) |
 | `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | When enabled, retries the request on a different backend if the response fails structured output JSON validation |
 
 > *Note: `STRUCTURED_OUTPUT_RETRY_ON_INVALID` is defined but not currently implemented in the inference pipeline. It is reserved for future use.*

@@ -148,8 +148,6 @@ class Settings(BaseSettings):
     backend_request_timeout: int = 300
     backend_request_timeout_per_attempt: int = 180
     backend_retry_max_attempts: int = 3
-    backend_retry_attempts: int = 2
-    backend_retry_backoff: float = 1.0
     structured_output_retry_on_invalid: bool = True
 
     # Logging
