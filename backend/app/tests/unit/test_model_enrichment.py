@@ -235,15 +235,14 @@ class TestEnrichModelDescription:
 
     @pytest.mark.asyncio
     async def test_successful_enrichment(self):
-        """Full pipeline returns LLM-generated description."""
+        """Full pipeline returns dict with description and huggingface_url."""
         search_results = [
-            {"title": "Llama 3 Model Card", "url": "https://example.com", "description": "Llama 3 is..."}
+            {"title": "Llama 3 Model Card", "url": "https://huggingface.co/meta-llama/Llama-3", "description": "Llama 3 is..."}
         ]
         expected_desc = "- **Architecture**: Llama 3\n- **Parameters**: 8B"
 
         with (
             patch.object(_enrich_mod, "brave_web_search", new_callable=AsyncMock, return_value=search_results),
-            patch.object(_enrich_mod, "format_search_results", return_value="[Web Search Results]\n1. Llama 3"),
             patch.object(_enrich_mod, "_call_mindrouter_llm", new_callable=AsyncMock, return_value=expected_desc),
         ):
             result = await enrich_model_description(
@@ -253,7 +252,8 @@ class TestEnrichModelDescription:
                 api_key="key",
             )
 
-        assert result == expected_desc
+        assert result["description"] == expected_desc
+        assert result["huggingface_url"] == "https://huggingface.co/meta-llama/Llama-3"
 
     @pytest.mark.asyncio
     async def test_strips_tag_suffix_for_search(self):
@@ -333,11 +333,12 @@ class TestEnrichModelDescription:
                 api_key="k",
             )
 
-        assert result == "desc"
+        assert result["description"] == "desc"
+        assert result["huggingface_url"] is None
 
     @pytest.mark.asyncio
     async def test_llm_returns_none(self):
-        """When LLM call fails, enrichment returns None."""
+        """When LLM call fails, description is None but dict is still returned."""
         with (
             patch.object(_enrich_mod, "brave_web_search", new_callable=AsyncMock, return_value=[]),
             patch.object(_enrich_mod, "_call_mindrouter_llm", new_callable=AsyncMock, return_value=None),
@@ -349,11 +350,11 @@ class TestEnrichModelDescription:
                 api_key="k",
             )
 
-        assert result is None
+        assert result["description"] is None
 
     @pytest.mark.asyncio
     async def test_llm_returns_empty_string(self):
-        """When LLM returns empty/whitespace, enrichment returns None."""
+        """When LLM returns empty/whitespace, description is None."""
         with (
             patch.object(_enrich_mod, "brave_web_search", new_callable=AsyncMock, return_value=[]),
             patch.object(_enrich_mod, "_call_mindrouter_llm", new_callable=AsyncMock, return_value="   \n  "),
@@ -365,7 +366,7 @@ class TestEnrichModelDescription:
                 api_key="k",
             )
 
-        assert result is None
+        assert result["description"] is None
 
     @pytest.mark.asyncio
     async def test_brave_api_key_passed_through(self):
@@ -409,7 +410,6 @@ class TestEnrichModelDescription:
         ]
         with (
             patch.object(_enrich_mod, "brave_web_search", new_callable=AsyncMock, return_value=results),
-            patch.object(_enrich_mod, "format_search_results", return_value="[Web Search Results]\n1. Model Card"),
             patch.object(_enrich_mod, "_call_mindrouter_llm", new_callable=AsyncMock, return_value="desc") as mock_llm,
         ):
             await enrich_model_description(
@@ -420,11 +420,199 @@ class TestEnrichModelDescription:
             )
 
         prompt = mock_llm.call_args[1]["prompt"]
-        assert "Web Search Results" in prompt
+        assert "Web Search Context" in prompt
+        assert "Model Card" in prompt
+
+
+    @pytest.mark.asyncio
+    async def test_huggingface_url_extracted(self):
+        """HuggingFace URL should be extracted from search results."""
+        results = [
+            {"title": "Model Card", "url": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct", "description": "desc"},
+            {"title": "Blog", "url": "https://blog.example.com/qwen", "description": "blog"},
+        ]
+        with (
+            patch.object(_enrich_mod, "brave_web_search", new_callable=AsyncMock, return_value=results),
+            patch.object(_enrich_mod, "_call_mindrouter_llm", new_callable=AsyncMock, return_value="desc"),
+        ):
+            result = await enrich_model_description(
+                model_name="qwen2.5:14b",
+                model_metadata={},
+                enrich_model="m",
+                api_key="k",
+            )
+
+        assert result["huggingface_url"] == "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct"
+
+    @pytest.mark.asyncio
+    async def test_no_huggingface_url_when_absent(self):
+        """huggingface_url should be None when no HF URLs in results."""
+        results = [
+            {"title": "Blog", "url": "https://blog.example.com/model", "description": "desc"},
+        ]
+        with (
+            patch.object(_enrich_mod, "brave_web_search", new_callable=AsyncMock, return_value=results),
+            patch.object(_enrich_mod, "_call_mindrouter_llm", new_callable=AsyncMock, return_value="desc"),
+        ):
+            result = await enrich_model_description(
+                model_name="test",
+                model_metadata={},
+                enrich_model="m",
+                api_key="k",
+            )
+
+        assert result["huggingface_url"] is None
 
 
 # ================================================================
-# Tests for format_search_results (existing function, basic coverage)
+# Tests for _extract_huggingface_url
+# ================================================================
+
+_extract_huggingface_url = _enrich_mod._extract_huggingface_url
+
+
+class TestExtractHuggingFaceUrl:
+    """Test HuggingFace URL extraction from search results."""
+
+    def test_prefers_matching_name(self):
+        results = [
+            {"url": "https://huggingface.co/OtherOrg/other-model"},
+            {"url": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct"},
+        ]
+        assert _extract_huggingface_url(results, "qwen2.5:14b") == \
+            "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct"
+
+    def test_falls_back_to_first_hf_url(self):
+        results = [
+            {"url": "https://example.com/other"},
+            {"url": "https://huggingface.co/SomeOrg/SomeModel"},
+        ]
+        assert _extract_huggingface_url(results, "unrelated-model") == \
+            "https://huggingface.co/SomeOrg/SomeModel"
+
+    def test_returns_none_when_no_hf_urls(self):
+        results = [
+            {"url": "https://example.com/model"},
+            {"url": "https://blog.ai/review"},
+        ]
+        assert _extract_huggingface_url(results, "test") is None
+
+    def test_empty_results(self):
+        assert _extract_huggingface_url([], "test") is None
+
+    def test_strips_org_prefix(self):
+        """Model name with org prefix (qwen/qwen3.5-122b) should match."""
+        results = [
+            {"url": "https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8"},
+        ]
+        assert _extract_huggingface_url(results, "qwen/qwen3.5-122b") == \
+            "https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8"
+
+    def test_distinguishes_size_variants_via_tag(self):
+        """Tag suffix (e.g. :14b) should disambiguate size variants."""
+        results = [
+            {"url": "https://huggingface.co/Qwen/Qwen2.5-72B-Instruct"},
+            {"url": "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct"},
+            {"url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct"},
+        ]
+        assert _extract_huggingface_url(results, "qwen2.5:14b") == \
+            "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct"
+
+    def test_distinguishes_aya_expanse_8b(self):
+        """aya-expanse:8b should pick the 8b variant, not 32b."""
+        results = [
+            {"url": "https://huggingface.co/CohereForAI/aya-expanse-32b"},
+            {"url": "https://huggingface.co/CohereForAI/aya-expanse-8b"},
+        ]
+        assert _extract_huggingface_url(results, "aya-expanse:8b") == \
+            "https://huggingface.co/CohereForAI/aya-expanse-8b"
+
+    def test_scoring_picks_best_match(self):
+        """Should pick URL with most matching tokens, not just any match."""
+        results = [
+            {"url": "https://huggingface.co/meta-llama/Llama-3.2-90B-Vision"},
+            {"url": "https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct"},
+        ]
+        assert _extract_huggingface_url(results, "llama3.2-vision:11b") == \
+            "https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct"
+
+
+# ================================================================
+# Tests for _format_search_for_enrichment
+# ================================================================
+
+_format_search_for_enrichment = _enrich_mod._format_search_for_enrichment
+
+
+class TestFormatSearchForEnrichment:
+    """Test the enrichment-specific search formatter."""
+
+    def test_empty_results(self):
+        assert _format_search_for_enrichment([]) == ""
+
+    def test_omits_urls(self):
+        """Enrichment formatter should NOT include URLs in output."""
+        results = [{"title": "Test", "url": "https://example.com", "description": "A test"}]
+        formatted = _format_search_for_enrichment(results)
+        assert "Test" in formatted
+        assert "A test" in formatted
+        assert "https://example.com" not in formatted
+
+    def test_no_cite_instruction(self):
+        """Enrichment formatter should NOT tell the LLM to cite sources."""
+        results = [{"title": "Test", "url": "https://example.com", "description": "desc"}]
+        formatted = _format_search_for_enrichment(results)
+        assert "cite" not in formatted.lower()
+        assert "Cite" not in formatted
+
+    def test_result_without_description(self):
+        results = [{"title": "Test", "url": "https://example.com", "description": ""}]
+        formatted = _format_search_for_enrichment(results)
+        assert "Test" in formatted
+
+
+# ================================================================
+# Tests for _clean_llm_description
+# ================================================================
+
+_clean_llm_description = _enrich_mod._clean_llm_description
+
+
+class TestCleanLlmDescription:
+    """Test citation/URL stripping from LLM output."""
+
+    def test_strips_citation_markers(self):
+        text = "A great model【1†URL】 with good performance【3】."
+        assert "【" not in _clean_llm_description(text)
+
+    def test_strips_bracket_citations(self):
+        text = "A model[1] with features[2†source]."
+        cleaned = _clean_llm_description(text)
+        assert "[1]" not in cleaned
+        assert "[2†source]" not in cleaned
+
+    def test_strips_urls(self):
+        text = "See https://huggingface.co/model for details."
+        cleaned = _clean_llm_description(text)
+        assert "https://" not in cleaned
+
+    def test_strips_learn_more_artifacts(self):
+        text = "A good model. Learn more at ."
+        cleaned = _clean_llm_description(text)
+        assert "Learn more" not in cleaned
+
+    def test_collapses_double_spaces(self):
+        text = "A  model  with  spaces."
+        cleaned = _clean_llm_description(text)
+        assert "  " not in cleaned
+
+    def test_clean_text_passes_through(self):
+        text = "- **Architecture**: Transformer\n- **Parameters**: 8B"
+        assert _clean_llm_description(text) == text
+
+
+# ================================================================
+# Tests for format_search_results (chat-oriented, in web_search.py)
 # ================================================================
 
 

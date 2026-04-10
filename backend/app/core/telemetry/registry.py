@@ -1517,21 +1517,29 @@ class BackendRegistry:
                     "supports_thinking": model.supports_thinking,
                     "supports_multimodal": model.supports_multimodal,
                 }
-                description = await enrich_model_description(
+                enrichment = await enrich_model_description(
                     model_name=model.name,
                     model_metadata=metadata,
                     enrich_model=enrich_model,
                     api_key=enrich_api_key,
                     brave_api_key=brave_api_key or None,
                 )
+                description = enrichment.get("description")
+                hf_url = enrichment.get("huggingface_url")
                 if description:
                     async with get_async_db_context() as db:
                         count = await crud.set_model_description_by_name(
                             db, model.name, description
                         )
                         await crud.set_cached_description(db, model.name, description)
+                        # Persist HuggingFace URL if discovered and not already set
+                        if hf_url and not model.huggingface_url:
+                            await crud.update_model_overrides_by_name(
+                                db, model.name, {"huggingface_url": hf_url}
+                            )
                         await db.commit()
-                    logger.info("model_enriched", model=model.name, rows_updated=count)
+                    logger.info("model_enriched", model=model.name,
+                                rows_updated=count, huggingface_url=hf_url)
                 else:
                     logger.warning("model_enrichment_failed", model=model.name,
                                    reason="empty_response")

@@ -14,12 +14,13 @@
 
 """Automatic model description enrichment using web search + LLM summarization."""
 
+import re
 from typing import Optional
 
 import httpx
 
 from backend.app.logging_config import get_logger
-from backend.app.services.web_search import brave_web_search, format_search_results
+from backend.app.services.web_search import brave_web_search
 
 logger = get_logger(__name__)
 
@@ -84,6 +85,77 @@ async def _call_mindrouter_llm(
         return None
 
 
+def _format_search_for_enrichment(results: list[dict]) -> str:
+    """Format search results for enrichment without citation instructions.
+
+    Unlike the chat-oriented format_search_results() in web_search.py, this
+    version deliberately omits "cite sources" instructions so the LLM does not
+    inject citation markers or URLs into the generated description.
+    """
+    if not results:
+        return ""
+    lines = ["[Web Search Context]"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r['title']}")
+        if r["description"]:
+            lines.append(f"   {r['description']}")
+    return "\n".join(lines)
+
+
+def _extract_huggingface_url(
+    search_results: list[dict], model_name: str
+) -> Optional[str]:
+    """Extract the best HuggingFace model card URL from search results.
+
+    Scores each huggingface.co URL by how many model-name tokens it contains
+    and returns the highest-scoring URL.  Tag suffixes (e.g. ":14b") are
+    included in the token set so size variants can be distinguished for
+    Ollama-style names like "qwen2.5:14b".
+    """
+    hf_urls: list[str] = []
+    for r in search_results:
+        url = r.get("url", "")
+        if "huggingface.co/" in url:
+            hf_urls.append(url)
+
+    if not hf_urls:
+        return None
+
+    # Strip org prefix ("qwen/qwen3.5-122b" -> "qwen3.5-122b") but keep the
+    # tag suffix so we can match size variants.  Split on -, _, ., :
+    base = model_name.split("/")[-1].lower()
+    tokens = [t for t in re.split(r"[-_.:]", base) if len(t) > 1]
+
+    if not tokens:
+        return hf_urls[0]
+
+    best_url = hf_urls[0]
+    best_score = -1
+    for url in hf_urls:
+        url_lower = url.lower()
+        score = sum(1 for t in tokens if t in url_lower)
+        if score > best_score:
+            best_score = score
+            best_url = url
+
+    return best_url
+
+
+def _clean_llm_description(text: str) -> str:
+    """Strip citation markers, URLs, and artifacts from LLM output."""
+    # Strip citation references like 【1†URL】, 【metadata】, [1], etc.
+    cleaned = re.sub(r'【[^】]*】', '', text)
+    cleaned = re.sub(r'\[\d+†?[^\]]*\]', '', cleaned)
+    # Strip any URLs that slipped through
+    cleaned = re.sub(r'https?://\S+', '', cleaned)
+    # Clean up artifacts: "Learn more at " with nothing after, trailing punctuation
+    cleaned = re.sub(r'[Ll]earn more at\s*\.?\s*', '', cleaned)
+    cleaned = re.sub(r'[Ss]ee\s*\.?\s*$', '', cleaned, flags=re.MULTILINE)
+    # Collapse any resulting double spaces
+    cleaned = re.sub(r'  +', ' ', cleaned)
+    return cleaned.strip()
+
+
 async def enrich_model_description(
     model_name: str,
     model_metadata: dict,
@@ -91,7 +163,7 @@ async def enrich_model_description(
     api_key: str,
     brave_api_key: Optional[str] = None,
     port: int = 8000,
-) -> Optional[str]:
+) -> dict:
     """Generate a markdown description for a model via web search + LLM.
 
     Args:
@@ -103,7 +175,8 @@ async def enrich_model_description(
         port: Port for localhost MindRouter API
 
     Returns:
-        Markdown description string, or None on failure.
+        Dict with keys ``description`` (str or None) and
+        ``huggingface_url`` (str or None).
     """
     # Strip tag suffixes for a cleaner search query
     base_name = model_name.split(":")[0] if ":" in model_name else model_name
@@ -113,7 +186,10 @@ async def enrich_model_description(
     search_results = await brave_web_search(
         search_query, num_results=5, api_key=brave_api_key
     )
-    search_context = format_search_results(search_results) if search_results else ""
+    search_context = _format_search_for_enrichment(search_results)
+
+    # Extract HuggingFace URL from search results
+    huggingface_url = _extract_huggingface_url(search_results, model_name)
 
     # Step 2: Build prompt with metadata + search context
     meta_lines = []
@@ -152,17 +228,5 @@ Known metadata:
         port=port,
     )
 
-    if result and result.strip():
-        import re
-        # Strip citation references like 【1†URL】, 【metadata】, [1], etc.
-        cleaned = re.sub(r'【[^】]*】', '', result)
-        cleaned = re.sub(r'\[\d+†?[^\]]*\]', '', cleaned)
-        # Strip any URLs that slipped through
-        cleaned = re.sub(r'https?://\S+', '', cleaned)
-        # Clean up artifacts: "Learn more at " with nothing after, trailing punctuation
-        cleaned = re.sub(r'[Ll]earn more at\s*\.?\s*', '', cleaned)
-        cleaned = re.sub(r'[Ss]ee\s*\.?\s*$', '', cleaned, flags=re.MULTILINE)
-        # Collapse any resulting double spaces
-        cleaned = re.sub(r'  +', ' ', cleaned)
-        return cleaned.strip()
-    return None
+    description = _clean_llm_description(result) if result and result.strip() else None
+    return {"description": description, "huggingface_url": huggingface_url}
