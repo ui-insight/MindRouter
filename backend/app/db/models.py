@@ -392,6 +392,15 @@ class NodeTelemetry(Base):
 
     __table_args__ = (
         Index("ix_node_telemetry_node_time", "node_id", "timestamp"),
+        # Covering index for cluster-wide power history queries that
+        # filter by timestamp only (no node_id) — see migration 049.
+        Index(
+            "ix_node_telemetry_time_covering",
+            "timestamp",
+            "node_id",
+            "server_power_watts",
+            "gpu_power_watts",
+        ),
     )
 
 
@@ -709,6 +718,15 @@ class Request(Base, TimestampMixin):
         Index("ix_requests_status", "status"),
         Index("ix_requests_model", "model"),
         Index("ix_requests_created_model_status", "created_at", "model", "status"),
+        # Covering index for per-user token total aggregations on the
+        # user dashboard — see migration 049.
+        Index(
+            "ix_requests_user_tokens_covering",
+            "user_id",
+            "total_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+        ),
     )
 
 
