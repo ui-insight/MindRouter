@@ -1148,6 +1148,9 @@ async def upsert_model(
                 break
             if sibling.supports_multimodal and not effective_multimodal:
                 effective_multimodal = True
+
+    if model:
+        # UPDATE existing model record
         model.modality = modality
         model.context_length = model.context_length_override if model.context_length_override is not None else (context_length if context_length is not None else model.context_length)
         model.model_max_context = model_max_context if model_max_context is not None else model.model_max_context
@@ -1167,15 +1170,16 @@ async def upsert_model(
         model.family = model.family_override if model.family_override is not None else model.family
         model.parameter_count = model.parameter_count_override if model.parameter_count_override is not None else model.parameter_count
     else:
+        # INSERT new model record
         model = Model(
             backend_id=backend_id,
             name=name,
             modality=modality,
             context_length=context_length,
             model_max_context=model_max_context,
-            supports_multimodal=supports_multimodal,
-            supports_thinking=supports_thinking,
-            supports_tools=supports_tools,
+            supports_multimodal=effective_multimodal,
+            supports_thinking=effective_thinking,
+            supports_tools=effective_tools,
             supports_structured_output=supports_structured_output,
             is_loaded=is_loaded,
             quantization=quantization,
