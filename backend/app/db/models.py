@@ -740,6 +740,16 @@ class Request(Base, TimestampMixin):
             "prompt_tokens",
             "completion_tokens",
         ),
+        # Covering index for recent-IPs query — see migration 051.
+        Index("ix_requests_user_created_ip", "user_id", "created_at", "client_ip"),
+        # Covering index for per-API-key token totals — see migration 051.
+        Index(
+            "ix_requests_apikey_tokens_covering",
+            "api_key_id",
+            "total_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+        ),
     )
 
 
