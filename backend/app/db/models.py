@@ -750,6 +750,15 @@ class Request(Base, TimestampMixin):
             "prompt_tokens",
             "completion_tokens",
         ),
+        # Covering index for status-page trend queries — see migration 052.
+        Index(
+            "ix_requests_created_tokens_user_covering",
+            "created_at",
+            "total_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "user_id",
+        ),
     )
 
 

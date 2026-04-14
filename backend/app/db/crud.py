@@ -17,7 +17,8 @@
 import json as _json
 from datetime import datetime, timedelta, timezone
 from enum import Enum as PyEnum
-from typing import Any, List, Optional, Tuple
+import time as _time
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import DateTime as SADateTime, and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3076,6 +3077,17 @@ _TREND_BUCKETS = {
     "year":  (31536000,   86400),
 }
 
+# In-memory TTL cache for trend queries.  Week/month/year scans are expensive
+# (millions of rows) but the data changes slowly, so we cache results.
+_TREND_CACHE_TTL = {
+    "hour":  60,     # 1 min  – buckets are 60s
+    "day":   120,    # 2 min  – buckets are 15 min
+    "week":  300,    # 5 min  – buckets are 1 h
+    "month": 600,    # 10 min – buckets are 6 h
+    "year":  900,    # 15 min – buckets are 24 h
+}
+_trend_cache: Dict[str, tuple] = {}  # key -> (expire_ts, data)
+
 
 async def get_global_token_total(db: AsyncSession, include_offset: bool = True) -> dict:
     """Total tokens ever served (all users, all time).
@@ -3119,6 +3131,11 @@ async def get_token_trend(
     db: AsyncSession, range_name: str = "day"
 ) -> List[dict]:
     """Token counts bucketed over time for trend chart."""
+    cache_key = f"token_trend:{range_name}"
+    cached = _trend_cache.get(cache_key)
+    if cached and cached[0] > _time.monotonic():
+        return cached[1]
+
     since_sec, bucket_sec = _TREND_BUCKETS.get(range_name, _TREND_BUCKETS["day"])
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_sec)
 
@@ -3135,7 +3152,7 @@ async def get_token_trend(
         " ORDER BY bucket_ts"
     )
     result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
-    return [
+    data = [
         {
             "t": _bucket_iso(int(row[0])),
             "prompt_tokens": int(row[1]),
@@ -3145,11 +3162,20 @@ async def get_token_trend(
         for row in result.all()
     ]
 
+    ttl = _TREND_CACHE_TTL.get(range_name, 120)
+    _trend_cache[cache_key] = (_time.monotonic() + ttl, data)
+    return data
+
 
 async def get_active_users_trend(
     db: AsyncSession, range_name: str = "day"
 ) -> List[dict]:
     """Distinct user counts bucketed over time for trend chart."""
+    cache_key = f"active_users_trend:{range_name}"
+    cached = _trend_cache.get(cache_key)
+    if cached and cached[0] > _time.monotonic():
+        return cached[1]
+
     since_sec, bucket_sec = _TREND_BUCKETS.get(range_name, _TREND_BUCKETS["day"])
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_sec)
 
@@ -3164,10 +3190,14 @@ async def get_active_users_trend(
         " ORDER BY bucket_ts"
     )
     result = await db.execute(stmt, {"bucket": bucket_sec, "cutoff": cutoff})
-    return [
+    data = [
         {"t": _bucket_iso(int(row[0])), "v": int(row[1])}
         for row in result.all()
     ]
+
+    ttl = _TREND_CACHE_TTL.get(range_name, 120)
+    _trend_cache[cache_key] = (_time.monotonic() + ttl, data)
+    return data
 
 
 async def get_top_active_users(
