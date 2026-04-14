@@ -727,6 +727,19 @@ class Request(Base, TimestampMixin):
             "prompt_tokens",
             "completion_tokens",
         ),
+        # Covering index for favorite-models query (GROUP BY model) on
+        # admin user detail page — see migration 050.
+        Index("ix_requests_user_model", "user_id", "model"),
+        # Covering index for monthly usage query (GROUP BY month with
+        # SUM of tokens) on admin user detail page — see migration 050.
+        Index(
+            "ix_requests_user_created_tokens",
+            "user_id",
+            "created_at",
+            "total_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+        ),
     )
 
 
