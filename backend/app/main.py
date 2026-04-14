@@ -261,8 +261,12 @@ async def _warm_trend_caches() -> None:
 
     The week/month/year trend queries scan millions of rows, so we run
     them once at startup (in the background) so the first user request
-    hits the cache instead of waiting several minutes.
+    hits the cache instead of waiting several minutes.  A random delay
+    staggers the work across uvicorn workers to avoid saturating the
+    DB connection pool.
     """
+    import random
+    await asyncio.sleep(random.uniform(5, 60))
     try:
         from backend.app.db import crud
 
