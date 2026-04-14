@@ -256,16 +256,36 @@ async def _redis_sync_loop() -> None:
             logger.exception("redis_sync_error")
 
 
+async def _warm_trend_caches() -> None:
+    """Pre-warm in-memory trend caches for expensive time ranges.
+
+    The week/month/year trend queries scan millions of rows, so we run
+    them once at startup (in the background) so the first user request
+    hits the cache instead of waiting several minutes.
+    """
+    try:
+        from backend.app.db import crud
+
+        for range_name in ("week", "month", "year"):
+            async with get_async_db_context() as db:
+                await crud.get_token_trend(db, range_name)
+                await crud.get_active_users_trend(db, range_name)
+            logger.info("trend_cache_warmed", range=range_name)
+    except Exception:
+        logger.exception("trend_cache_warm_failed")
+
+
 _cleanup_task: Optional[asyncio.Task] = None
 _redis_sync_task: Optional[asyncio.Task] = None
 _cache_warm_task: Optional[asyncio.Task] = None
+_trend_warm_task: Optional[asyncio.Task] = None
 _dlp_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Application lifespan manager."""
-    global _cleanup_task, _redis_sync_task, _dlp_task, _cache_warm_task
+    global _cleanup_task, _redis_sync_task, _dlp_task, _cache_warm_task, _trend_warm_task
     logger.info("Starting MindRouter...")
 
     # Initialize components
@@ -309,6 +329,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _redis_sync_task = asyncio.create_task(_redis_sync_loop())
         _cache_warm_task = asyncio.create_task(_cache_warm_loop())
 
+    # Pre-warm in-memory trend caches in background (takes several minutes)
+    _trend_warm_task = asyncio.create_task(_warm_trend_caches())
+
     # Start DLP background worker
     from backend.app.services.dlp_worker import dlp_worker_loop
     _dlp_task = asyncio.create_task(dlp_worker_loop())
@@ -335,6 +358,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _cache_warm_task.cancel()
         try:
             await _cache_warm_task
+        except asyncio.CancelledError:
+            pass
+    if _trend_warm_task:
+        _trend_warm_task.cancel()
+        try:
+            await _trend_warm_task
         except asyncio.CancelledError:
             pass
     if _dlp_task:
