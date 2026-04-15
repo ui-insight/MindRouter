@@ -4578,3 +4578,200 @@ async def admin_queue(
         "admin/queue.html",
         {"request": request, "user": user},
     )
+
+
+# ---- Web Search Config ----
+
+
+@dashboard_router.get("/admin/search-config")
+async def admin_search_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    test_count: Optional[int] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin web search configuration page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    from backend.app.services.search.registry import (
+        get_search_config,
+        list_providers,
+        PROVIDERS,
+    )
+
+    config = await get_search_config(db)
+
+    # Run health checks for all providers
+    health_checks = []
+    for p in PROVIDERS.values():
+        healthy, message = await p.health_check(config)
+        health_checks.append({
+            "name": p.display_name,
+            "key": p.provider_key,
+            "healthy": healthy,
+            "message": message,
+        })
+
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/search_config.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "search_enabled": config.get("search.enabled", True),
+            "active_provider": config.get("search.provider", "brave"),
+            "max_results": config.get("search.max_results", 10),
+            "quota_tokens": config.get("search.quota_tokens_per_request", 50),
+            "brave_api_key": config.get("search.brave.api_key", ""),
+            "brave_endpoint": config.get("search.brave.endpoint", ""),
+            "searxng_endpoint": config.get("search.searxng.endpoint", ""),
+            "providers": list_providers(),
+            "health_checks": health_checks,
+            "success": success,
+            "error": error,
+            "test_count": test_count,
+            "test_results": None,
+            "test_query": None,
+        },
+    )
+
+
+@dashboard_router.post("/admin/search-config")
+async def admin_search_config_post(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle search config form submissions."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    from backend.app.services.search.registry import (
+        get_search_config,
+        save_search_config,
+        list_providers,
+        PROVIDERS,
+    )
+
+    form = await request.form()
+    action = form.get("action")
+    _ip = get_client_ip(request)
+
+    if action == "save_general":
+        updates = {
+            "search.enabled": bool(form.get("search_enabled")),
+            "search.provider": form.get("provider", "brave"),
+            "search.max_results": max(1, min(50, int(form.get("max_results", 10)))),
+            "search.quota_tokens_per_request": max(0, min(10000, int(form.get("quota_tokens", 50)))),
+        }
+        await save_search_config(db, updates)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="search_config.save_general",
+            entity_type="config", after_value=updates, ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/search-config?success=settings_updated", status_code=302)
+
+    elif action == "save_brave":
+        updates = {
+            "search.brave.api_key": form.get("brave_api_key", "").strip(),
+            "search.brave.endpoint": form.get("brave_endpoint", "").strip()
+                or "https://api.search.brave.com/res/v1/web/search",
+        }
+        await save_search_config(db, updates)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="search_config.save_brave",
+            entity_type="config",
+            after_value={"endpoint": updates["search.brave.endpoint"]},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/search-config?success=provider_updated", status_code=302)
+
+    elif action == "save_searxng":
+        updates = {
+            "search.searxng.endpoint": form.get("searxng_endpoint", "").strip(),
+        }
+        await save_search_config(db, updates)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="search_config.save_searxng",
+            entity_type="config",
+            after_value=updates,
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/search-config?success=provider_updated", status_code=302)
+
+    elif action == "test_search":
+        test_query = form.get("test_query", "").strip()
+        if not test_query:
+            return RedirectResponse(url="/admin/search-config?error=Empty+query", status_code=302)
+
+        config = await get_search_config(db)
+        provider_key = config.get("search.provider", "brave")
+        provider = PROVIDERS.get(provider_key)
+
+        if not provider:
+            return RedirectResponse(
+                url="/admin/search-config?error=Unknown+provider", status_code=302
+            )
+
+        try:
+            results = await provider.search(
+                test_query,
+                max_results=int(config.get("search.max_results", 5)),
+                config=config,
+            )
+        except Exception as e:
+            return RedirectResponse(
+                url=f"/admin/search-config?error={str(e)[:100]}", status_code=302
+            )
+
+        # Re-render page with test results inline
+        health_checks = []
+        for p in PROVIDERS.values():
+            healthy, message = await p.health_check(config)
+            health_checks.append({
+                "name": p.display_name,
+                "key": p.provider_key,
+                "healthy": healthy,
+                "message": message,
+            })
+
+        masq = await _admin_masquerade_context(request, user, db)
+        return templates.TemplateResponse(
+            "admin/search_config.html",
+            {
+                "request": request,
+                "user": user,
+                **masq,
+                "search_enabled": config.get("search.enabled", True),
+                "active_provider": config.get("search.provider", "brave"),
+                "max_results": config.get("search.max_results", 10),
+                "quota_tokens": config.get("search.quota_tokens_per_request", 50),
+                "brave_api_key": config.get("search.brave.api_key", ""),
+                "brave_endpoint": config.get("search.brave.endpoint", ""),
+                "searxng_endpoint": config.get("search.searxng.endpoint", ""),
+                "providers": list_providers(),
+                "health_checks": health_checks,
+                "success": f"test_ok",
+                "error": None,
+                "test_count": len(results),
+                "test_results": [r.to_dict() for r in results],
+                "test_query": test_query,
+            },
+        )
+
+    return RedirectResponse(url="/admin/search-config", status_code=302)

@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}Web Search Config - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "search_config" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-search"></i> Web Search Configuration</h1>
+            <p class="text-muted">Configure the web search provider for the <code>/v1/search</code> and <code>/api/search</code> endpoints.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'provider_updated' %}Search provider settings updated.
+                {% elif success == 'settings_updated' %}General search settings updated.
+                {% elif success == 'test_ok' %}Search test successful! Found {{ test_count }} results.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            {% if not is_read_only %}
+            <div class="row g-4">
+                <!-- General Settings -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-gear"></i> General Settings</h5></div>
+                        <div class="card-body">
+                            <form method="post" action="/admin/search-config">
+                                <input type="hidden" name="action" value="save_general">
+
+                                <div class="mb-3">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="search_enabled" name="search_enabled" value="1" {% if search_enabled %}checked{% endif %}>
+                                        <label class="form-check-label" for="search_enabled">Search API Enabled</label>
+                                    </div>
+                                    <div class="form-text">When disabled, <code>/v1/search</code> returns 503.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="provider" class="form-label">Active Provider</label>
+                                    <select class="form-select" id="provider" name="provider">
+                                        {% for p in providers %}
+                                        <option value="{{ p.key }}" {% if p.key == active_provider %}selected{% endif %}>{{ p.name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_results" class="form-label">Default Max Results</label>
+                                    <input type="number" class="form-control" id="max_results" name="max_results" value="{{ max_results }}" min="1" max="50">
+                                    <div class="form-text">Clients can override this up to 50.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="quota_tokens" class="form-label">Quota Tokens per Search</label>
+                                    <input type="number" class="form-control" id="quota_tokens" name="quota_tokens" value="{{ quota_tokens }}" min="0" max="10000">
+                                    <div class="form-text">Fixed token cost deducted from a user's quota per search request. Set to 0 for free.</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">Save Settings</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Provider Status -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-heart-pulse"></i> Provider Status</h5></div>
+                        <div class="card-body">
+                            <table class="table table-sm mb-3">
+                                <thead>
+                                    <tr><th>Provider</th><th>Status</th><th>Message</th></tr>
+                                </thead>
+                                <tbody>
+                                    {% for h in health_checks %}
+                                    <tr>
+                                        <td>{{ h.name }}</td>
+                                        <td>
+                                            {% if h.healthy %}
+                                            <span class="badge bg-success">Healthy</span>
+                                            {% else %}
+                                            <span class="badge bg-secondary">Unavailable</span>
+                                            {% endif %}
+                                        </td>
+                                        <td class="text-muted small">{{ h.message }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+
+                            <!-- Test Search -->
+                            <form method="post" action="/admin/search-config">
+                                <input type="hidden" name="action" value="test_search">
+                                <div class="input-group">
+                                    <input type="text" class="form-control" name="test_query" placeholder="Test query..." value="{{ test_query or '' }}">
+                                    <button type="submit" class="btn btn-outline-primary"><i class="bi bi-search"></i> Test</button>
+                                </div>
+                            </form>
+
+                            {% if test_results is not none %}
+                            <div class="mt-3">
+                                <h6>Test Results ({{ test_results|length }})</h6>
+                                {% if test_results %}
+                                <div class="list-group list-group-flush small">
+                                    {% for r in test_results %}
+                                    <div class="list-group-item px-0">
+                                        <a href="{{ r.url }}" target="_blank" class="text-decoration-none fw-semibold">{{ r.title }}</a>
+                                        <br><span class="text-muted">{{ r.snippet[:200] }}</span>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <p class="text-muted">No results returned.</p>
+                                {% endif %}
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Brave Search Config -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-shield-check"></i> Brave Search</h5></div>
+                        <div class="card-body">
+                            <form method="post" action="/admin/search-config">
+                                <input type="hidden" name="action" value="save_brave">
+
+                                <div class="mb-3">
+                                    <label for="brave_api_key" class="form-label">API Key</label>
+                                    <input type="password" class="form-control" id="brave_api_key" name="brave_api_key" value="{{ brave_api_key or '' }}">
+                                    <div class="form-text">Get one at <a href="https://brave.com/search/api/" target="_blank">brave.com/search/api</a></div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="brave_endpoint" class="form-label">API Endpoint</label>
+                                    <input type="url" class="form-control" id="brave_endpoint" name="brave_endpoint" value="{{ brave_endpoint or 'https://api.search.brave.com/res/v1/web/search' }}">
+                                    <div class="form-text">Usually no need to change this.</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">Save Brave Config</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SearXNG Config -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-globe"></i> SearXNG</h5></div>
+                        <div class="card-body">
+                            <form method="post" action="/admin/search-config">
+                                <input type="hidden" name="action" value="save_searxng">
+
+                                <div class="mb-3">
+                                    <label for="searxng_endpoint" class="form-label">Instance URL</label>
+                                    <input type="url" class="form-control" id="searxng_endpoint" name="searxng_endpoint" value="{{ searxng_endpoint or '' }}" placeholder="https://searxng.example.com">
+                                    <div class="form-text">Base URL of your SearXNG instance. Must have JSON format enabled.</div>
+                                </div>
+
+                                <button type="submit" class="btn btn-primary">Save SearXNG Config</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- API Usage Info -->
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0"><i class="bi bi-code-slash"></i> API Usage</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted">Users authenticate with their MindRouter API key. Each search deducts <strong>{{ quota_tokens }}</strong> tokens from their quota.</p>
+                            <pre class="bg-dark text-light p-3 rounded"><code>curl -X POST https://mindrouter.uidaho.edu/v1/search \
+  -H "Authorization: Bearer $MINDROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "latest advances in LLM inference", "max_results": 5}'</code></pre>
+                            <p class="text-muted small mt-2">Also available at <code>POST /api/search</code> (same endpoint, Ollama-style path).</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i> Search configuration is view-only for auditors. Contact an administrator to make changes.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

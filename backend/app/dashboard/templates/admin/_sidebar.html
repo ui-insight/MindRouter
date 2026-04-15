@@ -99,6 +99,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'search_config' %}active{% endif %}" href="/admin/search-config" {% if active == 'search_config' %}aria-current="page"{% endif %}>
+                <i class="bi bi-search"></i> Search
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'ocr_config' %}active{% endif %}" href="/admin/ocr-config" {% if active == 'ocr_config' %}aria-current="page"{% endif %}>
                 <i class="bi bi-file-earmark-text"></i> OCR
             </a>
