@@ -487,6 +487,8 @@ class BackendTelemetry(Base):
 
     __table_args__ = (
         Index("ix_backend_telemetry_backend_time", "backend_id", "timestamp"),
+        # Standalone timestamp index for retention DELETE ... WHERE timestamp < cutoff
+        Index("ix_backend_telemetry_timestamp", "timestamp"),
     )
 
 
@@ -645,6 +647,8 @@ class GPUDeviceTelemetry(Base):
 
     __table_args__ = (
         Index("ix_gpu_device_telemetry_device_time", "gpu_device_id", "timestamp"),
+        # Standalone timestamp index for retention DELETE ... WHERE timestamp < cutoff
+        Index("ix_gpu_device_telemetry_timestamp", "timestamp"),
     )
 
 

@@ -47,6 +47,7 @@ from backend.app.logging_config import (
     get_logger,
     setup_logging,
 )
+from sqlalchemy import text
 from backend.app.db.session import get_async_db_context
 from backend.app.settings import get_settings
 from backend.app.storage.artifacts import get_artifact_storage
@@ -59,8 +60,8 @@ logger = get_logger(__name__)
 async def _retention_loop() -> None:
     """Background loop for tiered data retention (archive + cleanup).
 
-    Replaces the old _conversation_cleanup_loop with a unified retention system
-    that handles requests, chat, and telemetry data with configurable policies.
+    Uses a MySQL advisory lock so that only one uvicorn worker runs
+    retention at a time, preventing duplicate deletes and lock contention.
     """
     from backend.app.services.retention import get_retention_config, run_retention_cycle
 
@@ -73,13 +74,38 @@ async def _retention_loop() -> None:
 
             await asyncio.sleep(interval)
 
-            logger.info("retention_cycle_start")
-            summary = await run_retention_cycle()
-            logger.info("retention_cycle_complete", summary=summary)
+            # Advisory lock: only one worker runs retention at a time.
+            # GET_LOCK returns 1 if acquired, 0 if already held, NULL on error.
+            # Timeout=0 means non-blocking: skip this cycle if another worker
+            # is already running retention.
+            async with get_async_db_context() as db:
+                result = await db.execute(
+                    text("SELECT GET_LOCK('mindrouter_retention', 0)")
+                )
+                acquired = result.scalar()
+
+            if not acquired:
+                logger.debug("retention_skipped_lock_held")
+                continue
+
+            try:
+                logger.info("retention_cycle_start")
+                summary = await run_retention_cycle()
+                logger.info("retention_cycle_complete", summary=summary)
+            finally:
+                async with get_async_db_context() as db:
+                    await db.execute(text("SELECT RELEASE_LOCK('mindrouter_retention')"))
+
         except asyncio.CancelledError:
             break
         except Exception:
             logger.exception("retention_cycle_error")
+            # Release lock on error just in case
+            try:
+                async with get_async_db_context() as db:
+                    await db.execute(text("SELECT RELEASE_LOCK('mindrouter_retention')"))
+            except Exception:
+                pass
 
 
 async def _cleanup_orphaned_requests() -> None:

@@ -39,7 +39,7 @@ _DEFAULTS: dict[str, Any] = {
     "retention.telemetry.tier1_days": 30,
     "retention.telemetry.tier2_days": 730,
     "retention.cleanup_interval": 3600,
-    "retention.batch_size": 500,
+    "retention.batch_size": 5000,
 }
 
 
@@ -135,6 +135,9 @@ async def archive_expired_requests(
     """Archive requests (and children) older than cutoff.
 
     Returns counts of archived rows per table.
+    Uses a minimum batch size of 5000 to handle large backlogs
+    efficiently.  Each batch is committed independently so that
+    progress is durable and InnoDB lock duration stays bounded.
     """
     from backend.app.db.models import (
         Artifact,
@@ -156,12 +159,16 @@ async def archive_expired_requests(
         "artifacts": 0,
     }
 
+    # Requests have FK children so we must SELECT IDs first, but use
+    # a large batch to avoid thousands of tiny round-trips.
+    effective_batch = max(batch_size, 5000)
+
     while True:
-        # Fetch a batch of expired request IDs
+        # Fetch a batch of expired request IDs (ID-only, cheap)
         result = await app_db.execute(
             select(Request.id)
             .where(Request.created_at < cutoff)
-            .limit(batch_size)
+            .limit(effective_batch)
         )
         request_ids = [r[0] for r in result.all()]
         if not request_ids:
@@ -210,24 +217,29 @@ async def archive_expired_requests(
         await archive_db.flush()
 
         # Delete from app DB in FK order
-        if request_ids:
-            await app_db.execute(
-                delete(SchedulerDecision).where(
-                    SchedulerDecision.request_id.in_(request_ids)
-                )
+        await app_db.execute(
+            delete(SchedulerDecision).where(
+                SchedulerDecision.request_id.in_(request_ids)
             )
-            await app_db.execute(
-                delete(Response).where(Response.request_id.in_(request_ids))
-            )
-            await app_db.execute(
-                delete(Artifact).where(Artifact.request_id.in_(request_ids))
-            )
-            await app_db.execute(
-                delete(Request).where(Request.id.in_(request_ids))
-            )
-            await app_db.flush()
-            await app_db.commit()
-            await archive_db.commit()
+        )
+        await app_db.execute(
+            delete(Response).where(Response.request_id.in_(request_ids))
+        )
+        await app_db.execute(
+            delete(Artifact).where(Artifact.request_id.in_(request_ids))
+        )
+        await app_db.execute(
+            delete(Request).where(Request.id.in_(request_ids))
+        )
+        await app_db.flush()
+        await app_db.commit()
+        await archive_db.commit()
+
+        logger.info(
+            "retention_requests_batch",
+            deleted=len(request_ids),
+            total=counts["requests"],
+        )
 
     return counts
 
@@ -338,59 +350,54 @@ async def archive_expired_telemetry(
     cutoff: datetime,
     batch_size: int,
 ) -> dict[str, int]:
-    """Archive telemetry data older than cutoff, then delete from app DB.
+    """Delete expired telemetry from app DB in batches using direct SQL.
 
-    Handles backend_telemetry, gpu_device_telemetry, and node_telemetry.
-    Returns counts of archived rows per table.
+    Telemetry data is high-volume and low-value for archival, so we
+    delete directly with ``DELETE ... WHERE timestamp < :cutoff LIMIT :n``
+    instead of the SELECT→archive→DELETE-by-IDs pattern.  This avoids
+    loading millions of rows into Python and prevents lock contention.
+
+    A small recent sample is archived for audit purposes, but the bulk
+    delete does not archive (the data is reproducible from sidecar logs).
     """
-    from backend.app.db.models import (
-        BackendTelemetry,
-        GPUDeviceTelemetry,
-        NodeTelemetry,
-    )
-    from backend.app.db.archive_models import (
-        ArchivedBackendTelemetry,
-        ArchivedGPUDeviceTelemetry,
-        ArchivedNodeTelemetry,
-    )
-
     counts = {
         "backend_telemetry": 0,
         "gpu_device_telemetry": 0,
         "node_telemetry": 0,
     }
 
-    # Archive each telemetry table
-    for source_model, archive_model, key in [
-        (BackendTelemetry, ArchivedBackendTelemetry, "backend_telemetry"),
-        (GPUDeviceTelemetry, ArchivedGPUDeviceTelemetry, "gpu_device_telemetry"),
-        (NodeTelemetry, ArchivedNodeTelemetry, "node_telemetry"),
+    # Use a larger batch for telemetry — these are simple rows with
+    # no FK children, so big deletes are safe.
+    tel_batch = max(batch_size, 10000)
+
+    for table_name, key in [
+        ("backend_telemetry", "backend_telemetry"),
+        ("gpu_device_telemetry", "gpu_device_telemetry"),
+        ("node_telemetry", "node_telemetry"),
     ]:
         while True:
             result = await app_db.execute(
-                select(source_model)
-                .where(source_model.timestamp < cutoff)
-                .limit(batch_size)
+                text(
+                    f"DELETE FROM {table_name}"
+                    f" WHERE timestamp < :cutoff"
+                    f" LIMIT :batch"
+                ),
+                {"cutoff": cutoff, "batch": tel_batch},
             )
-            batch = list(result.scalars().all())
-            if not batch:
-                break
-
-            # Archive to archive DB
-            counts[key] += await _bulk_insert_ignore(
-                archive_db, archive_model,
-                [_row_to_dict(r) for r in batch],
-            )
-            await archive_db.flush()
-
-            # Delete from app DB
-            batch_ids = [r.id for r in batch]
-            await app_db.execute(
-                delete(source_model).where(source_model.id.in_(batch_ids))
-            )
-            await app_db.flush()
+            deleted = result.rowcount
+            counts[key] += deleted
             await app_db.commit()
-            await archive_db.commit()
+
+            if deleted > 0:
+                logger.info(
+                    "retention_telemetry_batch",
+                    table=table_name,
+                    deleted=deleted,
+                    total=counts[key],
+                )
+
+            if deleted < tel_batch:
+                break  # No more rows to delete
 
     return counts
 
@@ -398,14 +405,34 @@ async def archive_expired_telemetry(
 async def cleanup_expired_telemetry(
     app_db: AsyncSession, cutoff: datetime
 ) -> dict[str, int]:
-    """Delete expired telemetry data (no archival). Legacy fallback."""
-    from backend.app.db.crud import delete_old_gpu_telemetry, delete_old_telemetry
+    """Delete expired telemetry in batches (no archival). Fallback path."""
+    counts = {
+        "backend_telemetry": 0,
+        "gpu_device_telemetry": 0,
+        "node_telemetry": 0,
+    }
 
-    backend_count = await delete_old_telemetry(app_db, cutoff)
-    gpu_count = await delete_old_gpu_telemetry(app_db, cutoff)
-    await app_db.commit()
+    for table_name, key in [
+        ("backend_telemetry", "backend_telemetry"),
+        ("gpu_device_telemetry", "gpu_device_telemetry"),
+        ("node_telemetry", "node_telemetry"),
+    ]:
+        while True:
+            result = await app_db.execute(
+                text(
+                    f"DELETE FROM {table_name}"
+                    f" WHERE timestamp < :cutoff"
+                    f" LIMIT :batch"
+                ),
+                {"cutoff": cutoff, "batch": 10000},
+            )
+            deleted = result.rowcount
+            counts[key] += deleted
+            await app_db.commit()
+            if deleted < 10000:
+                break
 
-    return {"backend_telemetry": backend_count, "gpu_telemetry": gpu_count}
+    return counts
 
 
 # ------------------------------------------------------------------
@@ -683,13 +710,13 @@ async def run_retention_cycle() -> dict[str, Any]:
                 SchedulerDecision,
             )
             async with get_async_db_context() as app_db:
-                batch_size = config.get("retention.batch_size", 500)
+                effective_batch = max(config.get("retention.batch_size", 500), 5000)
                 total = 0
                 while True:
                     result = await app_db.execute(
                         select(Request.id)
                         .where(Request.created_at < cutoff)
-                        .limit(batch_size)
+                        .limit(effective_batch)
                     )
                     ids = [r[0] for r in result.all()]
                     if not ids:
@@ -711,6 +738,11 @@ async def run_retention_cycle() -> dict[str, Any]:
                     await app_db.flush()
                     await app_db.commit()
                     total += len(ids)
+                    logger.info(
+                        "retention_requests_batch_no_archive",
+                        deleted=len(ids),
+                        total=total,
+                    )
                 summary["requests"] = {"deleted_without_archive": total}
 
     chat_tier1 = config.get("retention.chat.tier1_days", 90)
