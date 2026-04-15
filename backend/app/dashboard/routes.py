@@ -1640,7 +1640,7 @@ async def toggle_model_tools(
     from sqlalchemy import select
     from backend.app.db.models import Model
 
-    result = await db.execute(select(Model).where(Model.name == model_name))
+    result = await db.execute(select(Model).where(Model.name == model_name).limit(1))
     model = result.scalar_one_or_none()
     if not model:
         return RedirectResponse(
