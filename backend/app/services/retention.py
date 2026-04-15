@@ -23,7 +23,7 @@ import json as _json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import bindparam, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.logging_config import get_logger
@@ -149,8 +149,8 @@ async def _snapshot_request_aggregates(
             " FROM requests"
             " WHERE id IN :ids"
             " GROUP BY user_id"
-        ),
-        {"ids": tuple(request_ids)},
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": request_ids},
     )
     for user_id, total_tok, prompt_tok, comp_tok, req_count in user_agg.all():
         await db.execute(
@@ -182,8 +182,8 @@ async def _snapshot_request_aggregates(
             " FROM requests"
             " WHERE id IN :ids"
             " GROUP BY model"
-        ),
-        {"ids": tuple(request_ids)},
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": request_ids},
     )
     for model_name, total_tok, prompt_tok, comp_tok, req_count in model_agg.all():
         await db.execute(
