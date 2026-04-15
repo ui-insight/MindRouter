@@ -16,6 +16,7 @@
 | `run stress tests`    | `make test-stress` | Multi-user load/stress test                          |
 | `run matrix tests`  | `make test-matrix` | Structured output matrix tests (all API styles)    |
 | `run thinking tests` | `make test-thinking` | Structured output + thinking compliance (live stack) |
+| `run tool tests`    | `make test-tools`  | Live tool calling compliance (all tool-capable models) |
 | `run accessibility tests` | `make test-a11y` | WCAG 2.1 accessibility tests (subset of unit)      |
 | `run sidecar tests`   | `make test-sidecar`| GPU sidecar agent tests                              |
 | `run all tests`       | `make test-all`    | Unit + integration + E2E + smoke + sidecar tests     |
@@ -174,7 +175,23 @@ Comprehensive matrix test covering structured output (JSON schema validation) an
 
 ---
 
-## 7. Accessibility Tests
+## 7. Live Tool Calling Compliance Tests
+
+**Runner:** `python tests/test_tool_calling_live.py`
+**Makefile:** `make test-tools`
+**Requirements:** Live deployment, `MINDROUTER_API_KEY` env var set.
+
+Auto-discovers all tool-capable models via `/v1/models` (filtering by `capabilities.tools`), then tests each model across OpenAI, Ollama, and Anthropic API styles with both streaming and non-streaming requests. Validates that models return proper `tool_calls` with correct function names and parseable arguments.
+
+| File | What it covers |
+|------|----------------|
+| `tests/test_tool_calling_live.py` | N models x 3 API styles x 2 stream modes: tool call generation, argument parsing, function name correctness, streaming tool call accumulation across OpenAI `/v1/chat/completions`, Ollama `/api/chat`, and Anthropic `/anthropic/v1/messages` |
+
+**Models tested:** All models with `capabilities.tools == true` (auto-discovered, excludes embeddings/rerankers)
+
+---
+
+## 8. Accessibility Tests
 
 **Runner:** `pytest backend/app/tests/unit/test_accessibility.py -v`
 **Makefile:** `make test-a11y`
@@ -184,7 +201,7 @@ Subset of unit tests, broken out for convenience. 99 tests validating WCAG 2.1 L
 
 ---
 
-## 8. GPU Sidecar Tests
+## 9. GPU Sidecar Tests
 
 **Runner:** `pytest sidecar/tests/ -v`
 **Makefile:** `make test-sidecar`
@@ -197,7 +214,7 @@ Subset of unit tests, broken out for convenience. 99 tests validating WCAG 2.1 L
 
 ---
 
-## 9. Security / Vulnerability Tests
+## 10. Security / Vulnerability Tests
 
 > **Status:** Not yet implemented.
 
