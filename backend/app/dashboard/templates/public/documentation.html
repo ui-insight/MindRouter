@@ -75,6 +75,7 @@
                 <li class="nav-item"><a class="nav-link" href="#rate-limiting">Rate Limiting</a></li>
                 <li class="nav-item"><a class="nav-link" href="#tool-calling">Tool Calling</a></li>
                 <li class="nav-item"><a class="nav-link" href="#ocr">Document OCR</a></li>
+                <li class="nav-item"><a class="nav-link" href="#web-search">Web Search</a></li>
                 <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
@@ -887,6 +888,7 @@ message = client.messages.create(
                         <tr><td>Admin Audit</td><td><code>/admin/admin-audit</code></td><td>Persistent log of all admin actions with before/after snapshots, filterable by action, entity type, and admin user</td></tr>
                         <tr><td>Conversations</td><td><code>/admin/conversations</code></td><td>Browse and export all user conversations</td></tr>
                         <tr><td>Chat Configuration</td><td><code>/admin/chat-config</code></td><td>Configure chat UI defaults: core models, default model, system prompt, max tokens, temperature, thinking mode</td></tr>
+                        <tr><td>Search</td><td><code>/admin/search-config</code></td><td>Configure web search API: provider selection (Brave, SearXNG), API keys, quota cost, health checks, test search</td></tr>
                         <tr><td>Blog Management</td><td><code>/admin/blog</code></td><td>Blog CMS: create, edit, publish/unpublish, and delete blog posts</td></tr>
                         <tr><td>Site Settings</td><td><code>/admin/settings</code></td><td>Global settings: display timezone, Ollama context length enforcement</td></tr>
                     </tbody>
@@ -1572,6 +1574,83 @@ print(f"Pages: {result['pages']}, Chunks: {result['chunks_processed']}")</code><
 
             <hr>
 
+            <!-- Web Search -->
+            <section id="web-search">
+                <h2>Web Search</h2>
+                <p>MindRouter provides a standalone web search API at <code>POST /v1/search</code> (and <code>POST /api/search</code>). This is a first-class service &mdash; it does <strong>not</strong> modify or inject results into LLM calls. Clients decide how to use the results (feed them to an agent, display to a user, etc.).</p>
+
+                <h3>Usage</h3>
+                <p>Authenticate with your MindRouter API key. Each search deducts a small configurable token cost from your quota.</p>
+<pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/search \
+  -H "Authorization: Bearer $MINDROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "latest advances in LLM inference", "max_results": 5}'</code></pre>
+
+                <h4>Request Body</h4>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>query</code></td><td>string</td><td><em>required</em></td><td>The search query (1&ndash;2000 characters)</td></tr>
+                        <tr><td><code>max_results</code></td><td>int</td><td>from config</td><td>Maximum results to return (1&ndash;50). If omitted, uses the server default.</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Response</h4>
+<pre><code>{
+  "query": "latest advances in LLM inference",
+  "provider": "Brave Search",
+  "results": [
+    {
+      "title": "Advances in LLM Inference Optimization",
+      "url": "https://example.com/article",
+      "snippet": "Recent work on speculative decoding and ...",
+      "published": "2026-04-10"
+    }
+  ],
+  "total_results": 5
+}</code></pre>
+
+                <h4>Python Example</h4>
+<pre><code>import requests
+
+resp = requests.post(
+    "https://mindrouter.uidaho.edu/v1/search",
+    headers={"Authorization": f"Bearer {api_key}"},
+    json={"query": "transformer architecture improvements", "max_results": 10},
+)
+results = resp.json()["results"]
+for r in results:
+    print(f"{r['title']}: {r['url']}")</code></pre>
+
+                <h3>Pluggable Providers</h3>
+                <p>The search backend is configurable via <strong>Admin &rarr; Search</strong>. MindRouter supports multiple search providers:</p>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Provider</th><th>Type</th><th>API Key Required</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Brave Search</strong></td><td>Commercial API</td><td>Yes</td><td>Fast, high-quality web results. Free tier available at <a href="https://brave.com/search/api/" target="_blank">brave.com/search/api</a></td></tr>
+                        <tr><td><strong>SearXNG</strong></td><td>Self-hosted</td><td>No</td><td>Meta-search engine aggregating multiple upstream providers. Requires a running SearXNG instance with JSON format enabled.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>MCP Integration</h3>
+                <p>The <code>/v1/search</code> endpoint can be wrapped as an MCP tool for agentic systems (Claude Code, Cursor, custom agents). An MCP server just needs to call MindRouter's search endpoint with the user's API key &mdash; no separate search API credentials required.</p>
+
+                <h3>Configuration</h3>
+                <p>All search settings are managed via <strong>Admin &rarr; Search</strong> in the web dashboard:</p>
+                <ul>
+                    <li><strong>Enable/disable</strong> &mdash; Toggle the entire search API (returns 503 when disabled)</li>
+                    <li><strong>Active provider</strong> &mdash; Select which search backend to use</li>
+                    <li><strong>Default max results</strong> &mdash; Server-wide default (clients can override up to 50)</li>
+                    <li><strong>Quota cost</strong> &mdash; Fixed token cost deducted per search request (default 50)</li>
+                    <li><strong>Provider-specific settings</strong> &mdash; API keys, endpoint URLs per provider</li>
+                    <li><strong>Health checks</strong> &mdash; Real-time status of each configured provider</li>
+                    <li><strong>Test search</strong> &mdash; Inline test with live results preview</li>
+                </ul>
+                <p>Settings are stored in the <code>app_config</code> table (keys prefixed with <code>search.*</code>) and take effect immediately.</p>
+            </section>
+
+            <hr>
+
             <!-- Request ID -->
             <section id="request-id">
                 <h2>Request ID</h2>
@@ -2069,6 +2148,13 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>catalog.enrich_model</code></td><td>string</td><td><code>""</code></td><td>Model name used for LLM enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.enrich_api_key</code></td><td>string</td><td><code>""</code></td><td>API key for internal MindRouter enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.brave_api_key</code></td><td>string</td><td><code>""</code></td><td>Brave Search API key for enrichment (overrides env var)</td><td>Site Settings</td></tr>
+                        <tr><td><code>search.enabled</code></td><td>bool</td><td><code>true</code></td><td>Enable/disable the <code>/v1/search</code> API</td><td>Search</td></tr>
+                        <tr><td><code>search.provider</code></td><td>string</td><td><code>"brave"</code></td><td>Active search provider: <code>brave</code> or <code>searxng</code></td><td>Search</td></tr>
+                        <tr><td><code>search.max_results</code></td><td>int</td><td><code>10</code></td><td>Default max results per search (clients can override up to 50)</td><td>Search</td></tr>
+                        <tr><td><code>search.quota_tokens_per_request</code></td><td>int</td><td><code>50</code></td><td>Fixed token cost deducted per search request</td><td>Search</td></tr>
+                        <tr><td><code>search.brave.api_key</code></td><td>string</td><td><code>""</code></td><td>Brave Search API key (falls back to <code>BRAVE_SEARCH_API_KEY</code> env var)</td><td>Search</td></tr>
+                        <tr><td><code>search.brave.endpoint</code></td><td>string</td><td><code>https://api.search.brave.com/...</code></td><td>Brave Search API endpoint URL</td><td>Search</td></tr>
+                        <tr><td><code>search.searxng.endpoint</code></td><td>string</td><td><code>""</code></td><td>SearXNG instance URL (must have JSON format enabled)</td><td>Search</td></tr>
                         <tr><td><code>email.smtp_host</code></td><td>string</td><td><code>""</code></td><td>SMTP server hostname</td><td>Site Settings</td></tr>
                         <tr><td><code>email.smtp_port</code></td><td>int</td><td><code>587</code></td><td>SMTP server port</td><td>Site Settings</td></tr>
                         <tr><td><code>email.smtp_username</code></td><td>string</td><td><code>""</code></td><td>SMTP authentication username</td><td>Site Settings</td></tr>
@@ -2173,11 +2259,12 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>BRAVE_SEARCH_API_KEY</code></td><td>str</td><td><code>None</code></td><td>Brave Search API key (enables web search in chat)</td></tr>
-                        <tr><td><code>BRAVE_SEARCH_MAX_RESULTS</code></td><td>int</td><td><code>5</code></td><td>Maximum search results to inject as context</td></tr>
+                        <tr><td><code>BRAVE_SEARCH_API_KEY</code></td><td>str</td><td><code>None</code></td><td>Brave Search API key &mdash; used as fallback for both the chat web search toggle and the <code>/v1/search</code> API if no key is configured in <strong>Admin &rarr; Search</strong></td></tr>
+                        <tr><td><code>BRAVE_SEARCH_MAX_RESULTS</code></td><td>int</td><td><code>5</code></td><td>Maximum search results to inject as context (chat toggle only)</td></tr>
                     </tbody>
                 </table>
                 <p>When configured, a search toggle appears in the chat input area. Enabling it queries the Brave Search API with the user's message and injects results into the system prompt as additional context.</p>
+                <p>The standalone <code>/v1/search</code> API (<a href="#web-search">see Web Search</a>) is configured separately via <strong>Admin &rarr; Search</strong> and supports multiple providers (Brave, SearXNG). The <code>BRAVE_SEARCH_API_KEY</code> env var serves as a fallback if no key is set in the admin UI.</p>
 
                 <h3>Conversation Retention</h3>
                 <table class="table table-bordered table-sm">
