@@ -42,6 +42,7 @@ from backend.app.db.models import (
     GPUDeviceTelemetry,
     Group,
     Model,
+    ModelArchivedStats,
     ModelDescriptionCache,
     Modality,
     Node,
@@ -288,7 +289,7 @@ async def get_users(
     asc = sort_dir.lower() == "asc"
 
     if sort_by == "tokens":
-        # Sort by total tokens via a subquery
+        # Sort by total tokens (live + archived) via subqueries
         token_subq = (
             select(
                 Request.user_id,
@@ -302,9 +303,13 @@ async def get_users(
             select(User)
             .options(selectinload(User.group))
             .outerjoin(token_subq, User.id == token_subq.c.user_id)
+            .outerjoin(Quota, User.id == Quota.user_id)
             .where(where_clause)
         )
-        order_col = func.coalesce(token_subq.c.total_tokens, 0)
+        order_col = (
+            func.coalesce(token_subq.c.total_tokens, 0)
+            + func.coalesce(Quota.archived_total_tokens, 0)
+        )
         query = query.order_by(order_col.asc() if asc else order_col.desc())
     elif sort_by == "last_login":
         query = (
@@ -347,10 +352,15 @@ async def get_users(
 async def get_user_token_totals(db: AsyncSession, user_ids: List[int]) -> dict:
     """Get token totals for a list of user IDs.
 
+    Includes archived offsets from the quotas table so totals stay
+    correct after retention deletes old requests.
+
     Returns {user_id: {prompt_tokens, completion_tokens, total_tokens}}.
     """
     if not user_ids:
         return {}
+
+    # Live totals from requests table
     result = await db.execute(
         select(
             Request.user_id,
@@ -361,7 +371,7 @@ async def get_user_token_totals(db: AsyncSession, user_ids: List[int]) -> dict:
         .where(Request.user_id.in_(user_ids), Request.total_tokens.isnot(None))
         .group_by(Request.user_id)
     )
-    return {
+    totals = {
         row[0]: {
             "prompt_tokens": int(row[1]),
             "completion_tokens": int(row[2]),
@@ -369,6 +379,29 @@ async def get_user_token_totals(db: AsyncSession, user_ids: List[int]) -> dict:
         }
         for row in result.all()
     }
+
+    # Add archived offsets
+    arch_result = await db.execute(
+        select(
+            Quota.user_id,
+            Quota.archived_prompt_tokens,
+            Quota.archived_completion_tokens,
+            Quota.archived_total_tokens,
+        ).where(Quota.user_id.in_(user_ids))
+    )
+    for uid, a_prompt, a_comp, a_total in arch_result.all():
+        if uid in totals:
+            totals[uid]["prompt_tokens"] += int(a_prompt)
+            totals[uid]["completion_tokens"] += int(a_comp)
+            totals[uid]["total_tokens"] += int(a_total)
+        elif a_total > 0:
+            totals[uid] = {
+                "prompt_tokens": int(a_prompt),
+                "completion_tokens": int(a_comp),
+                "total_tokens": int(a_total),
+            }
+
+    return totals
 
 
 async def get_api_key_token_totals(
@@ -405,8 +438,12 @@ async def get_model_token_totals(
 ) -> List[dict]:
     """Get token totals grouped by model, ordered by total descending.
 
+    Includes archived offsets from model_archived_stats so totals stay
+    correct after retention deletes old requests.
+
     Returns [{model, prompt_tokens, completion_tokens, total_tokens, request_count}].
     """
+    # Live totals from requests table
     result = await db.execute(
         select(
             Request.model,
@@ -417,19 +454,37 @@ async def get_model_token_totals(
         )
         .where(Request.total_tokens.isnot(None))
         .group_by(Request.model)
-        .order_by(func.sum(Request.total_tokens).desc())
-        .limit(limit)
     )
-    return [
-        {
+    by_model: dict[str, dict] = {}
+    for row in result.all():
+        by_model[row[0]] = {
             "model": row[0],
             "prompt_tokens": int(row[1]),
             "completion_tokens": int(row[2]),
             "total_tokens": int(row[3]),
             "request_count": int(row[4]),
         }
-        for row in result.all()
-    ]
+
+    # Merge archived offsets
+    arch_result = await db.execute(select(ModelArchivedStats))
+    for arch in arch_result.scalars().all():
+        if arch.model in by_model:
+            by_model[arch.model]["prompt_tokens"] += arch.archived_prompt_tokens
+            by_model[arch.model]["completion_tokens"] += arch.archived_completion_tokens
+            by_model[arch.model]["total_tokens"] += arch.archived_total_tokens
+            by_model[arch.model]["request_count"] += arch.archived_request_count
+        elif arch.archived_total_tokens > 0:
+            by_model[arch.model] = {
+                "model": arch.model,
+                "prompt_tokens": arch.archived_prompt_tokens,
+                "completion_tokens": arch.archived_completion_tokens,
+                "total_tokens": arch.archived_total_tokens,
+                "request_count": arch.archived_request_count,
+            }
+
+    # Sort by total_tokens descending, return top N
+    sorted_models = sorted(by_model.values(), key=lambda m: m["total_tokens"], reverse=True)
+    return sorted_models[:limit]
 
 
 async def delete_user(db: AsyncSession, user_id: int) -> bool:
@@ -2555,6 +2610,22 @@ async def get_user_with_stats(db: AsyncSession, user_id: int) -> Optional[dict]:
     )
     request_count = req_result.scalar_one()
 
+    # Add archived offsets (requests deleted by retention)
+    arch_result = await db.execute(
+        select(
+            Quota.archived_prompt_tokens,
+            Quota.archived_completion_tokens,
+            Quota.archived_total_tokens,
+            Quota.archived_request_count,
+        ).where(Quota.user_id == user_id)
+    )
+    arch_row = arch_result.first()
+    if arch_row:
+        prompt_tokens += int(arch_row[0])
+        completion_tokens += int(arch_row[1])
+        total_tokens += int(arch_row[2])
+        request_count += int(arch_row[3])
+
     # Favorite models (top 5)
     model_result = await db.execute(
         select(Request.model, func.count(Request.id).label("cnt"))
@@ -3092,6 +3163,9 @@ _trend_cache: Dict[str, tuple] = {}  # key -> (expire_ts, data)
 async def get_global_token_total(db: AsyncSession, include_offset: bool = True) -> dict:
     """Total tokens ever served (all users, all time).
 
+    Includes archived offsets from model_archived_stats so the total
+    stays correct after retention deletes old requests.
+
     When *include_offset* is True (the default), the ``stats.token_offset``
     value from app_config is added to the totals.  This lets the homepage
     reflect historical usage from before the current database without
@@ -3113,6 +3187,19 @@ async def get_global_token_total(db: AsyncSession, include_offset: bool = True) 
         "completion_tokens": int(row[1]),
         "total_tokens": int(row[2]),
     }
+
+    # Add archived offsets (requests deleted by retention)
+    arch_result = await db.execute(
+        select(
+            func.coalesce(func.sum(ModelArchivedStats.archived_prompt_tokens), 0),
+            func.coalesce(func.sum(ModelArchivedStats.archived_completion_tokens), 0),
+            func.coalesce(func.sum(ModelArchivedStats.archived_total_tokens), 0),
+        )
+    )
+    arch_row = arch_result.one()
+    totals["prompt_tokens"] += int(arch_row[0])
+    totals["completion_tokens"] += int(arch_row[1])
+    totals["total_tokens"] += int(arch_row[2])
 
     if include_offset:
         offset = await get_config_json(db, "stats.token_offset", 0)

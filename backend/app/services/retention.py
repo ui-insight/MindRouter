@@ -122,6 +122,93 @@ async def _bulk_insert_ignore(
 
 
 # ------------------------------------------------------------------
+# Pre-deletion aggregate snapshots
+# ------------------------------------------------------------------
+
+
+async def _snapshot_request_aggregates(
+    db: AsyncSession, request_ids: list[int]
+) -> None:
+    """Accumulate per-user and per-model token/count offsets for a batch
+    of requests that are about to be deleted.  This preserves the totals
+    so that metric queries stay correct after archival.
+
+    Uses raw SQL with ON DUPLICATE KEY UPDATE for atomic upserts.
+    """
+    if not request_ids:
+        return
+
+    # Per-user aggregates → quotas.archived_*
+    user_agg = await db.execute(
+        text(
+            "SELECT user_id,"
+            " COALESCE(SUM(total_tokens), 0),"
+            " COALESCE(SUM(prompt_tokens), 0),"
+            " COALESCE(SUM(completion_tokens), 0),"
+            " COUNT(*)"
+            " FROM requests"
+            " WHERE id IN :ids"
+            " GROUP BY user_id"
+        ),
+        {"ids": tuple(request_ids)},
+    )
+    for user_id, total_tok, prompt_tok, comp_tok, req_count in user_agg.all():
+        await db.execute(
+            text(
+                "UPDATE quotas SET"
+                " archived_total_tokens = archived_total_tokens + :total_tok,"
+                " archived_prompt_tokens = archived_prompt_tokens + :prompt_tok,"
+                " archived_completion_tokens = archived_completion_tokens + :comp_tok,"
+                " archived_request_count = archived_request_count + :req_count"
+                " WHERE user_id = :uid"
+            ),
+            {
+                "uid": user_id,
+                "total_tok": int(total_tok),
+                "prompt_tok": int(prompt_tok),
+                "comp_tok": int(comp_tok),
+                "req_count": int(req_count),
+            },
+        )
+
+    # Per-model aggregates → model_archived_stats
+    model_agg = await db.execute(
+        text(
+            "SELECT model,"
+            " COALESCE(SUM(total_tokens), 0),"
+            " COALESCE(SUM(prompt_tokens), 0),"
+            " COALESCE(SUM(completion_tokens), 0),"
+            " COUNT(*)"
+            " FROM requests"
+            " WHERE id IN :ids"
+            " GROUP BY model"
+        ),
+        {"ids": tuple(request_ids)},
+    )
+    for model_name, total_tok, prompt_tok, comp_tok, req_count in model_agg.all():
+        await db.execute(
+            text(
+                "INSERT INTO model_archived_stats"
+                " (model, archived_total_tokens, archived_prompt_tokens,"
+                "  archived_completion_tokens, archived_request_count)"
+                " VALUES (:model, :total_tok, :prompt_tok, :comp_tok, :req_count)"
+                " ON DUPLICATE KEY UPDATE"
+                " archived_total_tokens = archived_total_tokens + VALUES(archived_total_tokens),"
+                " archived_prompt_tokens = archived_prompt_tokens + VALUES(archived_prompt_tokens),"
+                " archived_completion_tokens = archived_completion_tokens + VALUES(archived_completion_tokens),"
+                " archived_request_count = archived_request_count + VALUES(archived_request_count)"
+            ),
+            {
+                "model": model_name,
+                "total_tok": int(total_tok),
+                "prompt_tok": int(prompt_tok),
+                "comp_tok": int(comp_tok),
+                "req_count": int(req_count),
+            },
+        )
+
+
+# ------------------------------------------------------------------
 # Tier 1: archive + delete from app DB
 # ------------------------------------------------------------------
 
@@ -215,6 +302,9 @@ async def archive_expired_requests(
             [_row_to_dict(r) for r in req_rows],
         )
         await archive_db.flush()
+
+        # Snapshot per-user and per-model aggregates before deletion
+        await _snapshot_request_aggregates(app_db, request_ids)
 
         # Delete from app DB in FK order
         await app_db.execute(
@@ -721,6 +811,8 @@ async def run_retention_cycle() -> dict[str, Any]:
                     ids = [r[0] for r in result.all()]
                     if not ids:
                         break
+                    # Snapshot aggregates before deletion
+                    await _snapshot_request_aggregates(app_db, ids)
                     await app_db.execute(
                         delete(SchedulerDecision).where(
                             SchedulerDecision.request_id.in_(ids)

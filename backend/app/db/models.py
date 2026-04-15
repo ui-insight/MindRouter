@@ -260,6 +260,13 @@ class Quota(Base, TimestampMixin):
     # Scheduler weight override (null = use role default)
     weight_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Archived offsets — accumulated totals from requests deleted by retention.
+    # Metric queries add these to live SUM(requests.*) so totals stay correct.
+    archived_total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_prompt_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_completion_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="quota")
 
@@ -566,6 +573,23 @@ class Model(Base, TimestampMixin):
         Index("ix_models_backend_name", "backend_id", "name"),
         Index("ix_models_name", "name"),
     )
+
+
+class ModelArchivedStats(Base):
+    """Accumulated token/request totals for models whose requests were
+    deleted by the retention system.  Metric queries add these offsets
+    to live ``SUM(requests.*)`` so that model popularity charts and
+    global token counts stay correct after archival.
+    """
+
+    __tablename__ = "model_archived_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    archived_total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_prompt_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_completion_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
 
 
 # Model Description Cache
