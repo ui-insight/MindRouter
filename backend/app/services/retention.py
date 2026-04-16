@@ -101,10 +101,17 @@ async def _bulk_insert_ignore(
     archive_db: AsyncSession,
     model_class,
     rows: list[dict],
+    chunk_size: int = 100,
 ) -> int:
     """Insert rows into archive table, skipping duplicates (INSERT IGNORE).
 
-    Returns the number of rows inserted.
+    Chunks the VALUES list into ``chunk_size`` rows per statement so that
+    statement compilation stays bounded and the resulting SQL does not
+    exceed MariaDB's ``max_allowed_packet`` (default 16 MB).  Tables like
+    ``responses`` carry large JSON payloads, and a single VALUES block of
+    thousands of rows easily exceeds that limit.
+
+    Returns the total number of rows inserted across all chunks.
     """
     if not rows:
         return 0
@@ -115,10 +122,13 @@ async def _bulk_insert_ignore(
     for row in rows:
         row["archived_at"] = now
 
-    # Use INSERT IGNORE via prefix_with
-    stmt = table.insert().prefix_with("IGNORE").values(rows)
-    result = await archive_db.execute(stmt)
-    return result.rowcount
+    total = 0
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i : i + chunk_size]
+        stmt = table.insert().prefix_with("IGNORE").values(chunk)
+        result = await archive_db.execute(stmt)
+        total += result.rowcount
+    return total
 
 
 # ------------------------------------------------------------------
@@ -246,9 +256,11 @@ async def archive_expired_requests(
         "artifacts": 0,
     }
 
-    # Requests have FK children so we must SELECT IDs first, but use
-    # a large batch to avoid thousands of tiny round-trips.
-    effective_batch = max(batch_size, 5000)
+    # Outer batch size is bounded to keep per-batch memory manageable:
+    # each Response row can carry a multi-KB JSON payload, so loading
+    # thousands at once consumed > 15 GB of RAM in practice.  The inner
+    # ``_bulk_insert_ignore`` chunks the VALUES list separately.
+    effective_batch = batch_size if batch_size and batch_size > 0 else 500
 
     while True:
         # Fetch a batch of expired request IDs (ID-only, cheap)
@@ -800,7 +812,7 @@ async def run_retention_cycle() -> dict[str, Any]:
                 SchedulerDecision,
             )
             async with get_async_db_context() as app_db:
-                effective_batch = max(config.get("retention.batch_size", 500), 5000)
+                effective_batch = config.get("retention.batch_size", 500) or 500
                 total = 0
                 while True:
                     result = await app_db.execute(
