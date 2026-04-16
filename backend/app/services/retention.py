@@ -121,13 +121,15 @@ def _estimate_row_bytes(row: dict) -> int:
 # splitter (``Packet sequence number wrong`` on queries > 16 MB; see
 # aio-libs/aiomysql#450 — still open, no upstream fix), so every query
 # must fit in a single 16 MB wire packet regardless of the server's
-# ``max_allowed_packet`` setting.  8 MB leaves headroom for SQL escaping,
-# UTF-8 expansion, and driver/parameter overhead.
-_INSERT_BYTE_BUDGET = 8 * 1024 * 1024
+# ``max_allowed_packet`` setting.  4 MB leaves headroom for SQL escaping
+# of JSON payloads with many quote/backslash escapes (observed expansion
+# factor 2-3x in production data).
+_INSERT_BYTE_BUDGET = 4 * 1024 * 1024
 _INSERT_MAX_ROWS = 500
 # Rows whose estimated payload alone exceeds this ceiling cannot be
 # archived without tripping the aiomysql bug — we skip and log them.
-_INSERT_ROW_SKIP_CEILING = 8 * 1024 * 1024
+# Stays paired with the chunk budget so single-row chunks fit too.
+_INSERT_ROW_SKIP_CEILING = 4 * 1024 * 1024
 
 
 async def _bulk_insert_ignore(
