@@ -4285,6 +4285,7 @@ async def admin_retention(
         get_app_db_counts,
         get_archive_stats,
         get_retention_config,
+        is_retention_running,
     )
     from backend.app.settings import get_settings
 
@@ -4294,6 +4295,7 @@ async def admin_retention(
 
     config = await get_retention_config(db)
     app_counts = await get_app_db_counts(db)
+    retention_running = await is_retention_running()
 
     archive_stats = None
     browse_rows = []
@@ -4329,6 +4331,7 @@ async def admin_retention(
             "config": config,
             "app_counts": app_counts,
             "archive_configured": archive_configured,
+            "retention_running": retention_running,
             "archive_stats": archive_stats,
             "browse_rows": browse_rows,
             "browse_total": browse_total,
@@ -4394,15 +4397,23 @@ async def admin_retention_post(
 
     elif action == "run_now":
         import asyncio
-        from backend.app.services.retention import run_retention_cycle
+        from backend.app.services.retention import (
+            is_retention_running,
+            try_run_retention_with_lock,
+        )
+
+        # Refuse if a cycle is already running anywhere in the cluster.
+        # The background task also re-checks via GET_LOCK to close the
+        # race window between this probe and task start.
+        if await is_retention_running():
+            return RedirectResponse(
+                url="/admin/retention?error=retention_already_running",
+                status_code=302,
+            )
 
         async def _run_manual_retention() -> None:
             try:
-                logger.info("retention_manual_cycle_start")
-                summary = await run_retention_cycle()
-                logger.info(
-                    "retention_manual_cycle_complete", summary=summary
-                )
+                await try_run_retention_with_lock("manual")
             except Exception:
                 logger.exception("retention_manual_cycle_error")
 

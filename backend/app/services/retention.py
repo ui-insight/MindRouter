@@ -934,6 +934,92 @@ async def browse_archive(
 
 
 # ------------------------------------------------------------------
+# Cross-worker mutual exclusion
+# ------------------------------------------------------------------
+
+# MariaDB advisory lock name used to serialize retention cycles across
+# all uvicorn workers (and across scheduled + manual triggers).
+_RETENTION_LOCK_NAME = "mindrouter_retention"
+
+
+async def is_retention_running() -> bool:
+    """Return True if some worker is currently running a retention cycle.
+
+    Uses ``IS_FREE_LOCK`` which returns 1 if the named advisory lock is
+    free, 0 if held, NULL on error.  Any non-1 result is treated as
+    "assume busy" — better to show a false positive than to launch a
+    duplicate cycle.
+    """
+    from backend.app.db.session import get_async_db_context
+
+    try:
+        async with get_async_db_context() as db:
+            is_free = await db.scalar(
+                text("SELECT IS_FREE_LOCK(:name)"),
+                {"name": _RETENTION_LOCK_NAME},
+            )
+        return is_free != 1
+    except Exception:
+        logger.exception("retention_lock_check_failed")
+        return False
+
+
+async def try_run_retention_with_lock(trigger: str) -> dict[str, Any]:
+    """Run ``run_retention_cycle`` while holding the advisory lock.
+
+    The lock is held on a dedicated session that stays open for the
+    entire cycle, so other workers (or a stacked manual click) see the
+    lock as held and bail out immediately.
+
+    Returns the cycle summary, plus a ``trigger`` tag and ``skipped``
+    flag.  When skipped, ``reason`` explains why.
+    """
+    from backend.app.db.session import AsyncSessionLocal
+
+    # Dedicated session — NOT from the shared context manager because
+    # we need to keep this one connection bound to the caller for the
+    # lock's full lifetime.
+    lock_session = AsyncSessionLocal()
+    try:
+        acquired = await lock_session.scalar(
+            text("SELECT GET_LOCK(:name, 0)"),
+            {"name": _RETENTION_LOCK_NAME},
+        )
+        if acquired != 1:
+            logger.info(
+                "retention_cycle_skipped_lock_held", trigger=trigger
+            )
+            return {
+                "skipped": True,
+                "reason": "already_running",
+                "trigger": trigger,
+            }
+
+        try:
+            logger.info("retention_cycle_start", trigger=trigger)
+            summary = await run_retention_cycle()
+            logger.info(
+                "retention_cycle_complete", trigger=trigger, summary=summary
+            )
+            summary["trigger"] = trigger
+            return summary
+        finally:
+            try:
+                await lock_session.execute(
+                    text("SELECT RELEASE_LOCK(:name)"),
+                    {"name": _RETENTION_LOCK_NAME},
+                )
+                await lock_session.commit()
+            except Exception:
+                logger.exception("retention_lock_release_failed")
+    finally:
+        try:
+            await lock_session.close()
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------------
 # Full retention cycle (called by background loop or "Run Now")
 # ------------------------------------------------------------------
 

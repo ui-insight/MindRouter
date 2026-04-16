@@ -15,6 +15,12 @@
                     <p class="text-muted mb-0">Configure how long data is kept in the app and archive databases.</p>
                 </div>
                 {% if not is_read_only %}
+                {% if retention_running %}
+                <button type="button" class="btn btn-warning disabled" disabled
+                        title="A retention cycle is already running">
+                    <i class="bi bi-hourglass-split"></i> Retention In Progress…
+                </button>
+                {% else %}
                 <form method="post" action="/admin/retention" class="d-inline">
                     <input type="hidden" name="action" value="run_now">
                     <button type="submit" class="btn btn-warning" onclick="return confirm('Run a full retention cycle now?')">
@@ -22,7 +28,19 @@
                     </button>
                 </form>
                 {% endif %}
+                {% endif %}
             </div>
+
+            {% if retention_running %}
+            <div class="alert alert-info d-flex align-items-center" role="alert">
+                <i class="bi bi-arrow-repeat me-2"></i>
+                <div>
+                    A retention cycle is currently running. The
+                    <strong>Run Retention Now</strong> button is disabled
+                    until it finishes. Refresh this page to re-check.
+                </div>
+            </div>
+            {% endif %}
 
             {% if success %}
             <div class="alert alert-success alert-dismissible fade show" role="alert">
@@ -34,7 +52,8 @@
             {% endif %}
             {% if error %}
             <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                {{ error }}
+                {% if error == 'retention_already_running' %}A retention cycle is already running &mdash; wait for it to finish before starting another.
+                {% else %}{{ error }}{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
             {% endif %}
