@@ -42,3 +42,6 @@ long_query_time = 2
 # Character Set
 character_set_server = utf8mb4
 collation_server = utf8mb4_unicode_ci
+
+# Large request payloads (messages column can reach ~10 MB)
+max_allowed_packet = 64M
