@@ -20,7 +20,10 @@ Tier 2 (Archive DB): longer retention with full data preserved.
 """
 
 import json as _json
-from datetime import datetime, timedelta, timezone
+import os
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from sqlalchemy import bindparam, delete, func, select, text
@@ -97,39 +100,42 @@ def _row_to_dict(row) -> dict:
     return {c.name: getattr(row, c.name) for c in row.__table__.columns}
 
 
-def _estimate_row_bytes(row: dict) -> int:
-    """Rough byte estimate of a row's payload for packet-budget chunking.
+# Retention rows are dumped here before being reloaded into the archive
+# DB row-by-row.  Kept on partial failure for triage; removed on full
+# success.  The dump sidesteps aio-libs/aiomysql#450 (broken multi-packet
+# splitter on queries > 16 MB) by making every INSERT a single row.
+_RETENTION_DUMP_DIR = "/tmp/mindrouter_retention"
 
-    Strings/bytes are counted by length; other scalars get a small fixed
-    cost.  This doesn't account for SQL escaping overhead, so the caller
-    should budget well under ``max_allowed_packet``.
+
+def _jsonl_default(o: Any) -> Any:
+    """JSON encoder for SQLAlchemy row values we dump to disk.
+
+    Dict/list/str/int/float/bool/None serialize natively.  Datetime,
+    date, Decimal, and bytes get wrapped in typed markers so the
+    decoder can restore them exactly.
     """
-    total = 0
-    for v in row.values():
-        if v is None:
-            total += 4
-        elif isinstance(v, (bytes, bytearray)):
-            total += len(v)
-        elif isinstance(v, str):
-            total += len(v.encode("utf-8", errors="ignore"))
-        else:
-            total += 32
-    return total
+    if isinstance(o, datetime):
+        return {"__type__": "datetime", "value": o.isoformat()}
+    if isinstance(o, date):
+        return {"__type__": "date", "value": o.isoformat()}
+    if isinstance(o, Decimal):
+        return {"__type__": "decimal", "value": str(o)}
+    if isinstance(o, (bytes, bytearray)):
+        return {"__type__": "bytes", "value": bytes(o).hex()}
+    raise TypeError(f"Not JSON-serializable: {type(o).__name__}")
 
 
-# Per-INSERT packet budget.  aiomysql 0.3.2 has a broken multi-packet
-# splitter (``Packet sequence number wrong`` on queries > 16 MB; see
-# aio-libs/aiomysql#450 — still open, no upstream fix), so every query
-# must fit in a single 16 MB wire packet regardless of the server's
-# ``max_allowed_packet`` setting.  4 MB leaves headroom for SQL escaping
-# of JSON payloads with many quote/backslash escapes (observed expansion
-# factor 2-3x in production data).
-_INSERT_BYTE_BUDGET = 4 * 1024 * 1024
-_INSERT_MAX_ROWS = 500
-# Rows whose estimated payload alone exceeds this ceiling cannot be
-# archived without tripping the aiomysql bug — we skip and log them.
-# Stays paired with the chunk budget so single-row chunks fit too.
-_INSERT_ROW_SKIP_CEILING = 4 * 1024 * 1024
+def _jsonl_object_hook(d: dict) -> Any:
+    t = d.get("__type__")
+    if t == "datetime":
+        return datetime.fromisoformat(d["value"])
+    if t == "date":
+        return date.fromisoformat(d["value"])
+    if t == "decimal":
+        return Decimal(d["value"])
+    if t == "bytes":
+        return bytes.fromhex(d["value"])
+    return d
 
 
 async def _bulk_insert_ignore(
@@ -137,68 +143,75 @@ async def _bulk_insert_ignore(
     model_class,
     rows: list[dict],
 ) -> tuple[int, list[dict]]:
-    """Insert rows into archive table, skipping duplicates (INSERT IGNORE).
+    """Insert rows into archive table via single-row INSERT IGNORE.
 
-    Chunks the VALUES list by estimated payload size so no single INSERT
-    statement exceeds 16 MB (aiomysql's hard per-query ceiling on this
-    version).  Any individual row larger than ``_INSERT_ROW_SKIP_CEILING``
-    is skipped — sending it alone would still overflow after SQL escaping
-    and trip aio-libs/aiomysql#450.
+    Rows are dumped to a JSONL file under ``_RETENTION_DUMP_DIR`` first,
+    then reloaded one at a time.  Each row is wrapped in a SAVEPOINT so
+    an individual failure (oversized payload, encoding issue, etc.) is
+    logged and skipped instead of aborting the whole batch.
 
-    Returns ``(inserted_count, skipped_rows)`` — the caller is responsible
-    for deciding what to do with skipped rows (typically: leave them in
-    the source DB for manual triage).
+    On full success the dump file is deleted.  On any skipped row the
+    file is retained for forensics.
+
+    Returns ``(inserted_count, skipped_rows)``.
     """
     if not rows:
         return 0, []
 
     table = model_class.__table__
     now = datetime.now(timezone.utc)
-    skipped: list[dict] = []
 
-    async def _flush(chunk_list, chunk_bytes_val):
-        stmt = table.insert().prefix_with("IGNORE").values(chunk_list)
-        # Compile the statement against the dialect to see the actual
-        # wire size we're about to send.  This is expensive but only
-        # enabled while we diagnose the aiomysql multi-packet bug.
-        compiled = stmt.compile(
-            dialect=archive_db.bind.dialect,
-            compile_kwargs={"literal_binds": True},
-        )
-        compiled_len = len(str(compiled))
-        logger.info(
-            "retention_bulk_insert_chunk",
-            table=table.name,
-            rows=len(chunk_list),
-            estimated_bytes=chunk_bytes_val,
-            compiled_sql_bytes=compiled_len,
-        )
-        result = await archive_db.execute(stmt)
-        return result.rowcount
+    os.makedirs(_RETENTION_DUMP_DIR, exist_ok=True)
+    dump_path = os.path.join(
+        _RETENTION_DUMP_DIR,
+        f"{table.name}_{now.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}.jsonl",
+    )
+
+    with open(dump_path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            row["archived_at"] = now
+            fh.write(_json.dumps(row, default=_jsonl_default) + "\n")
+
+    logger.info(
+        "retention_dump_written",
+        table=table.name,
+        path=dump_path,
+        rows=len(rows),
+    )
 
     total = 0
-    chunk: list[dict] = []
-    chunk_bytes = 0
-    for row in rows:
-        row_bytes = _estimate_row_bytes(row)
-        if row_bytes > _INSERT_ROW_SKIP_CEILING:
-            skipped.append(row)
-            continue
-        # Flush current chunk if adding this row would exceed the budget
-        # or row-count cap (but always allow at least one row per chunk).
-        if chunk and (
-            chunk_bytes + row_bytes > _INSERT_BYTE_BUDGET
-            or len(chunk) >= _INSERT_MAX_ROWS
-        ):
-            total += await _flush(chunk, chunk_bytes)
-            chunk = []
-            chunk_bytes = 0
-        row["archived_at"] = now
-        chunk.append(row)
-        chunk_bytes += row_bytes
+    skipped: list[dict] = []
+    with open(dump_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            row = _json.loads(line, object_hook=_jsonl_object_hook)
+            sp = await archive_db.begin_nested()
+            try:
+                stmt = table.insert().prefix_with("IGNORE").values(**row)
+                result = await archive_db.execute(stmt)
+                total += result.rowcount
+                await sp.commit()
+            except Exception as exc:
+                await sp.rollback()
+                logger.warning(
+                    "retention_row_insert_failed",
+                    table=table.name,
+                    row_id=row.get("id"),
+                    error=str(exc),
+                )
+                skipped.append(row)
 
-    if chunk:
-        total += await _flush(chunk, chunk_bytes)
+    if not skipped:
+        try:
+            os.remove(dump_path)
+        except OSError:
+            pass
+    else:
+        logger.warning(
+            "retention_dump_retained",
+            path=dump_path,
+            inserted=total,
+            skipped=len(skipped),
+        )
 
     return total, skipped
 
@@ -368,69 +381,85 @@ async def archive_expired_requests(
         )
         req_rows = list(req_result.scalars().all())
 
-        # Identify oversized request rows up front — they can't be
-        # archived (aiomysql#450) so we skip them entirely: not archived,
-        # not deleted.  They stay in the live DB for manual triage.
-        oversized_req_ids: set[int] = set()
-        for r in req_rows:
-            if _estimate_row_bytes(_row_to_dict(r)) > _INSERT_ROW_SKIP_CEILING:
-                oversized_req_ids.add(r.id)
-        if oversized_req_ids:
-            logger.warning(
-                "retention_oversized_requests_skipped",
-                request_ids=sorted(oversized_req_ids),
-                count=len(oversized_req_ids),
-            )
-            request_ids = [rid for rid in request_ids if rid not in oversized_req_ids]
-            req_rows = [r for r in req_rows if r.id not in oversized_req_ids]
-            responses = [r for r in responses if r.request_id not in oversized_req_ids]
-            sched_rows = [r for r in sched_rows if r.request_id not in oversized_req_ids]
-            art_rows = [r for r in art_rows if r.request_id not in oversized_req_ids]
-            if not request_ids:
-                # Whole batch was oversized — break to avoid infinite loop
-                # (same rows would reappear next iteration).
-                break
+        # Archive: bulk insert into archive DB.  Collect IDs of any
+        # parent requests whose archival failed (either directly or via
+        # a failed child row) — we must NOT delete those from the live
+        # DB or we'd silently lose data.
+        skipped_req_ids: set[int] = set()
 
-        # Archive: bulk insert into archive DB
-        resp_inserted, _ = await _bulk_insert_ignore(
+        resp_inserted, resp_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedResponse,
             [_row_to_dict(r) for r in responses],
         )
         counts["responses"] += resp_inserted
-        sched_inserted, _ = await _bulk_insert_ignore(
+        for r in resp_skipped:
+            if r.get("request_id") is not None:
+                skipped_req_ids.add(r["request_id"])
+
+        sched_inserted, sched_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedSchedulerDecision,
             [_row_to_dict(r) for r in sched_rows],
         )
         counts["scheduler_decisions"] += sched_inserted
-        art_inserted, _ = await _bulk_insert_ignore(
+        for r in sched_skipped:
+            if r.get("request_id") is not None:
+                skipped_req_ids.add(r["request_id"])
+
+        art_inserted, art_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedArtifact,
             [_row_to_dict(r) for r in art_rows],
         )
         counts["artifacts"] += art_inserted
-        req_inserted, _ = await _bulk_insert_ignore(
+        for r in art_skipped:
+            if r.get("request_id") is not None:
+                skipped_req_ids.add(r["request_id"])
+
+        req_inserted, req_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedRequest,
             [_row_to_dict(r) for r in req_rows],
         )
         counts["requests"] += req_inserted
+        for r in req_skipped:
+            if r.get("id") is not None:
+                skipped_req_ids.add(r["id"])
+
         await archive_db.flush()
 
+        safe_ids = [rid for rid in request_ids if rid not in skipped_req_ids]
+
+        if skipped_req_ids:
+            logger.warning(
+                "retention_requests_archive_skipped",
+                count=len(skipped_req_ids),
+                request_ids=sorted(skipped_req_ids)[:50],
+            )
+
+        if not safe_ids:
+            # Whole batch failed to archive — break to avoid an infinite
+            # loop over the same rows.  Dump files retained on disk.
+            logger.error(
+                "retention_batch_fully_skipped",
+                batch_size=len(request_ids),
+            )
+            break
+
         # Snapshot per-user and per-model aggregates before deletion
-        await _snapshot_request_aggregates(app_db, request_ids)
+        await _snapshot_request_aggregates(app_db, safe_ids)
 
         # Delete from app DB in FK order
         await app_db.execute(
             delete(SchedulerDecision).where(
-                SchedulerDecision.request_id.in_(request_ids)
+                SchedulerDecision.request_id.in_(safe_ids)
             )
         )
         await app_db.execute(
-            delete(Response).where(Response.request_id.in_(request_ids))
+            delete(Response).where(Response.request_id.in_(safe_ids))
         )
         await app_db.execute(
-            delete(Artifact).where(Artifact.request_id.in_(request_ids))
+            delete(Artifact).where(Artifact.request_id.in_(safe_ids))
         )
         await app_db.execute(
-            delete(Request).where(Request.id.in_(request_ids))
+            delete(Request).where(Request.id.in_(safe_ids))
         )
         await app_db.flush()
         await app_db.commit()
@@ -438,7 +467,7 @@ async def archive_expired_requests(
 
         logger.info(
             "retention_requests_batch",
-            deleted=len(request_ids),
+            deleted=len(safe_ids),
             total=counts["requests"],
         )
 
@@ -504,55 +533,79 @@ async def archive_expired_chats(
         for att in attachments:
             _remove_attachment_files(att)
 
-        # Archive to archive DB.  Chat tables don't carry multi-MB
-        # payloads like requests.messages, but the tuple return value is
-        # uniform across all callers; any skipped rows are logged below.
+        # Archive to archive DB.  Track any conversation whose archival
+        # failed (directly or via a failed message/attachment) so we
+        # don't delete its rows from the live DB.
+        skipped_conv_ids: set[int] = set()
+        msg_to_conv: dict[int, int] = {m.id: m.conversation_id for m in messages}
+
         att_inserted, att_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedChatAttachment,
             [_row_to_dict(a) for a in attachments],
         )
         counts["chat_attachments"] += att_inserted
+        for r in att_skipped:
+            conv_id = msg_to_conv.get(r.get("message_id"))
+            if conv_id is not None:
+                skipped_conv_ids.add(conv_id)
+
         msg_inserted, msg_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedChatMessage,
             [_row_to_dict(m) for m in messages],
         )
         counts["chat_messages"] += msg_inserted
+        for r in msg_skipped:
+            if r.get("conversation_id") is not None:
+                skipped_conv_ids.add(r["conversation_id"])
+
         conv_inserted, conv_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedChatConversation,
             [_row_to_dict(c) for c in batch],
         )
         counts["chat_conversations"] += conv_inserted
-        if att_skipped or msg_skipped or conv_skipped:
-            logger.warning(
-                "retention_oversized_chat_rows_skipped",
-                attachments=len(att_skipped),
-                messages=len(msg_skipped),
-                conversations=len(conv_skipped),
-            )
+        for r in conv_skipped:
+            if r.get("id") is not None:
+                skipped_conv_ids.add(r["id"])
+
         await archive_db.flush()
 
+        safe_conv_ids = [cid for cid in conv_ids if cid not in skipped_conv_ids]
+        safe_msg_ids = [mid for mid in msg_ids if msg_to_conv.get(mid) in safe_conv_ids]
+
+        if skipped_conv_ids:
+            logger.warning(
+                "retention_chat_archive_skipped",
+                count=len(skipped_conv_ids),
+                conversation_ids=sorted(skipped_conv_ids)[:50],
+            )
+
+        if not safe_conv_ids:
+            logger.error(
+                "retention_chat_batch_fully_skipped",
+                batch_size=len(conv_ids),
+            )
+            break
+
         # Delete from app DB in FK order
-        if msg_ids:
+        if safe_msg_ids:
             await app_db.execute(
                 delete(ChatAttachment).where(
-                    ChatAttachment.message_id.in_(msg_ids)
+                    ChatAttachment.message_id.in_(safe_msg_ids)
                 )
             )
         await app_db.execute(
             delete(ChatMessage).where(
-                ChatMessage.conversation_id.in_(conv_ids)
+                ChatMessage.conversation_id.in_(safe_conv_ids)
             )
         )
         await app_db.execute(
             delete(ChatConversation).where(
-                ChatConversation.id.in_(conv_ids)
+                ChatConversation.id.in_(safe_conv_ids)
             )
         )
         await app_db.flush()
         await app_db.commit()
         await archive_db.commit()
-
-        counts["chat_conversations"] += 0  # already counted above
 
     return counts
 
