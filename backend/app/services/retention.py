@@ -156,6 +156,26 @@ async def _bulk_insert_ignore(
     now = datetime.now(timezone.utc)
     skipped: list[dict] = []
 
+    async def _flush(chunk_list, chunk_bytes_val):
+        stmt = table.insert().prefix_with("IGNORE").values(chunk_list)
+        # Compile the statement against the dialect to see the actual
+        # wire size we're about to send.  This is expensive but only
+        # enabled while we diagnose the aiomysql multi-packet bug.
+        compiled = stmt.compile(
+            dialect=archive_db.bind.dialect,
+            compile_kwargs={"literal_binds": True},
+        )
+        compiled_len = len(str(compiled))
+        logger.info(
+            "retention_bulk_insert_chunk",
+            table=table.name,
+            rows=len(chunk_list),
+            estimated_bytes=chunk_bytes_val,
+            compiled_sql_bytes=compiled_len,
+        )
+        result = await archive_db.execute(stmt)
+        return result.rowcount
+
     total = 0
     chunk: list[dict] = []
     chunk_bytes = 0
@@ -170,9 +190,7 @@ async def _bulk_insert_ignore(
             chunk_bytes + row_bytes > _INSERT_BYTE_BUDGET
             or len(chunk) >= _INSERT_MAX_ROWS
         ):
-            stmt = table.insert().prefix_with("IGNORE").values(chunk)
-            result = await archive_db.execute(stmt)
-            total += result.rowcount
+            total += await _flush(chunk, chunk_bytes)
             chunk = []
             chunk_bytes = 0
         row["archived_at"] = now
@@ -180,9 +198,7 @@ async def _bulk_insert_ignore(
         chunk_bytes += row_bytes
 
     if chunk:
-        stmt = table.insert().prefix_with("IGNORE").values(chunk)
-        result = await archive_db.execute(stmt)
-        total += result.rowcount
+        total += await _flush(chunk, chunk_bytes)
 
     return total, skipped
 
