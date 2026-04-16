@@ -42,6 +42,13 @@ from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
 
+# Strong-reference set for fire-and-forget background tasks.  asyncio
+# keeps only weak references to tasks created via ``create_task`` (see
+# https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task),
+# so without this set a long-running task like a manual retention cycle
+# can be garbage-collected mid-execution and silently disappear.
+_background_tasks: set = set()
+
 dashboard_router = APIRouter(tags=["dashboard"])
 dashboard_router.include_router(azure_router)
 
@@ -4389,8 +4396,22 @@ async def admin_retention_post(
         import asyncio
         from backend.app.services.retention import run_retention_cycle
 
-        # Run in background so the redirect completes quickly
-        asyncio.create_task(run_retention_cycle())
+        async def _run_manual_retention() -> None:
+            try:
+                logger.info("retention_manual_cycle_start")
+                summary = await run_retention_cycle()
+                logger.info(
+                    "retention_manual_cycle_complete", summary=summary
+                )
+            except Exception:
+                logger.exception("retention_manual_cycle_error")
+
+        # Run in background so the redirect completes quickly.  Keep a
+        # strong reference in _background_tasks so the event loop's
+        # weak reference doesn't let the task get GC'd mid-run.
+        task = asyncio.create_task(_run_manual_retention())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         async with get_async_db_context() as audit_db:
             await crud.log_admin_action(
                 audit_db, user_id=user_id, action="retention.run_now",
