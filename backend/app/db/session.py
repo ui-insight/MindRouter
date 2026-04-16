@@ -49,10 +49,6 @@ async_database_url = settings.database_url.replace(
     "mariadb+pymysql", "mariadb+aiomysql"
 )
 
-# aiomysql default max_allowed_packet is 16 MB; bump to 64 MB to match the
-# server so we can archive requests whose `messages` column reaches ~10 MB.
-_AIOMYSQL_MAX_PACKET = 64 * 1024 * 1024
-
 async_engine = create_async_engine(
     async_database_url,
     pool_size=settings.database_pool_size,
@@ -61,7 +57,6 @@ async_engine = create_async_engine(
     pool_pre_ping=True,
     pool_recycle=300,  # Recycle connections every 5 min
     pool_timeout=10,  # Don't block forever waiting for a connection
-    connect_args={"max_allowed_packet": _AIOMYSQL_MAX_PACKET},
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -178,7 +173,6 @@ def _init_archive_engine():
         pool_pre_ping=True,
         pool_recycle=300,
         pool_timeout=10,
-        connect_args={"max_allowed_packet": _AIOMYSQL_MAX_PACKET},
     )
 
     _ArchiveAsyncSessionLocal = async_sessionmaker(
