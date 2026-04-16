@@ -117,43 +117,51 @@ def _estimate_row_bytes(row: dict) -> int:
     return total
 
 
-# Target a conservative 4 MB per INSERT statement to stay well under the
-# default 16 MB ``max_allowed_packet`` even after SQL escaping overhead.
-_INSERT_BYTE_BUDGET = 4 * 1024 * 1024
+# Per-INSERT packet budget.  aiomysql 0.3.2 has a broken multi-packet
+# splitter (``Packet sequence number wrong`` on queries > 16 MB; see
+# aio-libs/aiomysql#450 — still open, no upstream fix), so every query
+# must fit in a single 16 MB wire packet regardless of the server's
+# ``max_allowed_packet`` setting.  8 MB leaves headroom for SQL escaping,
+# UTF-8 expansion, and driver/parameter overhead.
+_INSERT_BYTE_BUDGET = 8 * 1024 * 1024
 _INSERT_MAX_ROWS = 500
+# Rows whose estimated payload alone exceeds this ceiling cannot be
+# archived without tripping the aiomysql bug — we skip and log them.
+_INSERT_ROW_SKIP_CEILING = 8 * 1024 * 1024
 
 
 async def _bulk_insert_ignore(
     archive_db: AsyncSession,
     model_class,
     rows: list[dict],
-) -> int:
+) -> tuple[int, list[dict]]:
     """Insert rows into archive table, skipping duplicates (INSERT IGNORE).
 
     Chunks the VALUES list by estimated payload size so no single INSERT
-    statement exceeds MariaDB's ``max_allowed_packet`` (default 16 MB).
-    Tables like ``responses`` carry large JSON payloads; fixed row-count
-    chunking is unsafe because one 500 KB row alongside others can push
-    a 100-row block over the packet limit.
+    statement exceeds 16 MB (aiomysql's hard per-query ceiling on this
+    version).  Any individual row larger than ``_INSERT_ROW_SKIP_CEILING``
+    is skipped — sending it alone would still overflow after SQL escaping
+    and trip aio-libs/aiomysql#450.
 
-    Any single row larger than the byte budget is sent on its own.
-
-    Returns the total number of rows inserted across all chunks.
+    Returns ``(inserted_count, skipped_rows)`` — the caller is responsible
+    for deciding what to do with skipped rows (typically: leave them in
+    the source DB for manual triage).
     """
     if not rows:
-        return 0
+        return 0, []
 
     table = model_class.__table__
     now = datetime.now(timezone.utc)
-
-    for row in rows:
-        row["archived_at"] = now
+    skipped: list[dict] = []
 
     total = 0
     chunk: list[dict] = []
     chunk_bytes = 0
     for row in rows:
         row_bytes = _estimate_row_bytes(row)
+        if row_bytes > _INSERT_ROW_SKIP_CEILING:
+            skipped.append(row)
+            continue
         # Flush current chunk if adding this row would exceed the budget
         # or row-count cap (but always allow at least one row per chunk).
         if chunk and (
@@ -165,6 +173,7 @@ async def _bulk_insert_ignore(
             total += result.rowcount
             chunk = []
             chunk_bytes = 0
+        row["archived_at"] = now
         chunk.append(row)
         chunk_bytes += row_bytes
 
@@ -173,7 +182,7 @@ async def _bulk_insert_ignore(
         result = await archive_db.execute(stmt)
         total += result.rowcount
 
-    return total
+    return total, skipped
 
 
 # ------------------------------------------------------------------
@@ -341,23 +350,50 @@ async def archive_expired_requests(
         )
         req_rows = list(req_result.scalars().all())
 
+        # Identify oversized request rows up front — they can't be
+        # archived (aiomysql#450) so we skip them entirely: not archived,
+        # not deleted.  They stay in the live DB for manual triage.
+        oversized_req_ids: set[int] = set()
+        for r in req_rows:
+            if _estimate_row_bytes(_row_to_dict(r)) > _INSERT_ROW_SKIP_CEILING:
+                oversized_req_ids.add(r.id)
+        if oversized_req_ids:
+            logger.warning(
+                "retention_oversized_requests_skipped",
+                request_ids=sorted(oversized_req_ids),
+                count=len(oversized_req_ids),
+            )
+            request_ids = [rid for rid in request_ids if rid not in oversized_req_ids]
+            req_rows = [r for r in req_rows if r.id not in oversized_req_ids]
+            responses = [r for r in responses if r.request_id not in oversized_req_ids]
+            sched_rows = [r for r in sched_rows if r.request_id not in oversized_req_ids]
+            art_rows = [r for r in art_rows if r.request_id not in oversized_req_ids]
+            if not request_ids:
+                # Whole batch was oversized — break to avoid infinite loop
+                # (same rows would reappear next iteration).
+                break
+
         # Archive: bulk insert into archive DB
-        counts["responses"] += await _bulk_insert_ignore(
+        resp_inserted, _ = await _bulk_insert_ignore(
             archive_db, ArchivedResponse,
             [_row_to_dict(r) for r in responses],
         )
-        counts["scheduler_decisions"] += await _bulk_insert_ignore(
+        counts["responses"] += resp_inserted
+        sched_inserted, _ = await _bulk_insert_ignore(
             archive_db, ArchivedSchedulerDecision,
             [_row_to_dict(r) for r in sched_rows],
         )
-        counts["artifacts"] += await _bulk_insert_ignore(
+        counts["scheduler_decisions"] += sched_inserted
+        art_inserted, _ = await _bulk_insert_ignore(
             archive_db, ArchivedArtifact,
             [_row_to_dict(r) for r in art_rows],
         )
-        counts["requests"] += await _bulk_insert_ignore(
+        counts["artifacts"] += art_inserted
+        req_inserted, _ = await _bulk_insert_ignore(
             archive_db, ArchivedRequest,
             [_row_to_dict(r) for r in req_rows],
         )
+        counts["requests"] += req_inserted
         await archive_db.flush()
 
         # Snapshot per-user and per-model aggregates before deletion
@@ -450,19 +486,31 @@ async def archive_expired_chats(
         for att in attachments:
             _remove_attachment_files(att)
 
-        # Archive to archive DB
-        counts["chat_attachments"] += await _bulk_insert_ignore(
+        # Archive to archive DB.  Chat tables don't carry multi-MB
+        # payloads like requests.messages, but the tuple return value is
+        # uniform across all callers; any skipped rows are logged below.
+        att_inserted, att_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedChatAttachment,
             [_row_to_dict(a) for a in attachments],
         )
-        counts["chat_messages"] += await _bulk_insert_ignore(
+        counts["chat_attachments"] += att_inserted
+        msg_inserted, msg_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedChatMessage,
             [_row_to_dict(m) for m in messages],
         )
-        counts["chat_conversations"] += await _bulk_insert_ignore(
+        counts["chat_messages"] += msg_inserted
+        conv_inserted, conv_skipped = await _bulk_insert_ignore(
             archive_db, ArchivedChatConversation,
             [_row_to_dict(c) for c in batch],
         )
+        counts["chat_conversations"] += conv_inserted
+        if att_skipped or msg_skipped or conv_skipped:
+            logger.warning(
+                "retention_oversized_chat_rows_skipped",
+                attachments=len(att_skipped),
+                messages=len(msg_skipped),
+                conversations=len(conv_skipped),
+            )
         await archive_db.flush()
 
         # Delete from app DB in FK order
