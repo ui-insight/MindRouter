@@ -97,19 +97,46 @@ def _row_to_dict(row) -> dict:
     return {c.name: getattr(row, c.name) for c in row.__table__.columns}
 
 
+def _estimate_row_bytes(row: dict) -> int:
+    """Rough byte estimate of a row's payload for packet-budget chunking.
+
+    Strings/bytes are counted by length; other scalars get a small fixed
+    cost.  This doesn't account for SQL escaping overhead, so the caller
+    should budget well under ``max_allowed_packet``.
+    """
+    total = 0
+    for v in row.values():
+        if v is None:
+            total += 4
+        elif isinstance(v, (bytes, bytearray)):
+            total += len(v)
+        elif isinstance(v, str):
+            total += len(v.encode("utf-8", errors="ignore"))
+        else:
+            total += 32
+    return total
+
+
+# Target a conservative 4 MB per INSERT statement to stay well under the
+# default 16 MB ``max_allowed_packet`` even after SQL escaping overhead.
+_INSERT_BYTE_BUDGET = 4 * 1024 * 1024
+_INSERT_MAX_ROWS = 500
+
+
 async def _bulk_insert_ignore(
     archive_db: AsyncSession,
     model_class,
     rows: list[dict],
-    chunk_size: int = 100,
 ) -> int:
     """Insert rows into archive table, skipping duplicates (INSERT IGNORE).
 
-    Chunks the VALUES list into ``chunk_size`` rows per statement so that
-    statement compilation stays bounded and the resulting SQL does not
-    exceed MariaDB's ``max_allowed_packet`` (default 16 MB).  Tables like
-    ``responses`` carry large JSON payloads, and a single VALUES block of
-    thousands of rows easily exceeds that limit.
+    Chunks the VALUES list by estimated payload size so no single INSERT
+    statement exceeds MariaDB's ``max_allowed_packet`` (default 16 MB).
+    Tables like ``responses`` carry large JSON payloads; fixed row-count
+    chunking is unsafe because one 500 KB row alongside others can push
+    a 100-row block over the packet limit.
+
+    Any single row larger than the byte budget is sent on its own.
 
     Returns the total number of rows inserted across all chunks.
     """
@@ -123,11 +150,29 @@ async def _bulk_insert_ignore(
         row["archived_at"] = now
 
     total = 0
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i : i + chunk_size]
+    chunk: list[dict] = []
+    chunk_bytes = 0
+    for row in rows:
+        row_bytes = _estimate_row_bytes(row)
+        # Flush current chunk if adding this row would exceed the budget
+        # or row-count cap (but always allow at least one row per chunk).
+        if chunk and (
+            chunk_bytes + row_bytes > _INSERT_BYTE_BUDGET
+            or len(chunk) >= _INSERT_MAX_ROWS
+        ):
+            stmt = table.insert().prefix_with("IGNORE").values(chunk)
+            result = await archive_db.execute(stmt)
+            total += result.rowcount
+            chunk = []
+            chunk_bytes = 0
+        chunk.append(row)
+        chunk_bytes += row_bytes
+
+    if chunk:
         stmt = table.insert().prefix_with("IGNORE").values(chunk)
         result = await archive_db.execute(stmt)
         total += result.rowcount
+
     return total
 
 
