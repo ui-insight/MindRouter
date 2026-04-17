@@ -258,9 +258,16 @@ async def check_rpm(key: str, rpm_limit: int) -> tuple[bool, int]:
         redis_key = f"{_RPM_KEY_PREFIX}{key}"
         pipe = _redis.pipeline(transaction=True)
         pipe.incr(redis_key)
-        pipe.expire(redis_key, _RPM_WINDOW_SECONDS)
+        pipe.ttl(redis_key)
         results = await pipe.execute()
         current = int(results[0])
+        ttl = int(results[1])
+        # Only set EXPIRE when the key is new (first request in window).
+        # Setting it on every request would reset the TTL and prevent the
+        # counter from ever expiring while requests keep arriving — even
+        # rejected ones — permanently locking out the user.
+        if ttl < 0:
+            await _redis.expire(redis_key, _RPM_WINDOW_SECONDS)
         if current > rpm_limit:
             # Over limit — decrement back so the window stays accurate
             await _redis.decr(redis_key)
