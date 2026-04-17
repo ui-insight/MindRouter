@@ -35,7 +35,7 @@ from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.core.translators import OpenAIInTranslator, OllamaOutTranslator, VLLMOutTranslator
 from backend.app.db import crud
-from backend.app.db.models import ApiKey, BackendEngine, Modality, User
+from backend.app.db.models import ApiKey, BackendEngine, Modality, RequestStatus, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.inference import InferenceService
@@ -724,21 +724,63 @@ async def image_generations(
     max_steps = await crud.get_config_json(db, "img.max_steps", 50)
     allowed_sizes_str = await crud.get_config_json(db, "img.allowed_sizes", "512x512,768x768,1024x1024,1024x768,768x1024")
     allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()]
-    prompt_blocklist_str = await crud.get_config_json(db, "img.prompt_blocklist", "")
-    prompt_blocklist = [w.strip().lower() for w in prompt_blocklist_str.split(",") if w.strip()]
 
     model = body.get("model") or default_model
     prompt = body["prompt"]
 
-    # Prompt blocklist check
-    if prompt_blocklist:
-        prompt_lower = prompt.lower()
-        for blocked in prompt_blocklist:
-            if blocked in prompt_lower:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Your prompt contains content that is not allowed",
-                )
+    # ── LLM-as-judge policy check ────────────────────────────────
+    policy_verdict = None
+    policy_text = await crud.get_config_json(db, "img.policy", "")
+    if policy_text and policy_text.strip():
+        from backend.app.services.image_policy import evaluate_prompt
+
+        primary_judge = await crud.get_config_json(db, "img.judge_model", "")
+        secondary_judge = await crud.get_config_json(db, "img.judge_model_secondary", "")
+
+        policy_verdict = await evaluate_prompt(
+            prompt=prompt,
+            policy=policy_text,
+            primary_model=primary_judge,
+            secondary_model=secondary_judge,
+        )
+
+        if not policy_verdict.passed:
+            # Record the denied request for auditing
+            denied_req = await crud.create_request(
+                db=db,
+                user_id=user.id,
+                api_key_id=api_key.id,
+                endpoint="/v1/images/generations",
+                model=model,
+                modality=Modality.IMAGE_GENERATION,
+                prompt=prompt,
+                parameters={
+                    "policy_verdict": policy_verdict.to_dict(),
+                    "size": body.get("size", default_size),
+                    "n": body.get("n", 1),
+                },
+                client_ip=(
+                    request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                    or request.headers.get("x-real-ip")
+                    or (request.client.host if request.client else None)
+                ),
+                user_agent=request.headers.get("user-agent"),
+            )
+            denied_req.status = RequestStatus.FAILED
+            denied_req.error_message = f"Policy violation: {policy_verdict.reason}"
+            denied_req.error_code = "policy_violation"
+            await db.commit()
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "message": f"Your image request was denied by content policy: {policy_verdict.reason}",
+                        "type": "content_policy_violation",
+                        "code": "policy_violation",
+                    }
+                },
+            )
 
     # Enforce guardrails
     req_n = min(body.get("n", 1), max_n)
@@ -772,6 +814,7 @@ async def image_generations(
             request_id=request_id,
             user_id=user.id,
             api_key_id=api_key.id,
+            policy_verdict=policy_verdict.to_dict() if policy_verdict else None,
         )
     except Exception as e:
         raise HTTPException(

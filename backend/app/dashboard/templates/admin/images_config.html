@@ -110,11 +110,49 @@
                                     <input type="text" class="form-control" id="allowed_sizes" name="allowed_sizes" value="{{ allowed_sizes }}">
                                     <div class="form-text">Comma-separated list of allowed dimensions. Leave empty to allow any size.</div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
 
-                                <div class="mb-3">
-                                    <label for="prompt_blocklist" class="form-label">Prompt Blocklist</label>
-                                    <textarea class="form-control" id="prompt_blocklist" name="prompt_blocklist" rows="3">{{ prompt_blocklist }}</textarea>
-                                    <div class="form-text">Comma-separated words/phrases. Requests containing any of these (case-insensitive) are rejected.</div>
+                    <!-- LLM Content Policy -->
+                    <div class="col-12">
+                        <div class="card border-warning">
+                            <div class="card-header bg-warning bg-opacity-10"><h5 class="mb-0"><i class="bi bi-shield-exclamation"></i> Content Policy (LLM-as-Judge)</h5></div>
+                            <div class="card-body">
+                                <p class="text-muted small">Every image generation prompt is evaluated by an LLM against the policy below before the image is generated. If the policy field is empty, no LLM check is performed. The system is <strong>fail-closed</strong>: if the judge LLM is unavailable or returns an unexpected response, the image request is denied.</p>
+
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label for="judge_model" class="form-label">Primary Judge Model</label>
+                                        <select class="form-select" id="judge_model" name="judge_model">
+                                            <option value="">-- Select a model --</option>
+                                            {% for m in chat_models %}
+                                            <option value="{{ m }}" {% if m == judge_model %}selected{% endif %}>{{ m }}</option>
+                                            {% endfor %}
+                                            {% if judge_model and judge_model not in chat_models %}
+                                            <option value="{{ judge_model }}" selected>{{ judge_model }} (not currently available)</option>
+                                            {% endif %}
+                                        </select>
+                                        <div class="form-text">LLM that evaluates prompts against the policy.</div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label for="judge_model_secondary" class="form-label">Secondary Judge Model (fallback)</label>
+                                        <select class="form-select" id="judge_model_secondary" name="judge_model_secondary">
+                                            <option value="">-- Select a model --</option>
+                                            {% for m in chat_models %}
+                                            <option value="{{ m }}" {% if m == judge_model_secondary %}selected{% endif %}>{{ m }}</option>
+                                            {% endfor %}
+                                            {% if judge_model_secondary and judge_model_secondary not in chat_models %}
+                                            <option value="{{ judge_model_secondary }}" selected>{{ judge_model_secondary }} (not currently available)</option>
+                                            {% endif %}
+                                        </select>
+                                        <div class="form-text">Used if the primary judge is unavailable or errors.</div>
+                                    </div>
+                                    <div class="col-12">
+                                        <label for="policy" class="form-label">Content Policy</label>
+                                        <textarea class="form-control font-monospace" id="policy" name="policy" rows="8" placeholder="Write your content policy in natural language. For example:&#10;&#10;Do not generate images that contain violence, nudity, hate symbols, real public figures, copyrighted characters, or content that could be used for harassment or misinformation.">{{ policy }}</textarea>
+                                        <div class="form-text">Natural language policy. The judge LLM evaluates each prompt against this text. Leave empty to disable policy checks. Prompts are evaluated in a sandboxed context with prompt injection protections.</div>
+                                    </div>
                                 </div>
                             </div>
                         </div>

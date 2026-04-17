@@ -434,6 +434,7 @@ class CanonicalImageRequest(BaseModel):
     user_id: Optional[int] = None
     api_key_id: Optional[int] = None
     user: Optional[str] = None
+    policy_verdict: Optional[dict] = None  # Populated by LLM-as-judge
 
 
 class CanonicalImageData(BaseModel):

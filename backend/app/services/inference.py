@@ -819,6 +819,13 @@ class InferenceService:
             if hasattr(request, param) and getattr(request, param) is not None:
                 parameters[param] = getattr(request, param)
 
+        # Image-specific parameters
+        for param in ["n", "size", "num_inference_steps", "guidance_scale", "seed"]:
+            if hasattr(request, param) and getattr(request, param) is not None:
+                parameters[param] = getattr(request, param)
+        if hasattr(request, "policy_verdict") and request.policy_verdict:
+            parameters["policy_verdict"] = request.policy_verdict
+
         response_format = None
         if hasattr(request, "response_format") and request.response_format:
             rf = request.response_format

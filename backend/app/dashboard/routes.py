@@ -3980,11 +3980,15 @@ async def admin_images_config(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    # Diffusion model names for dropdown
+    # Model names for dropdowns
     all_models = await crud.get_all_models_with_backends(db)
     diffusion_models = sorted({
         m.name for m in all_models
         if m.modality == Modality.IMAGE_GENERATION
+    })
+    chat_models = sorted({
+        m.name for m in all_models
+        if m.modality in (Modality.CHAT, Modality.MULTIMODAL)
     })
 
     # User list with pagination
@@ -4013,6 +4017,7 @@ async def admin_images_config(
             "user": user,
             **masq,
             "diffusion_models": diffusion_models,
+            "chat_models": chat_models,
             "enabled": await crud.get_config_json(db, "img.enabled", True),
             "default_model": await crud.get_config_json(db, "img.default_model", "black-forest-labs/FLUX.2-dev"),
             "default_size": await crud.get_config_json(db, "img.default_size", "1024x1024"),
@@ -4021,7 +4026,9 @@ async def admin_images_config(
             "max_steps": await crud.get_config_json(db, "img.max_steps", 50),
             "default_guidance_scale": await crud.get_config_json(db, "img.default_guidance_scale", 3.5),
             "allowed_sizes": await crud.get_config_json(db, "img.allowed_sizes", "512x512,768x768,1024x1024,1024x768,768x1024"),
-            "prompt_blocklist": await crud.get_config_json(db, "img.prompt_blocklist", ""),
+            "policy": await crud.get_config_json(db, "img.policy", ""),
+            "judge_model": await crud.get_config_json(db, "img.judge_model", ""),
+            "judge_model_secondary": await crud.get_config_json(db, "img.judge_model_secondary", ""),
             "users": users_list,
             "total_users": total_count,
             "total_pages": total_pages,
@@ -4057,7 +4064,9 @@ async def admin_images_config_post(
         await crud.set_config(db, "img.default_model", form.get("default_model", "").strip() or "black-forest-labs/FLUX.2-dev")
         await crud.set_config(db, "img.default_size", form.get("default_size", "").strip() or "1024x1024")
         await crud.set_config(db, "img.allowed_sizes", form.get("allowed_sizes", "").strip())
-        await crud.set_config(db, "img.prompt_blocklist", form.get("prompt_blocklist", "").strip())
+        await crud.set_config(db, "img.policy", form.get("policy", "").strip())
+        await crud.set_config(db, "img.judge_model", form.get("judge_model", "").strip())
+        await crud.set_config(db, "img.judge_model_secondary", form.get("judge_model_secondary", "").strip())
 
         int_configs = {
             "img.max_n": ("max_n", 4, 1, 10),
