@@ -683,6 +683,20 @@ async def image_generations(
     """
     user, api_key = auth
 
+    # ── Image generation access control ──────────────────────────
+    img_enabled = await crud.get_config_json(db, "img.enabled", True)
+    if not img_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Image generation is currently disabled",
+        )
+
+    if not user.image_generation_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Image generation is not enabled for your account. Contact an administrator.",
+        )
+
     try:
         body = await request.json()
     except Exception:
@@ -700,24 +714,59 @@ async def image_generations(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="'prompt' is required",
         )
-    if not body.get("model"):
+
+    # ── Load config defaults and guardrails ──────────────────────
+    default_model = await crud.get_config_json(db, "img.default_model", "black-forest-labs/FLUX.2-dev")
+    default_size = await crud.get_config_json(db, "img.default_size", "1024x1024")
+    default_steps = await crud.get_config_json(db, "img.default_steps", 20)
+    default_guidance = await crud.get_config_json(db, "img.default_guidance_scale", 3.5)
+    max_n = await crud.get_config_json(db, "img.max_n", 4)
+    max_steps = await crud.get_config_json(db, "img.max_steps", 50)
+    allowed_sizes_str = await crud.get_config_json(db, "img.allowed_sizes", "512x512,768x768,1024x1024,1024x768,768x1024")
+    allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()]
+    prompt_blocklist_str = await crud.get_config_json(db, "img.prompt_blocklist", "")
+    prompt_blocklist = [w.strip().lower() for w in prompt_blocklist_str.split(",") if w.strip()]
+
+    model = body.get("model") or default_model
+    prompt = body["prompt"]
+
+    # Prompt blocklist check
+    if prompt_blocklist:
+        prompt_lower = prompt.lower()
+        for blocked in prompt_blocklist:
+            if blocked in prompt_lower:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Your prompt contains content that is not allowed",
+                )
+
+    # Enforce guardrails
+    req_n = min(body.get("n", 1), max_n)
+    req_size = body.get("size", default_size)
+    if allowed_sizes and req_size not in allowed_sizes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="'model' is required",
+            detail=f"Size '{req_size}' is not allowed. Allowed sizes: {', '.join(allowed_sizes)}",
         )
+
+    req_steps = body.get("num_inference_steps") or default_steps
+    if req_steps > max_steps:
+        req_steps = max_steps
+
+    req_guidance = body.get("guidance_scale") if body.get("guidance_scale") is not None else default_guidance
 
     # Build canonical request
     try:
         canonical = CanonicalImageRequest(
-            model=body["model"],
-            prompt=body["prompt"],
-            n=body.get("n", 1),
-            size=body.get("size", "1024x1024"),
+            model=model,
+            prompt=prompt,
+            n=req_n,
+            size=req_size,
             quality=body.get("quality", "standard"),
             style=body.get("style"),
             response_format=body.get("response_format", "url"),
-            num_inference_steps=body.get("num_inference_steps"),
-            guidance_scale=body.get("guidance_scale"),
+            num_inference_steps=req_steps,
+            guidance_scale=req_guidance,
             seed=body.get("seed"),
             user=body.get("user"),
             request_id=request_id,

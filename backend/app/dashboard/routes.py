@@ -3956,6 +3956,163 @@ async def admin_ocr_config_post(
 
 
 # ---------------------------------------------------------------------------
+# Admin Image Generation Config
+# ---------------------------------------------------------------------------
+
+@dashboard_router.get("/admin/images-config")
+async def admin_images_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin image generation configuration page."""
+    from sqlalchemy import select, func
+    from backend.app.db.models import Modality, User as UserModel
+
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    # Diffusion model names for dropdown
+    all_models = await crud.get_all_models_with_backends(db)
+    diffusion_models = sorted({
+        m.name for m in all_models
+        if m.modality == Modality.IMAGE_GENERATION
+    })
+
+    # User list with pagination
+    per_page = 50
+    users_list, total_count = await crud.get_users(
+        db, skip=(page - 1) * per_page, limit=per_page,
+        search=search, is_active=True, sort_by="username", sort_dir="asc",
+    )
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+
+    # Count enabled users
+    enabled_result = await db.execute(
+        select(func.count()).select_from(UserModel).where(
+            UserModel.image_generation_enabled == True,  # noqa: E712
+            UserModel.deleted_at.is_(None),
+            UserModel.is_active == True,  # noqa: E712
+        )
+    )
+    enabled_count = enabled_result.scalar() or 0
+
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/images_config.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "diffusion_models": diffusion_models,
+            "enabled": await crud.get_config_json(db, "img.enabled", True),
+            "default_model": await crud.get_config_json(db, "img.default_model", "black-forest-labs/FLUX.2-dev"),
+            "default_size": await crud.get_config_json(db, "img.default_size", "1024x1024"),
+            "max_n": await crud.get_config_json(db, "img.max_n", 4),
+            "default_steps": await crud.get_config_json(db, "img.default_steps", 20),
+            "max_steps": await crud.get_config_json(db, "img.max_steps", 50),
+            "default_guidance_scale": await crud.get_config_json(db, "img.default_guidance_scale", 3.5),
+            "allowed_sizes": await crud.get_config_json(db, "img.allowed_sizes", "512x512,768x768,1024x1024,1024x768,768x1024"),
+            "prompt_blocklist": await crud.get_config_json(db, "img.prompt_blocklist", ""),
+            "users": users_list,
+            "total_users": total_count,
+            "total_pages": total_pages,
+            "page": page,
+            "search": search,
+            "enabled_count": enabled_count,
+            "success": success,
+            "error": error,
+        },
+    )
+
+
+@dashboard_router.post("/admin/images-config")
+async def admin_images_config_post(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle image config form submissions."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action", "")
+    _ip = get_client_ip(request)
+
+    if action == "save_config":
+        await crud.set_config(db, "img.enabled", "enabled" in form)
+        await crud.set_config(db, "img.default_model", form.get("default_model", "").strip() or "black-forest-labs/FLUX.2-dev")
+        await crud.set_config(db, "img.default_size", form.get("default_size", "").strip() or "1024x1024")
+        await crud.set_config(db, "img.allowed_sizes", form.get("allowed_sizes", "").strip())
+        await crud.set_config(db, "img.prompt_blocklist", form.get("prompt_blocklist", "").strip())
+
+        int_configs = {
+            "img.max_n": ("max_n", 4, 1, 10),
+            "img.default_steps": ("default_steps", 20, 1, 100),
+            "img.max_steps": ("max_steps", 50, 1, 200),
+        }
+        for key, (field, default, lo, hi) in int_configs.items():
+            try:
+                val = int(form.get(field, str(default)))
+                val = max(lo, min(hi, val))
+            except (ValueError, TypeError):
+                val = default
+            await crud.set_config(db, key, val)
+
+        # Float config
+        try:
+            guidance = float(form.get("default_guidance_scale", "3.5"))
+            guidance = max(0.0, min(20.0, guidance))
+        except (ValueError, TypeError):
+            guidance = 3.5
+        await crud.set_config(db, "img.default_guidance_scale", guidance)
+
+        await crud.log_admin_action(
+            db, user_id=user_id, action="images_config.save",
+            entity_type="config",
+            after_value={"enabled": "enabled" in form, "model": form.get("default_model")},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/images-config?success=config_updated", status_code=302)
+
+    elif action == "toggle_user":
+        target_id = int(form.get("user_id", 0))
+        target_user = await crud.get_user_by_id(db, target_id)
+        if not target_user:
+            return RedirectResponse(url="/admin/images-config?error=User+not+found", status_code=302)
+
+        new_val = not target_user.image_generation_enabled
+        target_user.image_generation_enabled = new_val
+
+        await crud.log_admin_action(
+            db, user_id=user_id, action="images_config.toggle_user",
+            entity_type="user", entity_id=str(target_id),
+            before_value={"image_generation_enabled": not new_val},
+            after_value={"image_generation_enabled": new_val},
+            ip_address=_ip,
+        )
+        await db.commit()
+        status_msg = "user_enabled" if new_val else "user_disabled"
+        return RedirectResponse(url=f"/admin/images-config?success={status_msg}", status_code=302)
+
+    return RedirectResponse(url="/admin/images-config?error=Unknown+action", status_code=302)
+
+
+# ---------------------------------------------------------------------------
 # Admin Site Settings (timezone, etc.)
 # ---------------------------------------------------------------------------
 

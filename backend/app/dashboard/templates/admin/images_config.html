@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+
+{% block title %}Image Generation Config - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "images_config" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-image"></i> Image Generation Configuration</h1>
+            <p class="text-muted">Configure the <code>/v1/images/generations</code> endpoint &mdash; defaults, guardrails, and per-user access.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'config_updated' %}Image generation configuration updated.
+                {% elif success == 'user_enabled' %}User image generation access enabled.
+                {% elif success == 'user_disabled' %}User image generation access disabled.
+                {% elif success == 'bulk_updated' %}User access updated.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            {% if not is_read_only %}
+            <!-- ────────── Settings Form ────────── -->
+            <form method="post" action="/admin/images-config">
+                <input type="hidden" name="action" value="save_config">
+
+                <div class="row g-4">
+                    <!-- General Settings -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-gear"></i> General</h5></div>
+                            <div class="card-body">
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="enabled" name="enabled" {% if enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="enabled">Enable image generation endpoint</label>
+                                    <div class="form-text">When disabled, <code>/v1/images/generations</code> returns 503.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="default_model" class="form-label">Default Model</label>
+                                    <select class="form-select" id="default_model" name="default_model">
+                                        {% for m in diffusion_models %}
+                                        <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                                        {% endfor %}
+                                        {% if default_model and default_model not in diffusion_models %}
+                                        <option value="{{ default_model }}" selected>{{ default_model }} (not currently available)</option>
+                                        {% endif %}
+                                    </select>
+                                    <div class="form-text">Used when the request omits <code>model</code>.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="default_size" class="form-label">Default Size</label>
+                                    <input type="text" class="form-control" id="default_size" name="default_size" value="{{ default_size }}">
+                                    <div class="form-text">Default image dimensions (e.g. <code>1024x1024</code>).</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_n" class="form-label">Max Images Per Request (n)</label>
+                                    <input type="number" class="form-control" id="max_n" name="max_n" value="{{ max_n }}" min="1" max="10">
+                                    <div class="form-text">Maximum number of images a single request can generate.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Model Parameters -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-sliders"></i> Model Parameters</h5></div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label for="default_steps" class="form-label">Default Inference Steps</label>
+                                    <input type="number" class="form-control" id="default_steps" name="default_steps" value="{{ default_steps }}" min="1" max="100">
+                                    <div class="form-text">Used when the request omits <code>num_inference_steps</code>. More steps = higher quality but slower.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_steps" class="form-label">Max Inference Steps</label>
+                                    <input type="number" class="form-control" id="max_steps" name="max_steps" value="{{ max_steps }}" min="1" max="200">
+                                    <div class="form-text">Hard cap on steps per request. Prevents excessive GPU time.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="default_guidance_scale" class="form-label">Default Guidance Scale</label>
+                                    <input type="number" class="form-control" id="default_guidance_scale" name="default_guidance_scale" value="{{ default_guidance_scale }}" min="0" max="20" step="0.5">
+                                    <div class="form-text">How closely the image follows the prompt. FLUX.2 default: 3.5</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Guardrails -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-shield-check"></i> Guardrails</h5></div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label for="allowed_sizes" class="form-label">Allowed Sizes</label>
+                                    <input type="text" class="form-control" id="allowed_sizes" name="allowed_sizes" value="{{ allowed_sizes }}">
+                                    <div class="form-text">Comma-separated list of allowed dimensions. Leave empty to allow any size.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="prompt_blocklist" class="form-label">Prompt Blocklist</label>
+                                    <textarea class="form-control" id="prompt_blocklist" name="prompt_blocklist" rows="3">{{ prompt_blocklist }}</textarea>
+                                    <div class="form-text">Comma-separated words/phrases. Requests containing any of these (case-insensitive) are rejected.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- API Info -->
+                    <div class="col-lg-6">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-code-slash"></i> API Usage</h5></div>
+                            <div class="card-body">
+                                <p class="small">OpenAI-compatible endpoint:</p>
+<pre class="bg-light p-3 rounded small" style="overflow-x:auto; white-space:pre; word-break:normal;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "black-forest-labs/FLUX.2-dev",
+    "prompt": "A mountain at sunset",
+    "size": "1024x1024",
+    "response_format": "b64_json"
+  }'</code></pre>
+                                <p class="small mt-2 mb-0"><strong>Optional parameters:</strong></p>
+                                <ul class="small mb-0">
+                                    <li><code>n</code> &mdash; number of images (max {{ max_n }})</li>
+                                    <li><code>size</code> &mdash; dimensions (default: {{ default_size }})</li>
+                                    <li><code>num_inference_steps</code> &mdash; quality steps (default: {{ default_steps }}, max: {{ max_steps }})</li>
+                                    <li><code>guidance_scale</code> &mdash; prompt adherence (default: {{ default_guidance_scale }})</li>
+                                    <li><code>seed</code> &mdash; reproducibility seed</li>
+                                    <li><code>response_format</code> &mdash; <code>url</code> or <code>b64_json</code></li>
+                                </ul>
+                                <div class="alert alert-info mt-3 mb-0 small">
+                                    <i class="bi bi-info-circle"></i> Users must be explicitly granted image generation access below.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-4">
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save Configuration</button>
+                </div>
+            </form>
+
+            <hr class="my-5">
+
+            <!-- ────────── User Access ────────── -->
+            <h3><i class="bi bi-people"></i> User Access</h3>
+            <p class="text-muted">Image generation is disabled by default. Toggle individual users on/off.</p>
+
+            <div class="row mb-3">
+                <div class="col-md-6">
+                    <form method="get" action="/admin/images-config" class="input-group">
+                        <input type="text" class="form-control" name="search" value="{{ search or '' }}" placeholder="Search users by name or email...">
+                        <button class="btn btn-outline-secondary" type="submit"><i class="bi bi-search"></i></button>
+                        {% if search %}
+                        <a href="/admin/images-config" class="btn btn-outline-secondary"><i class="bi bi-x-lg"></i></a>
+                        {% endif %}
+                    </form>
+                </div>
+                <div class="col-md-6 text-end">
+                    <span class="badge bg-success me-2">{{ enabled_count }} enabled</span>
+                    <span class="badge bg-secondary">{{ total_users }} total users</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>User</th>
+                                <th>Email</th>
+                                <th>Group</th>
+                                <th>Role</th>
+                                <th class="text-center">Image Access</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for u in users %}
+                            <tr>
+                                <td>
+                                    <a href="/admin/users/{{ u.id }}">{{ u.username }}</a>
+                                    {% if u.full_name %}<br><small class="text-muted">{{ u.full_name }}</small>{% endif %}
+                                </td>
+                                <td class="small">{{ u.email }}</td>
+                                <td>
+                                    {% if u.group %}
+                                    <span class="badge bg-info text-dark">{{ u.group.display_name or u.group.name }}</span>
+                                    {% else %}
+                                    <span class="text-muted">None</span>
+                                    {% endif %}
+                                </td>
+                                <td><span class="badge bg-secondary">{{ u.role.value }}</span></td>
+                                <td class="text-center">
+                                    <form method="post" action="/admin/images-config" class="d-inline">
+                                        <input type="hidden" name="action" value="toggle_user">
+                                        <input type="hidden" name="user_id" value="{{ u.id }}">
+                                        <div class="form-check form-switch d-flex justify-content-center">
+                                            <input class="form-check-input" type="checkbox"
+                                                   {% if u.image_generation_enabled %}checked{% endif %}
+                                                   onchange="this.form.submit()"
+                                                   role="switch"
+                                                   aria-label="Toggle image generation for {{ u.username }}">
+                                        </div>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {% if total_pages > 1 %}
+            <nav class="mt-3" aria-label="User pagination">
+                <ul class="pagination justify-content-center">
+                    {% for p in range(1, total_pages + 1) %}
+                    <li class="page-item {% if p == page %}active{% endif %}">
+                        <a class="page-link" href="/admin/images-config?page={{ p }}{% if search %}&search={{ search }}{% endif %}">{{ p }}</a>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </nav>
+            {% endif %}
+
+            {% else %}
+            <div class="alert alert-info">You have read-only admin access. Configuration changes require full admin privileges.</div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

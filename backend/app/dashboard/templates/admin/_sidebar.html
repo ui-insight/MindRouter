@@ -109,6 +109,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'images_config' %}active{% endif %}" href="/admin/images-config" {% if active == 'images_config' %}aria-current="page"{% endif %}>
+                <i class="bi bi-image"></i> Images
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'blog' %}active{% endif %}" href="/admin/blog" {% if active == 'blog' %}aria-current="page"{% endif %}>
                 <i class="bi bi-pencil-square"></i> Blog Posts
             </a>

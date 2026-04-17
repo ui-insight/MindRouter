@@ -174,6 +174,9 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     department: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     intended_use: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Feature access
+    image_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
+
     # Agreement tracking
     agreement_version_accepted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     agreement_accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
