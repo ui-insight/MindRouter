@@ -145,8 +145,11 @@
 #imagePreviewModal img { max-width: 100%; max-height: 80vh; border-radius: 8px; }
 
 /* ── Size selector ───────────────────────────────────── */
-.size-btn { cursor: pointer; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.size-btn { cursor: pointer; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; transition: all 0.15s; }
 .size-btn.active { background: #6366f1; color: white; border-color: #6366f1; }
+.size-btn:hover:not(.active) { background: rgba(99,102,241,.08); }
+.aspect-preview { width: 32px; height: 32px; border: 2px solid var(--mr-border-color); border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; margin-right: 0.3rem; vertical-align: middle; }
+.size-btn.active .aspect-preview { border-color: rgba(255,255,255,.5); }
 </style>
 
 <div class="container py-4" style="max-width: 960px;">
@@ -173,17 +176,50 @@
                 </div>
             </div>
 
-            <div class="row g-3 mb-3">
-                <div class="col-md-4">
-                    <label class="form-label fw-semibold">Size</label>
-                    <div class="d-flex flex-wrap gap-2" id="sizeSelector">
-                        {% for s in allowed_sizes %}
-                        <span class="size-btn border {% if s == default_size %}active{% endif %}" data-size="{{ s }}">{{ s }}</span>
-                        {% endfor %}
-                    </div>
-                    <input type="hidden" id="selectedSize" value="{{ default_size }}">
+            <!-- Aspect Ratio Presets -->
+            <div class="mb-3">
+                <label class="form-label fw-semibold">Aspect Ratio</label>
+                <div class="d-flex flex-wrap gap-2" id="aspectSelector">
+                    <span class="size-btn border active" data-w="1024" data-h="1024" data-label="1:1">
+                        <span class="aspect-preview" style="width:24px;height:24px;"></span> 1:1
+                    </span>
+                    <span class="size-btn border" data-w="1024" data-h="768" data-label="4:3">
+                        <span class="aspect-preview" style="width:28px;height:21px;"></span> 4:3
+                    </span>
+                    <span class="size-btn border" data-w="768" data-h="1024" data-label="3:4">
+                        <span class="aspect-preview" style="width:21px;height:28px;"></span> 3:4
+                    </span>
+                    <span class="size-btn border" data-w="1024" data-h="576" data-label="16:9">
+                        <span class="aspect-preview" style="width:32px;height:18px;"></span> 16:9
+                    </span>
+                    <span class="size-btn border" data-w="576" data-h="1024" data-label="9:16">
+                        <span class="aspect-preview" style="width:18px;height:32px;"></span> 9:16
+                    </span>
+                    <span class="size-btn border" data-w="1024" data-h="682" data-label="3:2">
+                        <span class="aspect-preview" style="width:30px;height:20px;"></span> 3:2
+                    </span>
+                    <span class="size-btn border" data-w="682" data-h="1024" data-label="2:3">
+                        <span class="aspect-preview" style="width:20px;height:30px;"></span> 2:3
+                    </span>
+                    <span class="size-btn border" data-w="0" data-h="0" data-label="Custom">
+                        <i class="bi bi-pencil-square"></i> Custom
+                    </span>
                 </div>
-                <div class="col-md-4">
+            </div>
+
+            <!-- Width / Height Controls -->
+            <div class="row g-3 mb-3">
+                <div class="col-md-3">
+                    <label for="imgWidth" class="form-label fw-semibold">Width: <span id="widthVal">1024</span>px</label>
+                    <input type="range" class="form-range" id="imgWidth" min="256" max="{{ max_width }}" step="64" value="1024">
+                    <input type="number" class="form-control form-control-sm mt-1" id="imgWidthNum" min="256" max="{{ max_width }}" step="64" value="1024">
+                </div>
+                <div class="col-md-3">
+                    <label for="imgHeight" class="form-label fw-semibold">Height: <span id="heightVal">1024</span>px</label>
+                    <input type="range" class="form-range" id="imgHeight" min="256" max="{{ max_height }}" step="64" value="1024">
+                    <input type="number" class="form-control form-control-sm mt-1" id="imgHeightNum" min="256" max="{{ max_height }}" step="64" value="1024">
+                </div>
+                <div class="col-md-3">
                     <label for="steps" class="form-label fw-semibold">Quality (Steps: <span id="stepsVal">{{ default_steps }}</span>)</label>
                     <input type="range" class="form-range" id="steps" min="4" max="{{ max_steps }}" value="{{ default_steps }}">
                     <div class="d-flex justify-content-between">
@@ -191,7 +227,7 @@
                         <small class="text-muted">Best</small>
                     </div>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label for="guidance" class="form-label fw-semibold">Prompt Strength (<span id="guidanceVal">{{ default_guidance }}</span>)</label>
                     <input type="range" class="form-range" id="guidance" min="1" max="15" step="0.5" value="{{ default_guidance }}">
                     <div class="d-flex justify-content-between">
@@ -202,11 +238,16 @@
             </div>
 
             <div class="row g-3 mb-3">
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <label for="seed" class="form-label fw-semibold">Seed <small class="text-muted">(optional)</small></label>
                     <input type="number" class="form-control form-control-sm" id="seed" placeholder="Random">
                 </div>
+                <div class="col-md-6">
+                    <label class="form-label fw-semibold">Dimensions</label>
+                    <div class="text-muted" id="dimensionPreview">1024 &times; 1024 &mdash; 1.0 MP</div>
+                </div>
             </div>
+            <input type="hidden" id="selectedSize" value="1024x1024">
 
             <button class="btn btn-primary btn-lg w-100" id="generateBtn" onclick="generateImage()">
                 <i class="bi bi-stars me-1"></i> Generate Image
@@ -377,12 +418,64 @@ let genStartTime = 0;
 let genTimerInterval = null;
 let lastPrompt = '';
 
-// ── Size selector ───────────────────────────────────────
-document.querySelectorAll('.size-btn').forEach(btn => {
+// ── Aspect ratio & dimension controls ──────────────────
+const MAX_W = {{ max_width }};
+const MAX_H = {{ max_height }};
+let customMode = false;
+
+function updateDimensions(w, h, fromSlider) {
+    w = Math.max(256, Math.min(MAX_W, Math.round(w / 64) * 64));
+    h = Math.max(256, Math.min(MAX_H, Math.round(h / 64) * 64));
+    document.getElementById('imgWidth').value = w;
+    document.getElementById('imgHeight').value = h;
+    document.getElementById('imgWidthNum').value = w;
+    document.getElementById('imgHeightNum').value = h;
+    document.getElementById('widthVal').textContent = w;
+    document.getElementById('heightVal').textContent = h;
+    document.getElementById('selectedSize').value = w + 'x' + h;
+    const mp = (w * h / 1e6).toFixed(2);
+    document.getElementById('dimensionPreview').innerHTML = w + ' &times; ' + h + ' &mdash; ' + mp + ' MP';
+}
+
+document.querySelectorAll('#aspectSelector .size-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-        document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('#aspectSelector .size-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        document.getElementById('selectedSize').value = btn.dataset.size;
+        const w = parseInt(btn.dataset.w);
+        const h = parseInt(btn.dataset.h);
+        if (w === 0 && h === 0) {
+            customMode = true;
+        } else {
+            customMode = false;
+            updateDimensions(w, h);
+        }
+    });
+});
+
+['imgWidth', 'imgHeight'].forEach(id => {
+    document.getElementById(id).addEventListener('input', e => {
+        // Switch to custom mode when sliders are manually moved
+        if (!customMode) {
+            customMode = true;
+            document.querySelectorAll('#aspectSelector .size-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector('#aspectSelector .size-btn[data-w="0"]').classList.add('active');
+        }
+        const w = parseInt(document.getElementById('imgWidth').value);
+        const h = parseInt(document.getElementById('imgHeight').value);
+        updateDimensions(w, h, true);
+    });
+});
+
+['imgWidthNum', 'imgHeightNum'].forEach(id => {
+    document.getElementById(id).addEventListener('change', e => {
+        if (!customMode) {
+            customMode = true;
+            document.querySelectorAll('#aspectSelector .size-btn').forEach(b => b.classList.remove('active'));
+            document.querySelector('#aspectSelector .size-btn[data-w="0"]').classList.add('active');
+        }
+        const w = parseInt(document.getElementById('imgWidthNum').value);
+        const h = parseInt(document.getElementById('imgHeightNum').value);
+        updateDimensions(w, h);
     });
 });
 

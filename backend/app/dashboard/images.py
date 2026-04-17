@@ -100,9 +100,7 @@ async def images_page(
     max_width = await crud.get_config_json(db, "img.max_width", 2048)
     max_height = await crud.get_config_json(db, "img.max_height", 2048)
 
-    allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()] if allowed_sizes_str else [
-        "512x512", "768x768", "1024x1024", "1024x768", "768x1024",
-    ]
+    allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()] if allowed_sizes_str else []
 
     # Check if user has an API key
     api_keys = await crud.get_user_api_keys(db, user_id, include_revoked=False)
@@ -217,7 +215,7 @@ async def images_api_generate(
         if judge_model:
             from backend.app.services.image_policy import evaluate_prompt
             verdict = await evaluate_prompt(body.get("prompt", ""), policy, judge_model, judge_secondary or None)
-            if not verdict.approved:
+            if not verdict.passed:
                 return JSONResponse(
                     status_code=400,
                     content={
@@ -229,7 +227,7 @@ async def images_api_generate(
                     },
                 )
             # Attach verdict for audit trail
-            body["_policy_verdict"] = {"approved": True, "reason": verdict.reason, "model": verdict.judge_model}
+            body["_policy_verdict"] = {"passed": True, "reason": verdict.reason, "model": verdict.judge_model}
 
     # Translate to canonical request
     prompt = body.get("prompt", "")
