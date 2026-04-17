@@ -4026,6 +4026,8 @@ async def admin_images_config(
             "max_steps": await crud.get_config_json(db, "img.max_steps", 50),
             "default_guidance_scale": await crud.get_config_json(db, "img.default_guidance_scale", 3.5),
             "allowed_sizes": await crud.get_config_json(db, "img.allowed_sizes", "512x512,768x768,1024x1024,1024x768,768x1024"),
+            "max_width": await crud.get_config_json(db, "img.max_width", 1024),
+            "max_height": await crud.get_config_json(db, "img.max_height", 1024),
             "policy": await crud.get_config_json(db, "img.policy", ""),
             "judge_model": await crud.get_config_json(db, "img.judge_model", ""),
             "judge_model_secondary": await crud.get_config_json(db, "img.judge_model_secondary", ""),
@@ -4072,6 +4074,8 @@ async def admin_images_config_post(
             "img.max_n": ("max_n", 4, 1, 10),
             "img.default_steps": ("default_steps", 20, 1, 100),
             "img.max_steps": ("max_steps", 50, 1, 200),
+            "img.max_width": ("max_width", 1024, 256, 4096),
+            "img.max_height": ("max_height", 1024, 256, 4096),
         }
         for key, (field, default, lo, hi) in int_configs.items():
             try:

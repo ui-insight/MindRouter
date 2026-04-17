@@ -857,6 +857,39 @@ class Artifact(Base, TimestampMixin):
     )
 
 
+class UserImage(Base, TimestampMixin):
+    """User-generated images saved to gallery."""
+
+    __tablename__ = "user_images"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # Generation parameters
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    size: Mapped[str] = mapped_column(String(20), nullable=False)
+    steps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    guidance_scale: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    seed: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    # Storage
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False, default="image/png")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+    # Optional link to request audit trail
+    request_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("requests.id"), nullable=True)
+
+    # Relationships
+    user: Mapped["User"] = relationship("User")
+
+    __table_args__ = (
+        Index("ix_user_images_user_id", "user_id"),
+        Index("ix_user_images_created_at", "created_at"),
+    )
+
+
 class SchedulerDecision(Base):
     """Audit log of scheduler routing decisions."""
 

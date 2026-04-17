@@ -110,6 +110,18 @@
                                     <input type="text" class="form-control" id="allowed_sizes" name="allowed_sizes" value="{{ allowed_sizes }}">
                                     <div class="form-text">Comma-separated list of allowed dimensions. Leave empty to allow any size.</div>
                                 </div>
+
+                                <div class="row">
+                                    <div class="col-6 mb-3">
+                                        <label for="max_width" class="form-label">Max Width (px)</label>
+                                        <input type="number" class="form-control" id="max_width" name="max_width" value="{{ max_width }}" min="256" max="4096">
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <label for="max_height" class="form-label">Max Height (px)</label>
+                                        <input type="number" class="form-control" id="max_height" name="max_height" value="{{ max_height }}" min="256" max="4096">
+                                    </div>
+                                </div>
+                                <div class="form-text mt-n2 mb-2">Maximum image dimensions. Requests exceeding these are rejected.</div>
                             </div>
                         </div>
                     </div>

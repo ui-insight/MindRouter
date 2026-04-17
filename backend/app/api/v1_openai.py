@@ -791,6 +791,20 @@ async def image_generations(
             detail=f"Size '{req_size}' is not allowed. Allowed sizes: {', '.join(allowed_sizes)}",
         )
 
+    # Enforce max dimensions
+    max_width = await crud.get_config_json(db, "img.max_width", 1024)
+    max_height = await crud.get_config_json(db, "img.max_height", 1024)
+    try:
+        w, h = req_size.split("x")
+        w, h = int(w), int(h)
+        if w > max_width or h > max_height:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image dimensions {req_size} exceed maximum allowed ({max_width}x{max_height})",
+            )
+    except ValueError:
+        pass  # Non-standard size format — let the backend handle it
+
     req_steps = body.get("num_inference_steps") or default_steps
     if req_steps > max_steps:
         req_steps = max_steps

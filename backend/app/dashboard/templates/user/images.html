@@ -1,0 +1,641 @@
+{% extends "base.html" %}
+
+{% block title %}Image Generation - MindRouter{% endblock %}
+
+{% block content %}
+<style>
+/* ── Generation Animation ────────────────────────────── */
+@keyframes mr-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+@keyframes mr-pulse-ring {
+    0% { transform: scale(0.8); opacity: 0.6; }
+    50% { transform: scale(1.15); opacity: 0.2; }
+    100% { transform: scale(0.8); opacity: 0.6; }
+}
+@keyframes mr-rotate {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+@keyframes mr-fade-in {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.gen-overlay {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 320px;
+    border-radius: 12px;
+    background: var(--mr-body-bg);
+    border: 2px dashed var(--mr-border-color);
+    overflow: hidden;
+}
+.gen-overlay.active {
+    border-color: transparent;
+    background: linear-gradient(135deg,
+        rgba(99,102,241,.08) 0%,
+        rgba(168,85,247,.08) 50%,
+        rgba(59,130,246,.08) 100%);
+}
+.gen-spinner {
+    width: 80px; height: 80px;
+    border-radius: 50%;
+    border: 3px solid rgba(99,102,241,.15);
+    border-top: 3px solid #6366f1;
+    animation: mr-rotate 1s linear infinite;
+}
+.gen-spinner-ring {
+    position: absolute;
+    width: 110px; height: 110px;
+    border-radius: 50%;
+    border: 2px solid rgba(168,85,247,.2);
+    animation: mr-pulse-ring 2s ease-in-out infinite;
+}
+.gen-status {
+    margin-top: 1.5rem;
+    font-weight: 500;
+    font-size: 0.95rem;
+}
+.gen-status-bar {
+    height: 4px;
+    width: 200px;
+    border-radius: 2px;
+    margin-top: 0.75rem;
+    background: rgba(99,102,241,.15);
+    overflow: hidden;
+}
+.gen-status-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, #6366f1, #a855f7, #3b82f6, #6366f1);
+    background-size: 200% 100%;
+    animation: mr-shimmer 2s linear infinite;
+}
+.gen-result { animation: mr-fade-in 0.5s ease-out; }
+.gen-result img {
+    max-width: 100%;
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,.15);
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+.gen-result img:hover { transform: scale(1.02); }
+
+/* ── Policy Badge ────────────────────────────────────── */
+.policy-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+.policy-badge.checking {
+    background: rgba(99,102,241,.12);
+    color: #6366f1;
+}
+.policy-badge.passed {
+    background: rgba(25,135,84,.12);
+    color: #198754;
+}
+.policy-badge.failed {
+    background: rgba(220,53,69,.12);
+    color: #dc3545;
+}
+.policy-badge .spinner-border {
+    width: 14px; height: 14px;
+    border-width: 2px;
+}
+
+/* ── Gallery ─────────────────────────────────────────── */
+.gallery-card {
+    transition: transform 0.2s, box-shadow 0.2s;
+    overflow: hidden;
+    border-radius: 8px;
+}
+.gallery-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 24px rgba(0,0,0,.12);
+}
+.gallery-card img {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    cursor: pointer;
+}
+.gallery-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 0.5rem;
+    background: linear-gradient(transparent, rgba(0,0,0,.7));
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.gallery-card:hover .gallery-overlay { opacity: 1; }
+
+/* ── Image Modal ─────────────────────────────────────── */
+#imagePreviewModal .modal-body { text-align: center; }
+#imagePreviewModal img { max-width: 100%; max-height: 80vh; border-radius: 8px; }
+
+/* ── Size selector ───────────────────────────────────── */
+.size-btn { cursor: pointer; padding: 0.3rem 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.size-btn.active { background: #6366f1; color: white; border-color: #6366f1; }
+</style>
+
+<div class="container py-4" style="max-width: 960px;">
+    <h1 class="mb-1"><i class="bi bi-image"></i> Image Generation</h1>
+    <p class="text-muted mb-4">Create images from text prompts using AI diffusion models.</p>
+
+    {% if not has_api_key %}
+    <div class="alert alert-warning">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        You need an active API key to generate images.
+        <a href="/dashboard" class="alert-link">Create one in your Dashboard</a>.
+    </div>
+    {% endif %}
+
+    <!-- ════════ Generation Form ════════ -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="mb-3">
+                <label for="prompt" class="form-label fw-semibold">Prompt</label>
+                <textarea class="form-control" id="prompt" rows="3" placeholder="Describe the image you want to create..." maxlength="2000" autofocus></textarea>
+                <div class="d-flex justify-content-between mt-1">
+                    <small class="text-muted">Be descriptive for best results</small>
+                    <small class="text-muted"><span id="charCount">0</span>/2000</small>
+                </div>
+            </div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <label class="form-label fw-semibold">Size</label>
+                    <div class="d-flex flex-wrap gap-2" id="sizeSelector">
+                        {% for s in allowed_sizes %}
+                        <span class="size-btn border {% if s == default_size %}active{% endif %}" data-size="{{ s }}">{{ s }}</span>
+                        {% endfor %}
+                    </div>
+                    <input type="hidden" id="selectedSize" value="{{ default_size }}">
+                </div>
+                <div class="col-md-4">
+                    <label for="steps" class="form-label fw-semibold">Quality (Steps: <span id="stepsVal">{{ default_steps }}</span>)</label>
+                    <input type="range" class="form-range" id="steps" min="4" max="{{ max_steps }}" value="{{ default_steps }}">
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">Fast</small>
+                        <small class="text-muted">Best</small>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <label for="guidance" class="form-label fw-semibold">Prompt Strength (<span id="guidanceVal">{{ default_guidance }}</span>)</label>
+                    <input type="range" class="form-range" id="guidance" min="1" max="15" step="0.5" value="{{ default_guidance }}">
+                    <div class="d-flex justify-content-between">
+                        <small class="text-muted">Creative</small>
+                        <small class="text-muted">Literal</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <label for="seed" class="form-label fw-semibold">Seed <small class="text-muted">(optional)</small></label>
+                    <input type="number" class="form-control form-control-sm" id="seed" placeholder="Random">
+                </div>
+            </div>
+
+            <button class="btn btn-primary btn-lg w-100" id="generateBtn" onclick="generateImage()">
+                <i class="bi bi-stars me-1"></i> Generate Image
+            </button>
+        </div>
+    </div>
+
+    <!-- ════════ Generation Result Area ════════ -->
+    <div id="resultArea" class="mb-4" style="display:none;">
+        <!-- Policy check status -->
+        <div class="mb-3 text-center" id="policyArea" style="display:none;">
+            <span id="policyBadge" class="policy-badge checking">
+                <span class="spinner-border"></span> Evaluating usage policy...
+            </span>
+        </div>
+
+        <!-- Animation overlay (during generation) -->
+        <div id="genOverlay" class="gen-overlay active" style="display:none;">
+            <div class="gen-spinner-ring"></div>
+            <div class="gen-spinner"></div>
+            <div class="gen-status text-muted" id="genStatusText">Evaluating content policy...</div>
+            <div class="gen-status-bar"><div class="gen-status-bar-fill" id="genProgressFill"></div></div>
+            <small class="text-muted mt-2" id="genTimer">0s</small>
+        </div>
+
+        <!-- Generated image -->
+        <div id="genResultContainer" class="gen-result text-center" style="display:none;">
+            <img id="genResultImg" src="" alt="Generated image" onclick="previewImage(this.src)">
+            <div class="mt-3 d-flex justify-content-center gap-2">
+                <a id="downloadBtn" class="btn btn-success" download="mindrouter-image.png">
+                    <i class="bi bi-download me-1"></i> Download
+                </a>
+                <button class="btn btn-outline-secondary" onclick="copyPromptBack()">
+                    <i class="bi bi-arrow-repeat me-1"></i> Regenerate
+                </button>
+            </div>
+            <div class="mt-2">
+                <small class="text-muted" id="genMeta"></small>
+            </div>
+        </div>
+
+        <!-- Error display -->
+        <div id="genError" class="alert alert-danger" role="alert" style="display:none;">
+            <i class="bi bi-exclamation-triangle-fill me-1"></i>
+            <span id="genErrorText"></span>
+        </div>
+    </div>
+
+    <!-- ════════ History Gallery ════════ -->
+    <div class="mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h3><i class="bi bi-clock-history"></i> Your Images</h3>
+            <small class="text-muted" id="historyCount"></small>
+        </div>
+        <div class="row g-3" id="galleryGrid">
+            <!-- Populated by JS -->
+        </div>
+        <div id="galleryEmpty" class="text-center text-muted py-5" style="display:none;">
+            <i class="bi bi-image" style="font-size:3rem; opacity:0.3;"></i>
+            <p class="mt-2">No images generated yet</p>
+        </div>
+        <div class="text-center mt-3" id="loadMoreArea" style="display:none;">
+            <button class="btn btn-outline-secondary btn-sm" onclick="loadHistory(true)">Load more</button>
+        </div>
+    </div>
+
+    <!-- ════════ API Reference ════════ -->
+    <div class="card mb-4">
+        <div class="card-header" role="button" data-bs-toggle="collapse" data-bs-target="#apiRef" aria-expanded="false">
+            <h5 class="mb-0"><i class="bi bi-code-slash me-1"></i> API Reference <small class="text-muted">(click to expand)</small></h5>
+        </div>
+        <div class="collapse" id="apiRef">
+            <div class="card-body">
+                <p class="small">Generate images programmatically using the OpenAI-compatible API:</p>
+                <h6>cURL</h6>
+<pre class="bg-light p-3 rounded small" style="overflow-x:auto;"><code>curl -X POST https://mindrouter.uidaho.edu/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "prompt": "A serene mountain landscape at sunset",
+    "model": "{{ default_model }}",
+    "size": "{{ default_size }}",
+    "num_inference_steps": {{ default_steps }},
+    "guidance_scale": {{ default_guidance }},
+    "response_format": "b64_json"
+  }'</code></pre>
+                <h6 class="mt-3">Python</h6>
+<pre class="bg-light p-3 rounded small" style="overflow-x:auto;"><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://mindrouter.uidaho.edu/v1",
+    api_key="YOUR_API_KEY",
+)
+
+response = client.images.generate(
+    model="{{ default_model }}",
+    prompt="A serene mountain landscape at sunset",
+    size="{{ default_size }}",
+    response_format="b64_json",
+)
+image_data = response.data[0].b64_json</code></pre>
+                <h6 class="mt-3">JavaScript</h6>
+<pre class="bg-light p-3 rounded small" style="overflow-x:auto;"><code>const response = await fetch('https://mindrouter.uidaho.edu/v1/images/generations', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer YOUR_API_KEY',
+  },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape at sunset',
+    model: '{{ default_model }}',
+    size: '{{ default_size }}',
+    response_format: 'b64_json',
+  }),
+});
+const data = await response.json();
+const imageBase64 = data.data[0].b64_json;</code></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Image Preview Modal -->
+<div class="modal fade" id="imagePreviewModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="previewTitle">Image Preview</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <img id="previewImg" src="" alt="Preview">
+            </div>
+            <div class="modal-footer">
+                <a id="previewDownload" class="btn btn-success" download="mindrouter-image.png"><i class="bi bi-download me-1"></i> Download</a>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteModal" tabindex="-1">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Delete Image</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">Are you sure you want to delete this image?</div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">Delete</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const DEFAULT_MODEL = '{{ default_model }}';
+let historyOffset = 0;
+const HISTORY_LIMIT = 12;
+let generating = false;
+let genStartTime = 0;
+let genTimerInterval = null;
+let lastPrompt = '';
+
+// ── Size selector ───────────────────────────────────────
+document.querySelectorAll('.size-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('selectedSize').value = btn.dataset.size;
+    });
+});
+
+// ── Range sliders ───────────────────────────────────────
+document.getElementById('steps').addEventListener('input', e => {
+    document.getElementById('stepsVal').textContent = e.target.value;
+});
+document.getElementById('guidance').addEventListener('input', e => {
+    document.getElementById('guidanceVal').textContent = e.target.value;
+});
+document.getElementById('prompt').addEventListener('input', e => {
+    document.getElementById('charCount').textContent = e.target.value.length;
+});
+
+// ── Generate ────────────────────────────────────────────
+async function generateImage() {
+    if (generating) return;
+    const prompt = document.getElementById('prompt').value.trim();
+    if (!prompt) { document.getElementById('prompt').focus(); return; }
+
+    generating = true;
+    lastPrompt = prompt;
+    const btn = document.getElementById('generateBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Generating...';
+
+    // Show result area
+    const resultArea = document.getElementById('resultArea');
+    resultArea.style.display = 'block';
+    document.getElementById('genError').style.display = 'none';
+    document.getElementById('genResultContainer').style.display = 'none';
+
+    // Policy check phase
+    const policyArea = document.getElementById('policyArea');
+    policyArea.style.display = 'block';
+    const policyBadge = document.getElementById('policyBadge');
+    policyBadge.className = 'policy-badge checking';
+    policyBadge.innerHTML = '<span class="spinner-border"></span> Evaluating usage policy...';
+
+    // Show generation overlay
+    const overlay = document.getElementById('genOverlay');
+    overlay.style.display = 'flex';
+    document.getElementById('genStatusText').textContent = 'Evaluating content policy...';
+
+    // Start timer
+    genStartTime = Date.now();
+    document.getElementById('genTimer').textContent = '0s';
+    genTimerInterval = setInterval(updateTimer, 1000);
+
+    const size = document.getElementById('selectedSize').value;
+    const steps = parseInt(document.getElementById('steps').value);
+    const guidance = parseFloat(document.getElementById('guidance').value);
+    const seedVal = document.getElementById('seed').value;
+
+    const body = {
+        model: DEFAULT_MODEL,
+        prompt: prompt,
+        size: size,
+        num_inference_steps: steps,
+        guidance_scale: guidance,
+        response_format: 'b64_json',
+    };
+    if (seedVal) body.seed = parseInt(seedVal);
+
+    try {
+        const resp = await fetch('/images/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            // Determine if it's a policy violation
+            let errMsg = '';
+            if (data.error) {
+                errMsg = data.error.message || JSON.stringify(data.error);
+                if (data.error.type === 'content_policy_violation' || data.error.policy_passed === false) {
+                    policyBadge.className = 'policy-badge failed';
+                    policyBadge.innerHTML = '<i class="bi bi-x-circle-fill"></i> Policy check failed';
+                }
+            } else if (data.detail) {
+                errMsg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+            } else {
+                errMsg = 'Request failed with status ' + resp.status;
+            }
+
+            overlay.style.display = 'none';
+            document.getElementById('genErrorText').textContent = errMsg;
+            document.getElementById('genError').style.display = 'block';
+            return;
+        }
+
+        // Success — policy passed
+        policyBadge.className = 'policy-badge passed';
+        policyBadge.innerHTML = '<i class="bi bi-check-circle-fill"></i> Policy check passed';
+
+        overlay.style.display = 'none';
+
+        // Display image
+        const imgData = data.data[0];
+        const imgSrc = 'data:image/png;base64,' + imgData.b64_json;
+
+        const resultImg = document.getElementById('genResultImg');
+        resultImg.src = imgSrc;
+        document.getElementById('downloadBtn').href = imgSrc;
+        document.getElementById('genResultContainer').style.display = 'block';
+
+        const elapsed = ((Date.now() - genStartTime) / 1000).toFixed(1);
+        document.getElementById('genMeta').textContent = `${size} | ${steps} steps | ${elapsed}s`;
+
+        // Save to server for gallery
+        saveToGallery(imgData.b64_json, prompt, DEFAULT_MODEL, size, steps, guidance);
+
+        // Refresh gallery
+        setTimeout(() => { historyOffset = 0; loadHistory(); }, 500);
+
+    } catch (err) {
+        overlay.style.display = 'none';
+        document.getElementById('genErrorText').textContent = 'Network error: ' + err.message;
+        document.getElementById('genError').style.display = 'block';
+    } finally {
+        clearInterval(genTimerInterval);
+        generating = false;
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-stars me-1"></i> Generate Image';
+    }
+}
+
+function updateTimer() {
+    const elapsed = Math.floor((Date.now() - genStartTime) / 1000);
+    document.getElementById('genTimer').textContent = elapsed + 's';
+
+    // Update status text based on elapsed time
+    const statusText = document.getElementById('genStatusText');
+    if (elapsed < 3) statusText.textContent = 'Evaluating content policy...';
+    else if (elapsed < 10) statusText.textContent = 'Preparing model...';
+    else if (elapsed < 30) statusText.textContent = 'Generating image...';
+    else if (elapsed < 60) statusText.textContent = 'Rendering details...';
+    else if (elapsed < 120) statusText.textContent = 'Almost there...';
+    else statusText.textContent = 'Still working (large images take longer)...';
+
+    // Update progress bar width
+    const pct = Math.min(95, (elapsed / 130) * 100);
+    document.getElementById('genProgressFill').style.width = pct + '%';
+}
+
+function copyPromptBack() {
+    document.getElementById('prompt').value = lastPrompt;
+    document.getElementById('charCount').textContent = lastPrompt.length;
+    document.getElementById('prompt').focus();
+}
+
+// ── Gallery ─────────────────────────────────────────────
+async function saveToGallery(b64Data, prompt, model, size, steps, guidance) {
+    try {
+        await fetch('/images/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_b64: b64Data, prompt, model, size, steps, guidance }),
+        });
+    } catch (e) { console.error('Failed to save to gallery:', e); }
+}
+
+async function loadHistory(append) {
+    if (!append) historyOffset = 0;
+    try {
+        const resp = await fetch(`/images/history?offset=${historyOffset}&limit=${HISTORY_LIMIT}`);
+        const data = await resp.json();
+
+        const grid = document.getElementById('galleryGrid');
+        const empty = document.getElementById('galleryEmpty');
+        const loadMore = document.getElementById('loadMoreArea');
+        const countEl = document.getElementById('historyCount');
+
+        if (!append) grid.innerHTML = '';
+
+        if (data.images.length === 0 && historyOffset === 0) {
+            empty.style.display = 'block';
+            loadMore.style.display = 'none';
+            countEl.textContent = '';
+            return;
+        }
+
+        empty.style.display = 'none';
+        countEl.textContent = data.total + ' image' + (data.total !== 1 ? 's' : '');
+
+        data.images.forEach(img => {
+            const col = document.createElement('div');
+            col.className = 'col-6 col-md-4 col-lg-3';
+            col.innerHTML = `
+                <div class="card gallery-card position-relative">
+                    <img src="/images/serve/${img.id}" alt="${escapeHtml(img.prompt)}"
+                         loading="lazy" onclick="previewImage('/images/serve/${img.id}', '${escapeHtml(img.prompt)}')">
+                    <div class="gallery-overlay d-flex justify-content-between align-items-end">
+                        <a href="/images/serve/${img.id}" download="mindrouter-${img.id}.png"
+                           class="btn btn-sm btn-light" onclick="event.stopPropagation()">
+                            <i class="bi bi-download"></i>
+                        </a>
+                        <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); confirmDelete(${img.id}, this)">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <small class="text-muted d-block text-truncate mt-1" title="${escapeHtml(img.prompt)}">${escapeHtml(img.prompt)}</small>
+                <small class="text-muted">${img.size} &middot; ${img.created}</small>
+            `;
+            grid.appendChild(col);
+        });
+
+        historyOffset += data.images.length;
+        loadMore.style.display = (historyOffset < data.total) ? 'block' : 'none';
+    } catch (e) { console.error('Failed to load history:', e); }
+}
+
+let deleteTargetId = null;
+function confirmDelete(id, btn) {
+    deleteTargetId = id;
+    new bootstrap.Modal(document.getElementById('deleteModal')).show();
+}
+document.getElementById('confirmDeleteBtn').addEventListener('click', async () => {
+    if (!deleteTargetId) return;
+    try {
+        await fetch(`/images/delete/${deleteTargetId}`, { method: 'DELETE' });
+        bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
+        historyOffset = 0;
+        loadHistory();
+    } catch (e) { console.error('Delete failed:', e); }
+});
+
+function previewImage(src, title) {
+    document.getElementById('previewImg').src = src;
+    document.getElementById('previewDownload').href = src;
+    document.getElementById('previewTitle').textContent = title || 'Image Preview';
+    new bootstrap.Modal(document.getElementById('imagePreviewModal')).show();
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML.replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+}
+
+// ── Keyboard shortcut ───────────────────────────────────
+document.getElementById('prompt').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        generateImage();
+    }
+});
+
+// ── Init ────────────────────────────────────────────────
+loadHistory();
+</script>
+{% endblock %}
