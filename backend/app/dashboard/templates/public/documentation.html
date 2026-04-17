@@ -110,7 +110,7 @@
                     <li><strong>Cross-Engine Routing</strong> &mdash; A request arriving in OpenAI, Ollama, or Anthropic format can be served by any backend. The translation layer handles all protocol conversion transparently.</li>
                     <li><strong>Fair-Share Scheduling</strong> &mdash; Weighted Deficit Round Robin (WDRR) ensures equitable GPU access across users in different groups with configurable priorities.</li>
                     <li><strong>Multi-Modal Support</strong> &mdash; Text chat, text completion, embeddings, multimodal models, structured JSON outputs, and tool calling (function calling).</li>
-                    <li><strong>Per-User Quotas</strong> &mdash; Token budgets, requests-per-minute limits, and concurrent request caps, with defaults inherited from the user's group.</li>
+                    <li><strong>Per-User Quotas</strong> &mdash; Token budgets and requests-per-minute (RPM) rate limits, with defaults inherited from the user's group. RPM enforcement is shared across all workers via Redis.</li>
                     <li><strong>Full Audit Logging</strong> &mdash; Every prompt, response, and token count is recorded for compliance and review.</li>
                     <li><strong>Real-Time GPU Telemetry</strong> &mdash; Per-GPU utilization, memory, temperature, and power metrics via lightweight sidecar agents.</li>
                     <li><strong>Web Dashboards</strong> &mdash; Public status page, user self-service dashboard, admin control panel, and built-in chat interface.</li>
@@ -863,7 +863,7 @@ message = client.messages.create(
                     <li><strong>Dark mode toggle</strong> &mdash; saved to browser localStorage, persists across sessions</li>
                     <li><strong>Live token usage</strong> &mdash; usage statistics poll every 1 second for real-time feedback without page refresh</li>
                     <li><strong>Lifetime vs rolling usage</strong> &mdash; displays both <em>Lifetime Token Usage</em> (all-time total, never resets) and <em>Current Period Usage</em> (resets when the budget period rolls over)</li>
-                    <li><strong>Quota details</strong> &mdash; current RPM limit and max concurrent requests shown in the Quota Details card</li>
+                    <li><strong>Quota details</strong> &mdash; current RPM limit shown in the Quota Details card</li>
                     <li><strong>API key expiration warnings</strong> &mdash; keys within 7 days of expiration show a yellow countdown; expired keys display an &ldquo;Expired&rdquo; badge; &ldquo;Last Used&rdquo; column shows last authentication time</li>
                 </ul>
 
@@ -1137,17 +1137,17 @@ message = client.messages.create(
                 <h3>Default Groups</h3>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
-                        <tr><th>Group</th><th>Token Budget</th><th>RPM</th><th>Max Concurrent</th><th>Sched. Weight</th><th>Role</th></tr>
+                        <tr><th>Group</th><th>Token Budget</th><th>RPM</th><th>Sched. Weight</th><th>Role</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>students</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>&mdash;</td></tr>
-                        <tr><td><code>staff</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>&mdash;</td></tr>
-                        <tr><td><code>faculty</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>&mdash;</td></tr>
-                        <tr><td><code>researchers</code></td><td>1,000,000</td><td>120</td><td>8</td><td>3</td><td>&mdash;</td></tr>
-                        <tr><td><code>admin</code></td><td>10,000,000</td><td>1,000</td><td>50</td><td>10</td><td>Admin</td></tr>
-                        <tr><td><code>auditor</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>Auditor</td></tr>
-                        <tr><td><code>nerds</code></td><td>500,000</td><td>60</td><td>4</td><td>2</td><td>&mdash;</td></tr>
-                        <tr><td><code>other</code></td><td>100,000</td><td>30</td><td>2</td><td>1</td><td>&mdash;</td></tr>
+                        <tr><td><code>students</code></td><td>100,000</td><td>30</td><td>1</td><td>&mdash;</td></tr>
+                        <tr><td><code>staff</code></td><td>500,000</td><td>60</td><td>2</td><td>&mdash;</td></tr>
+                        <tr><td><code>faculty</code></td><td>1,000,000</td><td>120</td><td>3</td><td>&mdash;</td></tr>
+                        <tr><td><code>researchers</code></td><td>1,000,000</td><td>120</td><td>3</td><td>&mdash;</td></tr>
+                        <tr><td><code>admin</code></td><td>10,000,000</td><td>1,000</td><td>10</td><td>Admin</td></tr>
+                        <tr><td><code>auditor</code></td><td>100,000</td><td>30</td><td>1</td><td>Auditor</td></tr>
+                        <tr><td><code>nerds</code></td><td>500,000</td><td>60</td><td>2</td><td>&mdash;</td></tr>
+                        <tr><td><code>other</code></td><td>100,000</td><td>30</td><td>1</td><td>&mdash;</td></tr>
                     </tbody>
                 </table>
                 <p>These 8 groups are created automatically by the database migration. Admins can create additional groups, edit defaults, or delete empty groups via the admin UI or API.</p>
@@ -1205,8 +1205,7 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                 <p>When a user is created, their quota defaults are inherited from their group. Admins can override any quota value per-user:</p>
                 <ul>
                     <li><strong>Token budget</strong> &mdash; inherited from group, overridable per user</li>
-                    <li><strong>RPM limit</strong> &mdash; inherited from group, overridable per user</li>
-                    <li><strong>Max concurrent</strong> &mdash; inherited from group, overridable per user</li>
+                    <li><strong>RPM limit</strong> &mdash; inherited from group, overridable per user or per API key</li>
                     <li><strong>Weight override</strong> &mdash; if set, overrides the group's scheduler weight for this user</li>
                 </ul>
 
@@ -1224,10 +1223,9 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                 <p>Each user has a quota record with:</p>
                 <ul>
                     <li><strong>Token budget</strong> &mdash; Total tokens allowed per period. Deducted on each completed request (prompt + completion tokens).</li>
-                    <li><strong>RPM limit</strong> &mdash; Maximum requests per minute.</li>
-                    <li><strong>Max concurrent</strong> &mdash; Maximum simultaneous in-flight requests.</li>
+                    <li><strong>RPM limit</strong> &mdash; Maximum requests per minute. Enforced cluster-wide via Redis (shared across all workers). API key overrides take precedence over the user's quota RPM.</li>
                 </ul>
-                <p>When a quota is exceeded, the request is rejected with HTTP 429.</p>
+                <p>When a quota is exceeded, the request is rejected with HTTP 429. Token budget is checked first, then RPM. If Redis is unavailable, RPM enforcement fails open (requests are allowed).</p>
 
                 <h3>Rolling Budget Period</h3>
                 <p>Token budgets use <strong>rolling 30-day windows</strong> per user, not calendar months. Usage is tracked continuously and the oldest usage falls off as the window advances.</p>
@@ -1454,11 +1452,10 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
             <!-- Rate Limiting -->
             <section id="rate-limiting">
                 <h2>Rate Limiting</h2>
-                <p><strong>Note:</strong> RPM and concurrent request rate limiting are defined in the codebase but <strong>not currently enforced</strong>. The rate limiter middleware is not registered in the application. Only token quota (monthly budget) enforcement is active, returning HTTP 429 when the token budget is exceeded.</p>
+                <p>MindRouter enforces two types of rate limits. Both return HTTP 429 when exceeded &mdash; clients should implement exponential backoff.</p>
                 <ul>
-                    <li><strong>Requests per minute (RPM)</strong> &mdash; Configurable per group but not yet enforced at runtime.</li>
-                    <li><strong>Concurrent request cap</strong> &mdash; Configurable per group but not yet enforced at runtime.</li>
-                    <li><strong>Token quota (active)</strong> &mdash; Monthly token budget is enforced. Returns HTTP 429 when exceeded. Clients should implement exponential backoff.</li>
+                    <li><strong>Token quota</strong> &mdash; Rolling token budget per user (period defaults to 30 days). When the budget is exhausted, all requests are rejected until the period resets. Configured per group, overridable per user.</li>
+                    <li><strong>Requests per minute (RPM)</strong> &mdash; Enforced cluster-wide via Redis using an atomic INCR + EXPIRE counter with a 60-second sliding window. The limit is shared across all application workers, so a user configured for 120 RPM gets exactly 120 RPM regardless of which worker handles the request. Configured per group, overridable per user or per API key. If Redis is unavailable, RPM enforcement fails open (requests are allowed).</li>
                 </ul>
             </section>
 
@@ -1842,7 +1839,8 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                 <ul>
                     <li><strong>Inflight streaming token counting</strong> &mdash; Atomically tracks tokens currently being streamed across all workers, enabling accurate real-time throughput metrics.</li>
                     <li><strong>Per-user quota token caching</strong> &mdash; Caches per-user token counters (<code>quota:tokens:{user_id}</code>) for fast atomic increments without hitting the database on every request.</li>
-                    <li><strong>Graceful degradation</strong> &mdash; All features that depend on Redis continue to work without it. Quota enforcement falls back to database queries, and inflight token counts default to zero. No functionality is lost; only caching benefits are reduced.</li>
+                    <li><strong>RPM rate limiting</strong> &mdash; Cluster-wide requests-per-minute enforcement via atomic INCR + EXPIRE counters (<code>rpm:user:{user_id}</code>) with a 60-second sliding window. Shared across all workers.</li>
+                    <li><strong>Graceful degradation</strong> &mdash; All features that depend on Redis continue to work without it. Token quota enforcement falls back to database queries, RPM enforcement fails open (requests are allowed), and inflight token counts default to zero. No functionality is lost; only caching and rate limiting benefits are reduced.</li>
                 </ul>
             </section>
 
@@ -2304,10 +2302,6 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>DEFAULT_RPM_STAFF</code></td><td>int</td><td><code>60</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
                         <tr><td><code>DEFAULT_RPM_FACULTY</code></td><td>int</td><td><code>120</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
                         <tr><td><code>DEFAULT_RPM_ADMIN</code></td><td>int</td><td><code>1000</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
-                        <tr><td><code>DEFAULT_MAX_CONCURRENT_STUDENT</code></td><td>int</td><td><code>2</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
-                        <tr><td><code>DEFAULT_MAX_CONCURRENT_STAFF</code></td><td>int</td><td><code>4</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
-                        <tr><td><code>DEFAULT_MAX_CONCURRENT_FACULTY</code></td><td>int</td><td><code>8</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
-                        <tr><td><code>DEFAULT_MAX_CONCURRENT_ADMIN</code></td><td>int</td><td><code>50</code></td><td><em>Deprecated</em> &mdash; use group defaults</td></tr>
                     </tbody>
                 </table>
 
