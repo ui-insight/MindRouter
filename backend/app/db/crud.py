@@ -1220,7 +1220,11 @@ async def upsert_model(
 
     if model:
         # UPDATE existing model record
-        model.modality = modality
+        # Preserve existing non-default modality if discovery passes the
+        # default CHAT — prevents overwriting admin-set modalities like
+        # IMAGE_GENERATION that discovery heuristics don't detect.
+        if modality != Modality.CHAT or model.modality == Modality.CHAT:
+            model.modality = modality
         model.context_length = model.context_length_override if model.context_length_override is not None else (context_length if context_length is not None else model.context_length)
         model.model_max_context = model_max_context if model_max_context is not None else model.model_max_context
         model.supports_multimodal = effective_multimodal

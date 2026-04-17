@@ -1109,13 +1109,16 @@ class BackendRegistry:
                             # Update models
                             discovered_names = []
                             for model_info in caps.models:
-                                modality = Modality.CHAT
-                                if model_info.supports_multimodal:
+                                if backend.engine == BackendEngine.DIFFUSION:
+                                    modality = Modality.IMAGE_GENERATION
+                                elif model_info.supports_multimodal:
                                     modality = Modality.MULTIMODAL
                                 elif "rerank" in model_info.name.lower():
                                     modality = Modality.RERANKING
                                 elif "embed" in model_info.name.lower():
                                     modality = Modality.EMBEDDING
+                                else:
+                                    modality = Modality.CHAT
 
                                 # Serialize capabilities list to JSON string for DB
                                 caps_json = None
