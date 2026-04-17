@@ -224,6 +224,13 @@ class ApiKey(Base, TimestampMixin):
     revocation_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     revocation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Archived token offsets — retention rolls up per-key totals here
+    # before deleting old requests, so lifetime counters stay accurate.
+    archived_total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_prompt_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_completion_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    archived_request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="api_keys", foreign_keys=[user_id])
     promoted_by_user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[promoted_by])

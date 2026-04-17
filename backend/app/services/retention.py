@@ -302,6 +302,39 @@ async def _snapshot_request_aggregates(
             },
         )
 
+    # Per-api-key aggregates → api_keys.archived_*
+    key_agg = await db.execute(
+        text(
+            "SELECT api_key_id,"
+            " COALESCE(SUM(total_tokens), 0),"
+            " COALESCE(SUM(prompt_tokens), 0),"
+            " COALESCE(SUM(completion_tokens), 0),"
+            " COUNT(*)"
+            " FROM requests"
+            " WHERE id IN :ids AND api_key_id IS NOT NULL"
+            " GROUP BY api_key_id"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": request_ids},
+    )
+    for key_id, total_tok, prompt_tok, comp_tok, req_count in key_agg.all():
+        await db.execute(
+            text(
+                "UPDATE api_keys SET"
+                " archived_total_tokens = archived_total_tokens + :total_tok,"
+                " archived_prompt_tokens = archived_prompt_tokens + :prompt_tok,"
+                " archived_completion_tokens = archived_completion_tokens + :comp_tok,"
+                " archived_request_count = archived_request_count + :req_count"
+                " WHERE id = :key_id"
+            ),
+            {
+                "key_id": key_id,
+                "total_tok": int(total_tok),
+                "prompt_tok": int(prompt_tok),
+                "comp_tok": int(comp_tok),
+                "req_count": int(req_count),
+            },
+        )
+
 
 # ------------------------------------------------------------------
 # Tier 1: archive + delete from app DB

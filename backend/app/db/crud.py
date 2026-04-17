@@ -409,11 +409,17 @@ async def get_api_key_token_totals(
 ) -> dict:
     """Get token totals for a list of API key IDs.
 
+    Merges live sums from ``requests`` with archived offsets stored on
+    ``api_keys`` so that lifetime counters stay correct after retention
+    deletes old rows.
+
     Returns {api_key_id: {prompt_tokens, completion_tokens, total_tokens}}.
     """
     if not api_key_ids:
         return {}
-    result = await db.execute(
+
+    # Live totals from requests table
+    live_result = await db.execute(
         select(
             Request.api_key_id,
             func.coalesce(func.sum(Request.prompt_tokens), 0),
@@ -423,14 +429,27 @@ async def get_api_key_token_totals(
         .where(Request.api_key_id.in_(api_key_ids), Request.total_tokens.isnot(None))
         .group_by(Request.api_key_id)
     )
-    return {
-        row[0]: {
-            "prompt_tokens": int(row[1]),
-            "completion_tokens": int(row[2]),
-            "total_tokens": int(row[3]),
+    live_map = {row[0]: (int(row[1]), int(row[2]), int(row[3])) for row in live_result.all()}
+
+    # Archived offsets from api_keys
+    arch_result = await db.execute(
+        select(
+            ApiKey.id,
+            ApiKey.archived_prompt_tokens,
+            ApiKey.archived_completion_tokens,
+            ApiKey.archived_total_tokens,
+        ).where(ApiKey.id.in_(api_key_ids))
+    )
+
+    merged: dict = {}
+    for kid, a_p, a_c, a_t in arch_result.all():
+        l_p, l_c, l_t = live_map.get(kid, (0, 0, 0))
+        merged[kid] = {
+            "prompt_tokens": l_p + int(a_p),
+            "completion_tokens": l_c + int(a_c),
+            "total_tokens": l_t + int(a_t),
         }
-        for row in result.all()
-    }
+    return merged
 
 
 async def get_model_token_totals(
