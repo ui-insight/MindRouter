@@ -821,7 +821,11 @@ class InferenceService:
 
         response_format = None
         if hasattr(request, "response_format") and request.response_format:
-            response_format = request.response_format.model_dump()
+            rf = request.response_format
+            if hasattr(rf, "model_dump"):
+                response_format = rf.model_dump()
+            else:
+                response_format = {"type": str(rf)}
 
         db_request = await crud.create_request(
             db=self.db,
