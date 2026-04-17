@@ -636,11 +636,11 @@ function updateTimer() {
     const statusText = document.getElementById('genStatusText');
     // Only update if we're past the policy check phase
     if (statusText.textContent !== 'Evaluating content policy...') {
-        if (elapsed < 10) statusText.textContent = 'Generating image...';
-        else if (elapsed < 30) statusText.textContent = 'Rendering details...';
-        else if (elapsed < 60) statusText.textContent = 'Almost there...';
-        else if (elapsed < 120) statusText.textContent = 'Still working (large images take longer)...';
-        else statusText.textContent = 'This is taking a while — hang tight...';
+        if (elapsed < 8) statusText.textContent = 'Generating image...';
+        else if (elapsed < 25) statusText.textContent = 'Running diffusion model...';
+        else if (elapsed < 45) statusText.textContent = 'Rendering details — this can take a minute...';
+        else if (elapsed < 75) statusText.textContent = 'Still working — you may be queued behind other requests...';
+        else statusText.textContent = 'Waiting for GPU availability — hang tight...';
     }
 
     // Update progress bar width
