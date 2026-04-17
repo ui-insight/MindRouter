@@ -552,9 +552,11 @@ async function generateImage() {
         if (!resp.ok) {
             // Determine if it's a policy violation
             let errMsg = '';
+            let isPolicyFail = false;
             if (data.error) {
                 errMsg = data.error.message || JSON.stringify(data.error);
                 if (data.error.type === 'content_policy_violation' || data.error.policy_passed === false) {
+                    isPolicyFail = true;
                     policyBadge.className = 'policy-badge failed';
                     policyBadge.innerHTML = '<i class="bi bi-x-circle-fill"></i> Policy check failed';
                 }
@@ -562,6 +564,12 @@ async function generateImage() {
                 errMsg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
             } else {
                 errMsg = 'Request failed with status ' + resp.status;
+            }
+
+            // Clear policy spinner on non-policy errors
+            if (!isPolicyFail) {
+                policyBadge.className = 'policy-badge failed';
+                policyBadge.innerHTML = '<i class="bi bi-exclamation-triangle-fill"></i> Error';
             }
 
             overlay.style.display = 'none';
@@ -596,6 +604,8 @@ async function generateImage() {
 
     } catch (err) {
         overlay.style.display = 'none';
+        policyBadge.className = 'policy-badge failed';
+        policyBadge.innerHTML = '<i class="bi bi-exclamation-triangle-fill"></i> Error';
         document.getElementById('genErrorText').textContent = 'Network error: ' + err.message;
         document.getElementById('genError').style.display = 'block';
     } finally {

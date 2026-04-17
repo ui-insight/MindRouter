@@ -252,7 +252,7 @@ async def images_api_generate(
         canonical.policy_verdict = body["_policy_verdict"]
 
     # Call inference service
-    svc = InferenceService()
+    svc = InferenceService(db)
     try:
         result = await svc.image_generation(canonical, user, api_key, request)
     except HTTPException as exc:
