@@ -729,6 +729,21 @@ class InferenceService:
                 detail="Token quota exceeded",
             )
 
+        # RPM rate limit (Redis-backed, shared across all workers)
+        rpm_limit = 0
+        if api_key and api_key.rpm_limit:
+            rpm_limit = api_key.rpm_limit
+        elif quota:
+            rpm_limit = quota.rpm_limit
+        if rpm_limit > 0:
+            from backend.app.core.redis_client import check_rpm
+            allowed, current = await check_rpm(f"user:{user.id}", rpm_limit)
+            if not allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Rate limit exceeded: {rpm_limit} requests per minute (current: {current})",
+                )
+
     async def _create_request_record(
         self,
         request: Any,

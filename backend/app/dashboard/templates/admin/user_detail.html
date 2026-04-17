@@ -122,10 +122,6 @@
                                             <input type="number" class="form-control" id="rpm_limit" name="rpm_limit" value="{{ stats.quota.rpm_limit }}">
                                         </div>
                                         <div class="col-md-6 mb-3">
-                                            <label for="max_concurrent" class="form-label">Max Concurrent</label>
-                                            <input type="number" class="form-control" id="max_concurrent" name="max_concurrent" value="{{ stats.quota.max_concurrent }}">
-                                        </div>
-                                        <div class="col-md-6 mb-3">
                                             <label for="weight_override" class="form-label">Weight Override</label>
                                             <input type="number" class="form-control" id="weight_override" name="weight_override" value="{{ stats.quota.weight_override or '' }}" placeholder="Leave blank for group default">
                                         </div>

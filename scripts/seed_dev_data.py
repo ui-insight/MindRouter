@@ -33,19 +33,19 @@ async def ensure_groups(db):
     """Ensure default groups exist (migration may have already created them)."""
     default_groups = [
         {"name": "students", "display_name": "Students", "description": "University students",
-         "token_budget": 100000, "rpm_limit": 30, "max_concurrent": 2, "scheduler_weight": 1, "is_admin": False},
+         "token_budget": 100000, "rpm_limit": 30, "scheduler_weight": 1, "is_admin": False},
         {"name": "staff", "display_name": "Staff", "description": "University staff",
-         "token_budget": 500000, "rpm_limit": 60, "max_concurrent": 4, "scheduler_weight": 2, "is_admin": False},
+         "token_budget": 500000, "rpm_limit": 60, "scheduler_weight": 2, "is_admin": False},
         {"name": "faculty", "display_name": "Faculty", "description": "University faculty members",
-         "token_budget": 1000000, "rpm_limit": 120, "max_concurrent": 8, "scheduler_weight": 3, "is_admin": False},
+         "token_budget": 1000000, "rpm_limit": 120, "scheduler_weight": 3, "is_admin": False},
         {"name": "researchers", "display_name": "Researchers", "description": "Research group members",
-         "token_budget": 1000000, "rpm_limit": 120, "max_concurrent": 8, "scheduler_weight": 3, "is_admin": False},
+         "token_budget": 1000000, "rpm_limit": 120, "scheduler_weight": 3, "is_admin": False},
         {"name": "admin", "display_name": "Admin", "description": "System administrators",
-         "token_budget": 10000000, "rpm_limit": 1000, "max_concurrent": 50, "scheduler_weight": 10, "is_admin": True},
+         "token_budget": 10000000, "rpm_limit": 1000, "scheduler_weight": 10, "is_admin": True},
         {"name": "nerds", "display_name": "Nerds", "description": "Power users and enthusiasts",
-         "token_budget": 500000, "rpm_limit": 60, "max_concurrent": 4, "scheduler_weight": 2, "is_admin": False},
+         "token_budget": 500000, "rpm_limit": 60, "scheduler_weight": 2, "is_admin": False},
         {"name": "other", "display_name": "Other", "description": "General users",
-         "token_budget": 100000, "rpm_limit": 30, "max_concurrent": 2, "scheduler_weight": 1, "is_admin": False},
+         "token_budget": 100000, "rpm_limit": 30, "scheduler_weight": 1, "is_admin": False},
     ]
 
     groups = {}
@@ -106,9 +106,7 @@ async def seed_users():
             await crud.create_quota(
                 db=db,
                 user_id=user.id,
-                token_budget=group.token_budget,
                 rpm_limit=group.rpm_limit,
-                max_concurrent=group.max_concurrent,
             )
             print(f"  Created quota: {group.token_budget} tokens")
 

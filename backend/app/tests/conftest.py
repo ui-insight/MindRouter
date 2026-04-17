@@ -202,7 +202,6 @@ def mock_group():
     group.display_name = "Faculty"
     group.token_budget = 1000000
     group.rpm_limit = 120
-    group.max_concurrent = 8
     group.scheduler_weight = 3
     group.is_admin = False
     return group
@@ -217,7 +216,6 @@ def mock_admin_group():
     group.display_name = "Admin"
     group.token_budget = 10000000
     group.rpm_limit = 1000
-    group.max_concurrent = 50
     group.scheduler_weight = 10
     group.is_admin = True
     return group
@@ -271,7 +269,6 @@ def mock_quota():
     quota.budget_period_start = datetime.now(timezone.utc)
     quota.budget_period_days = 30
     quota.rpm_limit = 60
-    quota.max_concurrent = 5
     quota.weight_override = None
 
     return quota

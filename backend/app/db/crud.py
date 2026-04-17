@@ -78,7 +78,6 @@ async def create_group(
     description: Optional[str] = None,
     token_budget: int = 100000,
     rpm_limit: int = 30,
-    max_concurrent: int = 2,
     scheduler_weight: int = 1,
     is_admin: bool = False,
     is_auditor: bool = False,
@@ -92,7 +91,6 @@ async def create_group(
         description=description,
         token_budget=token_budget,
         rpm_limit=rpm_limit,
-        max_concurrent=max_concurrent,
         scheduler_weight=scheduler_weight,
         is_admin=is_admin,
         is_auditor=is_auditor,
@@ -148,8 +146,6 @@ async def update_group(db: AsyncSession, group_id: int, **kwargs) -> Optional[Gr
     quota_fields = {}
     if "rpm_limit" in kwargs:
         quota_fields["rpm_limit"] = kwargs["rpm_limit"]
-    if "max_concurrent" in kwargs:
-        quota_fields["max_concurrent"] = kwargs["max_concurrent"]
     if quota_fields:
         user_ids = select(User.id).where(User.group_id == group_id)
         await db.execute(
@@ -658,13 +654,11 @@ async def create_quota(
     db: AsyncSession,
     user_id: int,
     rpm_limit: int,
-    max_concurrent: int,
 ) -> Quota:
     """Create quota for a user and initialise Redis counter to 0."""
     quota = Quota(
         user_id=user_id,
         rpm_limit=rpm_limit,
-        max_concurrent=max_concurrent,
     )
     db.add(quota)
     await db.flush()

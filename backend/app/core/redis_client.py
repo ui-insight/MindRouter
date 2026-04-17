@@ -228,3 +228,44 @@ async def seed_cluster_tokens(
         await pipe.execute()
     except Exception:
         logger.exception("redis_seed_cluster_tokens_failed")
+
+
+# ------------------------------------------------------------------
+# RPM rate limiting (shared across all workers via Redis)
+# ------------------------------------------------------------------
+
+_RPM_KEY_PREFIX = "rpm:"
+_RPM_WINDOW_SECONDS = 60
+
+
+async def check_rpm(key: str, rpm_limit: int) -> tuple[bool, int]:
+    """Check whether a request is allowed under the RPM limit.
+
+    Uses INCR + EXPIRE for a fixed 60-second sliding window.
+    Fail-open: if Redis is unavailable the request is allowed.
+
+    Args:
+        key: Rate limit key (e.g., ``"user:123"``).
+        rpm_limit: Maximum requests allowed per 60-second window.
+
+    Returns:
+        ``(allowed, current_count)``  — *current_count* includes this
+        request if allowed.
+    """
+    if not _available or not _redis or rpm_limit <= 0:
+        return True, 0
+    try:
+        redis_key = f"{_RPM_KEY_PREFIX}{key}"
+        pipe = _redis.pipeline(transaction=True)
+        pipe.incr(redis_key)
+        pipe.expire(redis_key, _RPM_WINDOW_SECONDS)
+        results = await pipe.execute()
+        current = int(results[0])
+        if current > rpm_limit:
+            # Over limit — decrement back so the window stays accurate
+            await _redis.decr(redis_key)
+            return False, current - 1
+        return True, current
+    except Exception:
+        logger.exception("redis_check_rpm_failed", key=key)
+        return True, 0  # fail-open

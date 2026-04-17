@@ -2924,7 +2924,6 @@ async def create_group(
     description: Optional[str] = Form(None),
     token_budget: int = Form(100000),
     rpm_limit: int = Form(30),
-    max_concurrent: int = Form(2),
     scheduler_weight: int = Form(1),
     is_admin: Optional[str] = Form(None),
     is_auditor: Optional[str] = Form(None),
@@ -2953,7 +2952,6 @@ async def create_group(
             description=description if description else None,
             token_budget=token_budget,
             rpm_limit=rpm_limit,
-            max_concurrent=max_concurrent,
             scheduler_weight=scheduler_weight,
             is_admin=(is_admin == "on"),
             is_auditor=(is_auditor == "on"),
@@ -2980,7 +2978,6 @@ async def edit_group(
     description: Optional[str] = Form(None),
     token_budget: int = Form(100000),
     rpm_limit: int = Form(30),
-    max_concurrent: int = Form(2),
     scheduler_weight: int = Form(1),
     is_admin: Optional[str] = Form(None),
     is_auditor: Optional[str] = Form(None),
@@ -3004,7 +3001,6 @@ async def edit_group(
             description=description if description else None,
             token_budget=token_budget,
             rpm_limit=rpm_limit,
-            max_concurrent=max_concurrent,
             scheduler_weight=scheduler_weight,
             is_admin=(is_admin == "on"),
             is_auditor=(is_auditor == "on"),
@@ -3108,7 +3104,6 @@ async def edit_user(
     department: Optional[str] = Form(None),
     intended_use: Optional[str] = Form(None),
     rpm_limit: Optional[int] = Form(None),
-    max_concurrent: Optional[int] = Form(None),
     weight_override: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_async_db),
 ):
@@ -3137,8 +3132,6 @@ async def edit_user(
         if quota:
             if rpm_limit is not None:
                 quota.rpm_limit = rpm_limit
-            if max_concurrent is not None:
-                quota.max_concurrent = max_concurrent
             quota.weight_override = int(weight_override) if weight_override and weight_override.strip() else None
             await db.flush()
 

@@ -96,22 +96,18 @@ class Settings(BaseSettings):
     # Default Quotas - per role (deprecated: use Group DB defaults instead)
     default_token_budget_student: int = 100000
     default_rpm_student: int = 30
-    default_max_concurrent_student: int = 2
 
     # Default Quotas - Staff
     default_token_budget_staff: int = 500000
     default_rpm_staff: int = 60
-    default_max_concurrent_staff: int = 4
 
     # Default Quotas - Faculty
     default_token_budget_faculty: int = 1000000
     default_rpm_faculty: int = 120
-    default_max_concurrent_faculty: int = 8
 
     # Default Quotas - Admin
     default_token_budget_admin: int = 10000000
     default_rpm_admin: int = 1000
-    default_max_concurrent_admin: int = 50
 
     # Scheduler Weights (deprecated: use Group.scheduler_weight instead)
     scheduler_weight_student: int = 1
@@ -217,7 +213,6 @@ class Settings(BaseSettings):
         return {
             "token_budget": getattr(self, f"default_token_budget_{role_lower}", 100000),
             "rpm": getattr(self, f"default_rpm_{role_lower}", 30),
-            "max_concurrent": getattr(self, f"default_max_concurrent_{role_lower}", 2),
         }
 
     def get_scheduler_weight(self, role: str) -> int:

@@ -55,8 +55,6 @@
                                 <dd class="col-6">{% if group.token_budget == 0 %}<span class="badge bg-info">Unlimited</span>{% else %}{{ "{:,}".format(group.token_budget) }}{% endif %}</dd>
                                 <dt class="col-6">RPM Limit</dt>
                                 <dd class="col-6">{{ group.rpm_limit }}</dd>
-                                <dt class="col-6">Max Concurrent</dt>
-                                <dd class="col-6">{{ group.max_concurrent }}</dd>
                                 <dt class="col-6">Sched. Weight</dt>
                                 <dd class="col-6">{{ group.scheduler_weight }}</dd>
                                 <dt class="col-6">Key Expiry</dt>
@@ -107,10 +105,6 @@
                                         <div class="col-6 mb-2">
                                             <label class="form-label small">RPM Limit</label>
                                             <input type="number" class="form-control form-control-sm" name="rpm_limit" value="{{ group.rpm_limit }}">
-                                        </div>
-                                        <div class="col-6 mb-2">
-                                            <label class="form-label small">Max Concurrent</label>
-                                            <input type="number" class="form-control form-control-sm" name="max_concurrent" value="{{ group.max_concurrent }}">
                                         </div>
                                         <div class="col-6 mb-2">
                                             <label class="form-label small">Sched. Weight</label>
@@ -181,10 +175,6 @@
                         <div class="col-6 mb-3">
                             <label for="rpm_limit" class="form-label">RPM Limit</label>
                             <input type="number" class="form-control" id="rpm_limit" name="rpm_limit" value="30">
-                        </div>
-                        <div class="col-6 mb-3">
-                            <label for="max_concurrent" class="form-label">Max Concurrent</label>
-                            <input type="number" class="form-control" id="max_concurrent" name="max_concurrent" value="2">
                         </div>
                         <div class="col-6 mb-3">
                             <label for="scheduler_weight" class="form-label">Scheduler Weight</label>

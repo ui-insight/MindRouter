@@ -35,15 +35,13 @@ class TestQuotaModel:
         assert quota.tokens_used == 0
 
     def test_quota_with_custom_limits(self):
-        """Test quota with custom RPM and concurrent limits."""
+        """Test quota with custom RPM limit."""
         quota = Quota(
             user_id=1,
             rpm_limit=60,
-            max_concurrent=5,
         )
 
         assert quota.rpm_limit == 60
-        assert quota.max_concurrent == 5
 
 
 class TestQuotaAccounting:
@@ -148,22 +146,18 @@ class TestRoleLimits:
             UserRole.STUDENT: {
                 "token_budget": 100000,
                 "rpm_limit": 20,
-                "max_concurrent": 2,
             },
             UserRole.STAFF: {
                 "token_budget": 500000,
                 "rpm_limit": 30,
-                "max_concurrent": 3,
             },
             UserRole.FACULTY: {
                 "token_budget": 1000000,
                 "rpm_limit": 60,
-                "max_concurrent": 5,
             },
             UserRole.ADMIN: {
                 "token_budget": 10000000,
                 "rpm_limit": 120,
-                "max_concurrent": 10,
             },
         }
 
@@ -172,21 +166,18 @@ class TestRoleLimits:
         limits = default_quotas[UserRole.STUDENT]
         assert limits["token_budget"] == 100000
         assert limits["rpm_limit"] == 20
-        assert limits["max_concurrent"] == 2
 
     def test_faculty_defaults(self, default_quotas):
         """Test faculty default quotas."""
         limits = default_quotas[UserRole.FACULTY]
         assert limits["token_budget"] == 1000000
         assert limits["rpm_limit"] == 60
-        assert limits["max_concurrent"] == 5
 
     def test_admin_defaults(self, default_quotas):
         """Test admin default quotas."""
         limits = default_quotas[UserRole.ADMIN]
         assert limits["token_budget"] == 10000000
         assert limits["rpm_limit"] == 120
-        assert limits["max_concurrent"] == 10
 
     def test_role_hierarchy(self, default_quotas):
         """Test that higher roles have higher limits."""
@@ -211,49 +202,42 @@ class TestGroupLimits:
             "students": {
                 "token_budget": 100000,
                 "rpm_limit": 30,
-                "max_concurrent": 2,
                 "scheduler_weight": 1,
                 "is_admin": False,
             },
             "staff": {
                 "token_budget": 500000,
                 "rpm_limit": 60,
-                "max_concurrent": 4,
                 "scheduler_weight": 2,
                 "is_admin": False,
             },
             "faculty": {
                 "token_budget": 1000000,
                 "rpm_limit": 120,
-                "max_concurrent": 8,
                 "scheduler_weight": 3,
                 "is_admin": False,
             },
             "researchers": {
                 "token_budget": 1000000,
                 "rpm_limit": 120,
-                "max_concurrent": 8,
                 "scheduler_weight": 3,
                 "is_admin": False,
             },
             "admin": {
                 "token_budget": 10000000,
                 "rpm_limit": 1000,
-                "max_concurrent": 50,
                 "scheduler_weight": 10,
                 "is_admin": True,
             },
             "nerds": {
                 "token_budget": 500000,
                 "rpm_limit": 60,
-                "max_concurrent": 4,
                 "scheduler_weight": 2,
                 "is_admin": False,
             },
             "other": {
                 "token_budget": 100000,
                 "rpm_limit": 30,
-                "max_concurrent": 2,
                 "scheduler_weight": 1,
                 "is_admin": False,
             },
@@ -264,7 +248,6 @@ class TestGroupLimits:
         limits = default_group_quotas["students"]
         assert limits["token_budget"] == 100000
         assert limits["rpm_limit"] == 30
-        assert limits["max_concurrent"] == 2
         assert limits["scheduler_weight"] == 1
         assert limits["is_admin"] is False
 
@@ -273,7 +256,6 @@ class TestGroupLimits:
         limits = default_group_quotas["faculty"]
         assert limits["token_budget"] == 1000000
         assert limits["rpm_limit"] == 120
-        assert limits["max_concurrent"] == 8
         assert limits["scheduler_weight"] == 3
 
     def test_admin_defaults(self, default_group_quotas):
@@ -281,7 +263,6 @@ class TestGroupLimits:
         limits = default_group_quotas["admin"]
         assert limits["token_budget"] == 10000000
         assert limits["rpm_limit"] == 1000
-        assert limits["max_concurrent"] == 50
         assert limits["scheduler_weight"] == 10
         assert limits["is_admin"] is True
 
@@ -346,23 +327,6 @@ class TestQuotaCheckLogic:
         # With budget=0, the check should be skipped (budget > 0 is false)
         should_block = group_budget > 0 and quota.tokens_used >= group_budget
         assert should_block is False
-
-    def test_check_concurrent_limit_ok(self):
-        """Test concurrent request check passes."""
-        max_concurrent = 5
-        current_concurrent = 3
-
-        can_proceed = current_concurrent < max_concurrent
-        assert can_proceed is True
-
-    def test_check_concurrent_limit_exceeded(self):
-        """Test concurrent request check fails at limit."""
-        max_concurrent = 5
-        current_concurrent = 5
-
-        can_proceed = current_concurrent < max_concurrent
-        assert can_proceed is False
-
 
 class TestUsageTracking:
     """Tests for usage tracking logic."""

@@ -128,7 +128,6 @@ class Group(Base, TimestampMixin):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     token_budget: Mapped[int] = mapped_column(BigInteger, nullable=False, default=100000)
     rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
-    max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     scheduler_weight: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_auditor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -211,7 +210,6 @@ class ApiKey(Base, TimestampMixin):
 
     # Rate limiting overrides (null = use quota defaults)
     rpm_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    max_concurrent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Service key fields
     is_service: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -262,7 +260,6 @@ class Quota(Base, TimestampMixin):
 
     # Rate limits
     rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
-    max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
 
     # Scheduler weight override (null = use role default)
     weight_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

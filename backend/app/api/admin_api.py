@@ -1455,7 +1455,6 @@ async def create_user(
         db,
         user_id=user.id,
         rpm_limit=group.rpm_limit,
-        max_concurrent=group.max_concurrent,
     )
 
     await crud.log_admin_action(
@@ -1653,7 +1652,6 @@ async def get_user_detail(
             "tokens_used": stats["quota"].tokens_used,
             "lifetime_tokens_used": stats["quota"].lifetime_tokens_used,
             "rpm_limit": stats["quota"].rpm_limit,
-            "max_concurrent": stats["quota"].max_concurrent,
             "weight_override": stats["quota"].weight_override,
         } if stats["quota"] else None,
         "api_keys": [
@@ -1740,7 +1738,6 @@ class CreateGroupRequest(BaseModel):
     description: Optional[str] = None
     token_budget: int = Field(default=100000, ge=0)
     rpm_limit: int = Field(default=30, ge=1)
-    max_concurrent: int = Field(default=2, ge=1)
     scheduler_weight: int = Field(default=1, ge=1)
     is_admin: bool = False
     is_auditor: bool = False
@@ -1752,7 +1749,6 @@ class UpdateGroupRequest(BaseModel):
     description: Optional[str] = None
     token_budget: Optional[int] = Field(None, ge=0)
     rpm_limit: Optional[int] = Field(None, ge=1)
-    max_concurrent: Optional[int] = Field(None, ge=1)
     scheduler_weight: Optional[int] = Field(None, ge=1)
     is_admin: Optional[bool] = None
     is_auditor: Optional[bool] = None
@@ -1774,7 +1770,6 @@ async def list_groups(
                 "description": g.description,
                 "token_budget": g.token_budget,
                 "rpm_limit": g.rpm_limit,
-                "max_concurrent": g.max_concurrent,
                 "scheduler_weight": g.scheduler_weight,
                 "is_admin": g.is_admin,
                 "is_auditor": g.is_auditor,
@@ -1807,7 +1802,6 @@ async def create_group(
         description=request.description,
         token_budget=request.token_budget,
         rpm_limit=request.rpm_limit,
-        max_concurrent=request.max_concurrent,
         scheduler_weight=request.scheduler_weight,
         is_admin=request.is_admin,
         is_auditor=request.is_auditor,

@@ -47,7 +47,7 @@ class TTSRequest(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-async def _check_quota(db: AsyncSession, user: User):
+async def _check_quota(db: AsyncSession, user: User, api_key: ApiKey = None):
     """Check if user has sufficient quota."""
     await crud.reset_quota_if_needed(db, user.id)
     quota = await crud.get_user_quota(db, user.id)
@@ -57,6 +57,21 @@ async def _check_quota(db: AsyncSession, user: User):
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Token quota exceeded",
         )
+
+    # RPM rate limit (Redis-backed, shared across all workers)
+    rpm_limit = 0
+    if api_key and api_key.rpm_limit:
+        rpm_limit = api_key.rpm_limit
+    elif quota:
+        rpm_limit = quota.rpm_limit
+    if rpm_limit > 0:
+        from backend.app.core.redis_client import check_rpm
+        allowed, current = await check_rpm(f"user:{user.id}", rpm_limit)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded: {rpm_limit} requests per minute (current: {current})",
+            )
 
 
 async def _record_and_complete(
@@ -121,7 +136,7 @@ async def tts_speech(
     """
     user, api_key = auth
 
-    await _check_quota(db, user)
+    await _check_quota(db, user, api_key)
 
     if not body.input.strip():
         raise HTTPException(status_code=400, detail="No text provided")
@@ -203,7 +218,7 @@ async def stt_transcriptions(
     """
     user, api_key = auth
 
-    await _check_quota(db, user)
+    await _check_quota(db, user, api_key)
 
     # Read STT config from DB (same as chat.py)
     stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
