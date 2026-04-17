@@ -27,6 +27,7 @@ from backend.app.api.auth import authenticate_request, get_current_api_key
 from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
     CanonicalEmbeddingRequest,
+    CanonicalImageRequest,
     CanonicalRerankRequest,
     CanonicalScoreRequest,
 )
@@ -667,3 +668,82 @@ async def ocrmd(
         return PlainTextResponse(str(e), status_code=501)
 
     return PlainTextResponse(result["content"], media_type="text/markdown")
+
+
+@router.post("/images/generations")
+async def image_generations(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """
+    OpenAI-compatible image generation endpoint.
+
+    Routes to diffusion backends (e.g. FLUX via openedai-images-flux).
+    """
+    user, api_key = auth
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body",
+        )
+
+    request_id = f"img-{uuid.uuid4().hex[:24]}"
+    bind_request_context(request_id=request_id, user_id=user.id)
+
+    # Validate required fields
+    if not body.get("prompt"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="'prompt' is required",
+        )
+    if not body.get("model"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="'model' is required",
+        )
+
+    # Build canonical request
+    try:
+        canonical = CanonicalImageRequest(
+            model=body["model"],
+            prompt=body["prompt"],
+            n=body.get("n", 1),
+            size=body.get("size", "1024x1024"),
+            quality=body.get("quality", "standard"),
+            style=body.get("style"),
+            response_format=body.get("response_format", "url"),
+            num_inference_steps=body.get("num_inference_steps"),
+            guidance_scale=body.get("guidance_scale"),
+            seed=body.get("seed"),
+            user=body.get("user"),
+            request_id=request_id,
+            user_id=user.id,
+            api_key_id=api_key.id,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid request format: {str(e)}",
+        )
+
+    # Early model validation
+    registry = get_registry()
+    if not await registry.model_exists(canonical.model):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": {
+                    "message": f"The model '{canonical.model}' does not exist",
+                    "type": "invalid_request_error",
+                    "code": "model_not_found",
+                }
+            },
+        )
+
+    service = InferenceService(db)
+    response = await service.image_generation(canonical, user, api_key, request)
+    return response

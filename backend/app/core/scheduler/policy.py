@@ -23,6 +23,7 @@ from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
     CanonicalCompletionRequest,
     CanonicalEmbeddingRequest,
+    CanonicalImageRequest,
     CanonicalRerankRequest,
     CanonicalScoreRequest,
 )
@@ -227,6 +228,31 @@ class SchedulerPolicy:
             requires_multimodal=False,
             requires_structured_output=False,
             estimated_prompt_tokens=estimated_tokens,
+            estimated_completion_tokens=0,
+            request_data=request.model_dump(),
+        )
+
+    def create_job_from_image_request(
+        self,
+        request: CanonicalImageRequest,
+        user_id: int,
+        api_key_id: int,
+    ) -> Job:
+        """Create a Job from an image generation request."""
+        # Token estimation is not meaningful for diffusion models,
+        # but we estimate prompt tokens for fair-share scheduling.
+        estimated_prompt_tokens = self.estimate_tokens(request.prompt)
+
+        return Job(
+            request_id=request.request_id or "",
+            user_id=user_id,
+            api_key_id=api_key_id,
+            model=request.model,
+            modality=JobModality.IMAGE_GENERATION,
+            is_streaming=False,
+            requires_multimodal=False,
+            requires_structured_output=False,
+            estimated_prompt_tokens=estimated_prompt_tokens,
             estimated_completion_tokens=0,
             request_data=request.model_dump(),
         )

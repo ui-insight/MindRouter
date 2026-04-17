@@ -27,6 +27,7 @@ from backend.app.core.translators.ollama_in import OllamaInTranslator
 from backend.app.core.translators.ollama_out import OllamaOutTranslator
 from backend.app.core.translators.vllm_out import VLLMOutTranslator
 from backend.app.core.translators.anthropic_in import AnthropicInTranslator
+from backend.app.core.translators.diffusion_out import DiffusionOutTranslator
 
 __all__ = [
     "OpenAIInTranslator",
@@ -34,4 +35,5 @@ __all__ = [
     "OllamaOutTranslator",
     "VLLMOutTranslator",
     "AnthropicInTranslator",
+    "DiffusionOutTranslator",
 ]

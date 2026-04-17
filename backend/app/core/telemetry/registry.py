@@ -844,6 +844,8 @@ class BackendRegistry:
         if backend.engine == BackendEngine.OLLAMA:
             return OllamaAdapter(backend.url, timeout=timeout)
         else:
+            # Both vLLM and diffusion backends expose OpenAI-compatible
+            # /v1/models and /health endpoints, so VLLMAdapter works for both.
             return VLLMAdapter(backend.url, timeout=timeout)
 
     async def _load_backends_from_db(self) -> None:

@@ -32,6 +32,7 @@ from backend.app.core.canonical_schemas import (
     CanonicalChoice,
     CanonicalEmbeddingRequest,
     CanonicalEmbeddingResponse,
+    CanonicalImageRequest,
     CanonicalMessage,
     CanonicalRerankRequest,
     CanonicalScoreRequest,
@@ -45,7 +46,7 @@ from backend.app.core.canonical_schemas import (
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.scheduler.queue import Job, JobModality
 from backend.app.core.telemetry.registry import get_registry
-from backend.app.core.translators import OllamaOutTranslator, VLLMOutTranslator
+from backend.app.core.translators import DiffusionOutTranslator, OllamaOutTranslator, VLLMOutTranslator
 from backend.app.db import crud
 from backend.app.db.models import ApiKey, Backend, BackendEngine, Modality, User
 from backend.app.logging_config import get_logger
@@ -536,6 +537,47 @@ class InferenceService:
             await self._complete_request(
                 db_request, backend.id, response, job,
                 modality=Modality.RERANKING
+            )
+
+            return response
+
+        except BaseException as e:
+            try:
+                await self._fail_request(db_request, None, str(e), job)
+            except Exception:
+                pass
+            raise
+
+    async def image_generation(
+        self,
+        request: CanonicalImageRequest,
+        user: User,
+        api_key: ApiKey,
+        http_request: Request,
+    ) -> Dict[str, Any]:
+        """Handle image generation request."""
+        await self._check_quota(user, api_key)
+
+        db_request = await self._create_request_record(
+            request, user, api_key, http_request, "/v1/images/generations",
+            modality=Modality.IMAGE_GENERATION
+        )
+
+        job = self._scheduler.create_job_from_image_request(
+            request, user.id, api_key.id
+        )
+        job.request_id = db_request.request_uuid
+
+        try:
+            response, backend = await self._proxy_with_retry(
+                request, job, user,
+                modality=Modality.IMAGE_GENERATION,
+                proxy_fn="_proxy_image_request",
+            )
+
+            await self._complete_request(
+                db_request, backend.id, response, job,
+                modality=Modality.IMAGE_GENERATION
             )
 
             return response
@@ -1577,6 +1619,33 @@ class InferenceService:
             data = response.json()
 
         canonical = VLLMOutTranslator.translate_score_response(data)
+        return canonical.model_dump(exclude_none=True, by_alias=True)
+
+    async def _proxy_image_request(
+        self,
+        request: CanonicalImageRequest,
+        backend: Backend,
+    ) -> Dict[str, Any]:
+        """Proxy image generation request to a diffusion backend.
+
+        The backend is expected to expose an OpenAI-compatible
+        ``/v1/images/generations`` endpoint (e.g. openedai-images-flux).
+        """
+        payload = DiffusionOutTranslator.translate_image_request(request)
+        url = f"{backend.url}/v1/images/generations"
+
+        # Image generation can be slow — use a longer timeout
+        timeout = max(
+            float(self._settings.backend_request_timeout_per_attempt),
+            300.0,
+        )
+
+        async with self._make_inference_client() as client:
+            response = await client.post(url, json=payload, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+
+        canonical = DiffusionOutTranslator.translate_image_response(data)
         return canonical.model_dump(exclude_none=True, by_alias=True)
 
     async def _proxy_ollama_chat(

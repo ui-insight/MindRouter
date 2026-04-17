@@ -411,6 +411,48 @@ class CanonicalScoreResponse(BaseModel):
     usage: UsageInfo = UsageInfo()
 
 
+# Image Generation Schemas
+class CanonicalImageRequest(BaseModel):
+    """Canonical image generation request (OpenAI /v1/images/generations compatible)."""
+    model: str
+    prompt: str
+
+    # Generation parameters
+    n: int = 1  # Number of images
+    size: str = "1024x1024"  # e.g. "1024x1024", "512x512", "1024x1792"
+    quality: str = "standard"  # "standard" or "hd"
+    style: Optional[str] = None  # "vivid" or "natural" (optional)
+    response_format: Optional[str] = "url"  # "url" or "b64_json"
+
+    # Extended parameters (FLUX-specific)
+    num_inference_steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
+    seed: Optional[int] = None
+
+    # MindRouter metadata
+    request_id: Optional[str] = None
+    user_id: Optional[int] = None
+    api_key_id: Optional[int] = None
+    user: Optional[str] = None
+
+
+class CanonicalImageData(BaseModel):
+    """A single generated image."""
+    url: Optional[str] = None
+    b64_json: Optional[str] = None
+    revised_prompt: Optional[str] = None
+
+
+class CanonicalImageResponse(BaseModel):
+    """Canonical image generation response."""
+    created: int
+    data: List[CanonicalImageData]
+
+    # MindRouter additions
+    backend_id: Optional[int] = None
+    processing_time_ms: Optional[int] = None
+
+
 class CanonicalErrorResponse(BaseModel):
     """Canonical error response."""
     error: Dict[str, Any]  # {"message": "...", "type": "...", "code": "..."}

@@ -30,6 +30,7 @@ class JobModality(str, Enum):
     EMBEDDING = "embedding"
     MULTIMODAL = "multimodal"
     RERANKING = "reranking"
+    IMAGE_GENERATION = "image_generation"
 
 
 @dataclass

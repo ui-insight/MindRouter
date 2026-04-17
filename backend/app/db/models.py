@@ -64,6 +64,7 @@ class BackendEngine(str, PyEnum):
     """Backend engine types."""
     OLLAMA = "ollama"
     VLLM = "vllm"
+    DIFFUSION = "diffusion"
 
 
 class BackendStatus(str, PyEnum):
@@ -114,6 +115,7 @@ class Modality(str, PyEnum):
     RERANKING = "reranking"
     TTS = "tts"
     STT = "stt"
+    IMAGE_GENERATION = "image_generation"
 
 
 # Group Model
