@@ -339,7 +339,12 @@ async def delete_all_orphan_attachments(
     max_age_hours: int = 24,
 ) -> int:
     """Delete all orphan attachments (unlinked to any message) older than max_age_hours."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    # Strip tzinfo: MariaDB returns naive datetimes via aiomysql even
+    # though the column is DateTime(timezone=True).  SQLAlchemy's
+    # in-memory evaluator compares loaded ORM objects against the WHERE
+    # clause after a DELETE, and Python raises TypeError when comparing
+    # naive vs aware datetimes.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).replace(tzinfo=None)
     result = await db.execute(
         select(ChatAttachment).where(
             ChatAttachment.message_id.is_(None),

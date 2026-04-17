@@ -19,6 +19,7 @@ Tier 1 (App DB): configurable retention periods per category.
 Tier 2 (Archive DB): longer retention with full data preserved.
 """
 
+import asyncio
 import json as _json
 import os
 import uuid
@@ -221,17 +222,48 @@ async def _bulk_insert_ignore(
 # ------------------------------------------------------------------
 
 
+_SNAPSHOT_DEADLOCK_RETRIES = 3
+_SNAPSHOT_DEADLOCK_DELAY = 0.5  # seconds, multiplied by attempt number
+
+
 async def _snapshot_request_aggregates(
     db: AsyncSession, request_ids: list[int]
 ) -> None:
-    """Accumulate per-user and per-model token/count offsets for a batch
-    of requests that are about to be deleted.  This preserves the totals
-    so that metric queries stay correct after archival.
+    """Accumulate per-user, per-model, and per-api-key token/count offsets
+    for a batch of requests that are about to be deleted.
 
-    Uses raw SQL with ON DUPLICATE KEY UPDATE for atomic upserts.
+    Retries on deadlock (error 1213) — concurrent discovery and request
+    processing also touch ``quotas``, so transient deadlocks are expected.
+    A deadlock rolls back the entire transaction, so a full retry from
+    the top is safe (no double-counting).
     """
     if not request_ids:
         return
+
+    from sqlalchemy.exc import OperationalError
+
+    for attempt in range(_SNAPSHOT_DEADLOCK_RETRIES + 1):
+        try:
+            await _snapshot_request_aggregates_inner(db, request_ids)
+            return
+        except OperationalError as exc:
+            if "1213" in str(exc) and attempt < _SNAPSHOT_DEADLOCK_RETRIES:
+                logger.warning(
+                    "retention_snapshot_deadlock_retry",
+                    attempt=attempt + 1,
+                    max_retries=_SNAPSHOT_DEADLOCK_RETRIES,
+                )
+                await asyncio.sleep(
+                    _SNAPSHOT_DEADLOCK_DELAY * (attempt + 1)
+                )
+                continue
+            raise
+
+
+async def _snapshot_request_aggregates_inner(
+    db: AsyncSession, request_ids: list[int]
+) -> None:
+    """Inner implementation — called by the retry wrapper above."""
 
     # Per-user aggregates → quotas.archived_*
     user_agg = await db.execute(
