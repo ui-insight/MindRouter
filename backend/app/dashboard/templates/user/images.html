@@ -541,6 +541,35 @@ async function generateImage() {
     if (seedVal) body.seed = parseInt(seedVal);
 
     try {
+        // ── Step 1: Policy check (fast) ────────────────────
+        const policyResp = await fetch('/images/api/check-policy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: body.prompt }),
+        });
+        const policyData = await policyResp.json();
+
+        if (!policyResp.ok) {
+            let errMsg = '';
+            if (policyData.error) {
+                errMsg = policyData.error.message || JSON.stringify(policyData.error);
+            } else {
+                errMsg = 'Policy check failed';
+            }
+            policyBadge.className = 'policy-badge failed';
+            policyBadge.innerHTML = '<i class="bi bi-x-circle-fill"></i> Policy check failed';
+            overlay.style.display = 'none';
+            document.getElementById('genErrorText').textContent = errMsg;
+            document.getElementById('genError').style.display = 'block';
+            return;
+        }
+
+        // Policy passed — show green checkmark
+        policyBadge.className = 'policy-badge passed';
+        policyBadge.innerHTML = '<i class="bi bi-check-circle-fill"></i> Policy check passed';
+        document.getElementById('genStatusText').textContent = 'Generating image...';
+
+        // ── Step 2: Generate image ─────────────────────────
         const resp = await fetch('/images/api/generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -550,26 +579,13 @@ async function generateImage() {
         const data = await resp.json();
 
         if (!resp.ok) {
-            // Determine if it's a policy violation
             let errMsg = '';
-            let isPolicyFail = false;
             if (data.error) {
                 errMsg = data.error.message || JSON.stringify(data.error);
-                if (data.error.type === 'content_policy_violation' || data.error.policy_passed === false) {
-                    isPolicyFail = true;
-                    policyBadge.className = 'policy-badge failed';
-                    policyBadge.innerHTML = '<i class="bi bi-x-circle-fill"></i> Policy check failed';
-                }
             } else if (data.detail) {
                 errMsg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
             } else {
                 errMsg = 'Request failed with status ' + resp.status;
-            }
-
-            // Clear policy spinner on non-policy errors
-            if (!isPolicyFail) {
-                policyBadge.className = 'policy-badge failed';
-                policyBadge.innerHTML = '<i class="bi bi-exclamation-triangle-fill"></i> Error';
             }
 
             overlay.style.display = 'none';
@@ -577,10 +593,6 @@ async function generateImage() {
             document.getElementById('genError').style.display = 'block';
             return;
         }
-
-        // Success — policy passed
-        policyBadge.className = 'policy-badge passed';
-        policyBadge.innerHTML = '<i class="bi bi-check-circle-fill"></i> Policy check passed';
 
         overlay.style.display = 'none';
 
@@ -622,12 +634,14 @@ function updateTimer() {
 
     // Update status text based on elapsed time
     const statusText = document.getElementById('genStatusText');
-    if (elapsed < 3) statusText.textContent = 'Evaluating content policy...';
-    else if (elapsed < 10) statusText.textContent = 'Preparing model...';
-    else if (elapsed < 30) statusText.textContent = 'Generating image...';
-    else if (elapsed < 60) statusText.textContent = 'Rendering details...';
-    else if (elapsed < 120) statusText.textContent = 'Almost there...';
-    else statusText.textContent = 'Still working (large images take longer)...';
+    // Only update if we're past the policy check phase
+    if (statusText.textContent !== 'Evaluating content policy...') {
+        if (elapsed < 10) statusText.textContent = 'Generating image...';
+        else if (elapsed < 30) statusText.textContent = 'Rendering details...';
+        else if (elapsed < 60) statusText.textContent = 'Almost there...';
+        else if (elapsed < 120) statusText.textContent = 'Still working (large images take longer)...';
+        else statusText.textContent = 'This is taking a while — hang tight...';
+    }
 
     // Update progress bar width
     const pct = Math.min(95, (elapsed / 130) * 100);

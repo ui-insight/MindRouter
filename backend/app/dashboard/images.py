@@ -132,8 +132,51 @@ async def images_page(
 
 
 # ---------------------------------------------------------------------------
-# Proxy: session-authenticated image generation
+# Proxy: policy check + image generation
 # ---------------------------------------------------------------------------
+
+@images_router.post("/images/api/check-policy")
+async def images_api_check_policy(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Check prompt against content policy (fast, separate from generation)."""
+    user, _ = await _get_image_user(request, db)
+    body = await request.json()
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        return JSONResponse(status_code=400, content={"error": {"message": "prompt is required"}})
+
+    policy = await crud.get_config_json(db, "img.policy", "")
+    if not policy:
+        return JSONResponse(content={"passed": True, "reason": "No policy configured"})
+
+    judge_model = await crud.get_config_json(db, "img.judge_model", "")
+    judge_secondary = await crud.get_config_json(db, "img.judge_model_secondary", "")
+    if not judge_model:
+        return JSONResponse(content={"passed": True, "reason": "No judge model configured"})
+
+    from backend.app.services.image_policy import evaluate_prompt
+    verdict = await evaluate_prompt(prompt, policy, judge_model, judge_secondary or None)
+
+    if not verdict.passed:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": f"Your prompt was not approved: {verdict.reason}",
+                    "type": "content_policy_violation",
+                    "policy_passed": False,
+                }
+            },
+        )
+
+    return JSONResponse(content={
+        "passed": True,
+        "reason": verdict.reason,
+        "model": verdict.judge_model,
+    })
+
 
 @images_router.post("/images/api/generate")
 async def images_api_generate(
