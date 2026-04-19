@@ -18,10 +18,12 @@ import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlencode
 
 import markdown
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
@@ -151,6 +153,7 @@ async def admin_blog_list(
 @blog_router.get("/admin/blog/new", response_class=HTMLResponse)
 async def admin_blog_new(
     request: Request,
+    error: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin: new post form."""
@@ -161,7 +164,7 @@ async def admin_blog_new(
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/blog_edit.html",
-        {"request": request, "user": user, **masq, "post": None, "active": "blog"},
+        {"request": request, "user": user, **masq, "post": None, "active": "blog", "error": error},
     )
 
 
@@ -181,16 +184,21 @@ async def admin_blog_create(
         return redirect
 
     publish = is_published == "on"
-    await crud.create_blog_post(
-        db,
-        title=title,
-        slug=slug,
-        content=content,
-        excerpt=excerpt or None,
-        author_id=user.id,
-        is_published=publish,
-    )
-    await db.commit()
+    try:
+        await crud.create_blog_post(
+            db,
+            title=title,
+            slug=slug,
+            content=content,
+            excerpt=excerpt or None,
+            author_id=user.id,
+            is_published=publish,
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        qs = urlencode({"error": f"A post with the slug '{slug}' already exists."})
+        return RedirectResponse(f"/admin/blog/new?{qs}", status_code=302)
 
     return RedirectResponse("/admin/blog", status_code=302)
 
@@ -262,8 +270,13 @@ async def admin_blog_update(
     if post and publish and not post.published_at:
         kwargs["published_at"] = datetime.now(timezone.utc)
 
-    await crud.update_blog_post(db, post_id, **kwargs)
-    await db.commit()
+    try:
+        await crud.update_blog_post(db, post_id, **kwargs)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        qs = urlencode({"error": f"A post with the slug '{slug}' already exists."})
+        return RedirectResponse(f"/admin/blog/{post_id}/edit?{qs}", status_code=302)
 
     return RedirectResponse("/admin/blog", status_code=302)
 
