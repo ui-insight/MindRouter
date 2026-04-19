@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 import markdown
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db import crud
@@ -199,6 +199,10 @@ async def admin_blog_create(
         await db.rollback()
         qs = urlencode({"error": f"A post with the slug '{slug}' already exists."})
         return RedirectResponse(f"/admin/blog/new?{qs}", status_code=302)
+    except DataError:
+        await db.rollback()
+        qs = urlencode({"error": "Content is too large to save. Try reducing the post size."})
+        return RedirectResponse(f"/admin/blog/new?{qs}", status_code=302)
 
     return RedirectResponse("/admin/blog", status_code=302)
 
@@ -276,6 +280,10 @@ async def admin_blog_update(
     except IntegrityError:
         await db.rollback()
         qs = urlencode({"error": f"A post with the slug '{slug}' already exists."})
+        return RedirectResponse(f"/admin/blog/{post_id}/edit?{qs}", status_code=302)
+    except DataError:
+        await db.rollback()
+        qs = urlencode({"error": "Content is too large to save. Try reducing the post size."})
         return RedirectResponse(f"/admin/blog/{post_id}/edit?{qs}", status_code=302)
 
     return RedirectResponse("/admin/blog", status_code=302)

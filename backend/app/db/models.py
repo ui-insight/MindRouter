@@ -1007,7 +1007,7 @@ class BlogPost(Base, TimestampMixin, SoftDeleteMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(MEDIUMTEXT, nullable=False)
     excerpt: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     author_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
