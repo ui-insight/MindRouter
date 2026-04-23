@@ -3891,6 +3891,8 @@ async def admin_ocr_config(
             "max_retries": await crud.get_config_json(db, "ocr.max_retries", 2),
             "max_tokens": await crud.get_config_json(db, "ocr.max_tokens", 16384),
             "temperature": await crud.get_config_json(db, "ocr.temperature", 0.1),
+            "prompt_ocr": await crud.get_config_json(db, "ocr.prompt_ocr", ""),
+            "prompt_ocrmd": await crud.get_config_json(db, "ocr.prompt_ocrmd", ""),
             "success": success,
             "error": error,
         },
@@ -3943,6 +3945,12 @@ async def admin_ocr_config_post(
     except (ValueError, TypeError):
         temp = 0.1
     await crud.set_config(db, "ocr.temperature", temp)
+
+    # Prompt templates (stored as JSON strings)
+    for key, field in [("ocr.prompt_ocr", "prompt_ocr"), ("ocr.prompt_ocrmd", "prompt_ocrmd")]:
+        val = form.get(field, "").strip()
+        if val:
+            await crud.set_config(db, key, val)
 
     _ip = get_client_ip(request)
     await crud.log_admin_action(

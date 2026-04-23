@@ -134,6 +134,26 @@
                         </div>
                     </div>
 
+                    <!-- Prompt Templates -->
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-chat-left-text"></i> Prompt Templates</h5></div>
+                            <div class="card-body">
+                                <p class="text-muted small">Prompt sent to the vision model for each chunk. Use <code>{num_pages}</code> to insert the page count. Leave blank to use the built-in default.</p>
+
+                                <div class="mb-3">
+                                    <label for="prompt_ocrmd" class="form-label"><code>/v1/ocrmd</code> Prompt (Markdown output)</label>
+                                    <textarea class="form-control font-monospace" id="prompt_ocrmd" name="prompt_ocrmd" rows="4" style="font-size: 0.85rem;">{{ prompt_ocrmd }}</textarea>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="prompt_ocr" class="form-label"><code>/v1/ocr</code> Prompt (JSON output)</label>
+                                    <textarea class="form-control font-monospace" id="prompt_ocr" name="prompt_ocr" rows="4" style="font-size: 0.85rem;">{{ prompt_ocr }}</textarea>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- API Info -->
                     <div class="col-lg-6">
                         <div class="card">
