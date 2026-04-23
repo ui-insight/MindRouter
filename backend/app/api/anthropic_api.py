@@ -86,6 +86,7 @@ async def messages(
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
     if not await registry.model_exists(canonical.model):
+        logger.warning("anthropic_model_not_found", model=canonical.model, raw_model=body.get("model"))
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
