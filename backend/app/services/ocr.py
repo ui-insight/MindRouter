@@ -48,6 +48,27 @@ from backend.app.settings import get_settings
 logger = get_logger(__name__)
 
 
+_DEFAULT_PROMPT_OCRMD = (
+    "Convert ALL of the following page images to well-structured markdown. "
+    "Render tables as proper markdown tables with correct columns and rows. "
+    "Do not add any preamble like 'Here is the markdown' - just output "
+    "the markdown directly. "
+    "Preserve all text exactly as it appears. "
+    "Do not summarize or omit anything. Do not add any commentary. "
+    "There are {num_pages} page images - make sure you process EVERY page."
+)
+
+_DEFAULT_PROMPT_OCR = (
+    "Output the result as a JSON object with a top-level 'pages' array. "
+    "Each page should have 'page_number' (int), 'content' (string with "
+    "the full text), and 'tables' (array of objects with 'headers' and 'rows'). "
+    "Output valid JSON only — no markdown fences or commentary. "
+    "Preserve all text exactly as it appears. "
+    "Do not summarize or omit anything. Do not add any commentary. "
+    "There are {num_pages} page images - make sure you process EVERY page."
+)
+
+
 async def get_ocr_config(db) -> dict:
     """Load OCR configuration from admin config (app_config table)."""
     return {
@@ -63,6 +84,8 @@ async def get_ocr_config(db) -> dict:
         "enabled": await crud.get_config_json(db, "ocr.enabled", True),
         "max_tokens": await crud.get_config_json(db, "ocr.max_tokens", 16384),
         "temperature": await crud.get_config_json(db, "ocr.temperature", 0.1),
+        "prompt_ocr": await crud.get_config_json(db, "ocr.prompt_ocr", _DEFAULT_PROMPT_OCR),
+        "prompt_ocrmd": await crud.get_config_json(db, "ocr.prompt_ocrmd", _DEFAULT_PROMPT_OCRMD),
     }
 
 
@@ -257,41 +280,28 @@ def _strip_fences(text: str) -> str:
 
 def _build_ocr_prompt(
     num_pages: int,
-    output_format: str = "markdown",
+    prompt_template: str,
     is_retry: bool = False,
     prev_length: int = 0,
 ) -> str:
-    """Build the OCR system prompt."""
-    if output_format == "json":
-        format_instruction = (
-            "Output the result as a JSON object with a top-level 'pages' array. "
-            "Each page should have 'page_number' (int), 'content' (string with "
-            "the full text), and 'tables' (array of objects with 'headers' and 'rows'). "
-            "Output valid JSON only — no markdown fences or commentary."
-        )
-    else:
-        format_instruction = (
-            "Convert ALL of the following page images to well-structured markdown. "
-            "Render tables as proper markdown tables with correct columns and rows. "
-            "Do not add any preamble like 'Here is the markdown' - just output "
-            "the markdown directly."
-        )
+    """Build the OCR prompt from an admin-configurable template.
+
+    The template may contain ``{num_pages}`` which is substituted at
+    call time.  On retry, a prefix is prepended urging completeness.
+    """
+    prompt = prompt_template.format(num_pages=num_pages)
 
     if is_retry:
-        return (
+        retry_prefix = (
             f"IMPORTANT: You MUST convert ALL {num_pages} page images below. "
             f"Your previous attempt only produced {prev_length} characters which "
             "is too short. Every single page must be fully transcribed. "
             "Convert ALL text, tables, headers, and content from EVERY page image. "
-            f"Do not stop early. Do not skip any pages. {format_instruction}"
+            "Do not stop early. Do not skip any pages. "
         )
+        return retry_prefix + prompt
 
-    return (
-        f"{format_instruction} "
-        "Preserve all text exactly as it appears. "
-        "Do not summarize or omit anything. Do not add any commentary. "
-        f"There are {num_pages} page images - make sure you process EVERY page."
-    )
+    return prompt
 
 
 async def ocr_chunk(
@@ -301,7 +311,7 @@ async def ocr_chunk(
     end_page: int,
     total_pages: int,
     total_chunks: int,
-    output_format: str,
+    prompt_template: str,
     model: str,
     ocr_config: dict,
     user: "User",
@@ -323,7 +333,7 @@ async def ocr_chunk(
     max_retries = ocr_config["max_retries"]
 
     # Build content blocks: prompt + images
-    prompt = _build_ocr_prompt(num_pages, output_format)
+    prompt = _build_ocr_prompt(num_pages, prompt_template)
     content_blocks: List[Any] = [TextContent(text=prompt)]
     for img_bytes in page_images:
         b64 = base64.b64encode(img_bytes).decode()
@@ -394,7 +404,7 @@ async def ocr_chunk(
                 expected=expected_min_chars,
             )
             retry_prompt = _build_ocr_prompt(
-                num_pages, output_format, is_retry=True, prev_length=len(text)
+                num_pages, prompt_template, is_retry=True, prev_length=len(text)
             )
             content_blocks[0] = TextContent(text=retry_prompt)
             canonical.messages[0].content = content_blocks
@@ -535,6 +545,7 @@ async def perform_ocr(
     user: "User",
     api_key: "ApiKey",
     http_request: "Request",
+    prompt_template: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Full OCR pipeline: document → images → chunked LLM OCR → merge.
@@ -571,11 +582,19 @@ async def perform_ocr(
         is_pdf = True
         logger.info("ocr_office_convert", ms=round((_time.monotonic() - t0) * 1000))
 
+    # Resolve prompt template: explicit parameter > config > built-in default
+    if prompt_template is None:
+        if output_format == "json":
+            prompt_template = ocr_config.get("prompt_ocr", _DEFAULT_PROMPT_OCR)
+        else:
+            prompt_template = ocr_config.get("prompt_ocrmd", _DEFAULT_PROMPT_OCRMD)
+
     # For PDFs with multiple pages, use pipelined conversion + inference
     if is_pdf:
         return await _perform_ocr_pipelined(
             file_bytes, model, output_format, chunk_size, overlap, dpi,
             ocr_config, user, api_key, http_request, t_total_start,
+            prompt_template,
         )
 
     # For images: simple path (single page, no chunking needed usually)
@@ -586,6 +605,7 @@ async def perform_ocr(
     return await _perform_ocr_simple(
         page_images, model, output_format, chunk_size, overlap,
         ocr_config, user, api_key, http_request, t_total_start, t_convert,
+        prompt_template,
     )
 
 
@@ -601,6 +621,7 @@ async def _perform_ocr_pipelined(
     api_key: "ApiKey",
     http_request: "Request",
     t_total_start: float,
+    prompt_template: str,
 ) -> Dict[str, Any]:
     """
     Pipelined OCR for PDFs: convert page ranges and run inference concurrently.
@@ -651,7 +672,7 @@ async def _perform_ocr_pipelined(
             return await ocr_chunk(
                 chunk_images, idx, start, end,
                 total_pages, total_chunks,
-                output_format, model, ocr_config,
+                prompt_template, model, ocr_config,
                 user, api_key, http_request,
             )
 
@@ -712,6 +733,7 @@ async def _perform_ocr_simple(
     http_request: "Request",
     t_total_start: float,
     t_convert: float,
+    prompt_template: str,
 ) -> Dict[str, Any]:
     """Simple OCR path for images (no pipelining needed)."""
     import time as _time
@@ -748,7 +770,7 @@ async def _perform_ocr_simple(
                 page_images[start:end],
                 idx, start, end,
                 total_pages, total_chunks,
-                output_format, model, ocr_config,
+                prompt_template, model, ocr_config,
                 user, api_key, http_request,
             )
 

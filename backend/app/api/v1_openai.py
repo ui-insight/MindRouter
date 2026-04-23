@@ -561,6 +561,7 @@ async def ocr(
             user=user,
             api_key=api_key,
             http_request=request,
+            prompt_template=ocr_config["prompt_ocr"],
         )
     except ValueError as e:
         raise HTTPException(
@@ -661,6 +662,7 @@ async def ocrmd(
             user=user,
             api_key=api_key,
             http_request=request,
+            prompt_template=ocr_config["prompt_ocrmd"],
         )
     except ValueError as e:
         return PlainTextResponse(str(e), status_code=400)
