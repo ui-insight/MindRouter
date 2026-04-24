@@ -31,9 +31,10 @@ from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.inference import InferenceService
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/anthropic", tags=["anthropic"])
+router = APIRouter(tags=["anthropic"])
 
 
+@router.post("/anthropic/v1/messages")
 @router.post("/v1/messages")
 async def messages(
     request: Request,
@@ -341,3 +342,14 @@ async def _stream_anthropic_events(
             "usage": {"output_tokens": output_tokens},
         })
         yield fmt("message_stop", {"type": "message_stop"})
+
+
+@router.get("/anthropic/v1/models")
+async def anthropic_models(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Serve model list at the Anthropic base path for CoWork compatibility."""
+    from backend.app.api.models_api import list_models
+    return await list_models(request=request, db=db, auth=auth)
