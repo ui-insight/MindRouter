@@ -269,228 +269,234 @@ def connect_db(url: str) -> pymysql.Connection:
     )
 
 
-def get_overview_stats(conn) -> dict:
-    """Collect high-level statistics."""
+def get_overview_stats(conn, sample_size: int = 10000, seed: int = 42) -> dict:
+    """Collect high-level statistics using PK sampling for speed.
+
+    Heavy aggregate queries are estimated from random samples instead
+    of scanning the full 5M+ row table.
+    """
     stats = {}
+    rng = random.Random(seed)
+
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) as cnt FROM requests")
-        stats["total_requests"] = cur.fetchone()["cnt"]
+        # These are instant (PK index / table metadata)
+        cur.execute("SELECT MIN(id) as mn, MAX(id) as mx FROM requests")
+        bounds = cur.fetchone()
+        min_id, max_id = bounds["mn"], bounds["mx"]
 
-        cur.execute("SELECT MIN(created_at) as mn, MAX(created_at) as mx FROM requests")
-        row = cur.fetchone()
-        stats["date_range"] = (row["mn"], row["mx"])
+        cur.execute("SELECT TABLE_ROWS FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='requests'")
+        stats["total_requests"] = cur.fetchone()["TABLE_ROWS"]
 
-        cur.execute("SELECT COUNT(DISTINCT user_id) as cnt FROM requests")
+        # Get date range from first and last row (PK order)
+        cur.execute("SELECT created_at FROM requests WHERE id = %s", (min_id,))
+        date_min = cur.fetchone()["created_at"]
+        cur.execute("SELECT created_at FROM requests WHERE id = %s", (max_id,))
+        date_max = cur.fetchone()["created_at"]
+        stats["date_range"] = (date_min, date_max)
+
+        # User/model counts from small tables or fast queries
+        cur.execute("SELECT COUNT(*) as cnt FROM users WHERE is_active = 1")
         stats["distinct_users"] = cur.fetchone()["cnt"]
 
-        # Use model index directly — much faster than COUNT(DISTINCT) on full table
-        cur.execute("SELECT COUNT(*) as cnt FROM (SELECT DISTINCT model FROM requests) t")
+        cur.execute("SELECT COUNT(DISTINCT name) as cnt FROM models")
         stats["distinct_models"] = cur.fetchone()["cnt"]
 
-        # Use indexed created_at, model, status composite index
-        cur.execute("""
-            SELECT modality, COUNT(*) as cnt
-            FROM requests GROUP BY modality ORDER BY cnt DESC
-        """)
-        stats["modality_counts"] = {r["modality"]: r["cnt"] for r in cur.fetchall()}
+    # Sample random rows by PK for aggregate estimates
+    print(f"  Sampling {sample_size} rows for statistics...", file=sys.stderr)
+    sample_rows = []
+    probes = [rng.randint(min_id, max_id) for _ in range(sample_size * 2)]
 
-        cur.execute("""
-            SELECT model, COUNT(*) as cnt
-            FROM requests
-            WHERE status = 'completed'
-            GROUP BY model ORDER BY cnt DESC LIMIT 20
-        """)
-        stats["top_models"] = [(r["model"], r["cnt"]) for r in cur.fetchall()]
+    with conn.cursor() as cur:
+        for probe_id in probes:
+            if len(sample_rows) >= sample_size:
+                break
+            cur.execute("""
+                SELECT id, user_id, model, modality, status, user_agent,
+                       total_tokens, created_at
+                FROM requests WHERE id = %s
+            """, (probe_id,))
+            row = cur.fetchone()
+            if row:
+                sample_rows.append(row)
 
-        # Role breakdown: aggregate requests by user_id first, then join (fast)
-        cur.execute("""
-            SELECT u.role, COUNT(DISTINCT u.id) as users, COALESCE(SUM(rc.cnt), 0) as reqs
-            FROM users u
-            LEFT JOIN (
-                SELECT user_id, COUNT(*) as cnt FROM requests GROUP BY user_id
-            ) rc ON rc.user_id = u.id
-            WHERE u.is_active = 1
-            GROUP BY u.role ORDER BY reqs DESC
-        """)
-        stats["role_breakdown"] = [(r["role"], r["users"], r["reqs"]) for r in cur.fetchall()]
+    total_est = stats["total_requests"]
+    scale = total_est / len(sample_rows) if sample_rows else 1
 
-        cur.execute("""
-            SELECT u.college, COUNT(DISTINCT u.id) as users, COALESCE(SUM(rc.cnt), 0) as reqs
-            FROM users u
-            LEFT JOIN (
-                SELECT user_id, COUNT(*) as cnt FROM requests GROUP BY user_id
-            ) rc ON rc.user_id = u.id
-            WHERE u.is_active = 1 AND u.college IS NOT NULL AND u.college != ''
-            GROUP BY u.college ORDER BY reqs DESC
-        """)
-        stats["college_breakdown"] = [(r["college"], r["users"], r["reqs"]) for r in cur.fetchall()]
+    # Modality counts (estimated)
+    modality_counter = Counter(r["modality"] for r in sample_rows)
+    stats["modality_counts"] = {k: round(v * scale) for k, v in modality_counter.most_common()}
 
-        # Client breakdown — sample recent 500K to avoid full scan
-        cur.execute("""
-            SELECT
-                CASE
-                    WHEN user_agent LIKE '%%aiohttp%%' THEN 'Chat UI'
-                    WHEN user_agent LIKE '%%python-requests%%' THEN 'Python SDK'
-                    WHEN user_agent LIKE '%%claude-cli%%' THEN 'Claude Code/CoWork'
-                    WHEN user_agent LIKE '%%curl%%' THEN 'curl'
-                    WHEN user_agent LIKE '%%openai-python%%' THEN 'OpenAI Python SDK'
-                    WHEN user_agent LIKE '%%axios%%' THEN 'JavaScript/Axios'
-                    WHEN user_agent IS NULL THEN 'Unknown'
-                    ELSE 'Other'
-                END as client,
-                COUNT(*) as cnt
-            FROM (SELECT user_agent FROM requests ORDER BY id DESC LIMIT 500000) t
-            GROUP BY client ORDER BY cnt DESC
-        """)
-        stats["client_breakdown"] = [(r["client"], r["cnt"]) for r in cur.fetchall()]
+    # Top models (estimated)
+    model_counter = Counter(r["model"] for r in sample_rows if r["status"] == "completed")
+    stats["top_models"] = [(m, round(c * scale)) for m, c in model_counter.most_common(20)]
 
-        # Time patterns — sample recent 1M for speed
-        cur.execute("""
-            SELECT HOUR(created_at) as hr, COUNT(*) as cnt
-            FROM (SELECT created_at FROM requests ORDER BY id DESC LIMIT 1000000) t
-            GROUP BY hr ORDER BY hr
-        """)
-        stats["hourly"] = {r["hr"]: r["cnt"] for r in cur.fetchall()}
+    # Client breakdown (estimated)
+    def classify_ua(ua):
+        if not ua: return "Unknown"
+        if "aiohttp" in ua: return "Chat UI"
+        if "python-requests" in ua: return "Python SDK"
+        if "claude-cli" in ua: return "Claude Code/CoWork"
+        if "curl" in ua: return "curl"
+        if "openai-python" in ua: return "OpenAI Python SDK"
+        if "axios" in ua: return "JavaScript/Axios"
+        return "Other"
 
-        cur.execute("""
-            SELECT DAYNAME(created_at) as day, COUNT(*) as cnt
-            FROM (SELECT created_at FROM requests ORDER BY id DESC LIMIT 1000000) t
-            GROUP BY day ORDER BY FIELD(day, 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday')
-        """)
-        stats["daily"] = [(r["day"], r["cnt"]) for r in cur.fetchall()]
+    client_counter = Counter(classify_ua(r["user_agent"]) for r in sample_rows)
+    stats["client_breakdown"] = [(c, round(n * scale)) for c, n in client_counter.most_common()]
 
-        # Use covering index on user_id, total_tokens
+    # Hourly distribution
+    hourly = Counter(r["created_at"].hour for r in sample_rows if r["created_at"])
+    stats["hourly"] = {h: round(c * scale) for h, c in sorted(hourly.items())}
+
+    # Daily distribution
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    daily = Counter(r["created_at"].strftime("%A") for r in sample_rows if r["created_at"])
+    stats["daily"] = [(d, round(daily.get(d, 0) * scale)) for d in day_names]
+
+    # Total tokens (estimated from sample)
+    token_sum = sum(r["total_tokens"] for r in sample_rows if r["total_tokens"])
+    stats["total_tokens"] = round(token_sum * scale)
+
+    # Role and college breakdowns (from users table — small, fast)
+    with conn.cursor() as cur:
         cur.execute("""
-            SELECT SUM(total_tokens) as tokens FROM requests WHERE total_tokens IS NOT NULL
+            SELECT u.id, u.role, u.college
+            FROM users u WHERE u.is_active = 1
         """)
-        stats["total_tokens"] = cur.fetchone()["tokens"] or 0
+        user_info_list = cur.fetchall()
+
+    user_roles = {u["id"]: u["role"] for u in user_info_list}
+    user_colleges = {u["id"]: u["college"] for u in user_info_list if u["college"]}
+
+    # Count requests per user from sample
+    user_req_counts = Counter(r["user_id"] for r in sample_rows)
+    role_users = defaultdict(set)
+    role_reqs = defaultdict(int)
+    for uid, cnt in user_req_counts.items():
+        role = user_roles.get(uid, "unknown")
+        role_users[role].add(uid)
+        role_reqs[role] += round(cnt * scale)
+    stats["role_breakdown"] = sorted(
+        [(role, len(role_users[role]), role_reqs[role]) for role in role_users],
+        key=lambda x: -x[2]
+    )
+
+    college_users = defaultdict(set)
+    college_reqs = defaultdict(int)
+    for uid, cnt in user_req_counts.items():
+        college = user_colleges.get(uid)
+        if college:
+            college_users[college].add(uid)
+            college_reqs[college] += round(cnt * scale)
+    stats["college_breakdown"] = sorted(
+        [(col, len(college_users[col]), college_reqs[col]) for col in college_users],
+        key=lambda x: -x[2]
+    )
 
     return stats
 
 
 def sample_requests(conn, n: int, seed: int = 42) -> list[dict]:
-    """Stratified random sample of completed requests with messages.
+    """Random sample of completed requests with messages.
 
-    Uses timestamp-range probing on the (user_id, created_at) index.
+    Uses pure PK lookups for speed on large tables.
     """
     rng = random.Random(seed)
 
     with conn.cursor() as cur:
-        # Get per-user time ranges and counts
-        cur.execute("""
-            SELECT user_id, MIN(created_at) as min_ts, MAX(created_at) as max_ts, COUNT(*) as cnt
-            FROM requests
-            WHERE status = 'completed' AND messages IS NOT NULL
-            GROUP BY user_id
-        """)
-        user_info = {r["user_id"]: r for r in cur.fetchall()}
+        cur.execute("SELECT MIN(id) as mn, MAX(id) as mx FROM requests")
+        bounds = cur.fetchone()
+        min_id, max_id = bounds["mn"], bounds["mx"]
 
-    if not user_info:
-        return []
-
-    # Allocate samples per user proportional to sqrt(count) to avoid
-    # heavy users dominating while still representing them
-    total_weight = sum(r["cnt"] ** 0.5 for r in user_info.values())
-    user_allocations = {}
-    for uid, info in user_info.items():
-        alloc = max(1, round(n * (info["cnt"] ** 0.5) / total_weight))
-        user_allocations[uid] = min(alloc, info["cnt"])
-
-    # Cap total to n
-    while sum(user_allocations.values()) > n * 1.2:
-        biggest = max(user_allocations, key=user_allocations.get)
-        user_allocations[biggest] = max(1, user_allocations[biggest] - 1)
-
-    # Pre-fetch user info (small table)
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT id, username, full_name, role, college, department, intended_use
-            FROM users
-        """)
+        cur.execute("SELECT id, username, full_name, role, college, department, intended_use FROM users")
         users_map = {r["id"]: r for r in cur.fetchall()}
 
     samples = []
-    for uid, alloc in user_allocations.items():
-        info = user_info[uid]
-        min_ts = info["min_ts"]
-        max_ts = info["max_ts"]
-        ts_range = (max_ts - min_ts).total_seconds()
-        if ts_range <= 0:
-            ts_range = 1
+    seen_ids = set()
+    attempts = 0
+    max_attempts = n * 8
 
-        # Probe random timestamps within user's active range
-        collected = {}
-        attempts = 0
-        max_attempts = alloc * 20
+    print(f"  PK range {min_id}-{max_id}, probing...", file=sys.stderr)
 
-        while len(collected) < alloc and attempts < max_attempts:
-            offset_secs = rng.random() * ts_range
-            probe_ts = min_ts + timedelta(seconds=offset_secs)
-            attempts += 1
-            with conn.cursor() as cur:
-                # Uses ix_requests_user_created (user_id, created_at) index
-                cur.execute("""
-                    SELECT r.id, r.request_uuid, r.user_id, r.model, r.modality,
-                           r.endpoint, r.messages, r.prompt, r.is_streaming,
-                           r.prompt_tokens, r.completion_tokens, r.total_tokens,
-                           r.total_time_ms, r.user_agent, r.created_at,
-                           ak.name as key_name, ak.is_service, ak.service_name
-                    FROM requests r
-                    LEFT JOIN api_keys ak ON ak.id = r.api_key_id
-                    WHERE r.user_id = %s AND r.created_at >= %s
-                      AND r.status = 'completed' AND r.messages IS NOT NULL
-                    ORDER BY r.created_at LIMIT 1
-                """, (uid, probe_ts))
-                row = cur.fetchone()
-                if row and row["id"] not in collected:
-                    u = users_map.get(uid, {})
-                    row["username"] = u.get("username", f"user_{uid}")
-                    row["full_name"] = u.get("full_name")
-                    row["role"] = u.get("role")
-                    row["college"] = u.get("college")
-                    row["department"] = u.get("department")
-                    row["intended_use"] = u.get("intended_use")
-                    collected[row["id"]] = row
+    while len(samples) < n and attempts < max_attempts:
+        # Batch probe 50 IDs at a time for efficiency
+        batch_ids = [rng.randint(min_id, max_id) for _ in range(50)]
+        batch_ids = [i for i in batch_ids if i not in seen_ids]
+        if not batch_ids:
+            attempts += 50
+            continue
 
-        samples.extend(collected.values())
-        print(f"  user {uid}: {len(collected)}/{alloc} samples", file=sys.stderr)
+        with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(batch_ids))
+            cur.execute(f"""
+                SELECT r.id, r.request_uuid, r.user_id, r.model, r.modality,
+                       r.endpoint, r.messages, r.prompt, r.is_streaming,
+                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                       r.total_time_ms, r.user_agent, r.created_at,
+                       ak.name as key_name, ak.is_service, ak.service_name
+                FROM requests r
+                LEFT JOIN api_keys ak ON ak.id = r.api_key_id
+                WHERE r.id IN ({placeholders})
+                  AND r.status = 'completed' AND r.messages IS NOT NULL
+            """, batch_ids)
+            rows = cur.fetchall()
+
+        for row in rows:
+            if row["id"] not in seen_ids:
+                seen_ids.add(row["id"])
+                u = users_map.get(row["user_id"], {})
+                row["username"] = u.get("username", f"user_{row['user_id']}")
+                row["full_name"] = u.get("full_name")
+                row["role"] = u.get("role")
+                row["college"] = u.get("college")
+                row["department"] = u.get("department")
+                row["intended_use"] = u.get("intended_use")
+                samples.append(row)
+
+        attempts += len(batch_ids)
+        if len(samples) % 100 == 0 and len(samples) > 0:
+            print(f"  ... {len(samples)}/{n} samples collected", file=sys.stderr)
 
     rng.shuffle(samples)
     return samples[:n]
 
 
 def sample_archive_requests(conn, n: int, seed: int = 42) -> list[dict]:
-    """Sample from the archive database using ID-range probing."""
+    """Sample from the archive database using PK batch lookups."""
     rng = random.Random(seed)
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT MIN(id) as min_id, MAX(id) as max_id
-            FROM archived_requests WHERE status = 'completed' AND messages IS NOT NULL
-        """)
+        cur.execute("SELECT MIN(id) as mn, MAX(id) as mx FROM archived_requests")
         bounds = cur.fetchone()
-        if not bounds or not bounds["min_id"]:
+        if not bounds or not bounds["mn"]:
             return []
 
-    min_id, max_id = bounds["min_id"], bounds["max_id"]
-    collected = {}
+    min_id, max_id = bounds["mn"], bounds["mx"]
+    samples = []
+    seen_ids = set()
     attempts = 0
-    max_attempts = n * 20
 
-    while len(collected) < n and attempts < max_attempts:
-        probe_id = rng.randint(min_id, max_id)
-        attempts += 1
+    while len(samples) < n and attempts < n * 10:
+        batch_ids = [rng.randint(min_id, max_id) for _ in range(50)]
+        batch_ids = [i for i in batch_ids if i not in seen_ids]
+        if not batch_ids:
+            attempts += 50
+            continue
+
         with conn.cursor() as cur:
-            cur.execute("""
+            placeholders = ",".join(["%s"] * len(batch_ids))
+            cur.execute(f"""
                 SELECT id, request_uuid, user_id, model, modality,
                        endpoint, messages, prompt, is_streaming,
                        prompt_tokens, completion_tokens, total_tokens,
                        total_time_ms, user_agent, created_at
                 FROM archived_requests
-                WHERE id >= %s AND status = 'completed' AND messages IS NOT NULL
-                LIMIT 1
-            """, (probe_id,))
-            row = cur.fetchone()
-            if row and row["id"] not in collected:
+                WHERE id IN ({placeholders}) AND status = 'completed' AND messages IS NOT NULL
+            """, batch_ids)
+            rows = cur.fetchall()
+
+        for row in rows:
+            if row["id"] not in seen_ids:
+                seen_ids.add(row["id"])
                 row["username"] = f"user_{row['user_id']}"
                 row["full_name"] = None
                 row["role"] = None
@@ -500,9 +506,11 @@ def sample_archive_requests(conn, n: int, seed: int = 42) -> list[dict]:
                 row["key_name"] = None
                 row["is_service"] = None
                 row["service_name"] = None
-                collected[row["id"]] = row
+                samples.append(row)
 
-    return list(collected.values())[:n]
+        attempts += len(batch_ids)
+
+    return samples[:n]
 
 
 def analyze_samples(samples: list[dict]) -> dict:
