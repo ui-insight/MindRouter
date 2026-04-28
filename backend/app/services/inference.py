@@ -23,7 +23,10 @@ from typing import Any, AsyncIterator, Dict, Optional, Set, Tuple
 import httpx
 import tiktoken
 from fastapi import HTTPException, Request, status
+from opentelemetry import trace
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_tracer = trace.get_tracer(__name__)
 
 from backend.app.core.redis_client import incr_inflight_tokens, decr_inflight_tokens
 from backend.app.core.canonical_schemas import (
@@ -971,6 +974,25 @@ class InferenceService:
                 uses ``backend_request_timeout / 2``.  Pass ``0`` to fail
                 immediately if no backend is available right now.
         """
+        with _tracer.start_as_current_span(
+            "mindrouter.route_request",
+            attributes={
+                "mindrouter.model": job.model,
+                "mindrouter.request_id": job.request_id or "",
+            },
+        ):
+            return await self._route_request_inner(
+                job, user, modality, exclude_backend_ids, max_wait,
+            )
+
+    async def _route_request_inner(
+        self,
+        job: Job,
+        user: User,
+        modality: Optional[Modality] = None,
+        exclude_backend_ids: Optional[Set[int]] = None,
+        max_wait: Optional[float] = None,
+    ):
         # Get backends that support the model
         backends = await self._registry.get_backends_with_model(
             job.model, modality
@@ -1161,6 +1183,9 @@ class InferenceService:
         Returns:
             (response, backend) on success.
         """
+        span = trace.get_current_span()
+        span.set_attribute("mindrouter.model", job.model)
+        span.set_attribute("mindrouter.request_id", job.request_id or "")
         max_attempts = self._settings.backend_retry_max_attempts
         tried_backends: Set[int] = set()
         last_error: Optional[Exception] = None
@@ -1230,6 +1255,10 @@ class InferenceService:
                 elapsed_ms = (time.monotonic() - start_time) * 1000
                 await self._registry.report_live_success(backend.id)
                 await self._latency_tracker.record_latency(backend.id, elapsed_ms)
+                span.set_attribute("mindrouter.backend_id", backend.id)
+                span.set_attribute("mindrouter.backend_engine", str(backend.engine))
+                span.set_attribute("mindrouter.latency_ms", elapsed_ms)
+                span.set_attribute("mindrouter.attempt", attempt + 1)
                 return response, backend
 
             except (asyncio.TimeoutError, httpx.TimeoutException) as e:
@@ -1311,6 +1340,10 @@ class InferenceService:
         Yields:
             (chunk, backend) tuples.
         """
+        span = trace.get_current_span()
+        span.set_attribute("mindrouter.model", job.model)
+        span.set_attribute("mindrouter.request_id", job.request_id or "")
+        span.set_attribute("mindrouter.streaming", True)
         max_attempts = self._settings.backend_retry_max_attempts
         tried_backends: Set[int] = set()
         last_error: Optional[Exception] = None
@@ -1373,6 +1406,9 @@ class InferenceService:
                         ttft_ms = (time.monotonic() - start_time) * 1000
                         await self._registry.report_live_success(backend.id)
                         await self._latency_tracker.record_ttft(backend.id, ttft_ms)
+                        span.set_attribute("mindrouter.backend_id", backend.id)
+                        span.set_attribute("mindrouter.ttft_ms", ttft_ms)
+                        span.set_attribute("mindrouter.attempt", attempt + 1)
 
                     yield chunk, backend
 

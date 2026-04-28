@@ -51,9 +51,13 @@ from backend.app.logging_config import (
 from backend.app.db.session import get_async_db_context
 from backend.app.settings import get_settings
 from backend.app.storage.artifacts import get_artifact_storage
+from backend.app.core.otel import setup_telemetry, shutdown_telemetry, instrument_app
 
 # Setup logging first
 setup_logging()
+
+# Initialize OpenTelemetry (before app creation so httpx/redis/sqlalchemy get instrumented)
+setup_telemetry()
 logger = get_logger(__name__)
 
 
@@ -118,43 +122,26 @@ async def _cleanup_orphaned_requests() -> None:
 
 
 async def _seed_redis_from_db() -> None:
-    """Seed Redis token counters from actual request totals on startup.
+    """Seed per-user Redis token counters from quotas on startup.
 
-    Uses the ``requests`` table as the source of truth (not
-    ``quotas.tokens_used``) so that Redis always reflects real usage.
-    Also deletes orphan Redis keys for user IDs that no longer exist.
+    Uses ``quotas.tokens_used`` (not the requests table) so the counter
+    survives retention deleting old rows.  Also deletes orphan Redis
+    keys for user IDs that no longer have quota rows.
     """
     if not redis_is_available():
         return
     try:
-        from backend.app.db.models import Quota, Request
-        from sqlalchemy import select, func
+        from backend.app.db.models import Quota
+        from sqlalchemy import select
 
         async with get_async_db_context() as db:
-            # Get actual token totals from requests table
-            stmt = (
-                select(Quota.user_id, func.coalesce(func.sum(Request.total_tokens), 0))
-                .outerjoin(Request, Request.user_id == Quota.user_id)
-                .group_by(Quota.user_id)
-            )
-            result = await db.execute(stmt)
+            result = await db.execute(select(Quota.user_id, Quota.tokens_used))
             valid_user_ids = set()
             seeded = 0
-            for user_id, actual_tokens in result.all():
-                await redis_set_tokens(user_id, int(actual_tokens))
+            for user_id, tokens_used in result.all():
+                await redis_set_tokens(user_id, int(tokens_used or 0))
                 valid_user_ids.add(user_id)
                 seeded += 1
-
-            # Also sync DB quotas.tokens_used to match
-            from sqlalchemy import update
-            for user_id in valid_user_ids:
-                sub = select(func.coalesce(func.sum(Request.total_tokens), 0)).where(
-                    Request.user_id == user_id
-                ).scalar_subquery()
-                await db.execute(
-                    update(Quota).where(Quota.user_id == user_id).values(tokens_used=sub)
-                )
-            await db.commit()
 
         # Clean up orphan Redis keys for user IDs that no longer have quotas
         all_redis = await get_all_token_keys()
@@ -169,11 +156,16 @@ async def _seed_redis_from_db() -> None:
         logger.exception("redis_seed_failed")
 
 
-async def _warm_page_caches() -> None:
+async def _warm_page_caches(force_seed: bool = False) -> None:
     """Pre-warm Redis caches for expensive dashboard queries.
 
-    Called on startup and periodically by _cache_warm_loop to ensure
-    page loads never trigger full table scans.
+    Called on startup (with *force_seed=True*) and periodically by
+    _cache_warm_loop to ensure page loads never trigger full table scans.
+
+    When *force_seed* is True the cluster token counter is overwritten
+    from the DB regardless of whether it already exists in Redis.  This
+    prevents a race where incoming requests create the key with a tiny
+    value before the seed runs.
     """
     if not redis_is_available():
         return
@@ -192,9 +184,9 @@ async def _warm_page_caches() -> None:
                     ex=3600,
                 )
 
-            # Global token total (seed the live counter if not already set)
+            # Global token total
             existing = await _rc.get_cluster_tokens()
-            if existing is None:
+            if existing is None or force_seed:
                 totals = await crud.get_global_token_total(db, include_offset=False)
                 await _rc.seed_cluster_tokens(
                     totals["prompt_tokens"],
@@ -210,7 +202,7 @@ async def _warm_page_caches() -> None:
 async def _cache_warm_loop() -> None:
     """Background loop: warm caches immediately on start, then every 30 min."""
     try:
-        await _warm_page_caches()
+        await _warm_page_caches(force_seed=True)
     except Exception:
         logger.exception("cache_warm_initial_error")
     while True:
@@ -409,6 +401,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         pass
     await shutdown_scheduler()
     await shutdown_registry()
+    shutdown_telemetry()
     logger.info("MindRouter shutdown complete")
 
 
@@ -478,6 +471,9 @@ def create_app() -> FastAPI:
     # Request ID middleware — raw ASGI to avoid BaseHTTPMiddleware's task
     # cancellation behavior which corrupts DB sessions on client disconnect.
     app.add_middleware(RequestIDMiddleware)
+
+    # OpenTelemetry FastAPI auto-instrumentation
+    instrument_app(app)
 
     # Exception handlers
     @app.exception_handler(Exception)

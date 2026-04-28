@@ -166,6 +166,7 @@ class Settings(BaseSettings):
     metrics_prefix: str = "mindrouter"
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: Optional[str] = None
+    otel_service_name: str = "mindrouter"
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:8000"]
