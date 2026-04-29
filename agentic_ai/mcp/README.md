@@ -13,7 +13,7 @@
 ### 1. Install dependencies
 
 ```bash
-cd mcp/search
+cd agentic_ai/mcp/search
 pip install -r requirements.txt
 ```
 

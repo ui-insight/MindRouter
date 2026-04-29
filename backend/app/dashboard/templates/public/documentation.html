@@ -77,6 +77,7 @@
                 <li class="nav-item"><a class="nav-link" href="#ocr">Document OCR</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-search">Web Search</a></li>
                 <li class="nav-item"><a class="nav-link" href="#mcp-servers">MCP Servers</a></li>
+                <li class="nav-item"><a class="nav-link" href="#agent-skills">Agent Skills</a></li>
                 <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
@@ -1630,8 +1631,8 @@ for r in results:
                     </tbody>
                 </table>
 
-                <h3>MCP Integration</h3>
-                <p>The <code>/v1/search</code> endpoint is available as a pre-built MCP server for agentic tools. See the <a href="#mcp-servers">MCP Servers</a> section below for setup instructions.</p>
+                <h3>Agentic AI Integration</h3>
+                <p>The <code>/v1/search</code> endpoint is available as both a pre-built <a href="#mcp-servers">MCP server</a> and an <a href="#agent-skills">agent skill</a> for AI coding agents. Both integrations live in the <code>agentic_ai/</code> directory.</p>
 
                 <h3>Configuration</h3>
                 <p>All search settings are managed via <strong>Admin &rarr; Search</strong> in the web dashboard:</p>
@@ -1652,7 +1653,7 @@ for r in results:
             <!-- MCP Servers -->
             <section id="mcp-servers">
                 <h2><i class="bi bi-plug"></i> MCP Servers</h2>
-                <p>MindRouter provides pre-built <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol (MCP)</a> servers that expose MindRouter APIs as tools for agentic systems like <strong>Claude Code</strong>, <strong>CoWork</strong>, <strong>Cursor</strong>, and other MCP-compatible clients.</p>
+                <p>MindRouter provides pre-built <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol (MCP)</a> servers that expose MindRouter APIs as tools for agentic systems like <strong>Claude Code</strong>, <strong>CoWork</strong>, <strong>Cursor</strong>, and other MCP-compatible clients. All agentic integrations (MCP servers and <a href="#agent-skills">agent skills</a>) live in the <code>agentic_ai/</code> directory.</p>
                 <p>MCP servers run locally on your machine. When an agent needs a tool (e.g. web search), it calls the MCP server via stdio, which forwards the request to MindRouter's API over HTTPS. No server-side configuration is needed &mdash; just your MindRouter API key.</p>
 
                 <div class="bg-light border rounded p-3 mb-3">
@@ -1670,7 +1671,7 @@ for r in results:
                             <td><strong>Web Search</strong></td>
                             <td><code>web_search</code></td>
                             <td>Search the web via MindRouter's search API (Brave Search / SearXNG)</td>
-                            <td><a href="https://github.com/ui-insight/MindRouter/tree/main/mcp/search" target="_blank"><code>mcp/search/</code></a></td>
+                            <td><a href="https://github.com/ui-insight/MindRouter/tree/main/mcp/search" target="_blank"><code>agentic_ai/mcp/search/</code></a></td>
                         </tr>
                     </tbody>
                 </table>
@@ -1686,12 +1687,12 @@ for r in results:
                 <h4>3. Configure in Claude Code</h4>
                 <p><strong>Option A: CLI command</strong></p>
 <pre><code>claude mcp add mindrouter-search \
-  -- python3 /path/to/mcp/search/server.py</code></pre>
+  -- python3 /path/to/agentic_ai/mcp/search/server.py</code></pre>
                 <p>Then set your API key in the environment. You can pass it via the <code>--env</code> flag:</p>
 <pre><code>claude mcp add --scope user \
   --env MINDROUTER_API_KEY=mr2_your_key_here \
   mindrouter-search \
-  -- python3 /path/to/mcp/search/server.py</code></pre>
+  -- python3 /path/to/agentic_ai/mcp/search/server.py</code></pre>
 
                 <p><strong>Option B: Project config (.mcp.json)</strong></p>
                 <p>Create a <code>.mcp.json</code> file in your project root:</p>
@@ -1699,7 +1700,7 @@ for r in results:
   "mcpServers": {
     "mindrouter-search": {
       "command": "python3",
-      "args": ["/path/to/mcp/search/server.py"],
+      "args": ["/path/to/agentic_ai/mcp/search/server.py"],
       "env": {
         "MINDROUTER_API_KEY": "mr2_your_key_here",
         "MINDROUTER_BASE_URL": "https://mindrouter.uidaho.edu"
@@ -1727,6 +1728,58 @@ for r in results:
                     <li><strong>Cursor</strong> &mdash; Configure in <code>.cursor/mcp.json</code> using the same format as <code>.mcp.json</code></li>
                     <li><strong>Custom agents</strong> &mdash; Use the <a href="https://github.com/modelcontextprotocol/python-sdk" target="_blank">MCP Python SDK</a> client to connect to the server programmatically</li>
                 </ul>
+            </section>
+
+            <hr>
+
+            <!-- Agent Skills -->
+            <section id="agent-skills">
+                <h2><i class="bi bi-terminal"></i> Agent Skills</h2>
+                <p>MindRouter provides pre-built agent skills &mdash; markdown files containing API context, usage instructions, and example commands that AI coding agents use to interact with MindRouter services. Compatible with <strong>Claude Code</strong>, <strong>ForgeCode</strong>, <strong>OpenCode</strong>, <strong>Codex</strong>, and other agentic coding tools that support markdown-based skill or custom command definitions.</p>
+                <p>Skills are complementary to <a href="#mcp-servers">MCP servers</a>. Use skills for lightweight, dependency-free integration; use MCP servers for a standardized tool protocol with structured input/output.</p>
+
+                <h3>Available Skills</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Skill</th><th>Name</th><th>Description</th><th>Source</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Web Search</strong></td>
+                            <td><code>web-search</code></td>
+                            <td>Search the web via MindRouter's search API (Brave Search / SearXNG)</td>
+                            <td><a href="https://github.com/ui-insight/MindRouter/tree/main/agentic_ai/skills/web-search" target="_blank"><code>agentic_ai/skills/web-search/</code></a></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>Installation</h3>
+                <p>Copy the skill folder into the location your agent tool expects for custom commands or skills. Each skill is a directory containing a <code>SKILL.md</code> file with YAML frontmatter and markdown instructions.</p>
+
+                <h4>Claude Code</h4>
+<pre><code>mkdir -p .claude/skills
+cp -r agentic_ai/skills/web-search .claude/skills/</code></pre>
+
+                <h4>Other Agent Tools</h4>
+                <p>Copy or symlink the skill directory into your tool&rsquo;s custom command location. If your tool doesn&rsquo;t have a specific skills directory, reference the <code>SKILL.md</code> file directly in your system prompt or project context &mdash; the content is standard markdown that any LLM-based agent can follow.</p>
+
+                <h3>Configuration</h3>
+                <p>Set your MindRouter API key in the environment before starting your agent:</p>
+<pre><code>export MINDROUTER_API_KEY=mr2_your_key_here</code></pre>
+                <p>Optionally set a custom base URL (defaults to <code>https://mindrouter.uidaho.edu</code>):</p>
+<pre><code>export MINDROUTER_BASE_URL=https://your-instance.example.com</code></pre>
+
+                <h3>Usage</h3>
+                <p>Once installed, invoke the skill via your agent&rsquo;s command interface (e.g. <code>/web-search</code> in Claude Code) or ask the agent to search the web. The agent will call MindRouter&rsquo;s search API, parse the results, and present titles, URLs, and snippets.</p>
+
+                <h3>Skills vs MCP Servers</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Feature</th><th>Skills</th><th>MCP Servers</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Format</strong></td><td>Markdown + YAML frontmatter</td><td>Python MCP server (stdio transport)</td></tr>
+                        <tr><td><strong>Setup</strong></td><td>Copy folder into agent&rsquo;s skill directory</td><td>Configure in agent&rsquo;s MCP settings</td></tr>
+                        <tr><td><strong>Scope</strong></td><td>Any agent that reads markdown skill files</td><td>Any MCP-compatible client</td></tr>
+                        <tr><td><strong>Dependencies</strong></td><td>None (uses curl / shell)</td><td>Python, <code>mcp[cli]</code>, <code>httpx</code></td></tr>
+                    </tbody>
+                </table>
             </section>
 
             <hr>

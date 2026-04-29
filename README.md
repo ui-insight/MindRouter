@@ -23,7 +23,8 @@ Interactive API docs are also available at `/docs` (Swagger UI) and `/redoc` (Re
 - **Health Alerts**: Admin dashboard shows a prominent warning banner when any backend is unhealthy or any node is offline
 - **Tool Calling**: Function calling support across all API surfaces with cross-engine translation
 - **Thinking/Reasoning Mode**: Control reasoning depth on supported models (qwen3.5, qwen3, gpt-oss)
-- **Web Search**: Optional Brave Search integration injects web results as context in chat
+- **Web Search**: Standalone search API (`/v1/search`) with pluggable providers (Brave Search, SearXNG)
+- **Agentic AI Integrations**: MCP servers and agent skills for Claude Code, ForgeCode, OpenCode, Codex, Cursor, and others (`agentic_ai/`)
 - **Azure AD SSO**: Optional single sign-on with JIT user provisioning from Microsoft Entra ID
 - **Voice API**: Public TTS and STT endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`) with API key auth and quota tracking
 - **Full Audit Logging**: All prompts, responses, and artifacts stored for review

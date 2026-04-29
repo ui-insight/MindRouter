@@ -10,14 +10,14 @@ Usage:
     python server.py
 
 Configure in Claude Code:
-    claude mcp add mindrouter-search -- python /path/to/mcp/search/server.py
+    claude mcp add mindrouter-search -- python /path/to/agentic_ai/mcp/search/server.py
 
 Or in .mcp.json:
     {
       "mcpServers": {
         "mindrouter-search": {
           "command": "python3",
-          "args": ["/path/to/mcp/search/server.py"],
+          "args": ["/path/to/agentic_ai/mcp/search/server.py"],
           "env": {
             "MINDROUTER_API_KEY": "mr2_your_key_here"
           }
