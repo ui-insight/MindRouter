@@ -3,11 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
-      - DATABASE_URL=mysql+pymysql://mindrouter:${MYSQL_PASSWORD:-mindrouter_password}@mariadb:3306/mindrouter
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=mysql+pymysql://mindrouter:${MYSQL_PASSWORD:-mindrouter_password}@127.0.0.1:3306/mindrouter
+      - REDIS_URL=redis://127.0.0.1:6379/0
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
       - ARTIFACT_STORAGE_PATH=/data/artifacts
       - CHAT_FILES_PATH=/data/chat_files
@@ -19,7 +18,7 @@ services:
       - AZURE_AD_REDIRECT_URI=${AZURE_AD_REDIRECT_URI:-}
       - BRAVE_SEARCH_API_KEY=${BRAVE_SEARCH_API_KEY:-}
       - APP_BASE_URL=${APP_BASE_URL:-https://mindrouter.uidaho.edu}
-      - ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:${MYSQL_ARCHIVE_PASSWORD:-archive_password}@mariadb-archive:3306/mindrouter_archive
+      - ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:${MYSQL_ARCHIVE_PASSWORD:-archive_password}@127.0.0.1:3307/mindrouter_archive
       - OTEL_ENABLED=${OTEL_ENABLED:-false}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-mindrouter}
@@ -41,18 +40,16 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
-    networks:
-      - mindrouter_network
 
   mariadb:
     image: mariadb:11.2
+    network_mode: host
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-root_password}
       - MYSQL_DATABASE=mindrouter
       - MYSQL_USER=mindrouter
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-mindrouter_password}
-    ports:
-      - "3306:3306"
+      - MYSQL_TCP_PORT=3306
     volumes:
       - mariadb_data:/var/lib/mysql
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -64,35 +61,30 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
-    networks:
-      - mindrouter_network
 
   mariadb-archive:
     image: mariadb:11.2
+    network_mode: host
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ARCHIVE_ROOT_PASSWORD:-archive_root_password}
       - MYSQL_DATABASE=mindrouter_archive
       - MYSQL_USER=mindrouter_archive
       - MYSQL_PASSWORD=${MYSQL_ARCHIVE_PASSWORD:-archive_password}
-    ports:
-      - "3307:3306"
+      - MYSQL_TCP_PORT=3307
     volumes:
       - mariadb_archive_data:/var/lib/mysql
       - ./mariadb/archive.cnf:/etc/mysql/conf.d/custom.cnf:ro
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized", "--port=3307"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
     restart: unless-stopped
-    networks:
-      - mindrouter_network
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    network_mode: host
     volumes:
       - redis_data:/data
     healthcheck:
@@ -101,22 +93,17 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
-    command: redis-server --appendonly yes
-    networks:
-      - mindrouter_network
+    command: redis-server --appendonly yes --port 6379
 
   # Mock Ollama backend for development/testing
   mock-ollama:
     build:
       context: .
       dockerfile: Dockerfile.mock
-    ports:
-      - "11434:11434"
+    network_mode: host
     environment:
       - MOCK_ENGINE=ollama
       - MOCK_PORT=11434
-    networks:
-      - mindrouter_network
     profiles:
       - dev
 
@@ -125,13 +112,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mock
-    ports:
-      - "8001:8001"
+    network_mode: host
     environment:
       - MOCK_ENGINE=vllm
       - MOCK_PORT=8001
-    networks:
-      - mindrouter_network
     profiles:
       - dev
 
@@ -140,14 +124,11 @@ services:
     build:
       context: ./sidecar
       dockerfile: Dockerfile.sidecar
-    ports:
-      - "8007:8007"
+    network_mode: host
     environment:
       - GPU_AGENT_PORT=8007
       - GPU_AGENT_HOST=0.0.0.0
       - SIDECAR_SECRET_KEY=${SIDECAR_SECRET_KEY}
-    networks:
-      - mindrouter_network
     profiles:
       - gpu
     deploy:
@@ -164,11 +145,3 @@ volumes:
   redis_data:
   artifact_data:
   chat_data:
-
-networks:
-  mindrouter_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.50.50.0/24
-          gateway: 10.50.50.1
