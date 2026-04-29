@@ -76,6 +76,7 @@
                 <li class="nav-item"><a class="nav-link" href="#tool-calling">Tool Calling</a></li>
                 <li class="nav-item"><a class="nav-link" href="#ocr">Document OCR</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-search">Web Search</a></li>
+                <li class="nav-item"><a class="nav-link" href="#mcp-servers">MCP Servers</a></li>
                 <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
                 <li class="nav-item"><a class="nav-link" href="#translation-layer">Translation Layer</a></li>
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
@@ -1630,7 +1631,7 @@ for r in results:
                 </table>
 
                 <h3>MCP Integration</h3>
-                <p>The <code>/v1/search</code> endpoint can be wrapped as an MCP tool for agentic systems (Claude Code, Cursor, custom agents). An MCP server just needs to call MindRouter's search endpoint with the user's API key &mdash; no separate search API credentials required.</p>
+                <p>The <code>/v1/search</code> endpoint is available as a pre-built MCP server for agentic tools. See the <a href="#mcp-servers">MCP Servers</a> section below for setup instructions.</p>
 
                 <h3>Configuration</h3>
                 <p>All search settings are managed via <strong>Admin &rarr; Search</strong> in the web dashboard:</p>
@@ -1644,6 +1645,88 @@ for r in results:
                     <li><strong>Test search</strong> &mdash; Inline test with live results preview</li>
                 </ul>
                 <p>Settings are stored in the <code>app_config</code> table (keys prefixed with <code>search.*</code>) and take effect immediately.</p>
+            </section>
+
+            <hr>
+
+            <!-- MCP Servers -->
+            <section id="mcp-servers">
+                <h2><i class="bi bi-plug"></i> MCP Servers</h2>
+                <p>MindRouter provides pre-built <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol (MCP)</a> servers that expose MindRouter APIs as tools for agentic systems like <strong>Claude Code</strong>, <strong>CoWork</strong>, <strong>Cursor</strong>, and other MCP-compatible clients.</p>
+                <p>MCP servers run locally on your machine. When an agent needs a tool (e.g. web search), it calls the MCP server via stdio, which forwards the request to MindRouter's API over HTTPS. No server-side configuration is needed &mdash; just your MindRouter API key.</p>
+
+                <div class="bg-light border rounded p-3 mb-3">
+                    <pre class="mb-0" style="font-size: 0.85rem;">Agent (Claude Code, CoWork, etc.)
+  &boxur;&horbar;&horbar; MCP protocol (stdio) &longrightarrow; MCP Server (local process)
+                                  &boxur;&horbar;&horbar; HTTPS &longrightarrow; MindRouter API
+                                                  &boxur;&horbar;&horbar; Backend service (Brave Search, etc.)</pre>
+                </div>
+
+                <h3>Available Servers</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Server</th><th>Tool Name</th><th>Description</th><th>Source</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Web Search</strong></td>
+                            <td><code>web_search</code></td>
+                            <td>Search the web via MindRouter's search API (Brave Search / SearXNG)</td>
+                            <td><a href="https://github.com/ui-insight/MindRouter/tree/main/mcp/search" target="_blank"><code>mcp/search/</code></a></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3>Setup: Web Search MCP Server</h3>
+
+                <h4>1. Install dependencies</h4>
+<pre><code>pip install "mcp[cli]" httpx</code></pre>
+
+                <h4>2. Get your API key</h4>
+                <p>Generate an API key from the <a href="/dashboard/api-keys">API Keys</a> page in the MindRouter dashboard.</p>
+
+                <h4>3. Configure in Claude Code</h4>
+                <p><strong>Option A: CLI command</strong></p>
+<pre><code>claude mcp add mindrouter-search \
+  -- python3 /path/to/mcp/search/server.py</code></pre>
+                <p>Then set your API key in the environment. You can pass it via the <code>--env</code> flag:</p>
+<pre><code>claude mcp add --scope user \
+  --env MINDROUTER_API_KEY=mr2_your_key_here \
+  mindrouter-search \
+  -- python3 /path/to/mcp/search/server.py</code></pre>
+
+                <p><strong>Option B: Project config (.mcp.json)</strong></p>
+                <p>Create a <code>.mcp.json</code> file in your project root:</p>
+<pre><code>{
+  "mcpServers": {
+    "mindrouter-search": {
+      "command": "python3",
+      "args": ["/path/to/mcp/search/server.py"],
+      "env": {
+        "MINDROUTER_API_KEY": "mr2_your_key_here",
+        "MINDROUTER_BASE_URL": "https://mindrouter.uidaho.edu"
+      }
+    }
+  }
+}</code></pre>
+
+                <h4>4. Verify</h4>
+                <p>Inside Claude Code, run <code>/mcp</code> to confirm the server is connected and the <code>web_search</code> tool is listed.</p>
+
+                <h3>Environment Variables</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>MINDROUTER_API_KEY</code></td><td><em>(required)</em></td><td>Your MindRouter API key</td></tr>
+                        <tr><td><code>MINDROUTER_BASE_URL</code></td><td><code>https://mindrouter.uidaho.edu</code></td><td>MindRouter instance URL (change for self-hosted instances)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Other MCP-Compatible Clients</h3>
+                <p>The MCP servers work with any client that supports the MCP stdio transport. Configuration varies by client:</p>
+                <ul>
+                    <li><strong>CoWork</strong> &mdash; Add the server in your workspace MCP configuration</li>
+                    <li><strong>Cursor</strong> &mdash; Configure in <code>.cursor/mcp.json</code> using the same format as <code>.mcp.json</code></li>
+                    <li><strong>Custom agents</strong> &mdash; Use the <a href="https://github.com/modelcontextprotocol/python-sdk" target="_blank">MCP Python SDK</a> client to connect to the server programmatically</li>
+                </ul>
             </section>
 
             <hr>

@@ -103,27 +103,17 @@ async def _deduct_search_tokens(
         modality=Modality.CHAT,
     )
 
-    await crud.update_request_status(
+    await crud.update_request_completed(
         db,
         request_record.id,
-        status=RequestStatus.COMPLETED,
-        total_tokens=token_cost,
         prompt_tokens=token_cost,
         completion_tokens=0,
-        latency_ms=latency_ms,
     )
 
-    # Update quota
-    await crud.increment_tokens(db, user.id, token_cost)
+    # Update quota (DB + Redis)
+    await crud.update_quota_usage(db, user.id, token_cost)
     await db.commit()
-
-    # Update Redis counter if available
-    try:
-        from backend.app.core.redis_client import is_available, incr_tokens
-        if is_available():
-            await incr_tokens(user.id, token_cost)
-    except Exception:
-        pass
+    await crud.incr_quota_redis(user.id, token_cost)
 
 
 # ---------------------------------------------------------------------------
