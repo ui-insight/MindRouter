@@ -75,7 +75,7 @@ services:
       - mariadb_archive_data:/var/lib/mysql
       - ./mariadb/archive.cnf:/etc/mysql/conf.d/custom.cnf:ro
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized", "--port=3307"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
       retries: 5
