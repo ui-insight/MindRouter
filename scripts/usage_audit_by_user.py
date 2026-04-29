@@ -423,24 +423,57 @@ def allocate_samples(user_counts: list[dict], total_budget: int,
 def sample_user_requests(conn, user_id: int, n: int,
                          start_dt: datetime, end_dt: datetime,
                          rng: random.Random) -> list[dict]:
-    """Sample up to *n* completed requests for a single user in the period."""
+    """Sample up to *n* completed requests for a single user in the period.
+
+    Uses PK-range probing to avoid fetching millions of IDs for heavy users.
+    """
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id FROM requests
+            SELECT MIN(id) AS mn, MAX(id) AS mx, COUNT(*) AS cnt
+            FROM requests
             WHERE user_id = %s AND created_at >= %s AND created_at < %s
               AND status = 'completed' AND messages IS NOT NULL
         """, (user_id, start_dt, end_dt))
-        ids = [row["id"] for row in cur.fetchall()]
+        bounds = cur.fetchone()
 
-    if not ids:
+    if not bounds or not bounds["mn"]:
         return []
 
-    chosen = rng.sample(ids, min(n, len(ids)))
+    min_id, max_id, total = bounds["mn"], bounds["mx"], bounds["cnt"]
 
+    if total <= n:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT r.id, r.request_uuid, r.user_id, r.model, r.modality,
+                       r.endpoint, r.messages, r.prompt, r.is_streaming,
+                       r.prompt_tokens, r.completion_tokens, r.total_tokens,
+                       r.total_time_ms, r.user_agent, r.created_at,
+                       ak.name AS key_name, ak.is_service, ak.service_name
+                FROM requests r
+                LEFT JOIN api_keys ak ON ak.id = r.api_key_id
+                WHERE r.user_id = %s AND r.created_at >= %s AND r.created_at < %s
+                  AND r.status = 'completed' AND r.messages IS NOT NULL
+            """, (user_id, start_dt, end_dt))
+            rows = cur.fetchall()
+            for row in rows:
+                row["_source"] = "main"
+            return rows
+
+    # PK-range probing: generate random IDs in the user's PK range
     rows = []
-    for batch_start in range(0, len(chosen), 50):
-        batch = chosen[batch_start:batch_start + 50]
-        placeholders = ",".join(["%s"] * len(batch))
+    seen = set()
+    attempts = 0
+    max_attempts = n * 20
+
+    while len(rows) < n and attempts < max_attempts:
+        batch_ids = [rng.randint(min_id, max_id) for _ in range(min(50, (n - len(rows)) * 4))]
+        batch_ids = [i for i in batch_ids if i not in seen]
+        if not batch_ids:
+            attempts += 50
+            continue
+        seen.update(batch_ids)
+
+        placeholders = ",".join(["%s"] * len(batch_ids))
         with conn.cursor() as cur:
             cur.execute(f"""
                 SELECT r.id, r.request_uuid, r.user_id, r.model, r.modality,
@@ -451,34 +484,72 @@ def sample_user_requests(conn, user_id: int, n: int,
                 FROM requests r
                 LEFT JOIN api_keys ak ON ak.id = r.api_key_id
                 WHERE r.id IN ({placeholders})
-            """, batch)
+                  AND r.user_id = %s AND r.created_at >= %s AND r.created_at < %s
+                  AND r.status = 'completed' AND r.messages IS NOT NULL
+            """, batch_ids + [user_id, start_dt, end_dt])
             for row in cur.fetchall():
-                row["_source"] = "main"
-                rows.append(row)
-    return rows
+                if row["id"] not in {r["id"] for r in rows}:
+                    row["_source"] = "main"
+                    rows.append(row)
+        attempts += len(batch_ids)
+
+    return rows[:n]
 
 
 def sample_user_archive_requests(aconn, user_id: int, n: int,
                                   start_dt: datetime, end_dt: datetime,
                                   rng: random.Random) -> list[dict]:
-    """Sample up to *n* archived requests for a single user in the period."""
+    """Sample up to *n* archived requests for a single user in the period.
+
+    Uses PK-range probing to avoid fetching all IDs for heavy users.
+    """
     with aconn.cursor() as cur:
         cur.execute("""
-            SELECT id FROM archived_requests
+            SELECT MIN(id) AS mn, MAX(id) AS mx, COUNT(*) AS cnt
+            FROM archived_requests
             WHERE user_id = %s AND created_at >= %s AND created_at < %s
               AND status = 'completed' AND messages IS NOT NULL
         """, (user_id, start_dt, end_dt))
-        ids = [row["id"] for row in cur.fetchall()]
+        bounds = cur.fetchone()
 
-    if not ids:
+    if not bounds or not bounds["mn"]:
         return []
 
-    chosen = rng.sample(ids, min(n, len(ids)))
+    min_id, max_id, total = bounds["mn"], bounds["mx"], bounds["cnt"]
+
+    if total <= n:
+        with aconn.cursor() as cur:
+            cur.execute("""
+                SELECT id, request_uuid, user_id, model, modality,
+                       endpoint, messages, prompt, is_streaming,
+                       prompt_tokens, completion_tokens, total_tokens,
+                       total_time_ms, user_agent, created_at
+                FROM archived_requests
+                WHERE user_id = %s AND created_at >= %s AND created_at < %s
+                  AND status = 'completed' AND messages IS NOT NULL
+            """, (user_id, start_dt, end_dt))
+            rows = cur.fetchall()
+            for row in rows:
+                row["key_name"] = None
+                row["is_service"] = None
+                row["service_name"] = None
+                row["_source"] = "archive"
+            return rows
 
     rows = []
-    for batch_start in range(0, len(chosen), 50):
-        batch = chosen[batch_start:batch_start + 50]
-        placeholders = ",".join(["%s"] * len(batch))
+    seen = set()
+    attempts = 0
+    max_attempts = n * 20
+
+    while len(rows) < n and attempts < max_attempts:
+        batch_ids = [rng.randint(min_id, max_id) for _ in range(min(50, (n - len(rows)) * 4))]
+        batch_ids = [i for i in batch_ids if i not in seen]
+        if not batch_ids:
+            attempts += 50
+            continue
+        seen.update(batch_ids)
+
+        placeholders = ",".join(["%s"] * len(batch_ids))
         with aconn.cursor() as cur:
             cur.execute(f"""
                 SELECT id, request_uuid, user_id, model, modality,
@@ -487,14 +558,19 @@ def sample_user_archive_requests(aconn, user_id: int, n: int,
                        total_time_ms, user_agent, created_at
                 FROM archived_requests
                 WHERE id IN ({placeholders})
-            """, batch)
+                  AND user_id = %s AND created_at >= %s AND created_at < %s
+                  AND status = 'completed' AND messages IS NOT NULL
+            """, batch_ids + [user_id, start_dt, end_dt])
             for row in cur.fetchall():
-                row["key_name"] = None
-                row["is_service"] = None
-                row["service_name"] = None
-                row["_source"] = "archive"
-                rows.append(row)
-    return rows
+                if row["id"] not in {r["id"] for r in rows}:
+                    row["key_name"] = None
+                    row["is_service"] = None
+                    row["service_name"] = None
+                    row["_source"] = "archive"
+                    rows.append(row)
+        attempts += len(batch_ids)
+
+    return rows[:n]
 
 
 def classify_ua(ua):
