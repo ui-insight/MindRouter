@@ -155,12 +155,25 @@
 |  +---------+  |  +--------+ |
 |  | Ollama  |  |  |  vLLM  | |  &larr; Inference engines
 |  +---------+  |  +--------+ |
-+---------------+-------------+</code></pre>
++---------------+-------------+
+
+MCP Client (Claude Code, Cursor, etc.)
+        |
+        v  SSE transport
++-----------------------------+
+|    MCP Server Container     |  &larr; /mcp/search/sse (dedicated single-worker process)
++-----------------------------+
+        |
+        v
++-----------------------------+
+| Search Provider (Brave API) |
++-----------------------------+</code></pre>
 
                 <p><strong>Key concepts:</strong></p>
                 <ul>
                     <li>A <strong>Node</strong> is a physical GPU server running a sidecar agent.</li>
                     <li>A <strong>Backend</strong> is an inference endpoint (Ollama or vLLM instance) running on a node. Multiple backends can share a node, each assigned specific GPUs via <code>gpu_indices</code>.</li>
+                    <li>The <strong>MCP Server</strong> runs as a separate single-worker container, exposing MindRouter tools (e.g., web search) to MCP-compatible agents over SSE transport. The main app proxies <code>/mcp/*</code> requests to this container.</li>
                 </ul>
             </section>
 
@@ -2853,6 +2866,22 @@ WHERE ENCRYPTION_SCHEME = 1;</code></pre>
                     <li>Node and backend registration</li>
                     <li>Verification and ongoing operations</li>
                 </ul>
+
+                <h3>Docker Compose Services</h3>
+                <p>The production stack consists of the following containers:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Service</th><th>Port</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>app</code></td><td>8000</td><td>Main FastAPI application (multi-worker)</td></tr>
+                        <tr><td><code>mcp</code></td><td>8001</td><td>MCP SSE server (single-worker &mdash; required for session affinity)</td></tr>
+                        <tr><td><code>mariadb</code></td><td>3306</td><td>Primary MariaDB database</td></tr>
+                        <tr><td><code>mariadb-archive</code></td><td>3307</td><td>Archive database for tiered data retention</td></tr>
+                        <tr><td><code>redis</code></td><td>6379</td><td>Redis for token counters and caching</td></tr>
+                    </tbody>
+                </table>
+                <p>The <code>mcp</code> service runs the <a href="#mcp-servers">MCP SSE server</a> as a dedicated single-worker process. The MCP SSE transport stores sessions in memory, so it must run with exactly one worker to ensure that SSE connections and subsequent POST messages are handled by the same process. The main <code>app</code> service proxies all <code>/mcp/*</code> requests to this container transparently.</p>
 
                 <h3>GPU Sidecar Deployment</h3>
                 <p>The GPU sidecar agent runs on each inference node to expose per-GPU hardware metrics and enable auto-discovery of inference endpoints.
