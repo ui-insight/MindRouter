@@ -25,7 +25,7 @@ Client configuration::
 
     {
       "mcpServers": {
-        "mindrouter": {
+        "mindrouter-search": {
           "type": "sse",
           "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
           "headers": {

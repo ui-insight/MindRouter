@@ -25,7 +25,7 @@ Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
 ```json
 {
   "mcpServers": {
-    "mindrouter": {
+    "mindrouter-search": {
       "type": "sse",
       "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
       "headers": {
@@ -41,7 +41,7 @@ Or via Claude Code CLI:
 ```bash
 claude mcp add --transport sse \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse
+  mindrouter-search https://mindrouter.uidaho.edu/mcp/search/sse
 ```
 
 ### Option 2: Local MCP Server (stdio)
