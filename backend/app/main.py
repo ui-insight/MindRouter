@@ -493,12 +493,13 @@ def create_app() -> FastAPI:
     app.include_router(blog_router)
     app.include_router(email_router)
     app.include_router(dlp_router)
-    # Mount server-side MCP search endpoint (SSE transport)
+    # Proxy /mcp/* to the standalone MCP service (single-worker process
+    # that avoids SseServerTransport session-affinity issues).
     try:
-        from backend.app.api.mcp_server import mcp_app as mcp_search_app
-        app.mount("/mcp/search", mcp_search_app)
+        from backend.app.api.mcp_proxy import mcp_proxy_app
+        app.mount("/mcp", mcp_proxy_app)
     except ImportError:
-        logger.warning("mcp_sse_disabled", reason="mcp package not installed")
+        logger.warning("mcp_proxy_disabled", reason="httpx not available")
 
     # Mount static files for dashboard
     import os

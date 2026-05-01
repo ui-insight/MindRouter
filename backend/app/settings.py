@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     debug: bool = False
     reload: bool = False
 
+    # MCP server (standalone single-worker process)
+    mcp_server_url: str = "http://127.0.0.1:8001"
+
     # Database
     database_url: str = Field(
         default="mysql+pymysql://mindrouter:mindrouter_password@localhost:3306/mindrouter"
