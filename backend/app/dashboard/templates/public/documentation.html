@@ -1653,49 +1653,81 @@ for r in results:
             <!-- MCP Servers -->
             <section id="mcp-servers">
                 <h2><i class="bi bi-plug"></i> MCP Servers</h2>
-                <p>MindRouter provides pre-built <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol (MCP)</a> servers that expose MindRouter APIs as tools for agentic systems like <strong>Claude Code</strong>, <strong>CoWork</strong>, <strong>Cursor</strong>, and other MCP-compatible clients. All agentic integrations (MCP servers and <a href="#agent-skills">agent skills</a>) live in the <code>agentic_ai/</code> directory.</p>
-                <p>MCP servers run locally on your machine. When an agent needs a tool (e.g. web search), it calls the MCP server via stdio, which forwards the request to MindRouter's API over HTTPS. No server-side configuration is needed &mdash; just your MindRouter API key.</p>
+                <p>MindRouter provides <a href="https://modelcontextprotocol.io/" target="_blank">Model Context Protocol (MCP)</a> servers that expose MindRouter APIs as tools for agentic systems like <strong>Claude Code</strong>, <strong>CoWork</strong>, <strong>Cursor</strong>, and other MCP-compatible clients.</p>
+                <p>Two connection options are available:</p>
+                <ul>
+                    <li><strong>Hosted SSE server (recommended)</strong> &mdash; Connect directly to MindRouter&rsquo;s built-in MCP endpoint. No local dependencies or setup required.</li>
+                    <li><strong>Local stdio server</strong> &mdash; Run the MCP server on your machine. Requires Python and a few packages.</li>
+                </ul>
 
                 <div class="bg-light border rounded p-3 mb-3">
-                    <pre class="mb-0" style="font-size: 0.85rem;">Agent (Claude Code, CoWork, etc.)
-  &boxur;&horbar;&horbar; MCP protocol (stdio) &longrightarrow; MCP Server (local process)
-                                  &boxur;&horbar;&horbar; HTTPS &longrightarrow; MindRouter API
-                                                  &boxur;&horbar;&horbar; Backend service (Brave Search, etc.)</pre>
+                    <pre class="mb-0" style="font-size: 0.85rem;">Agent (Claude Code, CoWork, Cursor, etc.)
+  &boxvr;&horbar;&horbar; SSE transport  &longrightarrow; MindRouter SSE MCP Server (hosted)  &longrightarrow; Search backend
+  &boxur;&horbar;&horbar; stdio transport &longrightarrow; MCP Server (local process) &longrightarrow; HTTPS &longrightarrow; MindRouter API</pre>
                 </div>
 
-                <h3>Available Servers</h3>
+                <h3>Available Tools</h3>
                 <table class="table table-sm table-bordered">
-                    <thead><tr><th>Server</th><th>Tool Name</th><th>Description</th><th>Source</th></tr></thead>
+                    <thead><tr><th>Tool</th><th>Tool Name</th><th>Description</th><th>Hosted SSE</th><th>Local Source</th></tr></thead>
                     <tbody>
                         <tr>
                             <td><strong>Web Search</strong></td>
                             <td><code>web_search</code></td>
-                            <td>Search the web via MindRouter's search API (Brave Search / SearXNG)</td>
-                            <td><a href="https://github.com/ui-insight/MindRouter/tree/main/mcp/search" target="_blank"><code>agentic_ai/mcp/search/</code></a></td>
+                            <td>Search the web via MindRouter (Brave Search / SearXNG)</td>
+                            <td><code>/mcp/search/sse</code></td>
+                            <td><a href="https://github.com/ui-insight/MindRouter/tree/main/agentic_ai/mcp/search" target="_blank"><code>agentic_ai/mcp/search/</code></a></td>
                         </tr>
                     </tbody>
                 </table>
 
-                <h3>Setup: Web Search MCP Server</h3>
+                <h3>Option 1: Hosted SSE Server (Recommended)</h3>
+                <p>The simplest way to connect. MindRouter hosts the MCP server &mdash; no Python, no dependencies, no local processes. Just add a few lines to your MCP client config.</p>
+
+                <h4>1. Get your API key</h4>
+                <p>Generate an API key from the <a href="/dashboard/api-keys">API Keys</a> page in the MindRouter dashboard.</p>
+
+                <h4>2. Configure your MCP client</h4>
+                <p>Add this to your agent&rsquo;s MCP configuration (<code>.mcp.json</code>, <code>.cursor/mcp.json</code>, etc.):</p>
+<pre><code>{
+  "mcpServers": {
+    "mindrouter": {
+      "type": "sse",
+      "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
+      "headers": {
+        "Authorization": "Bearer mr2_your_key_here"
+      }
+    }
+  }
+}</code></pre>
+                <p>Or in Claude Code via CLI:</p>
+<pre><code>claude mcp add --transport sse \
+  -H "Authorization: Bearer mr2_your_key_here" \
+  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse</code></pre>
+
+                <h4>3. Verify</h4>
+                <p>In Claude Code, run <code>/mcp</code> to confirm the connection and the <code>web_search</code> tool is listed. In other clients, check your MCP server status panel.</p>
+
+                <div class="alert alert-info mb-3">
+                    <strong>Authentication:</strong> The hosted MCP server authenticates with your MindRouter API key via the <code>Authorization: Bearer</code> or <code>X-API-Key</code> header. Each search deducts the same token cost as the REST API.
+                </div>
+
+                <h3>Option 2: Local stdio Server</h3>
+                <p>Run the MCP server locally if you prefer a self-hosted setup or need to work offline. The local server connects to MindRouter over HTTPS.</p>
 
                 <h4>1. Install dependencies</h4>
 <pre><code>pip install "mcp[cli]" httpx</code></pre>
 
                 <h4>2. Get your API key</h4>
-                <p>Generate an API key from the <a href="/dashboard/api-keys">API Keys</a> page in the MindRouter dashboard.</p>
+                <p>Generate an API key from the <a href="/dashboard/api-keys">API Keys</a> page.</p>
 
-                <h4>3. Configure in Claude Code</h4>
-                <p><strong>Option A: CLI command</strong></p>
-<pre><code>claude mcp add mindrouter-search \
-  -- python3 /path/to/agentic_ai/mcp/search/server.py</code></pre>
-                <p>Then set your API key in the environment. You can pass it via the <code>--env</code> flag:</p>
+                <h4>3. Configure in your MCP client</h4>
+                <p><strong>Claude Code CLI:</strong></p>
 <pre><code>claude mcp add --scope user \
   --env MINDROUTER_API_KEY=mr2_your_key_here \
   mindrouter-search \
   -- python3 /path/to/agentic_ai/mcp/search/server.py</code></pre>
 
-                <p><strong>Option B: Project config (.mcp.json)</strong></p>
-                <p>Create a <code>.mcp.json</code> file in your project root:</p>
+                <p><strong>Project config (.mcp.json):</strong></p>
 <pre><code>{
   "mcpServers": {
     "mindrouter-search": {
@@ -1709,10 +1741,7 @@ for r in results:
   }
 }</code></pre>
 
-                <h4>4. Verify</h4>
-                <p>Inside Claude Code, run <code>/mcp</code> to confirm the server is connected and the <code>web_search</code> tool is listed.</p>
-
-                <h3>Environment Variables</h3>
+                <h3>Environment Variables (Local Server Only)</h3>
                 <table class="table table-sm table-bordered">
                     <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
                     <tbody>
@@ -1721,12 +1750,24 @@ for r in results:
                     </tbody>
                 </table>
 
+                <h3>Hosted vs Local Comparison</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Feature</th><th>Hosted SSE</th><th>Local stdio</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Setup</strong></td><td>3-line JSON config</td><td>Install Python + packages</td></tr>
+                        <tr><td><strong>Dependencies</strong></td><td>None</td><td>Python 3.11+, <code>mcp[cli]</code>, <code>httpx</code></td></tr>
+                        <tr><td><strong>Transport</strong></td><td>SSE over HTTPS</td><td>stdio (local process)</td></tr>
+                        <tr><td><strong>Latency</strong></td><td>Direct server call</td><td>Extra HTTPS hop</td></tr>
+                        <tr><td><strong>Offline use</strong></td><td>Requires network</td><td>Requires network (to MindRouter API)</td></tr>
+                    </tbody>
+                </table>
+
                 <h3>Other MCP-Compatible Clients</h3>
-                <p>The MCP servers work with any client that supports the MCP stdio transport. Configuration varies by client:</p>
+                <p>Both hosted and local MCP servers work with any MCP-compatible client:</p>
                 <ul>
-                    <li><strong>CoWork</strong> &mdash; Add the server in your workspace MCP configuration</li>
-                    <li><strong>Cursor</strong> &mdash; Configure in <code>.cursor/mcp.json</code> using the same format as <code>.mcp.json</code></li>
-                    <li><strong>Custom agents</strong> &mdash; Use the <a href="https://github.com/modelcontextprotocol/python-sdk" target="_blank">MCP Python SDK</a> client to connect to the server programmatically</li>
+                    <li><strong>Cursor</strong> &mdash; Configure in <code>.cursor/mcp.json</code></li>
+                    <li><strong>CoWork</strong> &mdash; Add in your workspace MCP configuration</li>
+                    <li><strong>Custom agents</strong> &mdash; Use the <a href="https://github.com/modelcontextprotocol/python-sdk" target="_blank">MCP Python SDK</a> client to connect programmatically</li>
                 </ul>
             </section>
 
@@ -1772,12 +1813,12 @@ cp -r agentic_ai/skills/web-search .claude/skills/</code></pre>
 
                 <h3>Skills vs MCP Servers</h3>
                 <table class="table table-sm table-bordered">
-                    <thead><tr><th>Feature</th><th>Skills</th><th>MCP Servers</th></tr></thead>
+                    <thead><tr><th>Feature</th><th>Skills</th><th>MCP (Hosted SSE)</th><th>MCP (Local stdio)</th></tr></thead>
                     <tbody>
-                        <tr><td><strong>Format</strong></td><td>Markdown + YAML frontmatter</td><td>Python MCP server (stdio transport)</td></tr>
-                        <tr><td><strong>Setup</strong></td><td>Copy folder into agent&rsquo;s skill directory</td><td>Configure in agent&rsquo;s MCP settings</td></tr>
-                        <tr><td><strong>Scope</strong></td><td>Any agent that reads markdown skill files</td><td>Any MCP-compatible client</td></tr>
-                        <tr><td><strong>Dependencies</strong></td><td>None (uses curl / shell)</td><td>Python, <code>mcp[cli]</code>, <code>httpx</code></td></tr>
+                        <tr><td><strong>Format</strong></td><td>Markdown + YAML frontmatter</td><td>SSE endpoint (server-hosted)</td><td>Python MCP server</td></tr>
+                        <tr><td><strong>Setup</strong></td><td>Copy folder into agent&rsquo;s skill directory</td><td>3-line JSON config</td><td>Install Python + packages + config</td></tr>
+                        <tr><td><strong>Scope</strong></td><td>Any agent that reads markdown skill files</td><td colspan="2">Any MCP-compatible client</td></tr>
+                        <tr><td><strong>Dependencies</strong></td><td>None (uses curl / shell)</td><td>None</td><td>Python, <code>mcp[cli]</code>, <code>httpx</code></td></tr>
                     </tbody>
                 </table>
             </section>

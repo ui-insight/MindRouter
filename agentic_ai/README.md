@@ -6,7 +6,8 @@ Tools, skills, and servers that let AI coding agents and agentic systems use Min
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **MCP Servers** | [`mcp/`](mcp/) | [Model Context Protocol](https://modelcontextprotocol.io/) servers for any MCP-compatible client |
+| **Hosted MCP Server** | *(built into MindRouter)* | Server-side SSE MCP endpoint — no local setup needed |
+| **Local MCP Server** | [`mcp/`](mcp/) | [Model Context Protocol](https://modelcontextprotocol.io/) stdio server for local use |
 | **Agent Skills** | [`skills/`](skills/) | Markdown-based skill definitions for AI coding agents |
 
 ## Quick Start
@@ -14,26 +15,48 @@ Tools, skills, and servers that let AI coding agents and agentic systems use Min
 ### Prerequisites
 
 - A MindRouter API key (get one from the [dashboard](https://mindrouter.uidaho.edu/dashboard/api-keys))
-- Python 3.11+ (for MCP servers)
 
-### Option 1: MCP Server (standardized tool protocol)
+### Option 1: Hosted MCP Server (Recommended)
 
-MCP servers expose MindRouter tools to any MCP-compatible agent. The server runs locally and forwards requests to MindRouter over HTTPS.
+Connect directly to MindRouter's built-in MCP endpoint over SSE. No Python, no dependencies, no local processes.
+
+Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
+
+```json
+{
+  "mcpServers": {
+    "mindrouter": {
+      "type": "sse",
+      "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
+      "headers": {
+        "Authorization": "Bearer mr2_your_key_here"
+      }
+    }
+  }
+}
+```
+
+Or via Claude Code CLI:
 
 ```bash
-# Install dependencies
+claude mcp add --transport sse \
+  -H "Authorization: Bearer mr2_your_key_here" \
+  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse
+```
+
+### Option 2: Local MCP Server (stdio)
+
+Run the MCP server locally. Requires Python 3.11+.
+
+```bash
 pip install "mcp[cli]" httpx
-
-# Configure
 export MINDROUTER_API_KEY=mr2_your_key_here
-
-# Add to your MCP-compatible agent (example: Claude Code)
 claude mcp add mindrouter-search -- python3 agentic_ai/mcp/search/server.py
 ```
 
 See [`mcp/README.md`](mcp/README.md) for full setup, including configuration for Cursor, CoWork, and other MCP clients.
 
-### Option 2: Agent Skill (lightweight, no dependencies)
+### Option 3: Agent Skill (lightweight, no dependencies)
 
 Skills are markdown files containing API context and instructions. Copy them into your agent's skill/command directory:
 
@@ -53,25 +76,27 @@ See [`skills/README.md`](skills/README.md) for installation with other agent too
 ```
 User / Agent
   |
-  |-- Agent skill (markdown)      --> Agent executes curl --> MindRouter /v1/search
+  |-- MCP tool call (SSE)         --> MindRouter SSE MCP Server (hosted) --> Search backend
   |
-  |-- MCP tool call (web_search)  --> MCP Server (local)  --> MindRouter /v1/search
+  |-- MCP tool call (stdio)       --> MCP Server (local)  --> MindRouter /v1/search
+  |
+  |-- Agent skill (markdown)      --> Agent executes curl --> MindRouter /v1/search
                                                                  |
                                                                  v
                                                            Brave Search / SearXNG
 ```
 
-Both paths authenticate with your MindRouter API key and deduct a small token cost from your quota per search.
+All paths authenticate with your MindRouter API key and deduct a small token cost from your quota per search.
 
 ## Available Tools
 
-| Tool | Skill | MCP Tool | API Endpoint |
-|------|-------|----------|--------------|
-| **Web Search** | `web-search` | `web_search` | `POST /v1/search` |
+| Tool | Skill | MCP Tool | Hosted SSE Endpoint | REST API |
+|------|-------|----------|---------------------|----------|
+| **Web Search** | `web-search` | `web_search` | `GET /mcp/search/sse` | `POST /v1/search` |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MINDROUTER_API_KEY` | *(required)* | Your MindRouter API key |
-| `MINDROUTER_BASE_URL` | `https://mindrouter.uidaho.edu` | MindRouter instance URL |
+| `MINDROUTER_BASE_URL` | `https://mindrouter.uidaho.edu` | MindRouter instance URL (local server / skills only) |

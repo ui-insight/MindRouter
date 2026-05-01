@@ -493,6 +493,13 @@ def create_app() -> FastAPI:
     app.include_router(blog_router)
     app.include_router(email_router)
     app.include_router(dlp_router)
+    # Mount server-side MCP search endpoint (SSE transport)
+    try:
+        from backend.app.api.mcp_server import mcp_app as mcp_search_app
+        app.mount("/mcp/search", mcp_search_app)
+    except ImportError:
+        logger.warning("mcp_sse_disabled", reason="mcp package not installed")
+
     # Mount static files for dashboard
     import os
     static_path = os.path.join(os.path.dirname(__file__), "dashboard", "static")
