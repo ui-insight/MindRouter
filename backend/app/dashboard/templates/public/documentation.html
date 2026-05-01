@@ -1703,7 +1703,7 @@ for r in results:
                 <p>Add this to your agent&rsquo;s MCP configuration (<code>.mcp.json</code>, <code>.cursor/mcp.json</code>, etc.):</p>
 <pre><code>{
   "mcpServers": {
-    "mindrouter-search": {
+    "mindrouter": {
       "type": "sse",
       "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
       "headers": {
@@ -1715,7 +1715,7 @@ for r in results:
                 <p>Or in Claude Code via CLI:</p>
 <pre><code>claude mcp add --transport sse \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter-search https://mindrouter.uidaho.edu/mcp/search/sse</code></pre>
+  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse</code></pre>
 
                 <h4>3. Verify</h4>
                 <p>In Claude Code, run <code>/mcp</code> to confirm the connection and the <code>web_search</code> tool is listed. In other clients, check your MCP server status panel.</p>
@@ -1737,13 +1737,13 @@ for r in results:
                 <p><strong>Claude Code CLI:</strong></p>
 <pre><code>claude mcp add --scope user \
   --env MINDROUTER_API_KEY=mr2_your_key_here \
-  mindrouter-search \
+  mindrouter \
   -- python3 /path/to/agentic_ai/mcp/search/server.py</code></pre>
 
                 <p><strong>Project config (.mcp.json):</strong></p>
 <pre><code>{
   "mcpServers": {
-    "mindrouter-search": {
+    "mindrouter": {
       "command": "python3",
       "args": ["/path/to/agentic_ai/mcp/search/server.py"],
       "env": {

@@ -25,7 +25,7 @@ Client configuration::
 
     {
       "mcpServers": {
-        "mindrouter-search": {
+        "mindrouter": {
           "type": "sse",
           "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
           "headers": {
@@ -58,7 +58,7 @@ _auth_info: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
 )
 
 mcp = FastMCP(
-    "mindrouter-search",
+    "mindrouter",
     instructions="MindRouter web search. Use the web_search tool to find current information on the web.",
 )
 

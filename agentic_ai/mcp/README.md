@@ -11,7 +11,7 @@ MindRouter hosts a built-in MCP server — no local Python, no dependencies, no 
 ```json
 {
   "mcpServers": {
-    "mindrouter-search": {
+    "mindrouter": {
       "type": "sse",
       "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
       "headers": {
@@ -43,7 +43,7 @@ export MINDROUTER_API_KEY=mr2_your_key_here
 #### 3. Add to your MCP client
 
 ```bash
-claude mcp add mindrouter-search -- python3 /path/to/agentic_ai/mcp/search/server.py
+claude mcp add mindrouter -- python3 /path/to/agentic_ai/mcp/search/server.py
 ```
 
 Or add to your project's `.mcp.json`:
@@ -51,7 +51,7 @@ Or add to your project's `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "mindrouter-search": {
+    "mindrouter": {
       "command": "python3",
       "args": ["/path/to/agentic_ai/mcp/search/server.py"],
       "env": {

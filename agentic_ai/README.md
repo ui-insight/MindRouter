@@ -25,7 +25,7 @@ Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
 ```json
 {
   "mcpServers": {
-    "mindrouter-search": {
+    "mindrouter": {
       "type": "sse",
       "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
       "headers": {
@@ -41,7 +41,7 @@ Or via Claude Code CLI:
 ```bash
 claude mcp add --transport sse \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter-search https://mindrouter.uidaho.edu/mcp/search/sse
+  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse
 ```
 
 ### Option 2: Local MCP Server (stdio)
@@ -51,7 +51,7 @@ Run the MCP server locally. Requires Python 3.11+.
 ```bash
 pip install "mcp[cli]" httpx
 export MINDROUTER_API_KEY=mr2_your_key_here
-claude mcp add mindrouter-search -- python3 agentic_ai/mcp/search/server.py
+claude mcp add mindrouter -- python3 agentic_ai/mcp/search/server.py
 ```
 
 See [`mcp/README.md`](mcp/README.md) for full setup, including configuration for Cursor, CoWork, and other MCP clients.
