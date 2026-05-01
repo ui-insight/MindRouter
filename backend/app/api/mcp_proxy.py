@@ -16,7 +16,7 @@
 
 The MCP SSE server runs as a separate single-worker process (port 8001)
 to avoid session-affinity issues with multi-worker uvicorn. This proxy
-preserves the public URL at /mcp/search/sse while routing to that service.
+preserves the public URL at /mcp/sse while routing to that service.
 """
 
 import httpx

@@ -56,7 +56,7 @@ from backend.app.api.mcp_server import mcp_app  # noqa: E402
 app = Starlette(
     routes=[
         Route("/healthz", _healthz),
-        Mount("/mcp/search", app=mcp_app),
+        Mount("/mcp", app=mcp_app),
     ],
     lifespan=_lifespan,
 )

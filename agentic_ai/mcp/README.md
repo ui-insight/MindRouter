@@ -13,7 +13,7 @@ MindRouter hosts a built-in MCP server — no local Python, no dependencies, no 
   "mcpServers": {
     "mindrouter": {
       "type": "sse",
-      "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
+      "url": "https://mindrouter.uidaho.edu/mcp/sse",
       "headers": {
         "Authorization": "Bearer mr2_your_key_here"
       }

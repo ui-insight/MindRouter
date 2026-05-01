@@ -27,7 +27,7 @@ Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
   "mcpServers": {
     "mindrouter": {
       "type": "sse",
-      "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
+      "url": "https://mindrouter.uidaho.edu/mcp/sse",
       "headers": {
         "Authorization": "Bearer mr2_your_key_here"
       }
@@ -41,7 +41,7 @@ Or via Claude Code CLI:
 ```bash
 claude mcp add --transport sse \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse
+  mindrouter https://mindrouter.uidaho.edu/mcp/sse
 ```
 
 ### Option 2: Local MCP Server (stdio)
@@ -92,7 +92,7 @@ All paths authenticate with your MindRouter API key and deduct a small token cos
 
 | Tool | Skill | MCP Tool | Hosted SSE Endpoint | REST API |
 |------|-------|----------|---------------------|----------|
-| **Web Search** | `web-search` | `web_search` | `GET /mcp/search/sse` | `POST /v1/search` |
+| **Web Search** | `web-search` | `web_search` | `GET /mcp/sse` | `POST /v1/search` |
 
 ## Environment Variables
 

@@ -12,14 +12,14 @@
 #
 ############################################################
 
-"""Server-side SSE MCP server for MindRouter web search.
+"""Server-side SSE MCP server for MindRouter.
 
-Exposes the ``web_search`` tool over SSE transport so MCP-compatible
-agents can connect directly to the server without local dependencies.
+Exposes MindRouter tools (e.g., ``web_search``) over SSE transport so
+MCP-compatible agents can connect directly without local dependencies.
 
-Mount path: ``/mcp/search`` (configured in main.py)
-  - GET  /mcp/search/sse          — SSE stream (requires API key)
-  - POST /mcp/search/messages/    — client messages (session-bound)
+Mount path: ``/mcp`` (configured in mcp_entrypoint.py)
+  - GET  /mcp/sse          — SSE stream (requires API key)
+  - POST /mcp/messages/    — client messages (session-bound)
 
 Client configuration::
 
@@ -27,7 +27,7 @@ Client configuration::
       "mcpServers": {
         "mindrouter": {
           "type": "sse",
-          "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
+          "url": "https://mindrouter.uidaho.edu/mcp/sse",
           "headers": {
             "Authorization": "Bearer mr2_your_key_here"
           }
@@ -59,7 +59,7 @@ _auth_info: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
 
 mcp = FastMCP(
     "mindrouter",
-    instructions="MindRouter web search. Use the web_search tool to find current information on the web.",
+    instructions="MindRouter tools. Use web_search to find current information on the web.",
 )
 
 # Endpoint is relative — connect_sse prepends scope["root_path"] automatically
@@ -129,7 +129,7 @@ async def web_search(query: str, max_results: Optional[int] = 5) -> str:
                 user_id=user.id,
                 api_key_id=auth["api_key_id"],
                 model="web_search",
-                endpoint="/mcp/search",
+                endpoint="/mcp",
                 modality=Modality.CHAT,
             )
             await crud.update_request_completed(

@@ -161,7 +161,7 @@ MCP Client (Claude Code, Cursor, etc.)
         |
         v  SSE transport
 +-----------------------------+
-|    MCP Server Container     |  &larr; /mcp/search/sse (dedicated single-worker process)
+|    MCP Server Container     |  &larr; /mcp/sse (dedicated single-worker process)
 +-----------------------------+
         |
         v
@@ -1687,7 +1687,7 @@ for r in results:
                             <td><strong>Web Search</strong></td>
                             <td><code>web_search</code></td>
                             <td>Search the web via MindRouter (Brave Search / SearXNG)</td>
-                            <td><code>/mcp/search/sse</code></td>
+                            <td><code>/mcp/sse</code></td>
                             <td><a href="https://github.com/ui-insight/MindRouter/tree/main/agentic_ai/mcp/search" target="_blank"><code>agentic_ai/mcp/search/</code></a></td>
                         </tr>
                     </tbody>
@@ -1705,7 +1705,7 @@ for r in results:
   "mcpServers": {
     "mindrouter": {
       "type": "sse",
-      "url": "https://mindrouter.uidaho.edu/mcp/search/sse",
+      "url": "https://mindrouter.uidaho.edu/mcp/sse",
       "headers": {
         "Authorization": "Bearer mr2_your_key_here"
       }
@@ -1715,7 +1715,7 @@ for r in results:
                 <p>Or in Claude Code via CLI:</p>
 <pre><code>claude mcp add --transport sse \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter https://mindrouter.uidaho.edu/mcp/search/sse</code></pre>
+  mindrouter https://mindrouter.uidaho.edu/mcp/sse</code></pre>
 
                 <h4>3. Verify</h4>
                 <p>In Claude Code, run <code>/mcp</code> to confirm the connection and the <code>web_search</code> tool is listed. In other clients, check your MCP server status panel.</p>
