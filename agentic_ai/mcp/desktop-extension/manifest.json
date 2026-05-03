@@ -1,0 +1,54 @@
+{
+  "manifest_version": "0.3",
+  "name": "mindrouter",
+  "display_name": "MindRouter",
+  "version": "1.0.0",
+  "description": "Connect Claude Desktop to MindRouter's AI tools — web search and more.",
+  "long_description": "MindRouter is an open-source LLM inference load balancer developed by the University of Idaho. This extension connects Claude Desktop to MindRouter's hosted MCP server, giving you access to tools like web search powered by Brave Search. All searches are logged and count against your MindRouter token quota. Requires a MindRouter API key — generate one from the MindRouter dashboard at https://mindrouter.uidaho.edu.",
+  "author": {
+    "name": "University of Idaho — Research Computing and Data Services",
+    "url": "https://mindrouter.uidaho.edu"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://mindrouter.uidaho.edu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ui-insight/MindRouter"
+  },
+  "documentation": "https://mindrouter.uidaho.edu/documentation",
+  "keywords": ["search", "web-search", "mindrouter", "university-of-idaho"],
+  "user_config": {
+    "api_key": {
+      "type": "string",
+      "title": "MindRouter API Key",
+      "description": "Your MindRouter API key (starts with mr2_). Generate one at https://mindrouter.uidaho.edu under API Keys.",
+      "sensitive": true,
+      "required": true
+    },
+    "server_url": {
+      "type": "string",
+      "title": "MCP Server URL",
+      "description": "MindRouter MCP SSE endpoint. Only change this if you run your own MindRouter instance.",
+      "default": "https://mindrouter.uidaho.edu/mcp/sse",
+      "required": false
+    }
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.mjs"],
+      "env": {
+        "API_KEY": "${user_config.api_key}",
+        "SSE_URL": "${user_config.server_url}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "web_search",
+      "description": "Search the web for current information using MindRouter's search API."
+    }
+  ]
+}

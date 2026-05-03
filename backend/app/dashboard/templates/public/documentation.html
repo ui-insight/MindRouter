@@ -1674,9 +1674,10 @@ for r in results:
                 </ul>
 
                 <div class="bg-light border rounded p-3 mb-3">
-                    <pre class="mb-0" style="font-size: 0.85rem;">Agent (Claude Code, CoWork, Cursor, etc.)
-  &boxvr;&horbar;&horbar; SSE transport  &longrightarrow; MindRouter SSE MCP Server (hosted)  &longrightarrow; Search backend
-  &boxur;&horbar;&horbar; stdio transport &longrightarrow; MCP Server (local process) &longrightarrow; HTTPS &longrightarrow; MindRouter API</pre>
+                    <pre class="mb-0" style="font-size: 0.85rem;">Agent (Claude Code, Cursor, CoWork, etc.)
+  &boxvr;&horbar;&horbar; SSE transport      &longrightarrow; MindRouter SSE MCP Server (hosted) &longrightarrow; Search backend
+  &boxvr;&horbar;&horbar; Desktop Extension  &longrightarrow; SSE bridge (.mcpb)    &longrightarrow; SSE &longrightarrow; MindRouter MCP Server
+  &boxur;&horbar;&horbar; stdio transport    &longrightarrow; MCP Server (local Python process)  &longrightarrow; HTTPS &longrightarrow; MindRouter API</pre>
                 </div>
 
                 <h3>Available Tools</h3>
@@ -1724,7 +1725,23 @@ for r in results:
                     <strong>Authentication:</strong> The hosted MCP server authenticates with your MindRouter API key via the <code>Authorization: Bearer</code> or <code>X-API-Key</code> header. Each search deducts the same token cost as the REST API.
                 </div>
 
-                <h3>Option 2: Local stdio Server</h3>
+                <h3>Option 2: Claude Desktop Extension</h3>
+                <p>For <strong>Claude Desktop</strong> (the standalone app), install the MindRouter extension for one-click setup &mdash; no terminal, no dependencies, no config files.</p>
+
+                <h4>1. Download the extension</h4>
+                <p>Download <a href="https://github.com/ui-insight/MindRouter/raw/main/agentic_ai/mcp/mindrouter.mcpb"><code>mindrouter.mcpb</code></a> from the MindRouter repository.</p>
+
+                <h4>2. Install</h4>
+                <p>Double-click the <code>.mcpb</code> file, or open Claude Desktop and go to <strong>Settings &rarr; Extensions &rarr; Advanced settings &rarr; Install Extension&hellip;</strong> and select the file.</p>
+
+                <h4>3. Configure</h4>
+                <p>Enter your MindRouter API key when prompted. The server URL defaults to <code>https://mindrouter.uidaho.edu/mcp/sse</code> &mdash; change it only if you run your own MindRouter instance.</p>
+
+                <div class="alert alert-info mb-3">
+                    <strong>How it works:</strong> The extension runs a lightweight bridge script (bundled inside the <code>.mcpb</code>) that connects to MindRouter&rsquo;s hosted SSE server and translates it to the stdio transport that Claude Desktop expects. Claude Desktop provides the Node.js runtime &mdash; no local installation required.
+                </div>
+
+                <h3>Option 3: Local stdio Server</h3>
                 <p>Run the MCP server locally if you prefer a self-hosted setup or need to work offline. The local server connects to MindRouter over HTTPS.</p>
 
                 <h4>1. Install dependencies</h4>
@@ -1763,15 +1780,15 @@ for r in results:
                     </tbody>
                 </table>
 
-                <h3>Hosted vs Local Comparison</h3>
+                <h3>Connection Options Comparison</h3>
                 <table class="table table-sm table-bordered">
-                    <thead><tr><th>Feature</th><th>Hosted SSE</th><th>Local stdio</th></tr></thead>
+                    <thead><tr><th>Feature</th><th>Hosted SSE</th><th>Desktop Extension</th><th>Local stdio</th></tr></thead>
                     <tbody>
-                        <tr><td><strong>Setup</strong></td><td>3-line JSON config</td><td>Install Python + packages</td></tr>
-                        <tr><td><strong>Dependencies</strong></td><td>None</td><td>Python 3.11+, <code>mcp[cli]</code>, <code>httpx</code></td></tr>
-                        <tr><td><strong>Transport</strong></td><td>SSE over HTTPS</td><td>stdio (local process)</td></tr>
-                        <tr><td><strong>Latency</strong></td><td>Direct server call</td><td>Extra HTTPS hop</td></tr>
-                        <tr><td><strong>Offline use</strong></td><td>Requires network</td><td>Requires network (to MindRouter API)</td></tr>
+                        <tr><td><strong>Best for</strong></td><td>Claude Code, Cursor, CoWork</td><td>Claude Desktop app</td><td>Self-hosted / advanced</td></tr>
+                        <tr><td><strong>Setup</strong></td><td>3-line JSON config or CLI</td><td>Double-click <code>.mcpb</code> file</td><td>Install Python + packages</td></tr>
+                        <tr><td><strong>Dependencies</strong></td><td>None</td><td>None (runtime bundled)</td><td>Python 3.11+, <code>mcp[cli]</code>, <code>httpx</code></td></tr>
+                        <tr><td><strong>Transport</strong></td><td>SSE over HTTPS</td><td>SSE bridge &rarr; stdio</td><td>stdio (local process)</td></tr>
+                        <tr><td><strong>Technical skill</strong></td><td>Edit JSON or run CLI</td><td>None</td><td>Python environment setup</td></tr>
                     </tbody>
                 </table>
 
