@@ -162,10 +162,10 @@ async def _warm_page_caches(force_seed: bool = False) -> None:
     Called on startup (with *force_seed=True*) and periodically by
     _cache_warm_loop to ensure page loads never trigger full table scans.
 
-    When *force_seed* is True the cluster token counter is overwritten
-    from the DB regardless of whether it already exists in Redis.  This
-    prevents a race where incoming requests create the key with a tiny
-    value before the seed runs.
+    When *force_seed* is True the cluster token counter is seeded from
+    the larger of the live DB formula and the persisted high-water mark
+    (``stats.cluster_hwm``).  This ensures the counter never drops on
+    restart even if the DB formula has archival gaps.
     """
     if not redis_is_available():
         return
@@ -188,10 +188,21 @@ async def _warm_page_caches(force_seed: bool = False) -> None:
             existing = await _rc.get_cluster_tokens()
             if existing is None or force_seed:
                 totals = await crud.get_global_token_total(db, include_offset=False)
+                seed_total = totals["total_tokens"]
+
+                hwm = await crud.get_config_json(db, "stats.cluster_hwm", 0)
+                if hwm and int(hwm) > seed_total:
+                    logger.info(
+                        "cluster_seed_using_hwm",
+                        db_total=seed_total,
+                        hwm=int(hwm),
+                    )
+                    seed_total = int(hwm)
+
                 await _rc.seed_cluster_tokens(
                     totals["prompt_tokens"],
                     totals["completion_tokens"],
-                    totals["total_tokens"],
+                    seed_total,
                 )
 
         logger.info("page_caches_warmed")
@@ -219,9 +230,13 @@ async def _redis_sync_loop() -> None:
     """Background loop: sync Redis token counters to DB every 60s.
 
     Writes current Redis values into ``quotas.tokens_used`` for durability.
+    Also persists the cluster-wide token counter as a high-water mark in
+    ``app_config`` so it survives process restarts without losing state.
     Only syncs keys that correspond to existing quota rows (ignores orphans).
     Orphan cleanup happens on startup in ``_seed_redis_from_db``.
     """
+    from backend.app.core import redis_client as _rc
+
     while True:
         try:
             await asyncio.sleep(60)
@@ -245,6 +260,17 @@ async def _redis_sync_loop() -> None:
                             .where(Quota.user_id == user_id)
                             .values(tokens_used=tokens)
                         )
+
+                # Persist cluster counter high-water mark
+                cluster = await _rc.get_cluster_tokens()
+                if cluster and cluster["total_tokens"] > 0:
+                    from backend.app.db import crud
+                    await crud.set_config(
+                        db, "stats.cluster_hwm",
+                        cluster["total_tokens"],
+                        description="Cluster token counter high-water mark",
+                    )
+
                 await db.commit()
             logger.debug("redis_sync_to_db", users=len(token_map))
         except asyncio.CancelledError:

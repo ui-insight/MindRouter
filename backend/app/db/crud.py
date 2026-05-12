@@ -3180,9 +3180,8 @@ _trend_cache: Dict[str, tuple] = {}  # key -> (expire_ts, data)
 async def get_global_token_total(db: AsyncSession, include_offset: bool = True) -> dict:
     """Total tokens ever served (all users, all time).
 
-    Uses per-user quota counters (tokens_used + lifetime_tokens_used)
-    as the source of truth so the total survives retention deletions
-    and app restarts without drift.
+    Sums live requests + archived offsets (from retention deletions) so
+    the total stays correct across retention cycles.
 
     When *include_offset* is True (the default), the ``stats.token_offset``
     value from app_config is added to the totals.  This lets the homepage
@@ -3193,28 +3192,30 @@ async def get_global_token_total(db: AsyncSession, include_offset: bool = True) 
     """
     result = await db.execute(
         select(
-            func.coalesce(func.sum(Quota.tokens_used), 0),
-            func.coalesce(func.sum(Quota.lifetime_tokens_used), 0),
-        )
-    )
-    row = result.one()
-    total_tokens = int(row[0]) + int(row[1])
-
-    # prompt/completion breakdown from live requests only (archived
-    # breakdown is approximate; total_tokens is the authoritative number)
-    detail_result = await db.execute(
-        select(
             func.coalesce(func.sum(Request.prompt_tokens), 0),
             func.coalesce(func.sum(Request.completion_tokens), 0),
+            func.coalesce(func.sum(Request.total_tokens), 0),
         )
         .where(Request.total_tokens.isnot(None))
     )
-    detail_row = detail_result.one()
+    row = result.one()
     totals = {
-        "prompt_tokens": int(detail_row[0]),
-        "completion_tokens": int(detail_row[1]),
-        "total_tokens": total_tokens,
+        "prompt_tokens": int(row[0]),
+        "completion_tokens": int(row[1]),
+        "total_tokens": int(row[2]),
     }
+
+    arch_result = await db.execute(
+        select(
+            func.coalesce(func.sum(ModelArchivedStats.archived_prompt_tokens), 0),
+            func.coalesce(func.sum(ModelArchivedStats.archived_completion_tokens), 0),
+            func.coalesce(func.sum(ModelArchivedStats.archived_total_tokens), 0),
+        )
+    )
+    arch_row = arch_result.one()
+    totals["prompt_tokens"] += int(arch_row[0])
+    totals["completion_tokens"] += int(arch_row[1])
+    totals["total_tokens"] += int(arch_row[2])
 
     if include_offset:
         offset = await get_config_json(db, "stats.token_offset", 0)
