@@ -57,10 +57,16 @@ async def _proxy(request: Request) -> Response:
     if request.method == "GET" and "/sse" in request.url.path:
         req = client.build_request("GET", target_url, headers=headers)
         upstream = await client.send(req, stream=True)
+        resp_headers = dict(upstream.headers)
+        resp_headers["Cache-Control"] = "no-cache, no-store"
+        resp_headers["X-Accel-Buffering"] = "no"
+        resp_headers.pop("content-length", None)
+        resp_headers.pop("Content-Length", None)
         return StreamingResponse(
-            upstream.aiter_bytes(),
+            upstream.aiter_raw(),
             status_code=upstream.status_code,
-            headers=dict(upstream.headers),
+            headers=resp_headers,
+            media_type="text/event-stream",
             background=upstream.aclose,
         )
 
