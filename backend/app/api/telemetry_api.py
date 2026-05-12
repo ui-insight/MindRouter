@@ -14,8 +14,9 @@
 
 """Telemetry API endpoints for GPU and inference metrics."""
 
+import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -31,6 +32,25 @@ from backend.app.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+# ── Token usage cache (expensive full-table aggregation) ─────
+_TOKEN_CACHE_TTL = 300  # 5 minutes
+_token_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+
+
+async def _get_cached_token_usage(db: AsyncSession) -> dict:
+    """Return token usage stats, recomputing at most every 5 minutes."""
+    now = time.monotonic()
+    if _token_cache["data"] is not None and (now - _token_cache["ts"]) < _TOKEN_CACHE_TTL:
+        return _token_cache["data"]
+
+    global_tokens = await crud.get_global_token_total(db, include_offset=True)
+    model_tokens = await crud.get_model_token_totals(db)
+    result = {"global": global_tokens, "by_model": model_tokens}
+    _token_cache["data"] = result
+    _token_cache["ts"] = now
+    return result
+
 
 # Resolution string to minutes mapping
 RESOLUTION_MAP = {
@@ -100,6 +120,7 @@ def _build_gpu_info(device, gpu_t):
 async def telemetry_overview(
     admin: User = Depends(require_admin_or_session()),
     db: AsyncSession = Depends(get_async_db),
+    _include_tokens: bool = True,
 ):
     """
     Cluster-wide telemetry overview.
@@ -237,16 +258,12 @@ async def telemetry_overview(
     except Exception:
         cluster["queue_health"] = {}
 
-    # Token usage breakdown
-    try:
-        global_tokens = await crud.get_global_token_total(db, include_offset=True)
-        model_tokens = await crud.get_model_token_totals(db)
-        cluster["token_usage"] = {
-            "global": global_tokens,
-            "by_model": model_tokens,
-        }
-    except Exception:
-        cluster["token_usage"] = {}
+    # Token usage breakdown (cached — full-table scan is expensive)
+    if _include_tokens:
+        try:
+            cluster["token_usage"] = await _get_cached_token_usage(db)
+        except Exception:
+            cluster["token_usage"] = {}
 
     return {
         "cluster": cluster,
@@ -263,11 +280,11 @@ async def telemetry_latest(
     """
     Lightweight endpoint for dashboard live polling.
 
-    Returns the same structure as /overview but intended to be
-    polled every 10 seconds by the dashboard JS.
+    Returns the same structure as /overview but skips token usage
+    stats (expensive full-table aggregation). The dashboard JS
+    preserves the last-known token values between polls.
     """
-    # Reuse overview logic — it's fast enough for polling
-    return await telemetry_overview(admin=admin, db=db)
+    return await telemetry_overview(admin=admin, db=db, _include_tokens=False)
 
 
 @router.get("/backends/{backend_id}/history")

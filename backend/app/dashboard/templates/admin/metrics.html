@@ -536,29 +536,31 @@ function updateStatCards(cluster) {
     document.getElementById('stat-gc-evicted').textContent =
         qh.gc_last_evicted != null ? qh.gc_last_evicted : '--';
 
-    // Token usage
-    const tu = cluster.token_usage || {};
-    const gl = tu.global || {};
-    document.getElementById('stat-total-tokens').textContent =
-        (gl.total_tokens || 0).toLocaleString();
-    document.getElementById('stat-input-tokens').textContent =
-        (gl.prompt_tokens || 0).toLocaleString();
-    document.getElementById('stat-output-tokens').textContent =
-        (gl.completion_tokens || 0).toLocaleString();
+    // Token usage — skip update when polling returns without token data
+    if (cluster.token_usage) {
+        const tu = cluster.token_usage;
+        const gl = tu.global || {};
+        document.getElementById('stat-total-tokens').textContent =
+            (gl.total_tokens || 0).toLocaleString();
+        document.getElementById('stat-input-tokens').textContent =
+            (gl.prompt_tokens || 0).toLocaleString();
+        document.getElementById('stat-output-tokens').textContent =
+            (gl.completion_tokens || 0).toLocaleString();
 
-    // Top models table
-    const models = tu.by_model || [];
-    const tbody = document.getElementById('model-token-tbody');
-    if (models.length > 0) {
-        tbody.innerHTML = models.map(m =>
-            '<tr><td>' + m.model + '</td>' +
-            '<td class="text-end">' + (m.prompt_tokens || 0).toLocaleString() + '</td>' +
-            '<td class="text-end">' + (m.completion_tokens || 0).toLocaleString() + '</td>' +
-            '<td class="text-end">' + (m.total_tokens || 0).toLocaleString() + '</td>' +
-            '<td class="text-end">' + (m.request_count || 0).toLocaleString() + '</td></tr>'
-        ).join('');
-    } else {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No data</td></tr>';
+        // Top models table
+        const models = tu.by_model || [];
+        const tbody = document.getElementById('model-token-tbody');
+        if (models.length > 0) {
+            tbody.innerHTML = models.map(m =>
+                '<tr><td>' + m.model + '</td>' +
+                '<td class="text-end">' + (m.prompt_tokens || 0).toLocaleString() + '</td>' +
+                '<td class="text-end">' + (m.completion_tokens || 0).toLocaleString() + '</td>' +
+                '<td class="text-end">' + (m.total_tokens || 0).toLocaleString() + '</td>' +
+                '<td class="text-end">' + (m.request_count || 0).toLocaleString() + '</td></tr>'
+            ).join('');
+        } else {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-muted text-center">No data</td></tr>';
+        }
     }
 }
 
