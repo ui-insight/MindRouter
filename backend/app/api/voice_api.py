@@ -201,12 +201,17 @@ async def tts_speech(
 # POST /v1/audio/transcriptions   (STT)
 # ---------------------------------------------------------------------------
 
+_STT_RESPONSE_FORMATS = {"json", "text", "verbose_json", "srt", "vtt"}
+_STT_TEXT_FORMATS = {"text", "srt", "vtt"}
+
+
 @router.post("/transcriptions")
 async def stt_transcriptions(
     request: Request,
     file: UploadFile = File(...),
     model: Optional[str] = None,
     language: Optional[str] = None,
+    response_format: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
 ):
@@ -219,6 +224,14 @@ async def stt_transcriptions(
     user, api_key = auth
 
     await _check_quota(db, user, api_key)
+
+    fmt = (response_format or "json").lower()
+    if fmt not in _STT_RESPONSE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid response_format '{response_format}'. "
+                   f"Supported: {', '.join(sorted(_STT_RESPONSE_FORMATS))}",
+        )
 
     # Read STT config from DB (same as chat.py)
     stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
@@ -240,12 +253,12 @@ async def stt_transcriptions(
 
     token_cost = await crud.get_config_json(db, "voice_api.stt_quota_tokens", 200)
 
-    data = {"model": stt_model}
+    data = {"model": stt_model, "response_format": fmt}
     if language:
         data["language"] = language
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=600.0) as client:
             resp = await client.post(
                 f"{stt_url.rstrip('/')}/v1/audio/transcriptions",
                 files={"file": (file.filename or "audio.webm", audio_data, file.content_type or "application/octet-stream")},
@@ -263,8 +276,6 @@ async def stt_transcriptions(
                     error_message=f"STT service error: {resp.status_code}",
                 )
                 raise HTTPException(status_code=502, detail="STT service error")
-
-            result = resp.json()
 
     except httpx.TimeoutException as e:
         logger.warning("stt_api_proxy_timeout", error=str(e))
@@ -298,4 +309,11 @@ async def stt_transcriptions(
         model=stt_model,
     )
 
-    return JSONResponse({"text": result.get("text", "")})
+    if fmt in _STT_TEXT_FORMATS:
+        content_types = {"text": "text/plain", "srt": "text/plain", "vtt": "text/vtt"}
+        return StreamingResponse(
+            iter([resp.content]),
+            media_type=content_types.get(fmt, "text/plain"),
+        )
+
+    return JSONResponse(resp.json())

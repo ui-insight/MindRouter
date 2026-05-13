@@ -2296,9 +2296,24 @@ response.stream_to_file("output.mp3")</code></pre>
                         <tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>file</code></td><td>file upload</td><td><em>required</em></td><td>Audio file (mp3, wav, webm, m4a, etc.)</td></tr>
+                        <tr><td><code>file</code></td><td>file upload</td><td><em>required</em></td><td>Audio file (mp3, wav, webm, m4a, ogg, flac, etc.)</td></tr>
                         <tr><td><code>model</code></td><td>string</td><td><code>"whisper-large-v3-turbo"</code></td><td>STT model name</td></tr>
                         <tr><td><code>language</code></td><td>string</td><td><em>auto-detect</em></td><td>ISO 639-1 language code (e.g., <code>en</code>, <code>es</code>, <code>fr</code>)</td></tr>
+                        <tr><td><code>response_format</code></td><td>string</td><td><code>"json"</code></td><td>Output format (see table below)</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Response formats:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Format</th><th>Content-Type</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>json</code></td><td><code>application/json</code></td><td>Simple JSON: <code>{"text": "..."}</code></td></tr>
+                        <tr><td><code>verbose_json</code></td><td><code>application/json</code></td><td>JSON with word-level timestamps, segments, language, and duration</td></tr>
+                        <tr><td><code>text</code></td><td><code>text/plain</code></td><td>Plain text transcription only</td></tr>
+                        <tr><td><code>srt</code></td><td><code>text/plain</code></td><td>SubRip subtitle format with timestamps</td></tr>
+                        <tr><td><code>vtt</code></td><td><code>text/vtt</code></td><td>WebVTT subtitle format with timestamps</td></tr>
                     </tbody>
                 </table>
 
@@ -2307,7 +2322,8 @@ response.stream_to_file("output.mp3")</code></pre>
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "file=@recording.mp3" \
   -F "model=whisper-large-v3-turbo" \
-  -F "language=en"</code></pre>
+  -F "language=en" \
+  -F "response_format=verbose_json"</code></pre>
 
                 <p><strong>Example (Python &mdash; OpenAI SDK):</strong></p>
                 <pre><code>from openai import OpenAI
@@ -2322,11 +2338,25 @@ with open("recording.mp3", "rb") as audio_file:
         model="whisper-large-v3-turbo",
         file=audio_file,
         language="en",
+        response_format="verbose_json",
     )
 print(transcript.text)</code></pre>
 
-                <p><strong>Response (JSON):</strong></p>
+                <p><strong>Response examples:</strong></p>
+                <p><code>json</code>:</p>
                 <pre><code>{"text": "Hello from MindRouter!"}</code></pre>
+                <p><code>verbose_json</code>:</p>
+                <pre><code>{"task": "transcribe", "language": "english", "duration": 3.42, "text": "Hello from MindRouter!",
+ "segments": [{"id": 0, "start": 0.0, "end": 3.42, "text": "Hello from MindRouter!", ...}]}</code></pre>
+                <p><code>srt</code>:</p>
+                <pre><code>1
+00:00:00,000 --> 00:00:03,420
+Hello from MindRouter!</code></pre>
+                <p><code>vtt</code>:</p>
+                <pre><code>WEBVTT
+
+00:00:00.000 --> 00:00:03.420
+Hello from MindRouter!</code></pre>
 
                 <h4>List Voices &mdash; <code>GET /api/tts-voices</code></h4>
                 <p>Returns the available TTS voices. When the upstream Kokoro service is reachable, the list is fetched dynamically; otherwise it falls back to the admin-configured voice list.</p>
