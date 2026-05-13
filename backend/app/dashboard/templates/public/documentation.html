@@ -2297,7 +2297,7 @@ response.stream_to_file("output.mp3")</code></pre>
                     </thead>
                     <tbody>
                         <tr><td><code>file</code></td><td>file upload</td><td><em>required</em></td><td>Audio file (mp3, wav, webm, m4a, ogg, flac, etc.)</td></tr>
-                        <tr><td><code>model</code></td><td>string</td><td><code>"whisper-large-v3-turbo"</code></td><td>STT model name</td></tr>
+                        <tr><td><code>model</code></td><td>string</td><td><em>server default</em></td><td>STT model name (omit to use the admin-configured default)</td></tr>
                         <tr><td><code>language</code></td><td>string</td><td><em>auto-detect</em></td><td>ISO 639-1 language code (e.g., <code>en</code>, <code>es</code>, <code>fr</code>)</td></tr>
                         <tr><td><code>response_format</code></td><td>string</td><td><code>"json"</code></td><td>Output format (see table below)</td></tr>
                     </tbody>
@@ -2321,7 +2321,6 @@ response.stream_to_file("output.mp3")</code></pre>
                 <pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/transcriptions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "file=@recording.mp3" \
-  -F "model=whisper-large-v3-turbo" \
   -F "language=en" \
   -F "response_format=verbose_json"</code></pre>
 
@@ -2335,7 +2334,7 @@ client = OpenAI(
 
 with open("recording.mp3", "rb") as audio_file:
     transcript = client.audio.transcriptions.create(
-        model="whisper-large-v3-turbo",
+        model="default",
         file=audio_file,
         language="en",
         response_format="verbose_json",
@@ -2459,7 +2458,7 @@ Hello from MindRouter!</code></pre>
                     <tbody>
                         <tr><td>Service URL</td><td><code>voice.stt_url</code></td><td><em>none</em></td><td>Base URL of the STT service (e.g., <code>http://whisper:8000</code>)</td></tr>
                         <tr><td>API Key</td><td><code>voice.stt_api_key</code></td><td><em>none</em></td><td>Bearer token for the upstream STT service (if required)</td></tr>
-                        <tr><td>Default Model</td><td><code>voice.stt_model</code></td><td><code>"whisper-large-v3-turbo"</code></td><td>Whisper model passed to the upstream service</td></tr>
+                        <tr><td>Default Model</td><td><code>voice.stt_model</code></td><td><code>"deepdml/faster-whisper-large-v3-turbo-ct2"</code></td><td>Whisper model passed to the upstream service</td></tr>
                     </tbody>
                 </table>
 
