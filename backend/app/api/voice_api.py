@@ -18,7 +18,7 @@ import time
 from typing import Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -209,9 +209,9 @@ _STT_TEXT_FORMATS = {"text", "srt", "vtt"}
 async def stt_transcriptions(
     request: Request,
     file: UploadFile = File(...),
-    model: Optional[str] = None,
-    language: Optional[str] = None,
-    response_format: Optional[str] = None,
+    model: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    response_format: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
 ):
@@ -225,7 +225,7 @@ async def stt_transcriptions(
 
     await _check_quota(db, user, api_key)
 
-    fmt = (response_format or "json").lower()
+    fmt = response_format.lower() if isinstance(response_format, str) else "json"
     if fmt not in _STT_RESPONSE_FORMATS:
         raise HTTPException(
             status_code=400,
