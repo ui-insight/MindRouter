@@ -83,6 +83,7 @@
                 <li class="nav-item"><a class="nav-link" href="#telemetry-monitoring">Telemetry &amp; Monitoring</a></li>
                 <li class="nav-item"><a class="nav-link" href="#data-retention">Data Retention</a></li>
                 <li class="nav-item"><a class="nav-link" href="#chat-system">Chat System</a></li>
+                <li class="nav-item"><a class="nav-link" href="#voice">Voice (TTS / STT)</a></li>
                 <li class="nav-item"><a class="nav-link" href="#blog-system">Blog / CMS</a></li>
                 <li class="nav-item"><a class="nav-link" href="#email-system">Email System</a></li>
                 <li class="nav-item"><a class="nav-link" href="#app-config">AppConfig System</a></li>
@@ -111,7 +112,7 @@
                     <li><strong>Unified API Gateway</strong> &mdash; OpenAI-compatible <code>/v1/*</code>, Ollama-compatible <code>/api/*</code>, and Anthropic-compatible <code>/anthropic/v1/*</code> endpoints, all backed by the same pool of inference servers.</li>
                     <li><strong>Cross-Engine Routing</strong> &mdash; A request arriving in OpenAI, Ollama, or Anthropic format can be served by any backend. The translation layer handles all protocol conversion transparently.</li>
                     <li><strong>Fair-Share Scheduling</strong> &mdash; Weighted Deficit Round Robin (WDRR) ensures equitable GPU access across users in different groups with configurable priorities.</li>
-                    <li><strong>Multi-Modal Support</strong> &mdash; Text chat, text completion, embeddings, multimodal models, structured JSON outputs, and tool calling (function calling).</li>
+                    <li><strong>Multi-Modal Support</strong> &mdash; Text chat, text completion, embeddings, multimodal models, structured JSON outputs, tool calling (function calling), and <a href="#voice">voice (TTS/STT)</a>.</li>
                     <li><strong>Per-User Quotas</strong> &mdash; Token budgets and requests-per-minute (RPM) rate limits, with defaults inherited from the user's group. RPM enforcement is shared across all workers via Redis.</li>
                     <li><strong>Full Audit Logging</strong> &mdash; Every prompt, response, and token count is recorded for compliance and review.</li>
                     <li><strong>Real-Time GPU Telemetry</strong> &mdash; Per-GPU utilization, memory, temperature, and power metrics via lightweight sidecar agents.</li>
@@ -2217,6 +2218,258 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
 
                 <h3>Conversation Retention</h3>
                 <p>Conversations older than <code>CONVERSATION_RETENTION_DAYS</code> (default 730 days / 2 years) are automatically purged by a background task that runs every <code>CONVERSATION_CLEANUP_INTERVAL</code> seconds (default 86400 / once per day). Associated messages and attachments are deleted along with the conversation.</p>
+            </section>
+
+            <hr>
+
+            <!-- Voice (TTS / STT) -->
+            <section id="voice">
+                <h2>Voice (TTS / STT)</h2>
+                <p>MindRouter provides OpenAI-compatible <strong>Text-to-Speech</strong> (TTS) and <strong>Speech-to-Text</strong> (STT) endpoints that proxy to self-hosted GPU services. Audio is processed entirely on institutional infrastructure &mdash; no data leaves the cluster.</p>
+
+                <h3>Overview</h3>
+                <ul>
+                    <li><strong>TTS</strong> &mdash; Powered by <a href="https://github.com/hexgrad/kokoro" target="_blank">Kokoro</a> (or any service exposing an OpenAI-compatible <code>/v1/audio/speech</code> endpoint)</li>
+                    <li><strong>STT</strong> &mdash; Powered by <a href="https://github.com/guillaumekln/faster-whisper" target="_blank">faster-whisper</a> / <a href="https://github.com/speaches-ai/speaches" target="_blank">Speaches</a> (or any service exposing an OpenAI-compatible <code>/v1/audio/transcriptions</code> endpoint)</li>
+                    <li>Both endpoints require API key authentication (same keys used for chat/completions)</li>
+                    <li>Each request is logged with its own modality (<code>tts</code> or <code>stt</code>) and a configurable token cost is deducted from the user's quota</li>
+                    <li>The built-in Chat UI integrates both features: <strong>Read Aloud</strong> buttons on assistant messages (TTS) and a <strong>microphone button</strong> for voice input (STT)</li>
+                </ul>
+
+                <h3>API Endpoints</h3>
+
+                <h4>Text-to-Speech &mdash; <code>POST /v1/audio/speech</code></h4>
+                <p>Converts text to audio. The response is a streaming audio file.</p>
+
+                <p><strong>Request body (JSON):</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>model</code></td><td>string</td><td><code>"kokoro"</code></td><td>TTS model name (must match the upstream service)</td></tr>
+                        <tr><td><code>input</code></td><td>string</td><td><em>required</em></td><td>The text to synthesize</td></tr>
+                        <tr><td><code>voice</code></td><td>string</td><td><code>"af_heart"</code></td><td>Voice ID (see <a href="#voice-list">available voices</a> below)</td></tr>
+                        <tr><td><code>response_format</code></td><td>string</td><td><code>"mp3"</code></td><td>Audio format: <code>mp3</code>, <code>wav</code>, <code>opus</code>, or <code>flac</code></td></tr>
+                        <tr><td><code>speed</code></td><td>float</td><td><code>1.0</code></td><td>Playback speed (0.25 &ndash; 4.0)</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Example (curl):</strong></p>
+                <pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/speech \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "kokoro",
+    "input": "Hello from MindRouter!",
+    "voice": "af_heart",
+    "response_format": "mp3",
+    "speed": 1.0
+  }' \
+  -o output.mp3</code></pre>
+
+                <p><strong>Example (Python &mdash; OpenAI SDK):</strong></p>
+                <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://mindrouter.uidaho.edu/v1",
+    api_key="YOUR_API_KEY",
+)
+
+response = client.audio.speech.create(
+    model="kokoro",
+    voice="af_heart",
+    input="Hello from MindRouter!",
+    response_format="mp3",
+    speed=1.0,
+)
+response.stream_to_file("output.mp3")</code></pre>
+
+                <p><strong>Response:</strong> Streaming audio bytes with <code>Content-Type</code> matching the requested format (e.g., <code>audio/mpeg</code> for mp3).</p>
+
+                <h4>Speech-to-Text &mdash; <code>POST /v1/audio/transcriptions</code></h4>
+                <p>Transcribes an audio file to text.</p>
+
+                <p><strong>Request (multipart form):</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>file</code></td><td>file upload</td><td><em>required</em></td><td>Audio file (mp3, wav, webm, m4a, etc.)</td></tr>
+                        <tr><td><code>model</code></td><td>string</td><td><code>"whisper-large-v3-turbo"</code></td><td>STT model name</td></tr>
+                        <tr><td><code>language</code></td><td>string</td><td><em>auto-detect</em></td><td>ISO 639-1 language code (e.g., <code>en</code>, <code>es</code>, <code>fr</code>)</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Example (curl):</strong></p>
+                <pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/audio/transcriptions \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F "file=@recording.mp3" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "language=en"</code></pre>
+
+                <p><strong>Example (Python &mdash; OpenAI SDK):</strong></p>
+                <pre><code>from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://mindrouter.uidaho.edu/v1",
+    api_key="YOUR_API_KEY",
+)
+
+with open("recording.mp3", "rb") as audio_file:
+    transcript = client.audio.transcriptions.create(
+        model="whisper-large-v3-turbo",
+        file=audio_file,
+        language="en",
+    )
+print(transcript.text)</code></pre>
+
+                <p><strong>Response (JSON):</strong></p>
+                <pre><code>{"text": "Hello from MindRouter!"}</code></pre>
+
+                <h4>List Voices &mdash; <code>GET /api/tts-voices</code></h4>
+                <p>Returns the available TTS voices. When the upstream Kokoro service is reachable, the list is fetched dynamically; otherwise it falls back to the admin-configured voice list.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Parameter</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>allowed_only</code></td><td>bool</td><td><code>false</code></td><td>If <code>true</code>, only return voices in the admin-configured allowed list</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Response (JSON):</strong></p>
+                <pre><code>{"voices": ["af_bella", "af_heart", "am_adam", "am_michael"], "source": "upstream", "default_voice": "af_heart"}</code></pre>
+
+                <h3 id="voice-list">Voices</h3>
+                <p>Kokoro ships with multiple voices out of the box. The admin can restrict which voices are available to users via the <a href="#voice-admin">Voice Config</a> admin page. Some commonly used voices:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Voice ID</th><th>Gender</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>af_heart</code></td><td>Female</td><td>Default voice &mdash; warm and natural</td></tr>
+                        <tr><td><code>af_bella</code></td><td>Female</td><td>Clear and articulate</td></tr>
+                        <tr><td><code>am_adam</code></td><td>Male</td><td>Neutral male voice</td></tr>
+                        <tr><td><code>am_michael</code></td><td>Male</td><td>Deeper male voice</td></tr>
+                    </tbody>
+                </table>
+                <p>The full list of available voices depends on the Kokoro version deployed. Use the <code>GET /api/tts-voices</code> endpoint to discover all available voices dynamically.</p>
+
+                <h3>Chat UI Integration</h3>
+                <p>When TTS and/or STT are enabled by an admin, the built-in chat interface at <code>/chat</code> gains voice features:</p>
+
+                <h4>Read Aloud (TTS)</h4>
+                <ul>
+                    <li>A <strong>Read aloud</strong> button appears below each assistant message</li>
+                    <li>Clicking it streams the response text through the TTS service, sentence by sentence, playing audio sequentially</li>
+                    <li>Markdown formatting (code blocks, links, headers, bold/italic) is automatically stripped before synthesis so only natural text is spoken</li>
+                    <li>During streaming responses, TTS begins as soon as the first complete sentence arrives &mdash; it does not wait for the full response</li>
+                    <li>Clicking the button again (or starting a new Read Aloud) stops the current playback</li>
+                    <li>An animated border around the input area indicates when TTS is playing (cyan/blue/purple glow)</li>
+                </ul>
+
+                <h4>Voice Input (STT)</h4>
+                <ul>
+                    <li>A <strong>microphone button</strong> appears in the input bar when STT is enabled</li>
+                    <li>Clicking it requests browser microphone permission, then starts recording</li>
+                    <li>The button turns red during recording and an animated border (magenta/rose/amber) indicates active capture</li>
+                    <li>Clicking the button again stops recording, sends the audio to the STT service, and inserts the transcribed text into the message input</li>
+                    <li>Audio format is negotiated automatically (prefers WebM/Opus, falls back to WebM or MP4)</li>
+                    <li>The STT service timeout is 120 seconds to accommodate longer recordings or cold-start model loading</li>
+                </ul>
+
+                <h4>User Preferences</h4>
+                <p>When TTS is enabled, users can customize their voice experience from their <strong>User Dashboard</strong> (<code>/dashboard</code>):</p>
+                <ul>
+                    <li><strong>TTS Voice</strong> &mdash; Choose from the admin-allowed voice list, or leave as system default</li>
+                    <li><strong>TTS Speed</strong> &mdash; Slider from 0.5x to 2.0x playback speed, with a reset-to-default button</li>
+                </ul>
+                <p>Per-user preferences are stored in the <code>app_config</code> table as <code>user.{id}.tts_voice</code> and <code>user.{id}.tts_speed</code>. They take priority over the system-wide defaults but can be overridden per-request via the API.</p>
+
+                <h3 id="voice-admin">Admin Configuration</h3>
+                <p>Admins manage voice settings from two locations:</p>
+
+                <h4>Chat Config (<code>/admin/chat-config</code>)</h4>
+                <p>High-level on/off toggles and system-wide defaults:</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Setting</th><th>Config Key</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>TTS Enabled</td><td><code>voice.tts_enabled</code></td><td><code>false</code></td><td>Master switch for TTS in the chat UI and API</td></tr>
+                        <tr><td>TTS Provider</td><td><code>voice.tts_provider</code></td><td><code>"kokoro"</code></td><td>Model name sent to the upstream TTS service</td></tr>
+                        <tr><td>TTS Voice</td><td><code>voice.tts_voice</code></td><td><code>"af_heart"</code></td><td>System-wide default voice (lowest priority fallback)</td></tr>
+                        <tr><td>TTS Speed</td><td><code>voice.tts_speed</code></td><td><code>1.0</code></td><td>System-wide default speed</td></tr>
+                        <tr><td>STT Enabled</td><td><code>voice.stt_enabled</code></td><td><code>false</code></td><td>Master switch for STT in the chat UI and API</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Voice Config (<code>/admin/voice-config</code>)</h4>
+                <p>Backend connection details and quota settings:</p>
+
+                <p><strong>TTS Backend:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Setting</th><th>Config Key</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Service URL</td><td><code>voice.tts_url</code></td><td><em>none</em></td><td>Base URL of the TTS service (e.g., <code>http://kokoro:8880</code>)</td></tr>
+                        <tr><td>API Key</td><td><code>voice.tts_api_key</code></td><td><em>none</em></td><td>Bearer token for the upstream TTS service (if required)</td></tr>
+                        <tr><td>Available Voices</td><td><code>voice_api.tts_voices</code></td><td><code>af_heart, af_bella, am_adam, am_michael</code></td><td>Newline-separated list of voice IDs users can select</td></tr>
+                        <tr><td>Default Voice</td><td><code>voice_api.default_voice</code></td><td><code>"af_heart"</code></td><td>Voice assigned to new users who haven't chosen one</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>STT Backend:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Setting</th><th>Config Key</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Service URL</td><td><code>voice.stt_url</code></td><td><em>none</em></td><td>Base URL of the STT service (e.g., <code>http://whisper:8000</code>)</td></tr>
+                        <tr><td>API Key</td><td><code>voice.stt_api_key</code></td><td><em>none</em></td><td>Bearer token for the upstream STT service (if required)</td></tr>
+                        <tr><td>Default Model</td><td><code>voice.stt_model</code></td><td><code>"whisper-large-v3-turbo"</code></td><td>Whisper model passed to the upstream service</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Quota:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Setting</th><th>Config Key</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>TTS tokens per request</td><td><code>voice_api.tts_quota_tokens</code></td><td><code>100</code></td><td>Fixed token cost deducted from user quota for each TTS call</td></tr>
+                        <tr><td>STT tokens per request</td><td><code>voice_api.stt_quota_tokens</code></td><td><code>200</code></td><td>Fixed token cost deducted from user quota for each STT call</td></tr>
+                    </tbody>
+                </table>
+                <p>Voice requests use a <strong>fixed token cost</strong> model rather than counting actual tokens, since audio processing does not map cleanly to token counts. Adjust these values to control how heavily voice usage counts against a user's quota budget.</p>
+
+                <h3>Voice Priority Resolution</h3>
+                <p>When a TTS request is made (via the API or the Chat UI), the voice is resolved in the following order:</p>
+                <ol>
+                    <li><strong>Per-request</strong> &mdash; <code>voice</code> field in the API request body</li>
+                    <li><strong>Per-user preference</strong> &mdash; <code>user.{id}.tts_voice</code> (set from the user dashboard)</li>
+                    <li><strong>Admin default voice</strong> &mdash; <code>voice_api.default_voice</code> (set in Voice Config)</li>
+                    <li><strong>System fallback</strong> &mdash; <code>voice.tts_voice</code> (set in Chat Config)</li>
+                    <li><strong>Hardcoded fallback</strong> &mdash; <code>"af_heart"</code></li>
+                </ol>
+                <p>Speed follows a similar chain: per-user preference &rarr; system default &rarr; <code>1.0</code>.</p>
+
+                <h3>Error Handling</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>HTTP Status</th><th>Condition</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>400</code></td><td>Empty or blank input text (TTS)</td></tr>
+                        <tr><td><code>404</code></td><td>TTS or STT is not enabled by the admin</td></tr>
+                        <tr><td><code>429</code></td><td>User's token quota exceeded or RPM rate limit hit</td></tr>
+                        <tr><td><code>500</code></td><td>TTS/STT service URL not configured</td></tr>
+                        <tr><td><code>502</code></td><td>Upstream TTS/STT service returned an error, timed out, or is unreachable</td></tr>
+                    </tbody>
+                </table>
+                <p>Failed requests are recorded with the error message but do not deduct tokens from the user's quota.</p>
             </section>
 
             <hr>
