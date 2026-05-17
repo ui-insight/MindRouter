@@ -1590,8 +1590,8 @@ async def update_request_completed(
         request.total_time_ms = int(total_time.total_seconds() * 1000)
         request.prompt_tokens = prompt_tokens
         request.completion_tokens = completion_tokens
-        if prompt_tokens and completion_tokens:
-            request.total_tokens = prompt_tokens + completion_tokens
+        if prompt_tokens is not None or completion_tokens is not None:
+            request.total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
         request.tokens_estimated = tokens_estimated
         await db.flush()
     return request
