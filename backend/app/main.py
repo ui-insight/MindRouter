@@ -122,28 +122,59 @@ async def _cleanup_orphaned_requests() -> None:
 
 
 async def _seed_redis_from_db() -> None:
-    """Seed per-user Redis token counters from quotas on startup.
+    """Seed per-user Redis token counters from actual request data on startup.
 
-    Uses ``quotas.tokens_used`` (not the requests table) so the counter
-    survives retention deleting old rows.  Also deletes orphan Redis
-    keys for user IDs that no longer have quota rows.
+    Computes each user's current-period token usage directly from the
+    requests table rather than trusting ``quotas.tokens_used``, which can
+    carry stale values from a previous period due to the Redis↔DB sync
+    loop.  Also resets expired budget periods and cleans up orphan Redis
+    keys.
     """
     if not redis_is_available():
         return
     try:
-        from backend.app.db.models import Quota
-        from sqlalchemy import select
+        from backend.app.db.models import Quota, Request
+        from sqlalchemy import select, func
+
+        now = datetime.now(timezone.utc)
 
         async with get_async_db_context() as db:
-            result = await db.execute(select(Quota.user_id, Quota.tokens_used))
+            result = await db.execute(select(Quota))
+            quotas = list(result.scalars().all())
+
             valid_user_ids = set()
             seeded = 0
-            for user_id, tokens_used in result.all():
-                await redis_set_tokens(user_id, int(tokens_used or 0))
-                valid_user_ids.add(user_id)
+            reset_count = 0
+
+            for quota in quotas:
+                valid_user_ids.add(quota.user_id)
+                period_end = quota.budget_period_start
+                if period_end.tzinfo is None:
+                    period_end = period_end.replace(tzinfo=timezone.utc)
+                period_end = period_end + timedelta(days=quota.budget_period_days)
+
+                if now >= period_end:
+                    quota.budget_period_start = now
+                    quota.tokens_used = 0
+                    await redis_set_tokens(quota.user_id, 0)
+                    reset_count += 1
+                else:
+                    row = await db.execute(
+                        select(func.coalesce(func.sum(Request.total_tokens), 0))
+                        .where(
+                            Request.user_id == quota.user_id,
+                            Request.created_at >= quota.budget_period_start,
+                            Request.total_tokens.isnot(None),
+                        )
+                    )
+                    period_tokens = int(row.scalar())
+                    await redis_set_tokens(quota.user_id, period_tokens)
+                    quota.tokens_used = period_tokens
+
                 seeded += 1
 
-        # Clean up orphan Redis keys for user IDs that no longer have quotas
+            await db.commit()
+
         all_redis = await get_all_token_keys()
         orphans = set(all_redis.keys()) - valid_user_ids
         for orphan_id in orphans:
@@ -151,7 +182,11 @@ async def _seed_redis_from_db() -> None:
         if orphans:
             logger.info("redis_orphan_keys_cleaned", count=len(orphans))
 
-        logger.info("redis_seeded_from_requests", users=seeded)
+        logger.info(
+            "redis_seeded_from_requests",
+            users=seeded,
+            periods_reset=reset_count,
+        )
     except Exception:
         logger.exception("redis_seed_failed")
 
