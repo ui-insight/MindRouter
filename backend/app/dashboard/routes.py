@@ -773,11 +773,22 @@ async def api_tts_voices(
 ):
     """Return available TTS voices from upstream service or config fallback.
 
+    Accepts session cookie auth (browser) or API key auth (programmatic).
+
     Query params:
         allowed_only=true  — filter to only voices in voice_api.tts_voices config
                              (used by user dashboard to restrict choices)
     """
     user_id = get_session_user_id(request)
+    if not user_id:
+        from backend.app.security.api_keys import verify_api_key
+        api_key_str = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not api_key_str:
+            api_key_str = request.headers.get("X-API-Key", "").strip()
+        if api_key_str:
+            api_key = await verify_api_key(db, api_key_str)
+            if api_key and api_key.status == ApiKeyStatus.ACTIVE and api_key.user and api_key.user.is_active:
+                user_id = api_key.user.id
     if not user_id:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
