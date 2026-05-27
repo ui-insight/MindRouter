@@ -460,7 +460,7 @@
             return true;
         });
 
-        document.getElementById('modelCount').textContent = filtered.length;
+        document.getElementById('modelCount').textContent = filtered.filter(m => !m.is_alias).length;
         document.getElementById('noResults').classList.toggle('d-none', filtered.length > 0);
 
         grid.innerHTML = filtered.map(m => {
