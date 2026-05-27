@@ -90,6 +90,7 @@ async def chat_completions(
 
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -163,6 +164,7 @@ async def completions(
 
     # Early model validation
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -227,6 +229,7 @@ async def embeddings(
 
     # Early model validation
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -279,6 +282,7 @@ async def rerank(
 
     # Early model validation
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -331,6 +335,7 @@ async def score(
 
     # Early model validation
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -384,6 +389,7 @@ async def tokenize(
         )
 
     registry = get_registry()
+    model, _ = registry.resolve_alias(model)
     if not await registry.model_exists(model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -532,6 +538,7 @@ async def ocr(
 
     # Validate model exists
     registry = get_registry()
+    model, _ = registry.resolve_alias(model)
     if not await registry.model_exists(model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -637,6 +644,7 @@ async def ocrmd(
         return PlainTextResponse(f"Unsupported file type: {content_type}", status_code=400)
 
     registry = get_registry()
+    model, _ = registry.resolve_alias(model)
     if not await registry.model_exists(model):
         return PlainTextResponse(f"Model '{model}' not found", status_code=404)
 
@@ -840,6 +848,7 @@ async def image_generations(
 
     # Early model validation
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

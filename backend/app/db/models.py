@@ -1132,3 +1132,14 @@ class AppConfig(Base, TimestampMixin):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)  # JSON-encoded
     description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+
+class ModelAlias(Base, TimestampMixin):
+    """Named alias that maps to a real model name (e.g. default-llm -> qwen3.5-122b)."""
+
+    __tablename__ = "model_aliases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alias_name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
+    target_model: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

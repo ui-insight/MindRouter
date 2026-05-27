@@ -462,6 +462,31 @@ async def models_catalog(
             "backend_count": data["backend_count"],
         })
 
+    # Append model aliases
+    aliases = await crud.get_all_model_aliases(db)
+    for alias in aliases:
+        target = model_data.get(alias.target_model)
+        if target:
+            models_list.append({
+                "name": alias.alias_name,
+                "family": target["family"],
+                "description": alias.description or f"Alias for {alias.target_model}",
+                "model_url": target["model_url"],
+                "huggingface_url": target["huggingface_url"],
+                "category": "Alias",
+                "engines": sorted(target["engines"]),
+                "capabilities": target["capabilities"],
+                "context_length": target["context_length"],
+                "model_max_context": target["model_max_context"],
+                "parameter_count": target["parameter_count"],
+                "quantization": target["quantization"],
+                "model_format": target["model_format"],
+                "embedding_length": target["embedding_length"],
+                "backend_count": target["backend_count"],
+                "is_alias": True,
+                "alias_target": alias.target_model,
+            })
+
     # Token usage for popularity chart — read from Redis cache only.
     # The background _cache_warm_loop populates this every 30 min.
     # Never block on a DB scan here; if cache is empty, show no chart.
@@ -1489,6 +1514,10 @@ async def admin_models(
         if b.engine == BackendEngine.OLLAMA
     ]
 
+    # Model aliases
+    aliases = await crud.get_all_model_aliases(db)
+    model_names = sorted(grouped_models.keys())
+
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/models.html",
@@ -1498,10 +1527,98 @@ async def admin_models(
             **masq,
             "grouped_models": grouped_models,
             "ollama_backends": ollama_backends,
+            "aliases": aliases,
+            "model_names": model_names,
             "success": success,
             "error": error,
         },
     )
+
+
+@dashboard_router.post("/admin/models/create-alias")
+async def create_model_alias(
+    request: Request,
+    alias_name: str = Form(...),
+    target_model: str = Form(...),
+    description: str = Form(""),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Create a new model alias."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or not user.group or not user.group.is_admin:
+        return RedirectResponse(url="/admin/models?error=Permission+denied", status_code=302)
+
+    alias_name = alias_name.strip()
+    target_model = target_model.strip()
+    desc = description.strip() or None
+
+    if not alias_name or not target_model:
+        return RedirectResponse(url="/admin/models?error=Alias+name+and+target+model+are+required", status_code=302)
+
+    try:
+        await crud.create_model_alias(db, alias_name, target_model, desc)
+        registry = get_registry()
+        await registry.invalidate_alias_cache()
+        await crud.log_admin_action(db, user.id, "create_model_alias", entity_type="model_alias", detail=f"{alias_name} -> {target_model}")
+        return RedirectResponse(url="/admin/models?success=alias_created", status_code=302)
+    except Exception as e:
+        return RedirectResponse(url=f"/admin/models?error=Failed+to+create+alias:+{str(e)[:80]}", status_code=302)
+
+
+@dashboard_router.post("/admin/models/update-alias")
+async def update_model_alias(
+    request: Request,
+    alias_id: int = Form(...),
+    target_model: str = Form(...),
+    description: str = Form(""),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Update an existing model alias."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or not user.group or not user.group.is_admin:
+        return RedirectResponse(url="/admin/models?error=Permission+denied", status_code=302)
+
+    target_model = target_model.strip()
+    desc = description.strip() or None
+
+    alias = await crud.update_model_alias(db, alias_id, target_model, desc)
+    if not alias:
+        return RedirectResponse(url="/admin/models?error=Alias+not+found", status_code=302)
+
+    registry = get_registry()
+    await registry.invalidate_alias_cache()
+    await crud.log_admin_action(db, user.id, "update_model_alias", entity_type="model_alias", detail=f"{alias.alias_name} -> {target_model}")
+    return RedirectResponse(url="/admin/models?success=alias_updated", status_code=302)
+
+
+@dashboard_router.post("/admin/models/delete-alias")
+async def delete_model_alias(
+    request: Request,
+    alias_id: int = Form(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Delete a model alias."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or not user.group or not user.group.is_admin:
+        return RedirectResponse(url="/admin/models?error=Permission+denied", status_code=302)
+
+    deleted = await crud.delete_model_alias(db, alias_id)
+    if not deleted:
+        return RedirectResponse(url="/admin/models?error=Alias+not+found", status_code=302)
+
+    registry = get_registry()
+    await registry.invalidate_alias_cache()
+    await crud.log_admin_action(db, user.id, "delete_model_alias", entity_type="model_alias", detail=f"alias_id={alias_id}")
+    return RedirectResponse(url="/admin/models?success=alias_deleted", status_code=302)
 
 
 @dashboard_router.post("/admin/models/toggle-multimodal")

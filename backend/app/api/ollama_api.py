@@ -76,6 +76,7 @@ async def ollama_chat(
 
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -139,6 +140,7 @@ async def ollama_generate(
 
     # Early model validation
     registry = get_registry()
+    chat_canonical.model, _ = registry.resolve_alias(chat_canonical.model)
     if not await registry.model_exists(chat_canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -203,6 +205,19 @@ async def ollama_tags(
                     "model_max_context": model.model_max_context,
                 })
 
+    # Append model aliases (inherit target model's metadata)
+    alias_map = registry.get_alias_cache()
+    models_by_name = {m["name"]: m for m in models}
+    for alias_name, target_model in sorted(alias_map.items()):
+        target = models_by_name.get(target_model)
+        if target:
+            alias_entry = dict(target)
+            alias_entry["name"] = alias_name
+            alias_entry["model"] = alias_name
+            alias_entry["is_alias"] = True
+            alias_entry["alias_target"] = target_model
+            models.append(alias_entry)
+
     return {"models": models}
 
 
@@ -241,6 +256,7 @@ async def ollama_embeddings(
 
     # Early model validation
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -86,6 +86,7 @@ async def messages(
 
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
     if not await registry.model_exists(canonical.model):
         logger.warning("anthropic_model_not_found", model=canonical.model, raw_model=body.get("model"))
         from fastapi.responses import JSONResponse

@@ -88,6 +88,9 @@ class BackendRegistry:
             alpha=self._settings.latency_ema_alpha
         )
 
+        # Model alias cache: alias_name -> target_model
+        self._alias_cache: Dict[str, str] = {}
+
     @property
     def latency_tracker(self) -> LatencyTracker:
         """Access the latency tracker."""
@@ -126,6 +129,9 @@ class BackendRegistry:
                 circuit_open_until=getattr(b, "circuit_open_until", None),
             )
             self._circuit_breakers[b.id] = cb
+
+        # Load model alias cache
+        await self.load_alias_cache()
 
         # Start background tasks
         self._poll_task = asyncio.create_task(self._poll_loop())
@@ -485,6 +491,29 @@ class BackendRegistry:
         """Check if a model is available on any healthy backend."""
         backends = await self.get_backends_with_model(model_name)
         return len(backends) > 0
+
+    # --- Model alias cache ---------------------------------------------------
+
+    async def load_alias_cache(self) -> None:
+        """Load alias mappings from DB into memory."""
+        async with get_async_db_context() as db:
+            self._alias_cache = await crud.get_model_alias_map(db)
+        logger.info("alias_cache_loaded", count=len(self._alias_cache))
+
+    def resolve_alias(self, model_name: str) -> tuple:
+        """Resolve a model alias. Returns (resolved_name, original_alias | None)."""
+        target = self._alias_cache.get(model_name)
+        if target:
+            return target, model_name
+        return model_name, None
+
+    def get_alias_cache(self) -> Dict[str, str]:
+        """Return the current alias_name -> target_model mapping."""
+        return dict(self._alias_cache)
+
+    async def invalidate_alias_cache(self) -> None:
+        """Reload alias cache from DB (call after admin changes)."""
+        await self.load_alias_cache()
 
     async def get_gpu_utilizations(self) -> Dict[int, Optional[float]]:
         """Get current GPU utilization for all backends."""
@@ -939,6 +968,12 @@ class BackendRegistry:
                         await self._reload_registry()
                 except Exception as e:
                     logger.debug("registry_version_check_error", error=str(e))
+
+                # Refresh model alias cache periodically
+                try:
+                    await self.load_alias_cache()
+                except Exception as e:
+                    logger.debug("alias_cache_refresh_error", error=str(e))
 
                 now = datetime.now(timezone.utc)
 

@@ -478,6 +478,10 @@ class CanonicalModelInfo(BaseModel):
     quantization: Optional[str] = None  # e.g. "Q4_K_M", "FP16"
     family: Optional[str] = None  # e.g. "llama", "qwen2"
 
+    # Alias info
+    is_alias: Optional[bool] = None
+    alias_target: Optional[str] = None
+
 
 class CanonicalModelList(BaseModel):
     """List of available models."""

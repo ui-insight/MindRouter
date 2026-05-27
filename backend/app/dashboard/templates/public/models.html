@@ -175,6 +175,7 @@
                 <span class="badge border filter-pill" data-filter="category" data-value="LLM">LLM</span>
                 <span class="badge border filter-pill" data-filter="category" data-value="Embedding">Embedding</span>
                 <span class="badge border filter-pill" data-filter="category" data-value="Reranking">Reranking</span>
+                <span class="badge border filter-pill" data-filter="category" data-value="Alias"><i class="bi bi-signpost-2"></i> Alias</span>
             </div>
             <div class="vr d-none d-md-block"></div>
             <div class="d-flex flex-wrap gap-1" id="enginePills">
@@ -465,6 +466,7 @@
         grid.innerHTML = filtered.map(m => {
             const logo = getLogo(m.family);
             const caps = [];
+            if (m.is_alias) caps.push('<span class="badge bg-primary cap-badge"><i class="bi bi-signpost-2"></i> Alias</span>');
             if (m.capabilities.multimodal) caps.push('<span class="badge bg-info cap-badge">Vision</span>');
             if (m.capabilities.thinking) caps.push('<span class="badge bg-warning text-dark cap-badge">Thinking</span>');
             if (m.capabilities.tools) caps.push('<span class="badge cap-badge" style="background-color:#6f42c1">Tools</span>');
@@ -478,6 +480,10 @@
                 ? `<a href="${m.huggingface_url}" target="_blank" rel="noopener" class="hf-link" title="HuggingFace" onclick="event.stopPropagation()"><i class="bi bi-box-arrow-up-right"></i></a>`
                 : '';
 
+            const subtitle = m.is_alias
+                ? `<small class="text-muted"><i class="bi bi-arrow-right"></i> ${escapeHtml(m.alias_target)}</small>`
+                : `<small class="text-muted">${m.family || ''} &middot; ${m.engines.join(', ')}</small>`;
+
             return `<div class="col-sm-6 col-lg-4 col-xl-3">
                 <div class="card model-card" onclick="showDetail('${m.name.replace(/'/g, "\\'")}')">
                     <div class="card-body p-3">
@@ -488,12 +494,12 @@
                                     <h6 class="card-title mb-0 model-name">${m.name}</h6>
                                     ${hfIcon}
                                 </div>
-                                <small class="text-muted">${m.family || ''} &middot; ${m.engines.join(', ')}</small>
+                                ${subtitle}
                             </div>
                         </div>
                         <p class="desc-clamp text-muted small mb-2">${escapeHtml(m.description || 'No description available.')}</p>
                         <div class="d-flex flex-wrap gap-1 mb-2">${caps.join('')}
-                            <span class="badge bg-secondary cap-badge">${m.category}</span>
+                            ${m.is_alias ? '' : '<span class="badge bg-secondary cap-badge">' + m.category + '</span>'}
                         </div>
                         <div class="stat-row d-flex gap-3">${stats.join(' ')}</div>
                     </div>
@@ -508,7 +514,9 @@
         const logo = getLogo(m.family);
         document.getElementById('modalLogo').src = logo;
         document.getElementById('detailModalLabel').textContent = m.name;
-        document.getElementById('modalFamily').textContent = m.family || 'Unknown family';
+        document.getElementById('modalFamily').textContent = m.is_alias
+            ? 'Alias → ' + m.alias_target
+            : (m.family || 'Unknown family');
         document.getElementById('modalDescArea').innerHTML = renderDescriptionArea(m);
 
         const urlRow = document.getElementById('modalUrlRow');
@@ -528,7 +536,7 @@
         }
         urlRow.classList.toggle('d-none', !m.model_url && !m.huggingface_url);
 
-        document.getElementById('mdCategory').textContent = m.category;
+        document.getElementById('mdCategory').textContent = m.is_alias ? 'Alias' : m.category;
         document.getElementById('mdEngines').textContent = m.engines.join(', ');
         document.getElementById('mdCtx').textContent = m.context_length ? (m.context_length/1024).toFixed(0) + 'k tokens' : '-';
         document.getElementById('mdMaxCtx').textContent = m.model_max_context ? (m.model_max_context/1024).toFixed(0) + 'k tokens' : '-';

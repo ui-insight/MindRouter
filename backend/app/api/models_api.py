@@ -101,6 +101,17 @@ async def list_models(
             if model.family and not model_data[model.name]["family"]:
                 model_data[model.name]["family"] = model.family
 
+    # Append model aliases (inherit target model's metadata)
+    alias_map = registry.get_alias_cache()
+    for alias_name, target_model in alias_map.items():
+        if target_model in model_data:
+            target = model_data[target_model]
+            model_data[alias_name] = {
+                **target,
+                "is_alias": True,
+                "alias_target": target_model,
+            }
+
     # Build response
     models: List[CanonicalModelInfo] = []
     for name, data in sorted(model_data.items()):
@@ -116,6 +127,8 @@ async def list_models(
                 parameter_count=data["parameter_count"],
                 quantization=data["quantization"],
                 family=data["family"],
+                is_alias=data.get("is_alias"),
+                alias_target=data.get("alias_target"),
             )
         )
 

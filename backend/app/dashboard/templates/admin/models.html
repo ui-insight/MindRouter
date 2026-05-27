@@ -18,6 +18,9 @@
                 {% elif success == 'reset' %}Override reset to auto-detect.
                 {% elif success == 'metadata_updated' %}Model metadata overrides saved.
                 {% elif success == 'overrides_reset' %}All metadata overrides cleared.
+                {% elif success == 'alias_created' %}Model alias created.
+                {% elif success == 'alias_updated' %}Model alias updated.
+                {% elif success == 'alias_deleted' %}Model alias deleted.
                 {% else %}Operation completed successfully.{% endif %}
                 <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
             </div>
@@ -90,6 +93,116 @@
                 </div>
             </div>
             {% endif %}
+
+            <!-- Model Aliases Card -->
+            <div class="card mb-4">
+                <div class="card-header d-flex align-items-center justify-content-between" style="cursor:pointer"
+                     data-bs-toggle="collapse" data-bs-target="#aliasCard">
+                    <span><i class="bi bi-signpost-2"></i> Default Model Aliases</span>
+                    <span>
+                        <span class="badge bg-secondary me-2">{{ aliases|length if aliases else 0 }}</span>
+                        <i class="bi bi-chevron-down"></i>
+                    </span>
+                </div>
+                <div class="collapse show" id="aliasCard">
+                    <div class="card-body p-0">
+                        <table class="table table-sm table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th style="width:22%">Alias Name</th>
+                                    <th style="width:30%">Target Model</th>
+                                    <th>Description</th>
+                                    <th style="width:140px" class="text-end">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% if aliases %}
+                                {% for alias in aliases %}
+                                <tr id="alias-row-{{ alias.id }}">
+                                    <td><code>{{ alias.alias_name }}</code></td>
+                                    <td>
+                                        <span class="alias-display-{{ alias.id }}">{{ alias.target_model }}</span>
+                                        <form class="alias-edit-{{ alias.id }} d-none" method="POST" action="/admin/models/update-alias">
+                                            <input type="hidden" name="alias_id" value="{{ alias.id }}">
+                                            <select class="form-select form-select-sm" name="target_model">
+                                                {% for m in model_names %}
+                                                <option value="{{ m }}" {{ 'selected' if m == alias.target_model }}>{{ m }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </form>
+                                    </td>
+                                    <td>
+                                        <span class="alias-display-{{ alias.id }}">{{ alias.description or '' }}</span>
+                                        <span class="alias-edit-{{ alias.id }} d-none">
+                                            <input type="text" class="form-control form-control-sm" form="alias-edit-form-{{ alias.id }}"
+                                                   name="description" value="{{ alias.description or '' }}" placeholder="Description">
+                                        </span>
+                                    </td>
+                                    <td class="text-end text-nowrap">
+                                        {% if not is_read_only %}
+                                        <span class="alias-display-{{ alias.id }}">
+                                            <button class="btn btn-sm btn-outline-primary" onclick="toggleAliasEdit({{ alias.id }})">
+                                                <i class="bi bi-pencil"></i>
+                                            </button>
+                                            <form method="POST" action="/admin/models/delete-alias" class="d-inline"
+                                                  onsubmit="return confirm('Delete alias {{ alias.alias_name }}?')">
+                                                <input type="hidden" name="alias_id" value="{{ alias.id }}">
+                                                <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                                            </form>
+                                        </span>
+                                        <span class="alias-edit-{{ alias.id }} d-none">
+                                            <form id="alias-edit-form-{{ alias.id }}" method="POST" action="/admin/models/update-alias" class="d-inline">
+                                                <input type="hidden" name="alias_id" value="{{ alias.id }}">
+                                                <input type="hidden" name="target_model" value="">
+                                                <input type="hidden" name="description" value="">
+                                                <button type="button" class="btn btn-sm btn-success" onclick="submitAliasEdit({{ alias.id }})">
+                                                    <i class="bi bi-check"></i>
+                                                </button>
+                                            </form>
+                                            <button class="btn btn-sm btn-outline-secondary" onclick="toggleAliasEdit({{ alias.id }})">
+                                                <i class="bi bi-x"></i>
+                                            </button>
+                                        </span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                                {% else %}
+                                <tr><td colspan="4" class="text-muted text-center py-3">No aliases configured.</td></tr>
+                                {% endif %}
+
+                                {% if not is_read_only %}
+                                <tr class="table-light">
+                                    <td>
+                                        <form id="createAliasForm" method="POST" action="/admin/models/create-alias">
+                                        <input type="text" class="form-control form-control-sm" name="alias_name"
+                                               placeholder="e.g. default-llm" required>
+                                    </td>
+                                    <td>
+                                        <select class="form-select form-select-sm" name="target_model" required>
+                                            <option value="">Select target model...</option>
+                                            {% for m in model_names %}
+                                            <option value="{{ m }}">{{ m }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </td>
+                                    <td>
+                                        <input type="text" class="form-control form-control-sm" name="description"
+                                               placeholder="Description (optional)">
+                                    </td>
+                                    <td class="text-end">
+                                        <button type="submit" class="btn btn-sm btn-primary">
+                                            <i class="bi bi-plus-lg"></i> Create
+                                        </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% endif %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
 
             <p class="text-muted mb-3">{{ grouped_models|length }} unique model{{ 's' if grouped_models|length != 1 }} across all backends</p>
 
@@ -561,6 +674,20 @@
 </div>
 
 <script>
+function toggleAliasEdit(id) {
+    document.querySelectorAll('.alias-display-' + id).forEach(el => el.classList.toggle('d-none'));
+    document.querySelectorAll('.alias-edit-' + id).forEach(el => el.classList.toggle('d-none'));
+}
+function submitAliasEdit(id) {
+    var row = document.getElementById('alias-row-' + id);
+    var form = document.getElementById('alias-edit-form-' + id);
+    var sel = row.querySelector('select[name="target_model"]');
+    var inp = row.querySelector('.alias-edit-' + id + ' input[name="description"]');
+    form.querySelector('input[name="target_model"]').value = sel.value;
+    form.querySelector('input[name="description"]').value = inp ? inp.value : '';
+    form.submit();
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // Toggle detail rows on click
     document.querySelectorAll('.model-row').forEach(function(row) {

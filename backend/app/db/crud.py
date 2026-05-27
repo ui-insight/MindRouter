@@ -42,6 +42,7 @@ from backend.app.db.models import (
     GPUDeviceTelemetry,
     Group,
     Model,
+    ModelAlias,
     ModelArchivedStats,
     ModelDescriptionCache,
     Modality,
@@ -3853,3 +3854,76 @@ async def get_dlp_stats(db: AsyncSession, hours: int = 24) -> dict:
         "unacknowledged": unack,
         "hours": hours,
     }
+
+
+# ---------------------------------------------------------------------------
+# Model Aliases
+# ---------------------------------------------------------------------------
+
+async def get_all_model_aliases(db: AsyncSession) -> List[ModelAlias]:
+    """Return all model aliases ordered by name."""
+    result = await db.execute(
+        select(ModelAlias).order_by(ModelAlias.alias_name)
+    )
+    return list(result.scalars().all())
+
+
+async def get_model_alias_map(db: AsyncSession) -> Dict[str, str]:
+    """Return {alias_name: target_model} dict for cache loading."""
+    result = await db.execute(
+        select(ModelAlias.alias_name, ModelAlias.target_model)
+    )
+    return {row.alias_name: row.target_model for row in result.all()}
+
+
+async def create_model_alias(
+    db: AsyncSession,
+    alias_name: str,
+    target_model: str,
+    description: Optional[str] = None,
+) -> ModelAlias:
+    """Create a new model alias. Raises ValueError on conflict."""
+    alias = ModelAlias(
+        alias_name=alias_name,
+        target_model=target_model,
+        description=description,
+    )
+    db.add(alias)
+    await db.commit()
+    await db.refresh(alias)
+    return alias
+
+
+async def update_model_alias(
+    db: AsyncSession,
+    alias_id: int,
+    target_model: Optional[str] = None,
+    description: Optional[str] = None,
+) -> Optional[ModelAlias]:
+    """Update an existing alias. Returns None if not found."""
+    result = await db.execute(
+        select(ModelAlias).where(ModelAlias.id == alias_id)
+    )
+    alias = result.scalar_one_or_none()
+    if not alias:
+        return None
+    if target_model is not None:
+        alias.target_model = target_model
+    if description is not None:
+        alias.description = description
+    await db.commit()
+    await db.refresh(alias)
+    return alias
+
+
+async def delete_model_alias(db: AsyncSession, alias_id: int) -> bool:
+    """Delete a model alias by ID. Returns True if deleted."""
+    result = await db.execute(
+        select(ModelAlias).where(ModelAlias.id == alias_id)
+    )
+    alias = result.scalar_one_or_none()
+    if not alias:
+        return False
+    await db.delete(alias)
+    await db.commit()
+    return True
