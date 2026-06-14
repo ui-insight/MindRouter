@@ -24,7 +24,7 @@ services:
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-mindrouter}
       - MCP_SERVER_URL=${MCP_SERVER_URL:-http://127.0.0.1:8001}
     volumes:
-      - artifact_data:/data/artifacts
+      - /archivedb/artifacts:/data/artifacts
       - chat_data:/data/chat_files
       - ./backend:/app/backend:ro
     depends_on:
