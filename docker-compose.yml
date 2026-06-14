@@ -73,7 +73,7 @@ services:
       - MYSQL_PASSWORD=${MYSQL_ARCHIVE_PASSWORD:-archive_password}
       - MYSQL_TCP_PORT=3307
     volumes:
-      - mariadb_archive_data:/var/lib/mysql
+      - /archivedb:/var/lib/mysql
       - ./mariadb/archive.cnf:/etc/mysql/conf.d/custom.cnf:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
