@@ -193,6 +193,14 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="row mt-3">
+                            <div class="col-md-4">
+                                <label class="form-label">Request Images (days)</label>
+                                <input type="number" class="form-control" name="retention.request_images_days"
+                                       value="{{ config['retention.request_images_days'] }}" min="0">
+                                <div class="form-text">Audit-offload images from OCR/vision requests. 0 = never delete.</div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 

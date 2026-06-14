@@ -42,6 +42,7 @@ _DEFAULTS: dict[str, Any] = {
     "retention.chat.tier2_days": 730,
     "retention.telemetry.tier1_days": 30,
     "retention.telemetry.tier2_days": 730,
+    "retention.request_images_days": 180,
     "retention.cleanup_interval": 3600,
     "retention.batch_size": 5000,
 }
@@ -1089,6 +1090,53 @@ async def try_run_retention_with_lock(trigger: str) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 
+async def cleanup_expired_request_images(
+    artifact_storage_path: str, days: int
+) -> dict[str, Any]:
+    """Delete ``request_images/<uuid>/`` directories older than ``days``.
+
+    These are audit-offload images written by inference: base64 images
+    extracted from multimodal (OCR/vision) requests so the DB audit record
+    stays small. Nothing reads them back -- they exist only for forensic
+    inspection -- so they are reaped by directory mtime. A value of 0
+    disables cleanup (keep forever).
+    """
+    import shutil
+    from pathlib import Path
+
+    base = Path(artifact_storage_path) / "request_images"
+    if days <= 0 or not base.is_dir():
+        return {"deleted_dirs": 0, "skipped": True}
+
+    cutoff_ts = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).timestamp()
+
+    def _sweep() -> dict[str, int]:
+        scanned = deleted = errors = 0
+        with os.scandir(base) as it:
+            for entry in it:
+                scanned += 1
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if entry.stat(follow_symlinks=False).st_mtime >= cutoff_ts:
+                        continue
+                    shutil.rmtree(entry.path, ignore_errors=False)
+                    deleted += 1
+                except Exception:
+                    errors += 1
+        return {"scanned": scanned, "deleted_dirs": deleted, "errors": errors}
+
+    # Filesystem walk over potentially hundreds of thousands of dirs --
+    # run off the event loop so it never blocks request handling.
+    result = await asyncio.to_thread(_sweep)
+    logger.info(
+        "retention_request_images_cleanup", cutoff_days=days, **result
+    )
+    return result
+
+
 async def run_retention_cycle() -> dict[str, Any]:
     """Execute one full retention cycle.
 
@@ -1216,5 +1264,12 @@ async def run_retention_cycle() -> dict[str, Any]:
         orphans = await chat_crud.delete_all_orphan_attachments(app_db)
         await app_db.commit()
         summary["orphan_attachments"] = orphans
+
+    # Audit-offload request images: reap directories older than the
+    # configured window (filesystem-only, no DB rows involved).
+    summary["request_images"] = await cleanup_expired_request_images(
+        settings.artifact_storage_path,
+        config.get("retention.request_images_days", 180),
+    )
 
     return summary
