@@ -694,6 +694,9 @@ message = client.messages.create(
                     </thead>
                     <tbody>
                         <tr><td>POST</td><td><code>/v1/responses</code></td><td>API Key</td><td>Responses API (streaming and non-streaming)</td></tr>
+                        <tr><td>GET</td><td><code>/v1/responses/{id}</code></td><td>API Key</td><td>Retrieve a stored response</td></tr>
+                        <tr><td>DELETE</td><td><code>/v1/responses/{id}</code></td><td>API Key</td><td>Delete a stored response</td></tr>
+                        <tr><td>GET</td><td><code>/v1/responses/{id}/input_items</code></td><td>API Key</td><td>List a stored response's input items (paginated)</td></tr>
                     </tbody>
                 </table>
 
@@ -759,11 +762,11 @@ print(response.output_text)</code></pre>
                     <li>Vision input via <code>input_image</code> parts (data URIs and https URLs)</li>
                     <li>Parameters: <code>max_output_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>stream</code></li>
                 </ul>
-                <p><strong>Limitations (stateless implementation):</strong></p>
+                <p><strong>Server-side conversation state:</strong> <code>store</code> defaults to <code>true</code> (OpenAI parity). Stored responses can be retrieved (<code>GET</code>), deleted, and chained via <code>previous_response_id</code> &mdash; MindRouter rebuilds the conversation from the stored chain, so follow-up requests only need the new input. Stored state is subject to a retention window (default 30 days, admin-tunable), a per-response payload cap, and a per-user row cap (oldest evicted). Per the OpenAI spec, <code>instructions</code> and <code>tools</code> are <em>not</em> inherited across a chain &mdash; resend them each turn. Codex does not use server-side state; it resends the full transcript with <code>store: false</code>.</p>
+                <p><strong>Limitations:</strong></p>
                 <ul>
-                    <li><code>store</code> / <code>previous_response_id</code> conversation state is not persisted &mdash; resend the full transcript each turn (this is what Codex does natively). <code>previous_response_id</code> returns <code>previous_response_not_found</code>.</li>
                     <li>Hosted tools (<code>web_search</code>, <code>file_search</code>, <code>code_interpreter</code>, MCP) and <code>custom</code> freeform tools are accepted but stripped &mdash; only <code>function</code> tools reach the model.</li>
-                    <li><code>background</code> mode, file inputs (<code>input_file</code>, <code>file_id</code>), and <code>GET/DELETE /v1/responses/{id}</code> retrieval are not supported.</li>
+                    <li><code>background</code> mode, file inputs (<code>input_file</code>, <code>file_id</code>), stream replay of stored responses (<code>GET ?stream=true</code>), and <code>conversation</code> objects are not supported.</li>
                 </ul>
                 <p>Errors use the OpenAI envelope: <code>{"error": {"message", "type", "param", "code"}}</code>.</p>
 
