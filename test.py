@@ -898,6 +898,135 @@ def test_rerank(client: httpx.Client, cfg: argparse.Namespace):
 
 
 # ---------------------------------------------------------------------------
+# Section 10 — OpenAI Responses API Endpoint
+# ---------------------------------------------------------------------------
+
+def test_responses(client: httpx.Client, cfg: argparse.Namespace):
+    section_header("10. OpenAI Responses API")
+    headers = {"Authorization": f"Bearer {cfg.api_key}"}
+    model = cfg.vllm_model
+
+    # POST /v1/responses — non-streaming
+    name = "POST /v1/responses (non-streaming)"
+    try:
+        r = client.post("/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "Say hello in exactly 3 words.",
+            "max_output_tokens": 64,
+        })
+        body = r.json()
+        if (
+            r.status_code == 200
+            and body.get("object") == "response"
+            and body.get("id", "").startswith("resp_")
+            and body.get("output")
+            and body.get("usage")
+        ):
+            texts = [
+                part.get("text", "")
+                for item in body["output"] if item.get("type") == "message"
+                for part in item.get("content", [])
+            ]
+            record("pass", name, f"status={body['status']} text={''.join(texts)[:60]!r}")
+        else:
+            record("fail", name, f"status={r.status_code} body={r.text[:200]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+    # POST /v1/responses — streaming (typed SSE events, no [DONE])
+    name = "POST /v1/responses (streaming)"
+    try:
+        with client.stream("POST", "/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "Say hi.",
+            "stream": True,
+            "max_output_tokens": 64,
+        }) as r:
+            if r.status_code != 200:
+                record("fail", name, f"status={r.status_code}")
+            else:
+                events = []
+                saw_done_sentinel = False
+                for line in r.iter_lines():
+                    if line.startswith("event: "):
+                        events.append(line[7:].strip())
+                    elif line.strip() == "data: [DONE]":
+                        saw_done_sentinel = True
+                deltas = sum(1 for e in events if e == "response.output_text.delta")
+                ok = (
+                    events[:2] == ["response.created", "response.in_progress"]
+                    and deltas > 0
+                    and events[-1] == "response.completed"
+                    and not saw_done_sentinel
+                )
+                if ok:
+                    record("pass", name, f"{deltas} text deltas, clean terminal")
+                else:
+                    record("fail", name,
+                           f"deltas={deltas} done_sentinel={saw_done_sentinel} "
+                           f"events={events[:4]}...{events[-2:]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+    # POST /v1/responses — function tool round trip
+    name = "POST /v1/responses (function call round trip)"
+    weather_tool = {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    }
+    try:
+        r = client.post("/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "What is the weather in Moscow, Idaho? Use the tool.",
+            "tools": [weather_tool],
+            "tool_choice": "auto",
+        })
+        body = r.json()
+        calls = [i for i in body.get("output", []) if i.get("type") == "function_call"]
+        if r.status_code != 200 or not calls:
+            record("fail", name, f"status={r.status_code} no function_call: {r.text[:200]}")
+        else:
+            call = calls[0]
+            r2 = client.post("/v1/responses", headers=headers, json={
+                "model": model,
+                "input": [
+                    {"role": "user",
+                     "content": "What is the weather in Moscow, Idaho? Use the tool."},
+                    {"type": "function_call", "call_id": call["call_id"],
+                     "name": call["name"], "arguments": call["arguments"]},
+                    {"type": "function_call_output", "call_id": call["call_id"],
+                     "output": "sunny, 25C"},
+                ],
+                "tools": [weather_tool],
+            })
+            body2 = r2.json()
+            msgs = [i for i in body2.get("output", []) if i.get("type") == "message"]
+            if r2.status_code == 200 and msgs:
+                record("pass", name, f"tool={call['name']} answered with message")
+            else:
+                record("fail", name, f"follow-up status={r2.status_code} body={r2.text[:200]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+    # Unauthenticated request rejected (body shape is FastAPI-default; status only)
+    name = "POST /v1/responses (unauthenticated 401)"
+    try:
+        r = client.post("/v1/responses", json={"model": model, "input": "hi"})
+        if r.status_code == 401:
+            record("pass", name, "rejected without API key")
+        else:
+            record("fail", name, f"status={r.status_code}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+
+# ---------------------------------------------------------------------------
 # Section registry
 # ---------------------------------------------------------------------------
 
@@ -911,6 +1040,7 @@ SECTIONS = {
     "errors": test_errors,
     "admin": test_admin,
     "rerank": test_rerank,
+    "responses": test_responses,
 }
 
 

@@ -57,6 +57,9 @@
 | `backend/app/tests/unit/test_dlp.py` | 22 | DLP scanner: regex (SSN, CC, email, keywords, custom patterns), severity classification, text extraction (messages, images, response), LLM prompt construction, ScanResult/ScanFinding dataclasses |
 | `backend/app/tests/unit/test_latex_normalize.py` | 29 | LaTeX normalization: $$-block preservation (v2.4.2 regression), bare command/operator wrapping, display math promotion, inline preservation, mixed content, code block immunity, \\begin/\\end environments |
 | `backend/app/tests/unit/test_ocr.py` | 27 | OCR pipeline: chunking logic, fence stripping, prompt building, overlap detection, deterministic merge, image conversion, PDF fixture |
+| `backend/app/tests/unit/test_responses_in.py` | 44 | ResponsesIn translator: input polymorphism (string/items/typeless), function-call round trip via call_id, flat tool re-nesting + non-function strip, text.format, reasoning.effort→think, format_response/build_snapshot, vLLM round trip |
+| `backend/app/tests/unit/test_responses_stream.py` | 12 | Chat-SSE→Responses-SSE adapter: canonical event sequences (text/reasoning/tools), deferred terminal + usage harvesting, incomplete/failed terminals, exception hardening, drain contract |
+| `backend/app/tests/unit/test_responses_api.py` | 15 | /v1/responses route: feature flag, validation errors, OpenAI error envelopes, quota pre-flight (skip_quota_check), streaming/non-streaming dispatch, alias resolution |
 
 **Shared fixtures:** `backend/app/tests/conftest.py`
 
@@ -110,11 +113,11 @@
 **Makefile:** `make test-smoke`
 **Requirements:** Live deployment, valid API key.
 
-Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `anthropic`, `cross`, `errors`, `admin`, `rerank`.
+Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `anthropic`, `cross`, `errors`, `admin`, `rerank`, `responses`.
 
 | File | What it covers |
 |------|----------------|
-| `test.py` | Health endpoints, authentication, OpenAI-compatible API, Ollama-compatible API, Anthropic-compatible API, cross-engine routing, error handling, admin API, reranker (basic, top_n, return_documents) |
+| `test.py` | Health endpoints, authentication, OpenAI-compatible API, Ollama-compatible API, Anthropic-compatible API, cross-engine routing, error handling, admin API, reranker (basic, top_n, return_documents), Responses API (non-streaming, typed-SSE streaming, function-call round trip, auth) |
 
 **CLI arguments:**
 ```
