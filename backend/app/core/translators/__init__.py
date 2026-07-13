@@ -28,6 +28,10 @@ from backend.app.core.translators.ollama_out import OllamaOutTranslator
 from backend.app.core.translators.vllm_out import VLLMOutTranslator
 from backend.app.core.translators.anthropic_in import AnthropicInTranslator
 from backend.app.core.translators.diffusion_out import DiffusionOutTranslator
+from backend.app.core.translators.responses_in import (
+    ResponsesInTranslator,
+    ResponsesRequestContext,
+)
 
 __all__ = [
     "OpenAIInTranslator",
@@ -36,4 +40,6 @@ __all__ = [
     "VLLMOutTranslator",
     "AnthropicInTranslator",
     "DiffusionOutTranslator",
+    "ResponsesInTranslator",
+    "ResponsesRequestContext",
 ]

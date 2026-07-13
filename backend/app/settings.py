@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     backend_retry_max_attempts: int = 3
     structured_output_retry_on_invalid: bool = True
 
+    # OpenAI Responses API (/v1/responses)
+    # Default off until live validation; flip via RESPONSES_API_ENABLED=true
+    responses_api_enabled: bool = False
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "json"

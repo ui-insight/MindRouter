@@ -264,6 +264,9 @@ class InferenceService:
         user: User,
         api_key: ApiKey,
         http_request: Request,
+        endpoint: str = "/v1/chat/completions",
+        skip_quota_check: bool = False,
+        extra_parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Handle non-streaming chat completion.
@@ -273,16 +276,22 @@ class InferenceService:
             user: Authenticated user
             api_key: API key used
             http_request: Original HTTP request
+            endpoint: Endpoint string recorded on the audit row
+            skip_quota_check: Caller already ran _check_quota (the RPM
+                check increments a Redis counter, so it must run
+                exactly once per request)
 
         Returns:
             OpenAI-compatible chat completion response
         """
         # Check quota
-        await self._check_quota(user, api_key)
+        if not skip_quota_check:
+            await self._check_quota(user, api_key)
 
         # Create audit record
         db_request = await self._create_request_record(
-            request, user, api_key, http_request, "/v1/chat/completions"
+            request, user, api_key, http_request, endpoint,
+            extra_parameters=extra_parameters,
         )
 
         # Propagate request UUID so translators can use it as chunk/response ID
@@ -320,16 +329,25 @@ class InferenceService:
         user: User,
         api_key: ApiKey,
         http_request: Request,
+        endpoint: str = "/v1/chat/completions",
+        skip_quota_check: bool = False,
+        extra_parameters: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[bytes]:
         """
         Handle streaming chat completion.
 
         Yields SSE-formatted chunks.
+
+        ``skip_quota_check`` lets dialect routes pre-flight the quota
+        before HTTP 200 headers are committed — this generator only
+        runs on first iteration, after the status line is already sent.
         """
-        await self._check_quota(user, api_key)
+        if not skip_quota_check:
+            await self._check_quota(user, api_key)
 
         db_request = await self._create_request_record(
-            request, user, api_key, http_request, "/v1/chat/completions"
+            request, user, api_key, http_request, endpoint,
+            extra_parameters=extra_parameters,
         )
 
         # Propagate request UUID so translators can use it as chunk ID
@@ -797,6 +815,7 @@ class InferenceService:
         http_request: Request,
         endpoint: str,
         modality: Modality = Modality.CHAT,
+        extra_parameters: Optional[Dict[str, Any]] = None,
     ):
         """Create audit record for the request.
 
@@ -828,6 +847,11 @@ class InferenceService:
                 parameters[param] = getattr(request, param)
         if hasattr(request, "policy_verdict") and request.policy_verdict:
             parameters["policy_verdict"] = request.policy_verdict
+        # Dialect-supplied extras (e.g. the public resp_* id of a
+        # /v1/responses call, so audit rows are searchable by the id
+        # the client saw).
+        if extra_parameters:
+            parameters.update(extra_parameters)
 
         response_format = None
         if hasattr(request, "response_format") and request.response_format:
