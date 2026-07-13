@@ -912,7 +912,7 @@ def test_responses(client: httpx.Client, cfg: argparse.Namespace):
         r = client.post("/v1/responses", headers=headers, json={
             "model": model,
             "input": "Say hello in exactly 3 words.",
-            "max_output_tokens": 64,
+            "max_output_tokens": 512,
         })
         body = r.json()
         if (
@@ -940,7 +940,7 @@ def test_responses(client: httpx.Client, cfg: argparse.Namespace):
             "model": model,
             "input": "Say hi.",
             "stream": True,
-            "max_output_tokens": 64,
+            "max_output_tokens": 512,
         }) as r:
             if r.status_code != 200:
                 record("fail", name, f"status={r.status_code}")
@@ -1032,7 +1032,7 @@ def test_responses(client: httpx.Client, cfg: argparse.Namespace):
             "model": model,
             "input": "Remember this secret word: kumquat. Reply OK.",
             "store": True,
-            "max_output_tokens": 32,
+            "max_output_tokens": 512,
         })
         rid = r1.json().get("id", "")
         checks = []
@@ -1051,7 +1051,7 @@ def test_responses(client: httpx.Client, cfg: argparse.Namespace):
             "input": "What was the secret word? Answer with just the word.",
             "previous_response_id": rid,
             "store": True,
-            "max_output_tokens": 32,
+            "max_output_tokens": 512,
         })
         answer = ""
         for item in r2.json().get("output", []):
