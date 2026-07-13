@@ -445,12 +445,13 @@ class ResponsesInTranslator:
         for tool in tools:
             if not isinstance(tool, dict) or tool.get("type") != "function":
                 continue  # web_search / custom / mcp / ... — stripped
+            # description is always a string: vLLM's gpt-oss tool parser
+            # rejects tools whose description is missing/None.
             function: Dict[str, Any] = {
                 "name": tool.get("name") or "",
+                "description": tool.get("description") or "",
                 "parameters": tool.get("parameters") or {},
             }
-            if tool.get("description"):
-                function["description"] = tool["description"]
             translated.append(
                 CanonicalToolDefinition(type="function", function=function)
             )
