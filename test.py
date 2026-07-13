@@ -1025,6 +1025,58 @@ def test_responses(client: httpx.Client, cfg: argparse.Namespace):
     except Exception as e:
         record("fail", name, str(e))
 
+    # Store + retrieve + chain + delete (server-side state)
+    name = "POST/GET/chain/DELETE /v1/responses (stored state)"
+    try:
+        r1 = client.post("/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "Remember this secret word: kumquat. Reply OK.",
+            "store": True,
+            "max_output_tokens": 32,
+        })
+        rid = r1.json().get("id", "")
+        checks = []
+
+        r_get = client.get(f"/v1/responses/{rid}", headers=headers)
+        checks.append(("retrieve", r_get.status_code == 200
+                       and r_get.json().get("id") == rid))
+
+        r_items = client.get(f"/v1/responses/{rid}/input_items", headers=headers)
+        checks.append(("input_items", r_items.status_code == 200
+                       and r_items.json().get("object") == "list"
+                       and len(r_items.json().get("data", [])) > 0))
+
+        r2 = client.post("/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "What was the secret word? Answer with just the word.",
+            "previous_response_id": rid,
+            "store": True,
+            "max_output_tokens": 32,
+        })
+        answer = ""
+        for item in r2.json().get("output", []):
+            if item.get("type") == "message":
+                for part in item.get("content", []):
+                    answer += part.get("text", "")
+        checks.append(("chain_recall", r2.status_code == 200
+                       and "kumquat" in answer.lower()))
+        rid2 = r2.json().get("id", "")
+
+        r_del = client.delete(f"/v1/responses/{rid}", headers=headers)
+        checks.append(("delete", r_del.status_code == 200
+                       and r_del.json().get("deleted") is True))
+        r_gone = client.get(f"/v1/responses/{rid}", headers=headers)
+        checks.append(("gone_404", r_gone.status_code == 404))
+        client.delete(f"/v1/responses/{rid2}", headers=headers)  # cleanup
+
+        failed_checks = [c for c, ok in checks if not ok]
+        if not failed_checks:
+            record("pass", name, "store/retrieve/chain-recall/delete all OK")
+        else:
+            record("fail", name, f"failed: {failed_checks}")
+    except Exception as e:
+        record("fail", name, str(e))
+
 
 # ---------------------------------------------------------------------------
 # Section registry
