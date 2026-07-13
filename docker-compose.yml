@@ -23,6 +23,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-mindrouter}
       - MCP_SERVER_URL=${MCP_SERVER_URL:-http://127.0.0.1:8001}
+      - RESPONSES_API_ENABLED=${RESPONSES_API_ENABLED:-false}
     volumes:
       - /archivedb/artifacts:/data/artifacts
       - chat_data:/data/chat_files
