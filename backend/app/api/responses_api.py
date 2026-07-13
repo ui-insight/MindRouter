@@ -24,19 +24,22 @@ provider:
     wire_api = "responses"
     requires_openai_auth = false
 
-Tier 1 is stateless: ``store`` is accepted and echoed but nothing
-persists, and ``previous_response_id`` returns the documented
-``previous_response_not_found`` error (Codex never sends it over HTTP —
-it resends the full transcript each turn).
+Server-side state (Tier 2): ``store`` (default true, matching OpenAI)
+persists responses to the stored_responses table; ``previous_response_id``
+rebuilds conversation context by walking the stored chain; GET/DELETE
+/v1/responses/{id} and GET .../input_items are served from the store.
+Codex never uses any of this over HTTP — it resends the full transcript
+each turn with store=false — but the OpenAI SDKs default to it.
 
 Unlike the older dialects, route-level errors here use the OpenAI
 error envelope ``{"error": {message, type, param, code}}`` — Codex and
 the SDKs parse it.
 """
 
+import asyncio
 from typing import Any, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,9 +50,11 @@ from backend.app.core.translators.responses_in import (
     ResponsesRequestContext,
 )
 from backend.app.core.translators.responses_stream import stream_responses_events
+from backend.app.db import crud
 from backend.app.db.models import ApiKey, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
+from backend.app.services import responses_store
 from backend.app.services.inference import InferenceService
 from backend.app.settings import get_settings
 
@@ -127,20 +132,41 @@ async def responses(
         return error_json(400, "you must provide a model parameter", param="model")
 
     ctx = ResponsesRequestContext.from_body(body)
+    ctx.user_id = user.id
+    ctx.api_key_id = api_key.id
     bind_request_context(request_id=ctx.response_id, user_id=user.id)
 
-    # Tier 1 has no server-side response store.
-    if ctx.previous_response_id:
-        return error_json(
-            400,
-            f"Previous response with id '{ctx.previous_response_id}' not found.",
-            param="previous_response_id",
-            code="previous_response_not_found",
-        )
     if ctx.background:
         return error_json(
             400, "Background responses are not supported.", param="background"
         )
+
+    # Normalize the request's own (delta) input items; these are what
+    # gets persisted for store=true rows.
+    try:
+        delta_items = responses_store.normalize_input_to_items(body.get("input"))
+    except ValueError as e:
+        return error_json(400, str(e), param="input")
+
+    # previous_response_id: rebuild conversation context from the store.
+    if ctx.previous_response_id:
+        try:
+            chain = await crud.get_stored_response_chain(
+                db,
+                ctx.previous_response_id,
+                user.id,
+                max_depth=settings.responses_store_max_chain_depth,
+            )
+            combined = responses_store.rebuild_input_from_chain(chain, delta_items)
+        except ValueError as e:
+            message = str(e)
+            code = (
+                "previous_response_not_found" if "not found" in message else None
+            )
+            return error_json(
+                400, message, param="previous_response_id", code=code
+            )
+        body = {**body, "input": combined}
 
     stripped = ctx.stripped_tool_types()
     if stripped:
@@ -188,19 +214,26 @@ async def responses(
     extra_parameters = {"response_id": ctx.response_id}
 
     if ctx.stream:
-        return StreamingResponse(
-            stream_responses_events(
-                service.stream_chat_completion(
-                    canonical,
-                    user,
-                    api_key,
-                    request,
-                    endpoint="/v1/responses",
-                    skip_quota_check=True,
-                    extra_parameters=extra_parameters,
-                ),
-                ctx,
+        capture: dict = {}
+        events = stream_responses_events(
+            service.stream_chat_completion(
+                canonical,
+                user,
+                api_key,
+                request,
+                endpoint="/v1/responses",
+                skip_quota_check=True,
+                extra_parameters=extra_parameters,
             ),
+            ctx,
+            capture=capture,
+        )
+
+        if ctx.store:
+            events = _stream_and_persist(events, ctx, delta_items, capture)
+
+        return StreamingResponse(
+            events,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -223,4 +256,184 @@ async def responses(
         return _reshape_http_exception(e)
 
     result = ResponsesInTranslator.format_response(chat_response, ctx)
+
+    if ctx.store:
+        await responses_store.persist_response(
+            ctx,
+            delta_items,
+            result.get("output") or [],
+            result.get("usage"),
+            result.get("status", "completed"),
+            error=result.get("error"),
+        )
+
     return JSONResponse(content=result, headers={"X-Request-ID": ctx.response_id})
+
+
+async def _stream_and_persist(events, ctx, delta_items, capture):
+    """Wrap the event stream so store=true rows are persisted even when
+    the client disconnects mid-stream (dashboard/chat.py precedent:
+    finally + asyncio.shield survives ASGI task cancellation)."""
+    try:
+        async for frame in events:
+            yield frame
+    finally:
+        if capture.get("terminal"):
+            persist = responses_store.persist_response(
+                ctx,
+                delta_items,
+                capture.get("output") or [],
+                capture.get("usage"),
+                capture.get("status", "completed"),
+                error=capture.get("error"),
+            )
+        else:
+            # Stream aborted before a terminal event (disconnect or
+            # cancellation) — still leave a row so tokens consumed have
+            # a trace and any planned chain fails loudly, not silently.
+            persist = responses_store.persist_response(
+                ctx,
+                delta_items,
+                capture.get("output") or [],
+                None,
+                "failed",
+                error={
+                    "code": "server_error",
+                    "message": "stream aborted before completion",
+                },
+            )
+        try:
+            await asyncio.shield(persist)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("responses_store_stream_persist_error", error=str(e))
+
+
+@router.get("/v1/responses/{response_id}")
+async def get_response(
+    response_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Retrieve a stored response."""
+    user, _ = auth
+    if not get_settings().responses_api_enabled:
+        return error_json(404, "The Responses API is not enabled on this server.",
+                          code="not_found")
+    if request.query_params.get("stream") in ("true", "1"):
+        return error_json(400, "Stream replay of stored responses is not supported.",
+                          param="stream")
+
+    stored = await crud.get_stored_response(db, response_id, user.id)
+    if not stored:
+        return error_json(
+            404, f"Response with id '{response_id}' not found.",
+            code="response_not_found",
+        )
+
+    ctx = ResponsesRequestContext.from_stored(stored)
+    status = stored.status.value
+    incomplete_details = (
+        {"reason": "max_output_tokens"} if status == "incomplete" else None
+    )
+    snapshot = ResponsesInTranslator.build_snapshot(
+        ctx,
+        status=status,
+        output=stored.output_items or [],
+        usage=stored.usage,
+        error=stored.error,
+        incomplete_details=incomplete_details,
+        completed_at=int(stored.updated_at.timestamp()) if stored.updated_at else None,
+    )
+    return JSONResponse(content=snapshot)
+
+
+@router.delete("/v1/responses/{response_id}")
+async def delete_response(
+    response_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Delete a stored response (and its offloaded artifacts)."""
+    user, _ = auth
+    if not get_settings().responses_api_enabled:
+        return error_json(404, "The Responses API is not enabled on this server.",
+                          code="not_found")
+
+    stored = await crud.delete_stored_response(db, response_id, user.id)
+    if not stored:
+        return error_json(
+            404, f"Response with id '{response_id}' not found.",
+            code="response_not_found",
+        )
+    responses_store.remove_artifacts(response_id)
+    return {"id": response_id, "object": "response", "deleted": True}
+
+
+@router.get("/v1/responses/{response_id}/input_items")
+async def list_input_items(
+    response_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+    limit: int = Query(20, ge=1, le=100),
+    order: str = Query("desc"),
+    after: Optional[str] = Query(None),
+):
+    """List a stored response's input items (paginated)."""
+    user, _ = auth
+    if not get_settings().responses_api_enabled:
+        return error_json(404, "The Responses API is not enabled on this server.",
+                          code="not_found")
+
+    stored = await crud.get_stored_response(db, response_id, user.id)
+    if not stored:
+        return error_json(
+            404, f"Response with id '{response_id}' not found.",
+            code="response_not_found",
+        )
+
+    items = responses_store.reinflate_images(stored)
+    if order != "asc":
+        items = list(reversed(items))
+
+    if after:
+        idx = next(
+            (i for i, item in enumerate(items) if item.get("id") == after), None
+        )
+        items = items[idx + 1:] if idx is not None else []
+
+    page = items[:limit]
+    return {
+        "object": "list",
+        "data": page,
+        "first_id": page[0].get("id") if page else None,
+        "last_id": page[-1].get("id") if page else None,
+        "has_more": len(items) > limit,
+    }
+
+
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_response(
+    response_id: str,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Cancel a background response — background mode is unsupported."""
+    user, _ = auth
+    if not get_settings().responses_api_enabled:
+        return error_json(404, "The Responses API is not enabled on this server.",
+                          code="not_found")
+
+    stored = await crud.get_stored_response(db, response_id, user.id)
+    if not stored:
+        return error_json(
+            404, f"Response with id '{response_id}' not found.",
+            code="response_not_found",
+        )
+    return error_json(
+        400,
+        "Only responses created with background=true can be cancelled, "
+        "and background mode is not supported on this server.",
+    )

@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     # OpenAI Responses API (/v1/responses)
     # Default off until live validation; flip via RESPONSES_API_ENABLED=true
     responses_api_enabled: bool = False
+    responses_store_max_chain_depth: int = 20  # previous_response_id hops
+    responses_store_max_payload_bytes: int = 5242880  # 5MB; 0 = uncapped
+    responses_store_max_rows_per_user: int = 1000  # 0 = uncapped; oldest evicted
 
     # Logging
     log_level: str = "INFO"

@@ -4674,6 +4674,7 @@ async def admin_retention_post(
             "retention.telemetry.tier1_days",
             "retention.telemetry.tier2_days",
             "retention.request_images_days",
+            "retention.responses_store_days",
             "retention.cleanup_interval",
             "retention.batch_size",
         ]:

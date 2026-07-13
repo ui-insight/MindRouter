@@ -200,6 +200,12 @@
                                        value="{{ config['retention.request_images_days'] }}" min="0">
                                 <div class="form-text">Audit-offload images from OCR/vision requests. 0 = never delete.</div>
                             </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Stored Responses (days)</label>
+                                <input type="number" class="form-control" name="retention.responses_store_days"
+                                       value="{{ config['retention.responses_store_days'] }}" min="0">
+                                <div class="form-text">Responses API server-side state (store=true / previous_response_id chains). 0 = never delete.</div>
+                            </div>
                         </div>
                     </div>
                 </div>

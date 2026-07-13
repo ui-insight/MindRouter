@@ -43,6 +43,7 @@ _DEFAULTS: dict[str, Any] = {
     "retention.telemetry.tier1_days": 30,
     "retention.telemetry.tier2_days": 730,
     "retention.request_images_days": 180,
+    "retention.responses_store_days": 30,
     "retention.cleanup_interval": 3600,
     "retention.batch_size": 5000,
 }
@@ -1137,6 +1138,60 @@ async def cleanup_expired_request_images(
     return result
 
 
+async def cleanup_expired_stored_responses(
+    app_db: AsyncSession, cutoff: datetime, batch_size: int
+) -> dict[str, int]:
+    """Delete expired stored_responses rows in batches (no archival).
+
+    Offloaded image files are removed per-row (row-driven, not
+    mtime-driven — a chain's files must die with its row), before the
+    DELETE so a crash leaves rows pointing at missing files (harmless,
+    reinflate is best-effort) rather than orphaned files.
+    """
+    from backend.app.services.responses_store import remove_artifacts
+
+    deleted_total = 0
+    files_removed = 0
+
+    while True:
+        result = await app_db.execute(
+            text(
+                "SELECT id, response_id, offloaded_images IS NOT NULL AS has_files"
+                " FROM stored_responses WHERE created_at < :cutoff"
+                " ORDER BY id LIMIT :batch"
+            ),
+            {"cutoff": cutoff, "batch": batch_size},
+        )
+        rows = result.fetchall()
+        if not rows:
+            break
+
+        for row in rows:
+            if row.has_files:
+                remove_artifacts(row.response_id)
+                files_removed += 1
+
+        ids = [row.id for row in rows]
+        await app_db.execute(
+            text("DELETE FROM stored_responses WHERE id IN :ids").bindparams(
+                bindparam("ids", expanding=True)
+            ),
+            {"ids": ids},
+        )
+        deleted_total += len(rows)
+        await app_db.commit()
+
+        logger.info(
+            "retention_responses_store_batch",
+            deleted=len(rows), total=deleted_total,
+        )
+
+        if len(rows) < batch_size:
+            break
+
+    return {"deleted": deleted_total, "artifact_dirs_removed": files_removed}
+
+
 async def run_retention_cycle() -> dict[str, Any]:
     """Execute one full retention cycle.
 
@@ -1271,5 +1326,16 @@ async def run_retention_cycle() -> dict[str, Any]:
         settings.artifact_storage_path,
         config.get("retention.request_images_days", 180),
     )
+
+    # Stored Responses API state (delete-only, no archival — the audit
+    # copy lives in requests/responses; offloaded image files are
+    # removed row-driven, with their row).
+    responses_days = config.get("retention.responses_store_days", 30)
+    if responses_days > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=responses_days)
+        async with get_async_db_context() as app_db:
+            summary["responses_store"] = await cleanup_expired_stored_responses(
+                app_db, cutoff, config.get("retention.batch_size", 5000)
+            )
 
     return summary

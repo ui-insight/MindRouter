@@ -59,6 +59,8 @@ from backend.app.db.models import (
     SchedulerDecision,
     ServiceKeyRequest,
     ServiceKeyRequestStatus,
+    StoredResponse,
+    StoredResponseStatus,
     User,
     UserRole,
 )
@@ -3927,3 +3929,130 @@ async def delete_model_alias(db: AsyncSession, alias_id: int) -> bool:
     await db.delete(alias)
     await db.commit()
     return True
+
+
+# Stored Responses CRUD (OpenAI Responses API store=true / previous_response_id)
+
+async def create_stored_response(
+    db: AsyncSession,
+    response_id: str,
+    user_id: int,
+    api_key_id: int,
+    model: str,
+    status: StoredResponseStatus,
+    previous_response_id: Optional[str] = None,
+    input_items: Optional[list] = None,
+    output_items: Optional[list] = None,
+    instructions: Optional[str] = None,
+    parameters: Optional[dict] = None,
+    usage: Optional[dict] = None,
+    error: Optional[dict] = None,
+    offloaded_images: Optional[dict] = None,
+    request_id: Optional[int] = None,
+) -> StoredResponse:
+    """Create a stored response record. Caller commits."""
+    stored = StoredResponse(
+        response_id=response_id,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        model=model,
+        status=status,
+        previous_response_id=previous_response_id,
+        input_items=input_items,
+        output_items=output_items,
+        instructions=instructions,
+        parameters=parameters,
+        usage=usage,
+        error=error,
+        offloaded_images=offloaded_images,
+        request_id=request_id,
+    )
+    db.add(stored)
+    await db.flush()
+    return stored
+
+
+async def get_stored_response(
+    db: AsyncSession, response_id: str, user_id: int
+) -> Optional[StoredResponse]:
+    """Get a stored response by public id, scoped to its owner."""
+    result = await db.execute(
+        select(StoredResponse).where(
+            and_(
+                StoredResponse.response_id == response_id,
+                StoredResponse.user_id == user_id,
+            )
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def delete_stored_response(
+    db: AsyncSession, response_id: str, user_id: int
+) -> Optional[StoredResponse]:
+    """Delete a stored response (owner-scoped).
+
+    Returns the deleted row (detached; offloaded_images still readable
+    so the caller can remove artifact files), or None if not found.
+    """
+    stored = await get_stored_response(db, response_id, user_id)
+    if not stored:
+        return None
+    await db.delete(stored)
+    await db.flush()
+    return stored
+
+
+async def get_stored_response_chain(
+    db: AsyncSession,
+    response_id: str,
+    user_id: int,
+    max_depth: int = 20,
+) -> List[StoredResponse]:
+    """Walk previous_response_id links and return the chain root->leaf.
+
+    Raises ValueError on a missing link, a cycle, or depth overflow —
+    all of which surface to the API as previous_response_not_found /
+    invalid_request errors.
+    """
+    chain: List[StoredResponse] = []
+    seen: set = set()
+    current: Optional[str] = response_id
+
+    while current:
+        if current in seen:
+            raise ValueError(f"previous_response_id chain contains a cycle at '{current}'")
+        if len(chain) >= max_depth:
+            raise ValueError(
+                f"previous_response_id chain exceeds maximum depth of {max_depth}"
+            )
+        seen.add(current)
+        stored = await get_stored_response(db, current, user_id)
+        if not stored:
+            raise ValueError(f"Previous response with id '{current}' not found.")
+        chain.append(stored)
+        current = stored.previous_response_id
+
+    chain.reverse()  # root first
+    return chain
+
+
+async def count_stored_responses_for_user(db: AsyncSession, user_id: int) -> int:
+    """Count stored responses owned by a user (for per-user caps)."""
+    result = await db.execute(
+        select(func.count(StoredResponse.id)).where(StoredResponse.user_id == user_id)
+    )
+    return int(result.scalar() or 0)
+
+
+async def get_oldest_stored_responses_for_user(
+    db: AsyncSession, user_id: int, limit: int
+) -> List[StoredResponse]:
+    """Oldest stored responses for a user (eviction candidates)."""
+    result = await db.execute(
+        select(StoredResponse)
+        .where(StoredResponse.user_id == user_id)
+        .order_by(StoredResponse.created_at.asc(), StoredResponse.id.asc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())

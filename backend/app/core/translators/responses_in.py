@@ -91,6 +91,9 @@ class ResponsesRequestContext:
     stream: bool = False
     response_id: str = ""
     created_at: int = 0
+    # Stamped by the route (used by the store service)
+    user_id: Optional[int] = None
+    api_key_id: Optional[int] = None
 
     @classmethod
     def from_body(cls, body: Dict[str, Any]) -> "ResponsesRequestContext":
@@ -126,6 +129,53 @@ class ResponsesRequestContext:
             for t in self.tools
             if isinstance(t, dict) and t.get("type") != "function"
         ]
+
+    def to_stored_parameters(self) -> Dict[str, Any]:
+        """Echo-parameter dict persisted with a stored response, from
+        which the Response object can be rebuilt (GET /v1/responses/{id})."""
+        return {
+            "model": self.model,
+            "tools": self.tools,
+            "tool_choice": self.tool_choice,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_output_tokens": self.max_output_tokens,
+            "parallel_tool_calls": self.parallel_tool_calls,
+            "reasoning": self.reasoning,
+            "text": self.text,
+            "truncation": self.truncation,
+            "metadata": self.metadata,
+            "prompt_cache_key": self.prompt_cache_key,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_stored(cls, stored: Any) -> "ResponsesRequestContext":
+        """Rebuild a context from a StoredResponse row for snapshot
+        reconstruction."""
+        params = stored.parameters or {}
+        ctx = cls(
+            model=params.get("model") or stored.model,
+            instructions=stored.instructions,
+            tools=params.get("tools") or [],
+            tool_choice=params.get("tool_choice", "auto"),
+            temperature=params.get("temperature", 1.0),
+            top_p=params.get("top_p", 1.0),
+            max_output_tokens=params.get("max_output_tokens"),
+            parallel_tool_calls=params.get("parallel_tool_calls", True),
+            reasoning=params.get("reasoning"),
+            text=params.get("text"),
+            store=True,
+            previous_response_id=stored.previous_response_id,
+            truncation=params.get("truncation", "disabled"),
+            metadata=params.get("metadata") or {},
+            prompt_cache_key=params.get("prompt_cache_key"),
+            response_id=stored.response_id,
+            created_at=params.get("created_at") or int(stored.created_at.timestamp()),
+            user_id=stored.user_id,
+            api_key_id=stored.api_key_id,
+        )
+        return ctx
 
 
 class ResponsesInTranslator:

@@ -221,9 +221,15 @@ class _ItemState:
 async def stream_responses_events(
     inner: AsyncIterator[bytes],
     ctx: ResponsesRequestContext,
+    capture: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[str]:
     """Adapt the OpenAI-chunk SSE byte stream from
-    ``InferenceService.stream_chat_completion`` into Responses events."""
+    ``InferenceService.stream_chat_completion`` into Responses events.
+
+    ``capture``, when provided, is filled with the terminal state
+    (output, usage, status, error) as the terminal event is emitted —
+    the store=true persistence path reads it from a finally block.
+    """
     st = _ItemState()
     snapshot = ResponsesInTranslator.build_snapshot
 
@@ -272,6 +278,13 @@ async def stream_responses_events(
             event_type, status = "response.incomplete", "incomplete"
         else:
             event_type, status = "response.completed", "completed"
+
+        if capture is not None:
+            capture["output"] = st.completed_output
+            capture["usage"] = usage
+            capture["status"] = status
+            capture["error"] = pending_error
+            capture["terminal"] = True
 
         frames.append(
             _frame(

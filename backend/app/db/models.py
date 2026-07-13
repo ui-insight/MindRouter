@@ -1143,3 +1143,71 @@ class ModelAlias(Base, TimestampMixin):
     alias_name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False, index=True)
     target_model: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class StoredResponseStatus(str, PyEnum):
+    """OpenAI Responses API response status."""
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INCOMPLETE = "incomplete"
+    CANCELLED = "cancelled"
+
+
+class StoredResponse(Base, TimestampMixin):
+    """Server-side stored Responses API response (store=true / previous_response_id).
+
+    Rows hold only the request's own delta input items plus its output
+    items; previous_response_id chains are reconstructed by walking the
+    chain at request time.  previous_response_id is deliberately NOT a
+    self-FK: retention deletes oldest rows first, and a missing parent
+    surfaces as the API-level previous_response_not_found error, which
+    matches OpenAI semantics.
+    """
+
+    __tablename__ = "stored_responses"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Public id returned to clients (mirrors requests.request_uuid pattern)
+    response_id: Mapped[str] = mapped_column(
+        String(80), unique=True, nullable=False, index=True,
+        default=lambda: f"resp_{uuid.uuid4().hex}",
+    )
+
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    api_key_id: Mapped[int] = mapped_column(Integer, ForeignKey("api_keys.id"), nullable=False)
+    # Optional audit-trail link
+    request_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("requests.id"), nullable=True
+    )
+
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[StoredResponseStatus] = mapped_column(
+        Enum(StoredResponseStatus, values_callable=_enum_values),
+        nullable=False, default=StoredResponseStatus.IN_PROGRESS,
+    )
+
+    previous_response_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+
+    # Responses API payloads (sa.JSON == LONGTEXT on MariaDB)
+    input_items: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    output_items: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    instructions: Mapped[Optional[str]] = mapped_column(MEDIUMTEXT, nullable=True)
+    parameters: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    usage: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Server-created image-offload map: JSON-pointer-ish item path ->
+    # relative filename under this row's artifact directory.  Never
+    # derived from client-supplied strings (security: offload refs must
+    # not be forgeable via input).
+    offloaded_images: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    user: Mapped["User"] = relationship("User")
+    api_key: Mapped["ApiKey"] = relationship("ApiKey")
+
+    __table_args__ = (
+        Index("ix_stored_responses_user_created", "user_id", "created_at"),
+        # Standalone timestamp index for retention DELETE ... WHERE created_at < cutoff
+        Index("ix_stored_responses_created_at", "created_at"),
+        Index("ix_stored_responses_prev", "previous_response_id"),
+    )
