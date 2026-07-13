@@ -10,7 +10,7 @@ Interactive API docs are also available at `/docs` (Swagger UI) and `/redoc` (Re
 
 ## Features
 
-- **Unified API Gateway**: OpenAI-compatible `/v1/*`, Ollama `/api/*`, and Anthropic `/anthropic/v1/*` endpoints
+- **Unified API Gateway**: OpenAI-compatible `/v1/*` (including the Responses API `/v1/responses`), Ollama `/api/*`, and Anthropic `/anthropic/v1/*` endpoints
 - **API Dialect Translation**: Automatic translation between Ollama and vLLM formats
 - **Fair-Share Scheduling**: Weighted Deficit Round Robin with burst credits
 - **Multi-Modal Support**: Text, embeddings, and vision-language models
@@ -353,6 +353,7 @@ make docker-migrate # Run Alembic migrations via docker-compose
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/v1/chat/completions` | OpenAI-compatible chat |
+| POST | `/v1/responses` | OpenAI Responses API (agents, Codex) |
 | POST | `/v1/completions` | OpenAI-compatible completion |
 | POST | `/v1/embeddings` | OpenAI-compatible embeddings |
 | POST | `/v1/rerank` | Rerank documents against a query |

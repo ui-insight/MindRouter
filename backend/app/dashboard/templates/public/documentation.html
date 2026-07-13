@@ -109,7 +109,7 @@
                 <h2>Overview</h2>
                 <p>MindRouter sits between API consumers and GPU inference servers, providing:</p>
                 <ul>
-                    <li><strong>Unified API Gateway</strong> &mdash; OpenAI-compatible <code>/v1/*</code>, Ollama-compatible <code>/api/*</code>, and Anthropic-compatible <code>/anthropic/v1/*</code> endpoints, all backed by the same pool of inference servers.</li>
+                    <li><strong>Unified API Gateway</strong> &mdash; OpenAI-compatible <code>/v1/*</code> (including the agent-oriented Responses API at <code>/v1/responses</code>), Ollama-compatible <code>/api/*</code>, and Anthropic-compatible <code>/anthropic/v1/*</code> endpoints, all backed by the same pool of inference servers.</li>
                     <li><strong>Cross-Engine Routing</strong> &mdash; A request arriving in OpenAI, Ollama, or Anthropic format can be served by any backend. The translation layer handles all protocol conversion transparently.</li>
                     <li><strong>Fair-Share Scheduling</strong> &mdash; Weighted Deficit Round Robin (WDRR) ensures equitable GPU access across users in different groups with configurable priorities.</li>
                     <li><strong>Multi-Modal Support</strong> &mdash; Text chat, text completion, embeddings, multimodal models, structured JSON outputs, tool calling (function calling), and <a href="#voice">voice (TTS/STT)</a>.</li>
@@ -301,6 +301,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                     </thead>
                     <tbody>
                         <tr><td>POST</td><td><code>/v1/chat/completions</code></td><td>API Key</td><td>Chat completions (streaming and non-streaming)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/responses</code></td><td>API Key</td><td>OpenAI Responses API &mdash; agent clients (Codex), typed items and SSE events</td></tr>
                         <tr><td>POST</td><td><code>/v1/completions</code></td><td>API Key</td><td>Text completions (legacy)</td></tr>
                         <tr><td>POST</td><td><code>/v1/embeddings</code></td><td>API Key</td><td>Generate embeddings</td></tr>
                         <tr><td>POST</td><td><code>/v1/rerank</code></td><td>API Key</td><td>Rerank documents against a query</td></tr>
@@ -684,6 +685,87 @@ message = client.messages.create(
                     <li><code>metadata.user_id</code> mapping</li>
                 </ul>
                 <p><strong>Note:</strong> This is inbound-only &mdash; there are no Anthropic backends. Requests are translated to canonical format and routed to Ollama/vLLM backends like any other request.</p>
+
+                <h3>OpenAI Responses API Endpoint</h3>
+                <p>The <a href="https://platform.openai.com/docs/api-reference/responses" target="_blank" rel="noopener">OpenAI Responses API</a> is the newer, agent-oriented OpenAI wire format: typed input items instead of a messages array, flat function-tool definitions, and named SSE events. Agent clients built on it &mdash; notably <strong>Codex</strong> in the ChatGPT desktop app and CLI &mdash; can use MindRouter as a custom provider.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/v1/responses</code></td><td>API Key</td><td>Responses API (streaming and non-streaming)</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Basic Request</h4>
+                <pre><code>curl -X POST http://localhost:8000/v1/responses \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3.2",
+    "instructions": "You are a helpful assistant.",
+    "input": "Why is the sky blue?"
+  }'</code></pre>
+
+                <p><strong>Response:</strong></p>
+                <pre><code>{
+  "id": "resp_abc123...",
+  "object": "response",
+  "status": "completed",
+  "model": "llama3.2",
+  "output": [
+    {
+      "id": "msg_...",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [{"type": "output_text", "text": "...", "annotations": [], "logprobs": []}]
+    }
+  ],
+  "usage": {"input_tokens": 18, "output_tokens": 64, "total_tokens": 82, ...}
+}</code></pre>
+
+                <p><strong>Streaming</strong> &mdash; set <code>"stream": true</code> to receive typed SSE events (<code>response.created</code>, <code>response.output_item.added</code>, <code>response.output_text.delta</code>, ..., terminating with a single <code>response.completed</code> event &mdash; there is no <code>data: [DONE]</code> sentinel in this protocol). Reasoning models additionally emit <code>reasoning</code> output items with <code>response.reasoning_text.delta</code> events.</p>
+
+                <h4>Codex (ChatGPT Desktop App / CLI) Setup</h4>
+                <p>Add MindRouter as a custom provider in <code>~/.codex/config.toml</code>:</p>
+                <pre><code>[model_providers.mindrouter]
+name = "MindRouter"
+base_url = "https://mindrouter.uidaho.edu/v1"
+env_key = "MINDROUTER_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+
+[profiles.mindrouter]
+model_provider = "mindrouter"
+model = "qwen/qwen3.5-122b"</code></pre>
+                <p>Then export <code>MINDROUTER_API_KEY=mr2_your-api-key</code> and select the profile. Codex's hosted <code>web_search</code> tool is not executed by MindRouter (see below); set <code>web_search = "disabled"</code> in <code>config.toml</code> for cleanliness.</p>
+
+                <h4>SDK Usage (Python)</h4>
+                <pre><code>from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="mr2_your-api-key")
+response = client.responses.create(
+    model="llama3.2",
+    input="Hello!",
+)
+print(response.output_text)</code></pre>
+
+                <p><strong>Supported features:</strong></p>
+                <ul>
+                    <li><code>input</code> as a string or item array (<code>message</code>, <code>function_call</code>, <code>function_call_output</code>, <code>reasoning</code> items); <code>instructions</code>; <code>developer</code> role</li>
+                    <li>Function tools (flat Responses shape) with streaming <code>response.function_call_arguments.delta</code> events; tool round trips via <code>call_id</code></li>
+                    <li>Reasoning models &mdash; <code>reasoning.effort</code> mapped to backend thinking modes; reasoning output items</li>
+                    <li>Structured output via <code>text.format</code> (<code>json_object</code> / <code>json_schema</code>)</li>
+                    <li>Vision input via <code>input_image</code> parts (data URIs and https URLs)</li>
+                    <li>Parameters: <code>max_output_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>stream</code></li>
+                </ul>
+                <p><strong>Limitations (stateless implementation):</strong></p>
+                <ul>
+                    <li><code>store</code> / <code>previous_response_id</code> conversation state is not persisted &mdash; resend the full transcript each turn (this is what Codex does natively). <code>previous_response_id</code> returns <code>previous_response_not_found</code>.</li>
+                    <li>Hosted tools (<code>web_search</code>, <code>file_search</code>, <code>code_interpreter</code>, MCP) and <code>custom</code> freeform tools are accepted but stripped &mdash; only <code>function</code> tools reach the model.</li>
+                    <li><code>background</code> mode, file inputs (<code>input_file</code>, <code>file_id</code>), and <code>GET/DELETE /v1/responses/{id}</code> retrieval are not supported.</li>
+                </ul>
+                <p>Errors use the OpenAI envelope: <code>{"error": {"message", "type", "param", "code"}}</code>.</p>
 
                 <h3>Health &amp; Metrics Endpoints</h3>
                 <p>These endpoints are unauthenticated and intended for monitoring infrastructure.</p>

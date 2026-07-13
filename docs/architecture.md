@@ -19,6 +19,7 @@ The API Gateway is the entry point for all client requests.
 
 **Endpoints:**
 - `/v1/chat/completions` - OpenAI-compatible chat
+- `/v1/responses` - OpenAI Responses API (inbound-only; typed input items and SSE events)
 - `/v1/completions` - OpenAI-compatible text completions
 - `/v1/embeddings` - OpenAI-compatible embeddings
 - `/v1/rerank` - Reranking
