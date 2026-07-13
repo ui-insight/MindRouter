@@ -331,8 +331,11 @@ class ResponsesInTranslator:
             return [CanonicalMessage(role=role, content=str(content))]
 
         # Assistant history (OutputMessage form) carries output_text /
-        # refusal parts; flatten to plain text.
-        if role == MessageRole.ASSISTANT:
+        # refusal parts, and system/developer content is always textual —
+        # flatten both to plain strings.  (System messages MUST be plain
+        # strings: the outbound translators merge multiple system
+        # messages with a string join.)
+        if role in (MessageRole.ASSISTANT, MessageRole.SYSTEM):
             texts = [
                 part.get("text") or part.get("refusal") or ""
                 for part in content

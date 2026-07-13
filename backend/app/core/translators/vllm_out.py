@@ -133,7 +133,20 @@ class VLLMOutTranslator:
         system = [m for m in messages if m.get("role") == "system"]
         non_system = [m for m in messages if m.get("role") != "system"]
         if len(system) > 1:
-            merged = "\n\n".join(m.get("content", "") for m in system if m.get("content"))
+            # System content may legally be a list of text parts (OpenAI
+            # spec) — flatten before the string join.
+            def _sys_text(content: Any) -> str:
+                if isinstance(content, list):
+                    return " ".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict)
+                    )
+                return content or ""
+
+            merged = "\n\n".join(
+                _sys_text(m.get("content")) for m in system if m.get("content")
+            )
             messages = [{"role": "system", "content": merged}] + non_system
         else:
             messages = system + non_system

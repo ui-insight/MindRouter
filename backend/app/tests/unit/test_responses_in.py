@@ -168,6 +168,36 @@ class TestResponsesInputItems:
         )
         assert result.messages[0].role == MessageRole.SYSTEM
 
+    def test_system_and_developer_parts_flatten_to_string(self):
+        # Codex sends developer/user_instructions messages as input_text
+        # part arrays; system content must flatten to a plain string or
+        # the outbound system-merge join breaks (prod regression).
+        result = ResponsesInTranslator.translate_responses_request(
+            {
+                "model": "m",
+                "instructions": "You are Codex.",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [
+                            {"type": "input_text", "text": "<user_instructions>"},
+                            {"type": "input_text", "text": "be terse"},
+                        ],
+                    },
+                    {"role": "user", "content": "hi"},
+                ],
+            }
+        )
+        sys_msgs = [m for m in result.messages if m.role == MessageRole.SYSTEM]
+        assert len(sys_msgs) == 2
+        assert all(isinstance(m.content, str) for m in sys_msgs)
+        assert sys_msgs[1].content == "<user_instructions>be terse"
+        # And the multi-system merge in vllm_out must not raise
+        payload = VLLMOutTranslator.translate_chat_request(result)
+        assert payload["messages"][0]["role"] == "system"
+        assert "be terse" in payload["messages"][0]["content"]
+
     def test_items_with_server_ids_and_status_ignored(self):
         # Codex-on-Azure / SDK replays resend msg_/fc_/rs_ ids + status.
         result = ResponsesInTranslator.translate_responses_request(
