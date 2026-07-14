@@ -779,9 +779,12 @@ message = client.messages.create(
                     </thead>
                     <tbody>
                         <tr><td>POST</td><td><code>/v1/responses</code></td><td>API Key</td><td>Responses API (streaming and non-streaming)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/responses/input_tokens</code></td><td>API Key</td><td>Count input tokens without generating</td></tr>
                         <tr><td>GET</td><td><code>/v1/responses/{id}</code></td><td>API Key</td><td>Retrieve a stored response</td></tr>
                         <tr><td>DELETE</td><td><code>/v1/responses/{id}</code></td><td>API Key</td><td>Delete a stored response</td></tr>
                         <tr><td>GET</td><td><code>/v1/responses/{id}/input_items</code></td><td>API Key</td><td>List a stored response's input items (paginated)</td></tr>
+                        <tr><td>POST / GET / DELETE</td><td><code>/v1/conversations</code>, <code>/v1/conversations/{id}</code></td><td>API Key</td><td>Conversations API: durable conversation objects (<code>conv_*</code>)</td></tr>
+                        <tr><td>POST / GET / DELETE</td><td><code>/v1/conversations/{id}/items[/{item_id}]</code></td><td>API Key</td><td>Conversation item CRUD (create up to 20 at a time; paginated list)</td></tr>
                     </tbody>
                 </table>
 
@@ -877,6 +880,19 @@ r2 = client.responses.create(model="llama3.2",
 client.responses.delete(r1.id)   # stored responses can be deleted anytime</code></pre>
                 <p>Alternatively, set <code>"store": false</code> and resend the full item transcript each turn (Codex's approach).</p>
 
+                <h4>Conversations API (conversation objects)</h4>
+                <p>The modern state pattern: create a durable <code>conv_*</code> object once, then pass it to every response. Stored items are prepended to your input, and each response's input + output items are appended back automatically after it completes (failed responses append nothing):</p>
+                <pre><code>conv = client.conversations.create(metadata={"project": "thesis"})
+r1 = client.responses.create(model="llama3.2", input="My name is Ada.",
+                             conversation=conv.id)
+r2 = client.responses.create(model="llama3.2", input="What is my name?",
+                             conversation=conv.id)
+# r2.output_text -> "Ada"
+
+items = client.conversations.items.list(conv.id)   # paginated item log
+client.conversations.delete(conv.id)               # delete state anytime</code></pre>
+                <p>Conversations support <code>metadata</code> (updatable), seeding up to 20 items at create time, item-level retrieval/deletion, and <code>item_reference</code> input items resolved against the conversation. <code>conversation</code> and <code>previous_response_id</code> are mutually exclusive. Unlike stored responses (30-day default retention), conversations are kept indefinitely by default (admin-tunable, swept by last activity); per-user conversation and per-conversation item caps apply.</p>
+
                 <p><strong>Supported features:</strong></p>
                 <ul>
                     <li><code>input</code> as a string or item array (<code>message</code>, <code>function_call</code>, <code>function_call_output</code>, <code>reasoning</code> items); <code>instructions</code>; <code>developer</code> role</li>
@@ -905,7 +921,7 @@ client.responses.delete(r1.id)   # stored responses can be deleted anytime</code
                 <p><strong>Limitations:</strong></p>
                 <ul>
                     <li>Hosted tools other than <code>web_search</code> (<code>file_search</code>, <code>code_interpreter</code>, MCP) and <code>custom</code> freeform tools are accepted but stripped &mdash; they never reach the model.</li>
-                    <li><code>background</code> mode, file inputs (<code>input_file</code>, <code>file_id</code>), stream replay of stored responses (<code>GET ?stream=true</code>), and <code>conversation</code> objects are not supported.</li>
+                    <li><code>background</code> mode, file inputs (<code>input_file</code>, <code>file_id</code>), and stream replay of stored responses (<code>GET ?stream=true</code>) are not supported.</li>
                 </ul>
                 <p>Errors use the OpenAI envelope: <code>{"error": {"message", "type", "param", "code"}}</code>.</p>
 

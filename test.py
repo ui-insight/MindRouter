@@ -1014,6 +1014,79 @@ def test_responses(client: httpx.Client, cfg: argparse.Namespace):
     except Exception as e:
         record("fail", name, str(e))
 
+    # Count input tokens
+    name = "POST /v1/responses/input_tokens"
+    try:
+        r = client.post("/v1/responses/input_tokens", headers=headers, json={
+            "model": model,
+            "input": "Count the tokens in this sentence please.",
+        })
+        body = r.json()
+        if (r.status_code == 200 and body.get("object") == "response.input_tokens"
+                and isinstance(body.get("input_tokens"), int)
+                and body["input_tokens"] > 0):
+            record("pass", name, f"input_tokens={body['input_tokens']}")
+        else:
+            record("fail", name, f"status={r.status_code} body={r.text[:160]}")
+    except Exception as e:
+        record("fail", name, str(e))
+
+    # Conversations API: create -> respond -> recall -> items -> delete
+    name = "Conversations (create/respond/recall/items/delete)"
+    try:
+        checks = []
+        r_conv = client.post("/v1/conversations", headers=headers, json={
+            "metadata": {"purpose": "smoke-test"},
+        })
+        conv = r_conv.json()
+        conv_id = conv.get("id", "")
+        checks.append(("create", r_conv.status_code == 200
+                       and conv.get("object") == "conversation"
+                       and conv_id.startswith("conv_")))
+
+        r1 = client.post("/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "Remember this secret word: tamarind. Reply OK.",
+            "conversation": conv_id, "store": False,
+            "max_output_tokens": 512,
+        })
+        checks.append(("turn1", r1.status_code == 200))
+
+        r2 = client.post("/v1/responses", headers=headers, json={
+            "model": model,
+            "input": "What was the secret word? Answer with just the word.",
+            "conversation": conv_id, "store": False,
+            "max_output_tokens": 512,
+        })
+        answer = "".join(
+            p.get("text", "")
+            for i in r2.json().get("output", []) if i.get("type") == "message"
+            for p in i.get("content", [])
+        )
+        checks.append(("recall", r2.status_code == 200
+                       and "tamarind" in answer.lower()))
+
+        r_items = client.get(f"/v1/conversations/{conv_id}/items",
+                             headers=headers, params={"order": "asc"})
+        items_body = r_items.json()
+        checks.append(("items", r_items.status_code == 200
+                       and items_body.get("object") == "list"
+                       and len(items_body.get("data", [])) >= 3))
+
+        r_del = client.delete(f"/v1/conversations/{conv_id}", headers=headers)
+        checks.append(("delete", r_del.status_code == 200
+                       and r_del.json().get("deleted") is True))
+        r_gone = client.get(f"/v1/conversations/{conv_id}", headers=headers)
+        checks.append(("gone_404", r_gone.status_code == 404))
+
+        failed_checks = [c for c, ok in checks if not ok]
+        if not failed_checks:
+            record("pass", name, "full conversation lifecycle OK")
+        else:
+            record("fail", name, f"failed: {failed_checks}")
+    except Exception as e:
+        record("fail", name, str(e))
+
     # Unauthenticated request rejected (body shape is FastAPI-default; status only)
     name = "POST /v1/responses (unauthenticated 401)"
     try:

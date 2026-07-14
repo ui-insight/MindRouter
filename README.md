@@ -354,6 +354,8 @@ make docker-migrate # Run Alembic migrations via docker-compose
 |--------|------|-------------|
 | POST | `/v1/chat/completions` | OpenAI-compatible chat |
 | POST | `/v1/responses` | OpenAI Responses API (agents, Codex) |
+| POST | `/v1/responses/input_tokens` | Count input tokens without generating |
+| * | `/v1/conversations` | OpenAI Conversations API (durable conversation state) |
 | POST | `/v1/completions` | OpenAI-compatible completion |
 | POST | `/v1/embeddings` | OpenAI-compatible embeddings |
 | POST | `/v1/rerank` | Rerank documents against a query |

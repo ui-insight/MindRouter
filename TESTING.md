@@ -59,7 +59,8 @@
 | `backend/app/tests/unit/test_ocr.py` | 27 | OCR pipeline: chunking logic, fence stripping, prompt building, overlap detection, deterministic merge, image conversion, PDF fixture |
 | `backend/app/tests/unit/test_responses_in.py` | 46 | ResponsesIn translator: input polymorphism (string/items/typeless), function-call round trip via call_id, flat tool re-nesting + non-function strip, text.format, reasoning.effort→think, truncation flag, format_response/build_snapshot, vLLM round trip |
 | `backend/app/tests/unit/test_responses_stream.py` | 12 | Chat-SSE→Responses-SSE adapter: canonical event sequences (text/reasoning/tools), deferred terminal + usage harvesting, incomplete/failed terminals, exception hardening, drain contract |
-| `backend/app/tests/unit/test_responses_api.py` | 32 | /v1/responses routes: feature flag, validation errors, OpenAI error envelopes, quota pre-flight (skip_quota_check), streaming/non-streaming dispatch, alias resolution, store persistence, previous_response_id chains, GET/DELETE/input_items/cancel, hosted web_search dispatch |
+| `backend/app/tests/unit/test_responses_api.py` | 42 | /v1/responses routes: feature flag, validation errors, OpenAI error envelopes, quota pre-flight (skip_quota_check), streaming/non-streaming dispatch, alias resolution, store persistence, previous_response_id chains, GET/DELETE/input_items/cancel, hosted web_search dispatch, count input_tokens, conversation integration |
+| `backend/app/tests/unit/test_conversations_api.py` | 13 | Conversations API routes: conversation CRUD (create/seed/cap/update/delete), item endpoints (create/list/get/delete envelopes), owner-scoped 404s, flag gating |
 | `backend/app/tests/unit/test_responses_store.py` | 20 | Responses store service: item id stamping, image offload/re-inflate + path containment, chain rebuild + item_reference, payload/row caps, persist contract, crud/migration/retention source checks |
 | `backend/app/tests/unit/test_responses_websearch.py` | 11 | Hosted web_search: tool detection/synthetic tool, non-streaming loop (threading, budget, client passthrough), streaming loop (suppression, ws events, cross-round sequencing), error terminal |
 | `backend/app/tests/unit/test_context_trim.py` | 6 | truncation:"auto" trimming: turn grouping, tool-pair atomicity, oldest-first drops, system/final-turn protection |
@@ -120,7 +121,7 @@ Exercises every API surface. Sections: `health`, `auth`, `openai`, `ollama`, `an
 
 | File | What it covers |
 |------|----------------|
-| `test.py` | Health endpoints, authentication, OpenAI-compatible API, Ollama-compatible API, Anthropic-compatible API, cross-engine routing, error handling, admin API, reranker (basic, top_n, return_documents), Responses API (non-streaming, typed-SSE streaming, function-call round trip, auth, store/retrieve/chain/delete) |
+| `test.py` | Health endpoints, authentication, OpenAI-compatible API, Ollama-compatible API, Anthropic-compatible API, cross-engine routing, error handling, admin API, reranker (basic, top_n, return_documents), Responses API (non-streaming, typed-SSE streaming, function-call round trip, auth, store/retrieve/chain/delete, input_tokens count, Conversations lifecycle) |
 
 **CLI arguments:**
 ```

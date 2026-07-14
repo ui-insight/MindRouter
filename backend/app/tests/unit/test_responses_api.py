@@ -211,21 +211,30 @@ def _make_mock_crud(chain_error="Previous response with id 'resp_x' not found.")
     return crud
 
 
+def _make_mock_conv_store(history=None):
+    cs = MagicMock()
+    cs.load_context_items = AsyncMock(return_value=list(history or []))
+    cs.append_from_response = AsyncMock()
+    return cs
+
+
 async def _call(body=None, raise_json=False, service=None, registry=None,
                 enabled=True, store=None, crud=None, web_search=False,
-                websearch_mod=None):
+                websearch_mod=None, conv_store=None):
     """Invoke the endpoint with all module-level collaborators patched."""
     service = service or _make_mock_service()
     registry = registry or _make_mock_registry()
     store = store or _make_mock_store()
     crud = crud or _make_mock_crud()
     websearch_mod = websearch_mod or _make_mock_websearch()
+    conv_store = conv_store or _make_mock_conv_store()
     with patch.object(_mod, "get_settings",
                       return_value=_settings(enabled, web_search)), \
          patch.object(_mod, "get_registry", return_value=registry), \
          patch.object(_mod, "InferenceService", return_value=service), \
          patch.object(_mod, "responses_store", store), \
          patch.object(_mod, "responses_websearch", websearch_mod), \
+         patch.object(_mod, "conversations_store", conv_store), \
          patch.object(_mod, "crud", crud):
         result = await responses_endpoint(
             _make_mock_request(body, raise_json=raise_json),
@@ -472,6 +481,96 @@ async def _call_companion(endpoint_fn, response_id="resp_stored1", stored=None,
             response_id, db=AsyncMock(),
             auth=(_make_mock_user(), _make_mock_api_key()), **kwargs,
         ), crud, store
+
+
+class TestConversationIntegration:
+    async def test_mutual_exclusion_400(self):
+        result, _ = await _call({
+            "model": "m", "input": "hi",
+            "conversation": "conv_a", "previous_response_id": "resp_b",
+        })
+        assert result.status_code == 400
+        assert "conjunction" in _body(result)["error"]["message"]
+
+    async def test_unknown_conversation_404(self):
+        crud = _make_mock_crud()
+        crud.get_conversation = AsyncMock(return_value=None)
+        result, _ = await _call(
+            {"model": "m", "input": "hi", "conversation": "conv_ghost"},
+            crud=crud,
+        )
+        assert result.status_code == 404
+        assert _body(result)["error"]["code"] == "conversation_not_found"
+
+    async def test_history_prepended_and_appended(self):
+        crud = _make_mock_crud()
+        crud.get_conversation = AsyncMock(return_value=MagicMock())
+        conv_store = _make_mock_conv_store(history=[
+            {"id": "msg_h1", "type": "message", "role": "user",
+             "content": "remember: teal"},
+        ])
+        result, service = await _call(
+            {"model": "m", "input": "what color?",
+             "conversation": {"id": "conv_a"}, "store": False},
+            crud=crud, conv_store=conv_store,
+        )
+        assert result.status_code == 200
+        # History item precedes the new input in the canonical request
+        canonical = service.chat_completion.call_args.args[0]
+        assert canonical.messages[0].content == "remember: teal"
+        assert canonical.messages[1].content == "what color?"
+        # Echoed on the Response object
+        assert _body(result)["conversation"] == {"id": "conv_a"}
+        # Post-completion append: delta input + output items
+        conv_store.append_from_response.assert_awaited_once()
+        args = conv_store.append_from_response.await_args.args
+        assert args[0] == "conv_a"
+        assert args[2][0]["content"] == "what color?"  # delta input only
+        assert args[3][0]["type"] == "message"  # output items
+
+    async def test_item_reference_resolves_from_conversation(self):
+        crud = _make_mock_crud()
+        crud.get_conversation = AsyncMock(return_value=MagicMock())
+        conv_store = _make_mock_conv_store(history=[
+            {"id": "msg_ref", "type": "message", "role": "user",
+             "content": "referenced text"},
+        ])
+        result, service = await _call(
+            {"model": "m", "conversation": "conv_a", "store": False,
+             "input": [{"type": "item_reference", "id": "msg_ref"}]},
+            crud=crud, conv_store=conv_store,
+        )
+        assert result.status_code == 200
+        canonical = service.chat_completion.call_args.args[0]
+        # history + resolved reference = same content twice
+        assert [m.content for m in canonical.messages] == [
+            "referenced text", "referenced text",
+        ]
+
+    async def test_streaming_appends_via_wrapper(self):
+        crud = _make_mock_crud()
+        crud.get_conversation = AsyncMock(return_value=MagicMock())
+        conv_store = _make_mock_conv_store()
+        service = _make_mock_service()
+        registry = _make_mock_registry()
+        with patch.object(_mod, "get_settings", return_value=_settings(True)), \
+             patch.object(_mod, "get_registry", return_value=registry), \
+             patch.object(_mod, "InferenceService", return_value=service), \
+             patch.object(_mod, "responses_store", _make_mock_store()), \
+             patch.object(_mod, "responses_websearch", _make_mock_websearch()), \
+             patch.object(_mod, "conversations_store", conv_store), \
+             patch.object(_mod, "crud", crud):
+            result = await responses_endpoint(
+                _make_mock_request({"model": "m", "input": "hi",
+                                    "conversation": "conv_a", "store": False,
+                                    "stream": True}),
+                db=AsyncMock(),
+                auth=(_make_mock_user(), _make_mock_api_key()),
+            )
+            assert isinstance(result, StreamingResponse)
+            async for _ in result.body_iterator:
+                pass
+        conv_store.append_from_response.assert_awaited_once()
 
 
 class TestCountInputTokens:

@@ -236,6 +236,8 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 |--------|------|------|-------------|
 | POST | `/v1/chat/completions` | API Key | Chat completions (streaming and non-streaming) |
 | POST | `/v1/responses` | API Key | OpenAI Responses API (typed items/SSE events; serves agent clients like Codex) |
+| POST | `/v1/responses/input_tokens` | API Key | Count input tokens without generating |
+| * | `/v1/conversations` | API Key | OpenAI Conversations API (conv_* objects, item CRUD) |
 | POST | `/v1/completions` | API Key | Text completions (legacy, internally converts to chat format) |
 | POST | `/v1/embeddings` | API Key | Generate embeddings |
 | POST | `/v1/rerank` | API Key | Rerank documents against a query |
