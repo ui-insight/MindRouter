@@ -44,6 +44,7 @@ _DEFAULTS: dict[str, Any] = {
     "retention.telemetry.tier2_days": 730,
     "retention.request_images_days": 180,
     "retention.responses_store_days": 30,
+    "retention.conversations_days": 0,
     "retention.cleanup_interval": 3600,
     "retention.batch_size": 5000,
 }
@@ -1192,6 +1193,60 @@ async def cleanup_expired_stored_responses(
     return {"deleted": deleted_total, "artifact_dirs_removed": files_removed}
 
 
+async def cleanup_expired_conversations(
+    app_db: AsyncSession, cutoff: datetime, batch_size: int
+) -> dict[str, int]:
+    """Delete conversations idle since before the cutoff (by updated_at
+    — item appends touch the conversation row), including their items
+    and offloaded artifact directories."""
+    from backend.app.services.conversations_store import (
+        remove_conversation_artifacts,
+    )
+
+    deleted_convs = 0
+    deleted_items = 0
+
+    while True:
+        result = await app_db.execute(
+            text(
+                "SELECT id, conversation_id FROM conversations"
+                " WHERE updated_at < :cutoff ORDER BY id LIMIT :batch"
+            ),
+            {"cutoff": cutoff, "batch": batch_size},
+        )
+        rows = result.fetchall()
+        if not rows:
+            break
+
+        ids = [row.id for row in rows]
+        items_result = await app_db.execute(
+            text(
+                "DELETE FROM conversation_items WHERE conversation_pk IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": ids},
+        )
+        deleted_items += items_result.rowcount or 0
+        await app_db.execute(
+            text("DELETE FROM conversations WHERE id IN :ids").bindparams(
+                bindparam("ids", expanding=True)
+            ),
+            {"ids": ids},
+        )
+        for row in rows:
+            remove_conversation_artifacts(row.conversation_id)
+        deleted_convs += len(rows)
+        await app_db.commit()
+
+        logger.info(
+            "retention_conversations_batch",
+            deleted=len(rows), total=deleted_convs,
+        )
+        if len(rows) < batch_size:
+            break
+
+    return {"deleted": deleted_convs, "items_deleted": deleted_items}
+
+
 async def run_retention_cycle() -> dict[str, Any]:
     """Execute one full retention cycle.
 
@@ -1335,6 +1390,16 @@ async def run_retention_cycle() -> dict[str, Any]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=responses_days)
         async with get_async_db_context() as app_db:
             summary["responses_store"] = await cleanup_expired_stored_responses(
+                app_db, cutoff, config.get("retention.batch_size", 5000)
+            )
+
+    # Conversations (durable state — default 0 = never delete; sweeps
+    # by last activity, not creation).
+    conversations_days = config.get("retention.conversations_days", 0)
+    if conversations_days > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=conversations_days)
+        async with get_async_db_context() as app_db:
+            summary["conversations"] = await cleanup_expired_conversations(
                 app_db, cutoff, config.get("retention.batch_size", 5000)
             )
 

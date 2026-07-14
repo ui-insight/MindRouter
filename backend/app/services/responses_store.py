@@ -70,28 +70,29 @@ _MEDIA_EXT = {
 _STATUS_BY_NAME = {s.value: s for s in StoredResponseStatus}
 
 
-def _artifact_dir(response_id: str) -> Path:
-    """Artifact directory for one stored response.
+def _artifact_dir(rel_key: str, subdir: str = "responses_store") -> Path:
+    """Artifact directory for one stored object (a stored response, or a
+    conversation item as ``<conv_id>/<item_id>``).
 
-    response_id is always server-generated (resp_<32hex>), but validate
-    anyway so a crafted id can never traverse outside the store root.
+    Keys are always server-generated, but validate anyway so a crafted
+    id can never traverse outside the store root.
     """
-    root = Path(get_settings().artifact_storage_path) / "responses_store"
-    target = (root / response_id).resolve()
+    root = Path(get_settings().artifact_storage_path) / subdir
+    target = (root / rel_key).resolve()
     if not str(target).startswith(str(root.resolve()) + "/"):
-        raise ValueError(f"invalid response id path: {response_id!r}")
+        raise ValueError(f"invalid artifact key path: {rel_key!r}")
     return target
 
 
-def remove_artifacts(response_id: str) -> None:
-    """Best-effort removal of a stored response's offloaded files."""
+def remove_artifacts(rel_key: str, subdir: str = "responses_store") -> None:
+    """Best-effort removal of a stored object's offloaded files."""
     try:
-        target = _artifact_dir(response_id)
+        target = _artifact_dir(rel_key, subdir)
         if target.exists():
             shutil.rmtree(target)
     except Exception as e:
         logger.warning("responses_store_artifact_cleanup_failed",
-                       response_id=response_id, error=str(e))
+                       rel_key=rel_key, error=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,9 @@ def stamp_item_ids(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def offload_images(
-    items: List[Dict[str, Any]], response_id: str
+    items: List[Dict[str, Any]],
+    rel_key: str,
+    subdir: str = "responses_store",
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Extract large inline data-URI images from input items to disk.
 
@@ -148,7 +151,7 @@ def offload_images(
                     media_type = header.split(":")[1].split(";")[0]
                     ext = _MEDIA_EXT.get(media_type, "bin")
                     if images_dir is None:
-                        images_dir = _artifact_dir(response_id)
+                        images_dir = _artifact_dir(rel_key, subdir)
                         images_dir.mkdir(parents=True, exist_ok=True)
                     filename = f"{img_idx}.{ext}"
                     (images_dir / filename).write_bytes(
@@ -170,19 +173,22 @@ def offload_images(
     return out_items, (offload_map or None)
 
 
-def reinflate_images(stored: StoredResponse) -> List[Dict[str, Any]]:
-    """Return a stored row's input items with offloaded images restored
-    as data URIs.
+def reinflate_item_images(
+    items: List[Dict[str, Any]],
+    offload_map: Optional[Dict[str, Any]],
+    rel_key: str,
+    subdir: str = "responses_store",
+) -> List[Dict[str, Any]]:
+    """Restore offloaded images in an item list as data URIs.
 
-    Reads ONLY from the server-written offloaded_images map and refuses
-    any resolved path outside this row's own artifact directory.
+    Reads ONLY from the server-written offload map and refuses any
+    resolved path outside the object's own artifact directory.
     """
-    items = [dict(i) for i in (stored.input_items or [])]
-    offload_map = stored.offloaded_images or {}
+    items = [dict(i) for i in items]
     if not offload_map:
         return items
 
-    base_dir = _artifact_dir(stored.response_id)
+    base_dir = _artifact_dir(rel_key, subdir)
     for key, meta in offload_map.items():
         try:
             i_str, j_str = key.split(".", 1)
@@ -192,7 +198,7 @@ def reinflate_images(stored: StoredResponse) -> List[Dict[str, Any]]:
             if not str(resolved).startswith(str(base_dir.resolve()) + "/"):
                 logger.warning(
                     "responses_store_offload_path_rejected",
-                    response_id=stored.response_id, file=filename,
+                    rel_key=rel_key, file=filename,
                 )
                 continue
             data = base64.b64encode(resolved.read_bytes()).decode("ascii")
@@ -206,9 +212,19 @@ def reinflate_images(stored: StoredResponse) -> List[Dict[str, Any]]:
         except Exception as e:
             logger.warning(
                 "responses_store_reinflate_failed",
-                response_id=stored.response_id, key=key, error=str(e),
+                rel_key=rel_key, key=key, error=str(e),
             )
     return items
+
+
+def reinflate_images(stored: StoredResponse) -> List[Dict[str, Any]]:
+    """Return a stored response row's input items with offloaded images
+    restored as data URIs."""
+    return reinflate_item_images(
+        list(stored.input_items or []),
+        stored.offloaded_images,
+        stored.response_id,
+    )
 
 
 # ---------------------------------------------------------------------------

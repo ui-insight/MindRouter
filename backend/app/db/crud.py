@@ -52,6 +52,8 @@ from backend.app.db.models import (
     Quota,
     QuotaRequest,
     QuotaRequestStatus,
+    Conversation,
+    ConversationItem,
     RegistryMeta,
     Request,
     RequestStatus,
@@ -4056,3 +4058,136 @@ async def get_oldest_stored_responses_for_user(
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+# Conversations CRUD (OpenAI Conversations API)
+
+async def create_conversation(
+    db: AsyncSession,
+    user_id: int,
+    api_key_id: int,
+    metadata: Optional[dict] = None,
+) -> Conversation:
+    """Create a conversation. Caller commits."""
+    conversation = Conversation(
+        user_id=user_id, api_key_id=api_key_id, meta=metadata,
+    )
+    db.add(conversation)
+    await db.flush()
+    return conversation
+
+
+async def get_conversation(
+    db: AsyncSession, conversation_id: str, user_id: int
+) -> Optional[Conversation]:
+    """Get a conversation by public id, scoped to its owner."""
+    result = await db.execute(
+        select(Conversation).where(
+            and_(
+                Conversation.conversation_id == conversation_id,
+                Conversation.user_id == user_id,
+            )
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def count_conversations_for_user(db: AsyncSession, user_id: int) -> int:
+    result = await db.execute(
+        select(func.count(Conversation.id)).where(Conversation.user_id == user_id)
+    )
+    return int(result.scalar() or 0)
+
+
+async def touch_conversation(db: AsyncSession, conversation: Conversation) -> None:
+    """Bump updated_at (item appends don't modify the conversation row,
+    but retention sweeps by updated_at)."""
+    conversation.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+
+async def add_conversation_items(
+    db: AsyncSession,
+    conversation: Conversation,
+    items: List[dict],
+    offload_maps: Optional[List[Optional[dict]]] = None,
+) -> List[ConversationItem]:
+    """Append pre-stamped items to a conversation. Caller commits."""
+    rows = []
+    for i, item in enumerate(items):
+        row = ConversationItem(
+            conversation_pk=conversation.id,
+            item_id=item["id"],
+            item=item,
+            offloaded_images=(offload_maps[i] if offload_maps else None),
+        )
+        db.add(row)
+        rows.append(row)
+    await touch_conversation(db, conversation)
+    return rows
+
+
+async def get_conversation_items(
+    db: AsyncSession, conversation_pk: int
+) -> List[ConversationItem]:
+    """All items of a conversation in append order."""
+    result = await db.execute(
+        select(ConversationItem)
+        .where(ConversationItem.conversation_pk == conversation_pk)
+        .order_by(ConversationItem.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def count_conversation_items(db: AsyncSession, conversation_pk: int) -> int:
+    result = await db.execute(
+        select(func.count(ConversationItem.id)).where(
+            ConversationItem.conversation_pk == conversation_pk
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def get_conversation_item(
+    db: AsyncSession, conversation_pk: int, item_id: str
+) -> Optional[ConversationItem]:
+    result = await db.execute(
+        select(ConversationItem).where(
+            and_(
+                ConversationItem.conversation_pk == conversation_pk,
+                ConversationItem.item_id == item_id,
+            )
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def delete_conversation_item(
+    db: AsyncSession, conversation_pk: int, item_id: str
+) -> Optional[ConversationItem]:
+    row = await get_conversation_item(db, conversation_pk, item_id)
+    if not row:
+        return None
+    await db.delete(row)
+    await db.flush()
+    return row
+
+
+async def delete_conversation(
+    db: AsyncSession, conversation_id: str, user_id: int
+) -> Optional[Conversation]:
+    """Delete a conversation and all its items (owner-scoped).
+
+    Returns the detached conversation row, or None if not found.
+    """
+    conversation = await get_conversation(db, conversation_id, user_id)
+    if not conversation:
+        return None
+    await db.execute(
+        delete(ConversationItem).where(
+            ConversationItem.conversation_pk == conversation.id
+        )
+    )
+    await db.delete(conversation)
+    await db.flush()
+    return conversation

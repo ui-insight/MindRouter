@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     responses_web_search_enabled: bool = True
     responses_web_search_max_calls: int = 4  # per response; max_tool_calls can lower it
     responses_web_search_max_results: int = 5  # results fed to the model per search
+    # Conversations API (conv_* objects)
+    conversations_max_per_user: int = 1000  # 0 = uncapped; create rejected beyond
+    conversations_max_items: int = 10000  # per conversation; appends rejected beyond
+    conversations_max_item_bytes: int = 2097152  # 2MB per item (post-offload); 0 = uncapped
 
     # Logging
     log_level: str = "INFO"

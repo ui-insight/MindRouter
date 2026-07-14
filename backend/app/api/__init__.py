@@ -20,6 +20,7 @@ from backend.app.api.v1_openai import router as openai_router
 from backend.app.api.ollama_api import router as ollama_router
 from backend.app.api.anthropic_api import router as anthropic_router
 from backend.app.api.responses_api import router as responses_router
+from backend.app.api.conversations_api import router as conversations_router
 from backend.app.api.admin_api import router as admin_router
 from backend.app.api.models_api import router as models_router
 from backend.app.api.health import router as health_router
@@ -36,6 +37,7 @@ api_router.include_router(openai_router)
 api_router.include_router(ollama_router)
 api_router.include_router(anthropic_router)
 api_router.include_router(responses_router)
+api_router.include_router(conversations_router)
 api_router.include_router(models_router)
 api_router.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 api_router.include_router(telemetry_router, prefix="/api/admin/telemetry", tags=["telemetry"])

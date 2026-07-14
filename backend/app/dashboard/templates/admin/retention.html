@@ -206,6 +206,12 @@
                                        value="{{ config['retention.responses_store_days'] }}" min="0">
                                 <div class="form-text">Responses API server-side state (store=true / previous_response_id chains). 0 = never delete.</div>
                             </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Idle Conversations (days)</label>
+                                <input type="number" class="form-control" name="retention.conversations_days"
+                                       value="{{ config['retention.conversations_days'] }}" min="0">
+                                <div class="form-text">Conversations API state, swept by last activity. 0 = never delete (default).</div>
+                            </div>
                         </div>
                     </div>
                 </div>

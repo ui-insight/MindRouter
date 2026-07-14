@@ -1211,3 +1211,58 @@ class StoredResponse(Base, TimestampMixin):
         Index("ix_stored_responses_created_at", "created_at"),
         Index("ix_stored_responses_prev", "previous_response_id"),
     )
+
+
+class Conversation(Base, TimestampMixin):
+    """OpenAI Conversations API conversation (conv_* objects).
+
+    Durable, user-owned conversation state.  Items live in
+    conversation_items; deleting a conversation deletes its items
+    (application-managed so offloaded artifacts are cleaned up too).
+    """
+
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(80), unique=True, nullable=False, index=True,
+        default=lambda: f"conv_{uuid.uuid4().hex}",
+    )
+
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    api_key_id: Mapped[int] = mapped_column(Integer, ForeignKey("api_keys.id"), nullable=False)
+
+    # Attribute name avoids SQLAlchemy's reserved Base.metadata;
+    # column name matches the wire field.
+    meta: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)
+
+    user: Mapped["User"] = relationship("User")
+
+    __table_args__ = (
+        Index("ix_conversations_user_created", "user_id", "created_at"),
+        # Standalone index for retention DELETE ... WHERE updated_at < cutoff
+        Index("ix_conversations_updated_at", "updated_at"),
+    )
+
+
+class ConversationItem(Base, TimestampMixin):
+    """One item in a conversation (message / function_call / ... as
+    Responses API item JSON).  The BigInteger PK provides append order."""
+
+    __tablename__ = "conversation_items"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversation_pk: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversations.id"), nullable=False
+    )
+    # Public item id (msg_/fc_/rs_/item_ prefix), unique per conversation
+    item_id: Mapped[str] = mapped_column(String(80), nullable=False)
+
+    item: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Server-created image-offload map (see StoredResponse.offloaded_images)
+    offloaded_images: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("conversation_pk", "item_id", name="uq_conversation_items_conv_item"),
+        Index("ix_conversation_items_conv", "conversation_pk", "id"),
+    )

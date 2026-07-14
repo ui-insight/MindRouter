@@ -84,6 +84,7 @@ class ResponsesRequestContext:
     text: Optional[Dict[str, Any]] = None
     store: bool = True
     previous_response_id: Optional[str] = None
+    conversation_id: Optional[str] = None
     truncation: str = "disabled"
     metadata: Dict[str, Any] = field(default_factory=dict)
     prompt_cache_key: Optional[str] = None
@@ -100,6 +101,10 @@ class ResponsesRequestContext:
         def _or(value, default):
             return default if value is None else value
 
+        conversation = body.get("conversation")
+        if isinstance(conversation, dict):
+            conversation = conversation.get("id")
+
         return cls(
             model=str(body.get("model", "")),
             instructions=body.get("instructions"),
@@ -113,6 +118,7 @@ class ResponsesRequestContext:
             text=body.get("text"),
             store=_or(body.get("store"), True),
             previous_response_id=body.get("previous_response_id"),
+            conversation_id=conversation,
             truncation=_or(body.get("truncation"), "disabled"),
             metadata=body.get("metadata") or {},
             prompt_cache_key=body.get("prompt_cache_key"),
@@ -653,6 +659,9 @@ class ResponsesInTranslator:
             "output": output,
             "parallel_tool_calls": ctx.parallel_tool_calls,
             "previous_response_id": ctx.previous_response_id,
+            "conversation": (
+                {"id": ctx.conversation_id} if ctx.conversation_id else None
+            ),
             "prompt_cache_key": ctx.prompt_cache_key,
             "reasoning": ctx.reasoning or {"effort": None, "summary": None},
             "safety_identifier": None,

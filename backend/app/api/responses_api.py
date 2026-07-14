@@ -54,7 +54,11 @@ from backend.app.db import crud
 from backend.app.db.models import ApiKey, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
-from backend.app.services import responses_store, responses_websearch
+from backend.app.services import (
+    conversations_store,
+    responses_store,
+    responses_websearch,
+)
 from backend.app.services.inference import InferenceService
 from backend.app.settings import get_settings
 
@@ -148,6 +152,14 @@ async def responses(
     except ValueError as e:
         return error_json(400, str(e), param="input")
 
+    if ctx.previous_response_id and ctx.conversation_id:
+        return error_json(
+            400,
+            "'previous_response_id' cannot be used in conjunction with "
+            "'conversation'.",
+            param="previous_response_id",
+        )
+
     # previous_response_id: rebuild conversation context from the store.
     if ctx.previous_response_id:
         try:
@@ -167,6 +179,37 @@ async def responses(
                 400, message, param="previous_response_id", code=code
             )
         body = {**body, "input": combined}
+
+    # conversation: prepend stored items; the response's items are
+    # appended back to the conversation after it completes.
+    conversation = None
+    if ctx.conversation_id:
+        conversation = await crud.get_conversation(
+            db, ctx.conversation_id, user.id
+        )
+        if not conversation:
+            return error_json(
+                404,
+                f"Conversation with id '{ctx.conversation_id}' not found.",
+                code="conversation_not_found",
+            )
+        history = await conversations_store.load_context_items(db, conversation)
+        by_id = {i["id"]: i for i in history if i.get("id")}
+        resolved = []
+        for item in delta_items:
+            if item.get("type") == "item_reference":
+                ref = by_id.get(item.get("id") or "")
+                if ref is None:
+                    return error_json(
+                        400,
+                        f"item_reference '{item.get('id')}' not found in the "
+                        "conversation.",
+                        param="input",
+                    )
+                resolved.append(ref)
+            else:
+                resolved.append(item)
+        body = {**body, "input": history + resolved}
 
     # Hosted web_search: executed server-side when enabled (the hosted
     # tool type is still stripped from what the backend sees; a
@@ -269,7 +312,7 @@ async def responses(
                 capture=capture,
             )
 
-        if ctx.store:
+        if ctx.store or ctx.conversation_id:
             events = _stream_and_persist(events, ctx, delta_items, capture)
 
         return StreamingResponse(
@@ -323,47 +366,68 @@ async def responses(
             error=result.get("error"),
         )
 
+    # Per spec: input + output items are appended to the conversation
+    # after the response completes (failed responses append nothing).
+    if ctx.conversation_id and result.get("status") in ("completed", "incomplete"):
+        await conversations_store.append_from_response(
+            ctx.conversation_id, user.id,
+            delta_items, result.get("output") or [],
+        )
+
     return JSONResponse(content=result, headers={"X-Request-ID": ctx.response_id})
 
 
 async def _stream_and_persist(events, ctx, delta_items, capture):
-    """Wrap the event stream so store=true rows are persisted even when
-    the client disconnects mid-stream (dashboard/chat.py precedent:
-    finally + asyncio.shield survives ASGI task cancellation)."""
+    """Wrap the event stream so store=true rows are persisted (and
+    conversation items appended) even when the client disconnects
+    mid-stream (dashboard/chat.py precedent: finally + asyncio.shield
+    survives ASGI task cancellation)."""
     try:
         async for frame in events:
             yield frame
     finally:
-        if capture.get("terminal"):
-            persist = responses_store.persist_response(
-                ctx,
-                delta_items,
-                capture.get("output") or [],
-                capture.get("usage"),
-                capture.get("status", "completed"),
-                error=capture.get("error"),
-            )
-        else:
-            # Stream aborted before a terminal event (disconnect or
-            # cancellation) — still leave a row so tokens consumed have
-            # a trace and any planned chain fails loudly, not silently.
-            persist = responses_store.persist_response(
-                ctx,
-                delta_items,
-                capture.get("output") or [],
-                None,
-                "failed",
-                error={
-                    "code": "server_error",
-                    "message": "stream aborted before completion",
-                },
-            )
-        try:
-            await asyncio.shield(persist)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning("responses_store_stream_persist_error", error=str(e))
+        tasks = []
+        if ctx.store:
+            if capture.get("terminal"):
+                tasks.append(responses_store.persist_response(
+                    ctx,
+                    delta_items,
+                    capture.get("output") or [],
+                    capture.get("usage"),
+                    capture.get("status", "completed"),
+                    error=capture.get("error"),
+                ))
+            else:
+                # Stream aborted before a terminal event (disconnect or
+                # cancellation) — still leave a row so tokens consumed
+                # have a trace and any planned chain fails loudly.
+                tasks.append(responses_store.persist_response(
+                    ctx,
+                    delta_items,
+                    capture.get("output") or [],
+                    None,
+                    "failed",
+                    error={
+                        "code": "server_error",
+                        "message": "stream aborted before completion",
+                    },
+                ))
+        # Conversations append only on successful terminals (per spec,
+        # failed responses contribute nothing to the conversation).
+        if ctx.conversation_id and capture.get("status") in (
+            "completed", "incomplete",
+        ):
+            tasks.append(conversations_store.append_from_response(
+                ctx.conversation_id, ctx.user_id,
+                delta_items, capture.get("output") or [],
+            ))
+        for task in tasks:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("responses_store_stream_persist_error", error=str(e))
 
 
 @router.post("/v1/responses/input_tokens")
