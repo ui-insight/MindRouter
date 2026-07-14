@@ -97,10 +97,13 @@ def synthetic_search_tool() -> CanonicalToolDefinition:
         function={
             "name": SEARCH_TOOL_NAME,
             "description": (
-                "Search the public web for current information. Returns a "
-                "list of results with title, URL, and snippet. Use for "
-                "facts you are unsure about or anything after your "
-                "training cutoff."
+                "Search the live public web and return current results "
+                "(title, URL, snippet). ALWAYS use this tool for "
+                "time-sensitive questions — weather, news, prices, "
+                "schedules, sports, or recent events — and for facts you "
+                "are unsure about. This tool IS your real-time data "
+                "access: never decline such questions as beyond your "
+                "knowledge without searching first."
             ),
             "parameters": {
                 "type": "object",
@@ -113,6 +116,28 @@ def synthetic_search_tool() -> CanonicalToolDefinition:
                 "required": ["query"],
             },
         },
+    )
+
+
+# Injected as a system message whenever hosted web_search is armed.
+# Models aligned to say "I can't access real-time data" will otherwise
+# occasionally decline instead of using the tool they were handed.
+WEB_SEARCH_SYSTEM_NUDGE = (
+    "You have a web_search tool that gives you live web access. When a "
+    "question involves current or time-sensitive information (weather, "
+    "news, prices, schedules, recent events) or facts you are not sure "
+    "of, call web_search rather than saying you lack real-time access. "
+    "Cite source URLs from the results in your answer when relevant."
+)
+
+
+def arm_web_search(canonical: CanonicalChatRequest) -> None:
+    """Attach the synthetic tool and the usage nudge to a request."""
+    canonical.tools = (canonical.tools or []) + [synthetic_search_tool()]
+    canonical.messages.append(
+        CanonicalMessage(
+            role=MessageRole.SYSTEM, content=WEB_SEARCH_SYSTEM_NUDGE
+        )
     )
 
 

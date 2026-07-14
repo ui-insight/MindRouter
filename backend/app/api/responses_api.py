@@ -269,9 +269,7 @@ async def responses(
     extra_parameters = {"response_id": ctx.response_id}
 
     if use_web_search:
-        canonical.tools = (canonical.tools or []) + [
-            responses_websearch.synthetic_search_tool()
-        ]
+        responses_websearch.arm_web_search(canonical)
         max_tool_calls = body.get("max_tool_calls")
         max_calls = min(
             max_tool_calls or settings.responses_web_search_max_calls, 10

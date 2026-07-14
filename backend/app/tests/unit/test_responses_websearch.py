@@ -124,6 +124,15 @@ class TestHelpers:
         assert tool.function["parameters"]["required"] == ["query"]
         assert isinstance(tool.function["description"], str)
 
+    def test_arm_web_search_adds_tool_and_nudge(self):
+        canonical = _canonical(tools=False)
+        _mod.arm_web_search(canonical)
+        assert canonical.tools[-1].function["name"] == "web_search"
+        nudge = canonical.messages[-1]
+        assert nudge.role == MessageRole.SYSTEM
+        assert "web_search" in nudge.content
+        assert "real-time" in nudge.content
+
     def test_parse_query(self):
         assert _mod._parse_query('{"query": "cats"}') == "cats"
         assert _mod._parse_query("not json") == "not json"
