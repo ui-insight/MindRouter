@@ -366,6 +366,80 @@ async def _stream_and_persist(events, ctx, delta_items, capture):
             logger.warning("responses_store_stream_persist_error", error=str(e))
 
 
+@router.post("/v1/responses/input_tokens")
+async def count_input_tokens(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Count input tokens for a would-be response (no generation).
+
+    Wire shape per the official spec: accepts the context-shaping subset
+    of the create-response body and returns
+    ``{"object": "response.input_tokens", "input_tokens": N}``.
+    Counts are exact for vLLM backends (chat template + tools applied
+    via /tokenize) and tiktoken estimates otherwise.
+    """
+    user, api_key = auth
+    settings = get_settings()
+    if not settings.responses_api_enabled:
+        return error_json(404, "The Responses API is not enabled on this server.",
+                          code="not_found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return error_json(400, "Invalid JSON body")
+    if not isinstance(body, dict) or not body.get("model"):
+        return error_json(400, "you must provide a model parameter", param="model")
+
+    ctx = ResponsesRequestContext.from_body(body)
+
+    try:
+        delta_items = responses_store.normalize_input_to_items(body.get("input"))
+    except ValueError as e:
+        return error_json(400, str(e), param="input")
+
+    if ctx.previous_response_id:
+        try:
+            chain = await crud.get_stored_response_chain(
+                db, ctx.previous_response_id, user.id,
+                max_depth=settings.responses_store_max_chain_depth,
+            )
+            body = {**body, "input": responses_store.rebuild_input_from_chain(
+                chain, delta_items
+            )}
+        except ValueError as e:
+            message = str(e)
+            code = "previous_response_not_found" if "not found" in message else None
+            return error_json(400, message, param="previous_response_id", code=code)
+
+    try:
+        canonical = ResponsesInTranslator.translate_responses_request(body)
+    except Exception as e:
+        return error_json(400, f"Invalid request: {str(e)}")
+
+    registry = get_registry()
+    canonical.model, _ = registry.resolve_alias(canonical.model)
+    backends = await registry.get_backends_with_model(canonical.model)
+    if not backends:
+        return error_json(
+            404,
+            f"The model '{ctx.model}' does not exist or you do not have access to it.",
+            code="model_not_found",
+        )
+
+    # Prefer a vLLM backend for an exact chat-template-aware count.
+    backend = next(
+        (b for b in backends if getattr(b.engine, "value", b.engine) == "vllm"),
+        backends[0],
+    )
+    service = InferenceService(db)
+    count, _is_estimate = await service._count_input_tokens(canonical, backend)
+
+    return {"object": "response.input_tokens", "input_tokens": count}
+
+
 @router.get("/v1/responses/{response_id}")
 async def get_response(
     response_id: str,

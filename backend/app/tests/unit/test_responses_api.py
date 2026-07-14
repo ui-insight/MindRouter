@@ -84,6 +84,7 @@ for _name in _added_stubs:
     sys.modules.pop(_name, None)
 
 responses_endpoint = _mod.responses
+count_input_tokens_endpoint = _mod.count_input_tokens
 get_response_endpoint = _mod.get_response
 delete_response_endpoint = _mod.delete_response
 list_input_items_endpoint = _mod.list_input_items
@@ -146,6 +147,7 @@ def _make_mock_service(streaming=False):
     service._check_quota = AsyncMock()
     service.chat_completion = AsyncMock(return_value=dict(_CHAT_RESPONSE))
     service.stream_chat_completion = MagicMock(return_value=_fake_stream())
+    service._count_input_tokens = AsyncMock(return_value=(123, False))
     return service
 
 
@@ -153,6 +155,11 @@ def _make_mock_registry(model_exists=True):
     registry = MagicMock()
     registry.resolve_alias = MagicMock(side_effect=lambda m: (m, None))
     registry.model_exists = AsyncMock(return_value=model_exists)
+    vllm_backend = MagicMock()
+    vllm_backend.engine = MagicMock(value="vllm")
+    registry.get_backends_with_model = AsyncMock(
+        return_value=[vllm_backend] if model_exists else []
+    )
     return registry
 
 
@@ -465,6 +472,55 @@ async def _call_companion(endpoint_fn, response_id="resp_stored1", stored=None,
             response_id, db=AsyncMock(),
             auth=(_make_mock_user(), _make_mock_api_key()), **kwargs,
         ), crud, store
+
+
+class TestCountInputTokens:
+    async def _count(self, body, service=None, registry=None, enabled=True):
+        service = service or _make_mock_service()
+        registry = registry or _make_mock_registry()
+        with patch.object(_mod, "get_settings",
+                          return_value=_settings(enabled)), \
+             patch.object(_mod, "get_registry", return_value=registry), \
+             patch.object(_mod, "InferenceService", return_value=service), \
+             patch.object(_mod, "responses_store", _make_mock_store()), \
+             patch.object(_mod, "crud", _make_mock_crud()):
+            return await count_input_tokens_endpoint(
+                _make_mock_request(body),
+                db=AsyncMock(),
+                auth=(_make_mock_user(), _make_mock_api_key()),
+            ), service
+
+    async def test_returns_spec_shape(self):
+        result, service = await self._count({"model": "m", "input": "hello"})
+        assert result == {"object": "response.input_tokens", "input_tokens": 123}
+        canonical = service._count_input_tokens.await_args.args[0]
+        assert canonical.messages[0].content == "hello"
+
+    async def test_counts_tools_and_instructions(self):
+        result, service = await self._count({
+            "model": "m", "input": "hi", "instructions": "be terse",
+            "tools": [{"type": "function", "name": "f", "parameters": {}}],
+        })
+        canonical = service._count_input_tokens.await_args.args[0]
+        assert canonical.tools is not None
+        assert canonical.messages[0].role.value == "system"
+
+    async def test_missing_model_400(self):
+        result, _ = await self._count({"input": "hi"})
+        assert result.status_code == 400
+        assert _body(result)["error"]["param"] == "model"
+
+    async def test_unknown_model_404(self):
+        result, _ = await self._count(
+            {"model": "ghost", "input": "hi"},
+            registry=_make_mock_registry(model_exists=False),
+        )
+        assert result.status_code == 404
+        assert _body(result)["error"]["code"] == "model_not_found"
+
+    async def test_flag_disabled_404(self):
+        result, _ = await self._count({"model": "m", "input": "hi"}, enabled=False)
+        assert result.status_code == 404
 
 
 class TestWebSearchDispatch:
