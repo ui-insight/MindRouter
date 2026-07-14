@@ -156,10 +156,12 @@ def _make_mock_registry(model_exists=True):
     return registry
 
 
-def _settings(enabled=True):
+def _settings(enabled=True, web_search=False):
     settings = MagicMock()
     settings.responses_api_enabled = enabled
     settings.responses_store_max_chain_depth = 20
+    settings.responses_web_search_enabled = web_search
+    settings.responses_web_search_max_calls = 4
     return settings
 
 
@@ -203,16 +205,20 @@ def _make_mock_crud(chain_error="Previous response with id 'resp_x' not found.")
 
 
 async def _call(body=None, raise_json=False, service=None, registry=None,
-                enabled=True, store=None, crud=None):
+                enabled=True, store=None, crud=None, web_search=False,
+                websearch_mod=None):
     """Invoke the endpoint with all module-level collaborators patched."""
     service = service or _make_mock_service()
     registry = registry or _make_mock_registry()
     store = store or _make_mock_store()
     crud = crud or _make_mock_crud()
-    with patch.object(_mod, "get_settings", return_value=_settings(enabled)), \
+    websearch_mod = websearch_mod or _make_mock_websearch()
+    with patch.object(_mod, "get_settings",
+                      return_value=_settings(enabled, web_search)), \
          patch.object(_mod, "get_registry", return_value=registry), \
          patch.object(_mod, "InferenceService", return_value=service), \
          patch.object(_mod, "responses_store", store), \
+         patch.object(_mod, "responses_websearch", websearch_mod), \
          patch.object(_mod, "crud", crud):
         result = await responses_endpoint(
             _make_mock_request(body, raise_json=raise_json),
@@ -220,6 +226,21 @@ async def _call(body=None, raise_json=False, service=None, registry=None,
             auth=(_make_mock_user(), _make_mock_api_key()),
         )
     return result, service
+
+
+def _make_mock_websearch(wants=False):
+    ws = MagicMock()
+    ws.wants_web_search = MagicMock(return_value=wants)
+    ws.has_client_web_search_function = MagicMock(return_value=False)
+    ws.WEB_SEARCH_TOOL_TYPES = {"web_search"}
+    ws.synthetic_search_tool = MagicMock(return_value=MagicMock())
+    ws.make_search_executor = MagicMock(return_value=AsyncMock())
+    ws.run_web_search_loop = AsyncMock(return_value={
+        "id": "resp_ws", "object": "response", "status": "completed",
+        "output": [], "usage": None, "error": None,
+    })
+    ws.stream_with_web_search = MagicMock(return_value=_fake_stream())
+    return ws
 
 
 class TestValidation:
@@ -444,6 +465,54 @@ async def _call_companion(endpoint_fn, response_id="resp_stored1", stored=None,
             response_id, db=AsyncMock(),
             auth=(_make_mock_user(), _make_mock_api_key()), **kwargs,
         ), crud, store
+
+
+class TestWebSearchDispatch:
+    async def test_hosted_web_search_routes_to_loop(self):
+        ws = _make_mock_websearch(wants=True)
+        result, service = await _call(
+            {"model": "m", "input": "latest news?",
+             "tools": [{"type": "web_search"}]},
+            web_search=True, websearch_mod=ws,
+        )
+        assert result.status_code == 200
+        ws.run_web_search_loop.assert_awaited_once()
+        service.chat_completion.assert_not_awaited()
+
+    async def test_web_search_disabled_strips_tool(self):
+        ws = _make_mock_websearch(wants=True)
+        result, service = await _call(
+            {"model": "m", "input": "hi", "tools": [{"type": "web_search"}]},
+            web_search=False, websearch_mod=ws,
+        )
+        assert result.status_code == 200
+        ws.run_web_search_loop.assert_not_awaited()
+        service.chat_completion.assert_awaited_once()
+
+    async def test_client_function_collision_disables_hosted(self):
+        ws = _make_mock_websearch(wants=True)
+        ws.has_client_web_search_function = MagicMock(return_value=True)
+        result, service = await _call(
+            {"model": "m", "input": "hi",
+             "tools": [{"type": "web_search"},
+                       {"type": "function", "name": "web_search",
+                        "parameters": {}}]},
+            web_search=True, websearch_mod=ws,
+        )
+        assert result.status_code == 200
+        ws.run_web_search_loop.assert_not_awaited()
+        service.chat_completion.assert_awaited_once()
+
+    async def test_streaming_web_search_dispatch(self):
+        ws = _make_mock_websearch(wants=True)
+        result, service = await _call(
+            {"model": "m", "input": "hi", "stream": True,
+             "tools": [{"type": "web_search"}]},
+            web_search=True, websearch_mod=ws,
+        )
+        assert isinstance(result, StreamingResponse)
+        ws.stream_with_web_search.assert_called_once()
+        service.stream_chat_completion.assert_not_called()
 
 
 class TestStorePersistence:

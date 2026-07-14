@@ -121,6 +121,20 @@ class TestResponsesInBasics:
         with pytest.raises(KeyError):
             ResponsesInTranslator.translate_responses_request({"input": "hi"})
 
+    def test_truncation_auto_sets_flag(self):
+        result = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi", "truncation": "auto"}
+        )
+        assert result.auto_truncate is True
+        result = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi", "truncation": "disabled"}
+        )
+        assert result.auto_truncate is False
+        result = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi"}
+        )
+        assert result.auto_truncate is False
+
 
 class TestResponsesInputItems:
     def test_typed_message_item(self):

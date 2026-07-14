@@ -173,6 +173,10 @@ class CanonicalChatRequest(BaseModel):
     # Opaque backend-specific options (e.g. Ollama mirostat, tfs_z, num_ctx)
     backend_options: Optional[Dict[str, Any]] = None
 
+    # Server-side context truncation (Responses API truncation:"auto"):
+    # on context overflow, drop oldest turns instead of failing.
+    auto_truncate: bool = False
+
     # Tool calling
     tools: Optional[List[CanonicalToolDefinition]] = None
     tool_choice: Optional[Any] = None

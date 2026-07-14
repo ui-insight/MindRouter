@@ -827,7 +827,7 @@ requires_openai_auth = false
 [profiles.mindrouter]
 model_provider = "mindrouter"
 model = "qwen/qwen3.5-122b"</code></pre>
-                <p>Then export <code>MINDROUTER_API_KEY=mr2_your-api-key</code> and select the profile. Codex's hosted <code>web_search</code> tool is not executed by MindRouter (see below); set <code>web_search = "disabled"</code> in <code>config.toml</code> for cleanliness.</p>
+                <p>Then export <code>MINDROUTER_API_KEY=mr2_your-api-key</code> and select the profile. Codex's hosted <code>web_search</code> tool is executed by MindRouter's own search engine (see <em>Hosted Web Search</em> below) — searches Codex performs count against your search quota.</p>
 
                 <h4>SDK Usage (Python)</h4>
                 <pre><code>from openai import OpenAI
@@ -881,15 +881,30 @@ client.responses.delete(r1.id)   # stored responses can be deleted anytime</code
                 <ul>
                     <li><code>input</code> as a string or item array (<code>message</code>, <code>function_call</code>, <code>function_call_output</code>, <code>reasoning</code> items); <code>instructions</code>; <code>developer</code> role</li>
                     <li>Function tools (flat Responses shape) with streaming <code>response.function_call_arguments.delta</code> events; tool round trips via <code>call_id</code></li>
+                    <li><strong>Hosted <code>web_search</code> tool</strong> &mdash; executed server-side (see below)</li>
                     <li>Reasoning models &mdash; <code>reasoning.effort</code> mapped to backend thinking modes; reasoning output items</li>
                     <li>Structured output via <code>text.format</code> (<code>json_object</code> / <code>json_schema</code>)</li>
                     <li>Vision input via <code>input_image</code> parts (data URIs and https URLs)</li>
-                    <li>Parameters: <code>max_output_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>stream</code></li>
+                    <li><code>truncation: "auto"</code> &mdash; on context overflow, the oldest conversation turns are dropped server-side (tool-call pairs kept intact; system messages and the newest turn always preserved) instead of failing with a context-length error</li>
+                    <li>Parameters: <code>max_output_tokens</code>, <code>max_tool_calls</code>, <code>temperature</code>, <code>top_p</code>, <code>stream</code></li>
+                </ul>
+
+                <h5>Hosted Web Search</h5>
+                <p>Requests that include <code>{"type": "web_search"}</code> in <code>tools</code> get OpenAI-style server-side search execution: when the model decides to search, MindRouter runs the query through the same provider stack as <a href="#web-search"><code>/v1/search</code></a>, feeds the results back to the model, and repeats until the model answers (or the call budget is spent). Each executed search appears in <code>output</code> as a <code>web_search_call</code> item:</p>
+                <pre><code>{"id": "ws_…", "type": "web_search_call", "status": "completed",
+ "action": {"type": "search", "query": "…"}}</code></pre>
+                <p>Streaming emits <code>response.web_search_call.in_progress</code> / <code>.searching</code> / <code>.completed</code> events around each search. Notes:</p>
+                <ul>
+                    <li>The call budget is <code>max_tool_calls</code> (default 4, server-capped); when spent, the model must answer from what it has.</li>
+                    <li>Searches consume your web-search quota (same accounting as <code>/v1/search</code>).</li>
+                    <li>Search failures are reported to the model as tool output, not surfaced as request errors.</li>
+                    <li><code>url_citation</code> annotations are not generated &mdash; source URLs appear in the answer text if the model includes them.</li>
+                    <li>Defining your own <code>function</code> tool named <code>web_search</code> disables hosted execution (your tool wins).</li>
                 </ul>
                 <p><strong>Server-side conversation state:</strong> <code>store</code> defaults to <code>true</code> (OpenAI parity). Stored responses can be retrieved (<code>GET</code>), deleted, and chained via <code>previous_response_id</code> &mdash; MindRouter rebuilds the conversation from the stored chain, so follow-up requests only need the new input. Stored state is subject to a retention window (default 30 days, admin-tunable), a per-response payload cap, and a per-user row cap (oldest evicted). Per the OpenAI spec, <code>instructions</code> and <code>tools</code> are <em>not</em> inherited across a chain &mdash; resend them each turn. Codex does not use server-side state; it resends the full transcript with <code>store: false</code>.</p>
                 <p><strong>Limitations:</strong></p>
                 <ul>
-                    <li>Hosted tools (<code>web_search</code>, <code>file_search</code>, <code>code_interpreter</code>, MCP) and <code>custom</code> freeform tools are accepted but stripped &mdash; only <code>function</code> tools reach the model.</li>
+                    <li>Hosted tools other than <code>web_search</code> (<code>file_search</code>, <code>code_interpreter</code>, MCP) and <code>custom</code> freeform tools are accepted but stripped &mdash; they never reach the model.</li>
                     <li><code>background</code> mode, file inputs (<code>input_file</code>, <code>file_id</code>), stream replay of stored responses (<code>GET ?stream=true</code>), and <code>conversation</code> objects are not supported.</li>
                 </ul>
                 <p>Errors use the OpenAI envelope: <code>{"error": {"message", "type", "param", "code"}}</code>.</p>

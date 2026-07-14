@@ -154,6 +154,11 @@ class Settings(BaseSettings):
     responses_store_max_chain_depth: int = 20  # previous_response_id hops
     responses_store_max_payload_bytes: int = 5242880  # 5MB; 0 = uncapped
     responses_store_max_rows_per_user: int = 1000  # 0 = uncapped; oldest evicted
+    # Hosted web_search tool ({"type":"web_search"}) — executed server-side
+    # via the /v1/search provider stack
+    responses_web_search_enabled: bool = True
+    responses_web_search_max_calls: int = 4  # per response; max_tool_calls can lower it
+    responses_web_search_max_results: int = 5  # results fed to the model per search
 
     # Logging
     log_level: str = "INFO"

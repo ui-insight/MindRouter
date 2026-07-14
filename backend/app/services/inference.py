@@ -234,6 +234,31 @@ class InferenceService:
         input_tokens, is_estimate = await self._count_input_tokens(request, backend)
 
         remaining = context_length - input_tokens - _TOKEN_BUFFER
+        if remaining <= 0 and request.auto_truncate:
+            # Responses API truncation:"auto" — drop oldest turns until
+            # the input fits, reserving room for a useful response.
+            from backend.app.core.context_trim import trim_messages_to_fit
+
+            if _tiktoken_encoder is None:
+                _tiktoken_estimate(request)  # initializes the encoder
+            reserve = min(request.max_tokens or 1024, 4096)
+            budget = context_length - _TOKEN_BUFFER - reserve
+            request.messages, dropped = trim_messages_to_fit(
+                request.messages, budget,
+                lambda s: len(_tiktoken_encoder.encode(s)),
+            )
+            if dropped:
+                input_tokens, is_estimate = await self._count_input_tokens(
+                    request, backend
+                )
+                remaining = context_length - input_tokens - _TOKEN_BUFFER
+                logger.info(
+                    "auto_truncate_applied",
+                    dropped_messages=dropped,
+                    input_tokens=input_tokens,
+                    context_length=context_length,
+                    model=request.model,
+                )
         if remaining <= 0:
             logger.warning(
                 "context_overflow",

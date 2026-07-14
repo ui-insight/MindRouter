@@ -224,6 +224,7 @@ class ResponsesInTranslator:
             response_format=response_format,
             think=think,
             user=user,
+            auto_truncate=data.get("truncation") == "auto",
         )
 
     # ------------------------------------------------------------------

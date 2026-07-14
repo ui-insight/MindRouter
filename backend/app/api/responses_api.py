@@ -54,7 +54,7 @@ from backend.app.db import crud
 from backend.app.db.models import ApiKey, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
-from backend.app.services import responses_store
+from backend.app.services import responses_store, responses_websearch
 from backend.app.services.inference import InferenceService
 from backend.app.settings import get_settings
 
@@ -168,10 +168,22 @@ async def responses(
             )
         body = {**body, "input": combined}
 
-    stripped = ctx.stripped_tool_types()
+    # Hosted web_search: executed server-side when enabled (the hosted
+    # tool type is still stripped from what the backend sees; a
+    # synthetic function tool is injected instead).
+    use_web_search = (
+        settings.responses_web_search_enabled
+        and responses_websearch.wants_web_search(ctx.tools)
+        and not responses_websearch.has_client_web_search_function(ctx.tools)
+    )
+
+    stripped = [
+        t for t in ctx.stripped_tool_types()
+        if not (use_web_search and t in responses_websearch.WEB_SEARCH_TOOL_TYPES)
+    ]
     if stripped:
-        # Codex sends a web_search tool by default; stripping (not
-        # erroring) keeps default configs working.
+        # Non-executable hosted tools are stripped, not errored, so
+        # default agent configs keep working.
         logger.info("responses_tools_stripped", types=stripped, user_id=user.id)
 
     try:
@@ -213,21 +225,49 @@ async def responses(
 
     extra_parameters = {"response_id": ctx.response_id}
 
+    if use_web_search:
+        canonical.tools = (canonical.tools or []) + [
+            responses_websearch.synthetic_search_tool()
+        ]
+        max_tool_calls = body.get("max_tool_calls")
+        max_calls = min(
+            max_tool_calls or settings.responses_web_search_max_calls, 10
+        )
+        executor = responses_websearch.make_search_executor(db, user, api_key)
+
     if ctx.stream:
         capture: dict = {}
-        events = stream_responses_events(
-            service.stream_chat_completion(
+        if use_web_search:
+            events = responses_websearch.stream_with_web_search(
+                lambda: service.stream_chat_completion(
+                    canonical,
+                    user,
+                    api_key,
+                    request,
+                    endpoint="/v1/responses",
+                    skip_quota_check=True,
+                    extra_parameters=extra_parameters,
+                ),
                 canonical,
-                user,
-                api_key,
-                request,
-                endpoint="/v1/responses",
-                skip_quota_check=True,
-                extra_parameters=extra_parameters,
-            ),
-            ctx,
-            capture=capture,
-        )
+                ctx,
+                executor,
+                max_calls,
+                capture=capture,
+            )
+        else:
+            events = stream_responses_events(
+                service.stream_chat_completion(
+                    canonical,
+                    user,
+                    api_key,
+                    request,
+                    endpoint="/v1/responses",
+                    skip_quota_check=True,
+                    extra_parameters=extra_parameters,
+                ),
+                ctx,
+                capture=capture,
+            )
 
         if ctx.store:
             events = _stream_and_persist(events, ctx, delta_items, capture)
@@ -243,19 +283,35 @@ async def responses(
         )
 
     try:
-        chat_response = await service.chat_completion(
-            canonical,
-            user,
-            api_key,
-            request,
-            endpoint="/v1/responses",
-            skip_quota_check=True,
-            extra_parameters=extra_parameters,
-        )
+        if use_web_search:
+            result = await responses_websearch.run_web_search_loop(
+                lambda c: service.chat_completion(
+                    c,
+                    user,
+                    api_key,
+                    request,
+                    endpoint="/v1/responses",
+                    skip_quota_check=True,
+                    extra_parameters=extra_parameters,
+                ),
+                canonical,
+                ctx,
+                executor,
+                max_calls,
+            )
+        else:
+            chat_response = await service.chat_completion(
+                canonical,
+                user,
+                api_key,
+                request,
+                endpoint="/v1/responses",
+                skip_quota_check=True,
+                extra_parameters=extra_parameters,
+            )
+            result = ResponsesInTranslator.format_response(chat_response, ctx)
     except HTTPException as e:
         return _reshape_http_exception(e)
-
-    result = ResponsesInTranslator.format_response(chat_response, ctx)
 
     if ctx.store:
         await responses_store.persist_response(
