@@ -3452,16 +3452,21 @@ docker run -d --name gpu-sidecar \
                 <h3>Nginx Reverse Proxy Configuration</h3>
                 <p>Each inference node runs an nginx reverse proxy that terminates TLS and forwards requests to the locally-bound inference engine (Ollama or vLLM) and GPU sidecar. This is required because inference engines bind to <code>127.0.0.1</code> for security — nginx handles external TLS traffic on the public-facing ports.</p>
 
-                <h4>Upload size for multimodal requests</h4>
-                <p>Multimodal inference requests (images sent to vision models like Qwen3-VL, gemma3, LLaVA, etc.) include base64-encoded image data in the JSON body, which can be significantly larger than text-only requests. A typical high-resolution image produces 1&ndash;10MB of base64 data. Nginx's default <code>client_max_body_size</code> is only 1MB, which will cause <strong>413 Request Entity Too Large</strong> errors for any image upload.</p>
-                <p><strong>You must set <code>client_max_body_size</code></strong> in every nginx proxy config that handles inference traffic (Ollama and vLLM proxies). A value of <code>50m</code> (50MB) is recommended to accommodate large images and multi-image requests:</p>
+                <h4>Request body size limits (413 errors)</h4>
+                <p>Two request classes routinely exceed nginx's default <code>client_max_body_size</code> of <strong>1MB</strong>: multimodal requests (a high-resolution image is 1&ndash;10MB of base64) and <strong>full-transcript agent clients</strong> &mdash; Codex and other Responses API consumers resend the entire conversation every turn, crossing 1MB of plain text within a normal session. Either way the node proxy returns an opaque <strong>413 Request Entity Too Large</strong> HTML page.</p>
+                <p><strong>Set the limit once at http level</strong> so it covers every server block on the node &mdash; past practice of adding it inside individual <code>server&nbsp;{}</code> blocks caused an outage when new blocks were added without it:</p>
+<pre><code># /etc/nginx/conf.d/00-body-size.conf   (one line, applies to ALL proxies on the node)
+client_max_body_size 64m;</code></pre>
+                <p>Keep the limits in <strong>lockstep across the chain</strong>, with the MindRouter app as the strictest link so oversized requests always get its clean JSON error rather than raw nginx HTML:</p>
+<pre><code>gateway nginx (500m)  &gt;  inference-node nginx (64m)  &gt;  app MAX_REQUEST_SIZE (50MB)</code></pre>
+                <p>If you raise <code>MAX_REQUEST_SIZE</code>, raise the node configs with it. Diagnosis tip: the nginx version string in a 413 page identifies which layer rejected the request.</p>
 
                 <h4>Example: Ollama proxy config</h4>
 <pre><code># /etc/nginx/conf.d/ollama-proxy.conf
+# (body size limit comes from 00-body-size.conf above — do not set it per block)
 server {
     listen 8001 ssl;
     listen [::]:8001 ssl;
-    client_max_body_size 50m;    # Required for multimodal image uploads
     server_name node.example.edu;
 
     ssl_certificate     /etc/pki/tls/certs/node.example.edu.crt;
@@ -3479,9 +3484,9 @@ server {
                 <h4>Example: vLLM proxy config</h4>
 <pre><code># /etc/nginx/conf.d/vllm-proxy.conf
 # Multiple server blocks, one per vLLM instance on different ports
+# (body size limit comes from 00-body-size.conf — do not set it per block)
 server {
     listen 8001 ssl;
-    client_max_body_size 50m;    # Required for multimodal image uploads
     server_name node.example.edu;
 
     ssl_certificate     /etc/pki/tls/certs/node.example.edu.crt;
