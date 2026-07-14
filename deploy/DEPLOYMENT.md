@@ -9,6 +9,8 @@
 
 > **Reverse proxy:** The production Docker Compose stack includes an nginx container that handles TLS termination and reverse proxying on ports 80/443. You do **not** need to install a separate web server (Apache, nginx, etc.) on the host. If you prefer to use an external reverse proxy (e.g., Apache httpd), see [Alternative: External Apache Reverse Proxy](#alternative-external-apache-reverse-proxy) below and remove the `nginx` service from `docker-compose.prod.yml`.
 
+> **Request body size limits must stay in lockstep across the chain.** The effective limiter should be the app's `MAX_REQUEST_SIZE` (default 50 MB), which returns a clean JSON error. Every proxy in front of AND behind the app must allow more: the gateway nginx (`client_max_body_size 500m` in this repo's config) and — easy to forget — the **nginx TLS proxies on each GPU inference node**, which get a raw nginx default of 1 MB unless configured. Full-transcript agent clients (Codex/Responses API) exceed 1 MB routinely and will see opaque `413 Request Entity Too Large` HTML from the node proxy. Each inference node carries `/etc/nginx/conf.d/00-body-size.conf` with `client_max_body_size 64m;` (http-level, covers all server blocks). If you raise `MAX_REQUEST_SIZE`, raise the node configs too.
+
 ## Step 1: Install Dependencies (if needed)
 
 ```bash
