@@ -686,7 +686,7 @@ message = client.messages.create(
                 </ul>
                 <p><strong>Note:</strong> This is inbound-only &mdash; there are no Anthropic backends. Requests are translated to canonical format and routed to Ollama/vLLM backends like any other request.</p>
 
-                <h3>OpenAI Responses API Endpoint</h3>
+                <h3 id="responses-api">OpenAI Responses API Endpoint</h3>
                 <p>The <a href="https://platform.openai.com/docs/api-reference/responses" target="_blank" rel="noopener">OpenAI Responses API</a> is the newer, agent-oriented OpenAI wire format: typed input items instead of a messages array, flat function-tool definitions, and named SSE events. Agent clients built on it &mdash; notably <strong>Codex</strong> in the ChatGPT desktop app and CLI &mdash; can use MindRouter as a custom provider.</p>
                 <table class="table table-bordered table-sm">
                     <thead class="table-light">
@@ -752,6 +752,45 @@ response = client.responses.create(
     input="Hello!",
 )
 print(response.output_text)</code></pre>
+
+                <h4>Function Calling (Tool Round Trip)</h4>
+                <p><strong>Important:</strong> Responses function tools are <em>flat</em> &mdash; <code>name</code>/<code>description</code>/<code>parameters</code> sit directly on the tool object, with no nested <code>function</code> wrapper as in chat completions. Correlate results via <code>call_id</code>:</p>
+                <pre><code># Turn 1 — model decides to call the tool
+response = client.responses.create(
+    model="llama3.2",
+    input="What is the weather in Moscow, Idaho?",
+    tools=[{
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get current weather for a city.",
+        "parameters": {"type": "object",
+                       "properties": {"city": {"type": "string"}},
+                       "required": ["city"]},
+    }],
+)
+call = next(i for i in response.output if i.type == "function_call")
+# call.name == "get_weather", call.arguments == '{"city": "Moscow, Idaho"}'
+
+# Turn 2 — run the tool yourself, send the result back
+response2 = client.responses.create(
+    model="llama3.2",
+    previous_response_id=response.id,          # or resend the transcript
+    input=[{"type": "function_call_output",
+            "call_id": call.call_id,
+            "output": "sunny, 25C"}],
+    tools=[...],  # tools are NOT inherited across turns — resend them
+)
+print(response2.output_text)</code></pre>
+
+                <h4>Multi-Turn Conversations (previous_response_id)</h4>
+                <p>With <code>store</code> left at its default (<code>true</code>), chain turns server-side &mdash; each follow-up sends only the new input:</p>
+                <pre><code>r1 = client.responses.create(model="llama3.2", input="My name is Ada.")
+r2 = client.responses.create(model="llama3.2",
+                             input="What is my name?",
+                             previous_response_id=r1.id)
+# r2.output_text -> "Ada"
+client.responses.delete(r1.id)   # stored responses can be deleted anytime</code></pre>
+                <p>Alternatively, set <code>"store": false</code> and resend the full item transcript each turn (Codex's approach).</p>
 
                 <p><strong>Supported features:</strong></p>
                 <ul>
