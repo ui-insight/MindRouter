@@ -140,10 +140,11 @@ def _style_code_blocks(html: str) -> str:
 
     _mono = "'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace"
 
-    # 1) Style <pre> blocks — wrap text and use smaller monospace font
+    # 1) Style <pre> blocks — bordered container, wrap text, small mono font
     html = re.sub(
         r'<pre(?![^>]*style=)>',
-        f'<pre style="background:#f6f8fa;padding:12px 16px;border-radius:6px;'
+        f'<pre style="background:#f6f8fa;border:1px solid #333333;'
+        f'padding:12px 16px;border-radius:6px;'
         f'overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;'
         f'font-family:{_mono};font-size:13px;line-height:1.45;">',
         html,
@@ -168,9 +169,52 @@ def _style_code_blocks(html: str) -> str:
     return html
 
 
+def _style_tables(html: str) -> str:
+    """Add inline CSS with visible black borders to tables for email.
+
+    Email clients strip <style> blocks, so borders must be inline on
+    each element.  cellspacing="0" + border-collapse keeps Outlook from
+    inserting gaps between the (border-collapsed) cells.
+    """
+    import re
+
+    table_style = (
+        "border-collapse:collapse;border:2px solid #000000;"
+        "width:100%;margin:16px 0;font-size:14px;"
+    )
+    cell = "border:1px solid #000000;padding:8px 10px;"
+    th_style = cell + "background:#f0f0f0;text-align:left;"
+
+    # <table> is always emitted bare by python-markdown.
+    html = re.sub(
+        r"<table(?![^>]*style=)([^>]*)>",
+        rf'<table\1 cellspacing="0" cellpadding="0" style="{table_style}">',
+        html,
+    )
+
+    # <th>/<td> may already carry style="text-align:..." from column
+    # alignment — merge onto the existing style, else add a new one.
+    # The (?=[\s>]) guard anchors on the whole tag name so <th> does not
+    # also match <thead>.
+    for tag, style in (("th", th_style), ("td", cell)):
+        html = re.sub(
+            rf'<{tag}(?=[\s>])([^>]*) style="([^"]*)"',
+            rf'<{tag}\1 style="\2;{style}"',
+            html,
+        )
+        html = re.sub(
+            rf"<{tag}(?=[\s>])(?![^>]*style=)([^>]*)>",
+            rf'<{tag}\1 style="{style}">',
+            html,
+        )
+
+    return html
+
+
 def _wrap_html(content_html: str, footer_html: str = "", base_url: str = "") -> str:
     """Wrap content in the email base template."""
     content_html = _style_code_blocks(content_html)
+    content_html = _style_tables(content_html)
     footer = footer_html or _DEFAULT_FOOTER.format(base_url=base_url)
     return _EMAIL_WRAPPER.format(content=content_html, footer=footer)
 
@@ -179,6 +223,11 @@ def _render_blog_email(
     title: str, content_md: str, slug: str, author_name: str, base_url: str
 ) -> str:
     """Render a blog post as an HTML email body."""
+    # Strip the [TOC] table-of-contents marker: the email renderer has no
+    # 'toc' extension (anchor navigation is unreliable in mail clients),
+    # so the literal token would otherwise appear as text.
+    content_md = re.sub(r"\[TOC\]", "", content_md, flags=re.IGNORECASE)
+
     # Convert relative image URLs to absolute so email clients can fetch them
     content_md = re.sub(
         r'src="(/blog/images/)',
