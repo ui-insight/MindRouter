@@ -18,15 +18,22 @@
     /* Override Pygments GitHub theme colors in dark mode */
     [data-bs-theme="dark"] .codehilite,
     [data-bs-theme="dark"] .blog-content pre { background: #1e1e2e; color: #cdd6f4; }
+    /* Safety net: any token class not accented below inherits a light,
+       readable color instead of the base theme's dark-on-dark defaults
+       (e.g. Keyword.Constant true/false/None). Accent rules below have
+       higher specificity and still win. */
+    [data-bs-theme="dark"] .codehilite span { color: #cdd6f4; }
     [data-bs-theme="dark"] .codehilite .c,
     [data-bs-theme="dark"] .codehilite .cm,
     [data-bs-theme="dark"] .codehilite .c1,
     [data-bs-theme="dark"] .codehilite .cs { color: #6c7086; }
     [data-bs-theme="dark"] .codehilite .k,
+    [data-bs-theme="dark"] .codehilite .kc,
     [data-bs-theme="dark"] .codehilite .kd,
     [data-bs-theme="dark"] .codehilite .kn,
     [data-bs-theme="dark"] .codehilite .kp,
-    [data-bs-theme="dark"] .codehilite .kr { color: #cba6f7; }
+    [data-bs-theme="dark"] .codehilite .kr,
+    [data-bs-theme="dark"] .codehilite .kt { color: #cba6f7; }
     [data-bs-theme="dark"] .codehilite .s,
     [data-bs-theme="dark"] .codehilite .s1,
     [data-bs-theme="dark"] .codehilite .s2,
