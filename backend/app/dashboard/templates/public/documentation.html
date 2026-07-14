@@ -566,7 +566,7 @@ max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
                         <tr><td><code>model</code></td><td>string</td><td>server default</td><td>Diffusion model name; omit to use the administrator-configured default. Image models appear in <code>GET /v1/models</code>.</td></tr>
                         <tr><td><code>n</code></td><td>int</td><td>1</td><td>Number of images (capped server-side, default cap 4)</td></tr>
                         <tr><td><code>size</code></td><td>string</td><td>"1024x1024"</td><td>Must be on the administrator-configured allow-list (e.g. <code>512x512</code>, <code>768x768</code>, <code>1024x1024</code>, <code>1024x768</code>, <code>768x1024</code>); disallowed sizes return 400 listing the permitted values</td></tr>
-                        <tr><td><code>response_format</code></td><td>string</td><td>"url"</td><td><code>"b64_json"</code> or <code>"url"</code>. <strong>Use <code>b64_json</code> from API clients</strong> &mdash; <code>url</code> values are passed through from the backend and may not be reachable from outside the cluster network.</td></tr>
+                        <tr><td><code>response_format</code></td><td>string</td><td>"url"</td><td><code>"b64_json"</code> or <code>"url"</code>. <strong>Always use <code>b64_json</code> from API clients</strong> &mdash; see <em>Retrieving the image</em> below.</td></tr>
                         <tr><td><code>num_inference_steps</code></td><td>int</td><td>20</td><td>Diffusion steps (quality/latency tradeoff); values above the server cap (default 50) are silently clamped</td></tr>
                         <tr><td><code>guidance_scale</code></td><td>float</td><td>3.5</td><td>Prompt-adherence strength (FLUX-specific)</td></tr>
                         <tr><td><code>seed</code></td><td>int</td><td>random</td><td>Fix for reproducible generations</td></tr>
@@ -608,6 +608,11 @@ result = client.images.generate(
 with open("idaho.png", "wb") as f:
     f.write(base64.b64decode(result.data[0].b64_json))</code></pre>
                 <p>(<code>num_inference_steps</code>, <code>guidance_scale</code>, and <code>seed</code> are MindRouter extensions, so the OpenAI SDK requires them via <code>extra_body</code>.)</p>
+
+                <h5>Retrieving the Image</h5>
+                <p>The generation response is the <strong>only</strong> delivery of the image &mdash; MindRouter does not retain images generated through the API, and there is no follow-up download endpoint. Decode the <code>b64_json</code> payload and save it client-side (as in the SDK example above).</p>
+                <p><strong>Do not use <code>response_format: "url"</code> from API clients.</strong> The <code>url</code> value is passed through verbatim from the diffusion backend and is a backend-relative path (e.g. <code>/images/&lt;id&gt;.png</code>) that refers to a file on the backend node itself &mdash; it is <em>not</em> served by MindRouter and will 404 if resolved against the gateway. It exists for deployments where clients can reach the diffusion backend directly.</p>
+                <p>If you want server-side persistence with browsable history, use the <a href="/images">/images</a> dashboard playground instead &mdash; its save/history features store images on the server, but they apply only to images generated through that page, not through the API.</p>
 
                 <h5>Content Policy</h5>
                 <p>When an administrator has configured an image content policy, every prompt is screened by an LLM judge <em>before</em> generation. Denied prompts return <code>400</code> with the OpenAI error envelope:</p>
