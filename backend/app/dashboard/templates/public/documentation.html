@@ -307,6 +307,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/rerank</code></td><td>API Key</td><td>Rerank documents against a query</td></tr>
                         <tr><td>POST</td><td><code>/v1/score</code></td><td>API Key</td><td>Score similarity between text pairs</td></tr>
                         <tr><td>POST</td><td><code>/v1/tokenize</code></td><td>API Key</td><td>Count input tokens for a request</td></tr>
+                        <tr><td>POST</td><td><code>/v1/images/generations</code></td><td>API Key</td><td><a href="#image-generation">Image generation</a> (diffusion models; requires per-account enablement)</td></tr>
                         <tr><td>GET</td><td><code>/v1/models</code></td><td>API Key</td><td>List available models</td></tr>
                     </tbody>
                 </table>
@@ -545,6 +546,85 @@ max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
                     <li><code>family</code> &mdash; model family (e.g. "llama", "qwen2")</li>
                     <li><code>capabilities.thinking</code> &mdash; whether the model supports thinking/reasoning mode</li>
                 </ul>
+
+                <h4 id="image-generation">Image Generation</h4>
+                <p><code>POST /v1/images/generations</code> generates images with the cluster's diffusion backends (FLUX family), using the OpenAI Images API request/response shape plus diffusion-specific extensions. A browser-based playground with the same capabilities is available at <a href="/images">/images</a> in the dashboard (generate, save, history).</p>
+
+                <p><strong>Access requirements</strong> &mdash; two switches must be on before any request succeeds:</p>
+                <ul>
+                    <li><strong>Per-account enablement</strong> &mdash; image generation is opt-in per user. Without it you receive <code>403 Forbidden</code> (<em>"Image generation is not enabled for your account"</em>). Contact an administrator to enable it.</li>
+                    <li><strong>Global switch</strong> &mdash; administrators can disable image generation cluster-wide, in which case all requests receive <code>503</code>.</li>
+                </ul>
+
+                <p><strong>Request parameters:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>prompt</code></td><td>string</td><td><em>required</em></td><td>Text description of the desired image</td></tr>
+                        <tr><td><code>model</code></td><td>string</td><td>server default</td><td>Diffusion model name; omit to use the administrator-configured default. Image models appear in <code>GET /v1/models</code>.</td></tr>
+                        <tr><td><code>n</code></td><td>int</td><td>1</td><td>Number of images (capped server-side, default cap 4)</td></tr>
+                        <tr><td><code>size</code></td><td>string</td><td>"1024x1024"</td><td>Must be on the administrator-configured allow-list (e.g. <code>512x512</code>, <code>768x768</code>, <code>1024x1024</code>, <code>1024x768</code>, <code>768x1024</code>); disallowed sizes return 400 listing the permitted values</td></tr>
+                        <tr><td><code>response_format</code></td><td>string</td><td>"url"</td><td><code>"b64_json"</code> or <code>"url"</code>. <strong>Use <code>b64_json</code> from API clients</strong> &mdash; <code>url</code> values are passed through from the backend and may not be reachable from outside the cluster network.</td></tr>
+                        <tr><td><code>num_inference_steps</code></td><td>int</td><td>20</td><td>Diffusion steps (quality/latency tradeoff); values above the server cap (default 50) are silently clamped</td></tr>
+                        <tr><td><code>guidance_scale</code></td><td>float</td><td>3.5</td><td>Prompt-adherence strength (FLUX-specific)</td></tr>
+                        <tr><td><code>seed</code></td><td>int</td><td>random</td><td>Fix for reproducible generations</td></tr>
+                        <tr><td><code>quality</code>, <code>style</code></td><td>string</td><td>&mdash;</td><td>OpenAI-compatible fields, passed through to the backend</td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Example:</strong></p>
+                <pre><code>curl -X POST http://localhost:8000/v1/images/generations \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A golden retriever wearing a tiny graduation cap, studio portrait",
+    "size": "1024x1024",
+    "response_format": "b64_json",
+    "num_inference_steps": 28,
+    "seed": 42
+  }'</code></pre>
+
+                <p><strong>Response</strong> (OpenAI Images shape):</p>
+                <pre><code>{
+  "created": 1752444000,
+  "data": [
+    {"b64_json": "&lt;base64-encoded PNG&gt;"}
+  ]
+}</code></pre>
+
+                <h5>SDK Usage (Python)</h5>
+                <pre><code>import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="mr2_your-api-key")
+result = client.images.generate(
+    prompt="A watercolor map of Idaho",
+    size="1024x1024",
+    response_format="b64_json",
+    extra_body={"num_inference_steps": 28, "seed": 42},
+)
+with open("idaho.png", "wb") as f:
+    f.write(base64.b64decode(result.data[0].b64_json))</code></pre>
+                <p>(<code>num_inference_steps</code>, <code>guidance_scale</code>, and <code>seed</code> are MindRouter extensions, so the OpenAI SDK requires them via <code>extra_body</code>.)</p>
+
+                <h5>Content Policy</h5>
+                <p>When an administrator has configured an image content policy, every prompt is screened by an LLM judge <em>before</em> generation. Denied prompts return <code>400</code> with the OpenAI error envelope:</p>
+                <pre><code>{
+  "error": {
+    "message": "Your image request was denied by content policy: &lt;reason&gt;",
+    "type": "content_policy_violation",
+    "code": "policy_violation"
+  }
+}</code></pre>
+                <p>Denied requests are recorded in the audit log with the judge's verdict. The <a href="/images">/images</a> playground offers a pre-flight policy check so you can test a prompt without spending a generation.</p>
+
+                <h5>Server-Side Guardrails</h5>
+                <p>Administrators configure defaults and limits that are applied to every request (values above a cap are clamped, not rejected, except for <code>size</code>): default model, default/maximum inference steps, default guidance scale, maximum image count per request, allowed sizes, and maximum dimensions.</p>
+
+                <p><strong>Error summary:</strong> <code>400</code> missing prompt / disallowed size / dimensions over limit / policy denial &middot; <code>403</code> image generation not enabled for your account &middot; <code>404</code> unknown model &middot; <code>429</code> rate limit &middot; <code>503</code> image generation disabled or no healthy diffusion backend.</p>
+                <p><strong>Notes:</strong> generation is slow relative to chat (tens of seconds for high step counts &mdash; the gateway allows up to 5 minutes per attempt); request IDs use the <code>img-*</code> prefix; standard RPM rate limits apply.</p>
 
                 <h3>Ollama-Compatible Endpoints</h3>
                 <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter as a drop-in replacement.</p>

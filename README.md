@@ -358,6 +358,7 @@ make docker-migrate # Run Alembic migrations via docker-compose
 | POST | `/v1/embeddings` | OpenAI-compatible embeddings |
 | POST | `/v1/rerank` | Rerank documents against a query |
 | POST | `/v1/score` | Score similarity between text pairs |
+| POST | `/v1/images/generations` | Image generation (FLUX; per-account enablement) |
 | GET | `/v1/models` | List available models |
 | POST | `/api/chat` | Ollama-compatible chat |
 | POST | `/api/generate` | Ollama-compatible generate |

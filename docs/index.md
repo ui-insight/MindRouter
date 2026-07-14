@@ -181,7 +181,7 @@ Browser-based dashboard calls authenticate via the `mindrouter_session` cookie s
 
 Every API response includes a unique request ID for tracing and audit correlation:
 
-- **Auto-generated** in the format `chatcmpl-*`, `cmpl-*`, `emb-*`, `msg-*`, or `resp_*` based on the endpoint type.
+- **Auto-generated** in the format `chatcmpl-*`, `cmpl-*`, `emb-*`, `msg-*`, `resp_*`, or `img-*` based on the endpoint type.
 - **Client-provided** -- Clients can supply their own ID via the `X-Request-ID` header, which MindRouter will use instead of generating one.
 - **Returned** in both the response body (`id` field) and response headers for easy correlation.
 - **Audit trail** -- The request ID links the audit log entry to the API response for end-to-end traceability.
@@ -240,6 +240,7 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | POST | `/v1/embeddings` | API Key | Generate embeddings |
 | POST | `/v1/rerank` | API Key | Rerank documents against a query |
 | POST | `/v1/score` | API Key | Score similarity between text pairs |
+| POST | `/v1/images/generations` | API Key | Image generation (FLUX; requires per-account enablement) |
 | GET | `/v1/models` | API Key | List available models |
 
 #### Chat Completions
