@@ -148,6 +148,12 @@ class Settings(BaseSettings):
     backend_request_timeout_per_attempt: int = 180
     backend_retry_max_attempts: int = 3
     structured_output_retry_on_invalid: bool = True
+    # Gateway policy: reasoning/thinking is OFF by default unless the client
+    # explicitly opts in (think:true / thinking:{type:enabled} / reasoning_effort).
+    # Applies to enable_thinking-style models (Qwen, Gemma, Nemotron); gpt-oss
+    # uses reasoning_effort and is left untouched. Set false to restore the old
+    # per-model launch defaults.
+    thinking_off_by_default: bool = True
 
     # OpenAI Responses API (/v1/responses)
     responses_api_enabled: bool = True

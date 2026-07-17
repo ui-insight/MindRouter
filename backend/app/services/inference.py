@@ -1278,6 +1278,19 @@ class InferenceService:
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
+            # Gateway policy: reasoning/thinking is OFF by default unless the
+            # client opts in. Applies to enable_thinking-style models (Qwen,
+            # Gemma, Nemotron all honor the boolean). gpt-oss uses
+            # reasoning_effort and ignores enable_thinking, so leave it as-is
+            # (think stays None) to preserve its reasoning-promotion handling.
+            if (
+                self._settings.thinking_off_by_default
+                and hasattr(request, 'think')
+                and request.think is None
+                and "gpt-oss" not in (job.model or "").lower()
+            ):
+                request.think = False
+
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
                 _ctx_target = next((m for m in models if m.name == job.model), models[0])
@@ -1429,6 +1442,17 @@ class InferenceService:
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
+
+            # Gateway policy: reasoning/thinking is OFF by default unless the
+            # client opts in (see non-streaming path for rationale). gpt-oss is
+            # left untouched (uses reasoning_effort, ignores enable_thinking).
+            if (
+                self._settings.thinking_off_by_default
+                and hasattr(request, 'think')
+                and request.think is None
+                and "gpt-oss" not in (job.model or "").lower()
+            ):
+                request.think = False
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and _models and hasattr(request, 'backend_options'):
