@@ -1283,15 +1283,14 @@ class InferenceService:
                     request.think = None
 
             # Gateway policy: reasoning/thinking is OFF by default unless the
-            # client opts in. Applies to vLLM enable_thinking-style models (Qwen,
-            # Gemma, Nemotron honor the boolean; harmless no-op on non-reasoning
-            # vLLM models). gpt-oss uses reasoning_effort and ignores
-            # enable_thinking, so leave it as-is (think stays None) to preserve its
-            # reasoning-promotion handling. Ollama is left untouched to avoid
-            # sending an unsupported think field to non-thinking Ollama models.
+            # client opts in. Applies to all engines except gpt-oss (which uses
+            # reasoning_effort and ignores enable_thinking; leaving think None
+            # preserves its reasoning-promotion handling). For Ollama, think:false
+            # is accepted by both thinking and non-thinking models (verified), and
+            # the Ollama-only strip above still guards think:true on non-thinking
+            # models.
             if (
                 self._settings.thinking_off_by_default
-                and backend.engine != BackendEngine.OLLAMA
                 and hasattr(request, 'think')
                 and request.think is None
                 and "gpt-oss" not in (job.model or "").lower()
@@ -1453,11 +1452,9 @@ class InferenceService:
                     request.think = None
 
             # Gateway policy: reasoning/thinking is OFF by default unless the
-            # client opts in (see non-streaming path for rationale). Only for
-            # non-Ollama (vLLM); gpt-oss left untouched (uses reasoning_effort).
+            # client opts in (see non-streaming path). All engines except gpt-oss.
             if (
                 self._settings.thinking_off_by_default
-                and backend.engine != BackendEngine.OLLAMA
                 and hasattr(request, 'think')
                 and request.think is None
                 and "gpt-oss" not in (job.model or "").lower()
