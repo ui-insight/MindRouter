@@ -1271,20 +1271,27 @@ class InferenceService:
                 if _target.context_length:
                     await self.cap_max_tokens(request, backend, _target.context_length)
 
-            # Strip thinking mode for models that don't support it
-            # (Ollama returns a 400 error if think=true on non-thinking models)
-            if models and hasattr(request, 'think') and request.think:
+            # Strip thinking mode for OLLAMA models that don't support it
+            # (Ollama 400s if think is set on a non-thinking model). vLLM ignores
+            # enable_thinking harmlessly, so never strip there: supports_thinking is
+            # discovery-populated and can be stale/inconsistent across replicas,
+            # which would otherwise wrongly block a client's opt-in.
+            if (backend.engine == BackendEngine.OLLAMA
+                    and models and hasattr(request, 'think') and request.think):
                 _target = next((m for m in models if m.name == job.model), models[0])
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
             # Gateway policy: reasoning/thinking is OFF by default unless the
-            # client opts in. Applies to enable_thinking-style models (Qwen,
-            # Gemma, Nemotron all honor the boolean). gpt-oss uses
-            # reasoning_effort and ignores enable_thinking, so leave it as-is
-            # (think stays None) to preserve its reasoning-promotion handling.
+            # client opts in. Applies to vLLM enable_thinking-style models (Qwen,
+            # Gemma, Nemotron honor the boolean; harmless no-op on non-reasoning
+            # vLLM models). gpt-oss uses reasoning_effort and ignores
+            # enable_thinking, so leave it as-is (think stays None) to preserve its
+            # reasoning-promotion handling. Ollama is left untouched to avoid
+            # sending an unsupported think field to non-thinking Ollama models.
             if (
                 self._settings.thinking_off_by_default
+                and backend.engine != BackendEngine.OLLAMA
                 and hasattr(request, 'think')
                 and request.think is None
                 and "gpt-oss" not in (job.model or "").lower()
@@ -1437,17 +1444,20 @@ class InferenceService:
                 if _target.context_length:
                     await self.cap_max_tokens(request, backend, _target.context_length)
 
-            # Strip thinking mode for models that don't support it
-            if _models and hasattr(request, 'think') and request.think:
+            # Strip thinking mode for OLLAMA models that don't support it
+            # (see non-streaming path for rationale; never strip on vLLM).
+            if (backend.engine == BackendEngine.OLLAMA
+                    and _models and hasattr(request, 'think') and request.think):
                 _target = next((m for m in _models if m.name == job.model), _models[0])
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
             # Gateway policy: reasoning/thinking is OFF by default unless the
-            # client opts in (see non-streaming path for rationale). gpt-oss is
-            # left untouched (uses reasoning_effort, ignores enable_thinking).
+            # client opts in (see non-streaming path for rationale). Only for
+            # non-Ollama (vLLM); gpt-oss left untouched (uses reasoning_effort).
             if (
                 self._settings.thinking_off_by_default
+                and backend.engine != BackendEngine.OLLAMA
                 and hasattr(request, 'think')
                 and request.think is None
                 and "gpt-oss" not in (job.model or "").lower()
