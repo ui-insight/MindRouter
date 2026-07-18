@@ -126,6 +126,20 @@ def test_post_path_helpers():
     assert be.post_canonical("my-slug") == "https://mindrouter.ai/blog/my-slug/"
 
 
+def test_navbar_has_configurator_in_canonical_order():
+    html = be.render_post_html(make_post())
+    # Absolute path required — blog pages live under /blog/, a relative link 404s.
+    assert 'href="/configurator.html"' in html
+    assert 'href="configurator.html"' not in html
+    assert "bi bi-sliders" in html  # icon loads from the CDN already in <head>
+    # Canonical order: Features · Telemetry · Configurator · Docs · Blog · GitHub · Contact
+    nav = html[html.index("navbar-nav me-auto"):]
+    nav = nav[: nav.index("</ul>")]
+    order = ["Features", "Telemetry", "Configurator", "Docs", "Blog", "GitHub", "Contact"]
+    idxs = [nav.index(t) for t in order]
+    assert idxs == sorted(idxs), f"nav out of order: {list(zip(order, idxs))}"
+
+
 # --- index page -------------------------------------------------------------
 def test_render_index_lists_selected_posts_in_order():
     posts = [make_post(slug="newest", title="Newest"), make_post(slug="older", title="Older")]

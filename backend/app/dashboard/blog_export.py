@@ -213,6 +213,7 @@ def _navbar(active_blog: bool = True) -> str:
             <ul class="navbar-nav me-auto">
                 <li class="nav-item"><a class="nav-link" href="/#features">Features</a></li>
                 <li class="nav-item"><a class="nav-link" href="/#telemetry">Telemetry</a></li>
+                <li class="nav-item"><a class="nav-link" href="/configurator.html"><i class="bi bi-sliders"></i> Configurator</a></li>
                 <li class="nav-item"><a class="nav-link" href="/#docs">Docs</a></li>
                 <li class="nav-item"><a class="nav-link{active}" href="/blog/">Blog</a></li>
                 <li class="nav-item"><a class="nav-link" href="https://github.com/ui-insight/MindRouter" target="_blank"><i class="bi bi-github"></i> GitHub</a></li>
