@@ -31,6 +31,7 @@ from backend.app.db.session import get_async_db
 from backend.app.dashboard.routes import get_session_user_id, _admin_masquerade_context, templates
 from backend.app.services import email_service
 from backend.app.storage.artifacts import get_artifact_storage
+from backend.app.dashboard import blog_export
 
 blog_router = APIRouter(tags=["blog"])
 
@@ -431,6 +432,76 @@ async def admin_blog_send_test_email(
         return JSONResponse({"ok": True, "message": f"Test sent to {test_addr}"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Static-HTML export (dry-run preview of what would ship to mindrouter.ai).
+# The actual GitHub publishing lives in services/website_publisher.py.
+# ---------------------------------------------------------------------------
+
+@blog_router.get("/admin/blog/{post_id}/export.json")
+async def admin_blog_export_json(
+    request: Request,
+    post_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin dry-run: show the generated static HTML + image manifest for a post."""
+    user, redirect = await _require_admin_read(request, db)
+    if redirect:
+        return redirect
+
+    post = await crud.get_blog_post_by_id(db, post_id)
+    if not post:
+        return JSONResponse({"error": "Post not found"}, status_code=404)
+
+    exported = await blog_export.export_post(post)
+    return JSONResponse({
+        "post": {
+            "id": post.id,
+            "slug": exported.slug,
+            "title": exported.title,
+            "repo_path": exported.repo_path,
+            "url": exported.url,
+            "canonical": exported.canonical,
+        },
+        "images": [
+            {
+                "storage_path": img.storage_path,
+                "repo_path": img.repo_path,
+                "url": img.url,
+                "size": img.size,
+                "missing": img.missing,
+            }
+            for img in exported.images
+        ],
+        "missing_images": exported.missing_images,
+        "html_bytes": len(exported.html.encode("utf-8")),
+        "html": exported.html,
+    })
+
+
+@blog_router.get("/admin/blog/{post_id}/export/preview", response_class=HTMLResponse)
+async def admin_blog_export_preview(
+    request: Request,
+    post_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin dry-run: render the generated static page as HTML for eyeballing.
+
+    Served from the app, so /css/style.css and /css/blog.css (website assets)
+    will 404 here; Bootstrap/Pygments load from CDN and /blog/images/* resolve
+    via the app's own image route, so this gives a rough visual check. The
+    true look is on mindrouter.ai after publishing.
+    """
+    user, redirect = await _require_admin_read(request, db)
+    if redirect:
+        return redirect
+
+    post = await crud.get_blog_post_by_id(db, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    return HTMLResponse(blog_export.render_post_html(post))
 
 
 # ---------------------------------------------------------------------------
