@@ -2815,6 +2815,27 @@ async def get_published_blog_posts(db: AsyncSession) -> List[BlogPost]:
     return list(result.scalars().all())
 
 
+async def get_website_published_blog_posts(db: AsyncSession) -> List[BlogPost]:
+    """Get posts selected for the public mindrouter.ai site, newest first.
+
+    These back the generated blog index / RSS feed on mindrouter.ai. A post
+    must be app-published, not soft-deleted, and explicitly website-selected.
+    """
+    result = await db.execute(
+        select(BlogPost)
+        .options(selectinload(BlogPost.author))
+        .where(
+            and_(
+                BlogPost.website_published.is_(True),
+                BlogPost.is_published.is_(True),
+                BlogPost.deleted_at.is_(None),
+            )
+        )
+        .order_by(BlogPost.published_at.desc())
+    )
+    return list(result.scalars().all())
+
+
 async def get_blog_post_by_slug(db: AsyncSession, slug: str) -> Optional[BlogPost]:
     """Get a single published blog post by slug."""
     result = await db.execute(

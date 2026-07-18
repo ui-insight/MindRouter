@@ -22,6 +22,7 @@
                             <th>Author</th>
                             <th>Status</th>
                             <th>Published</th>
+                            <th>Site</th>
                             <th>Created</th>
                             <th>Actions</th>
                         </tr>
@@ -41,6 +42,17 @@
                                 {% endif %}
                             </td>
                             <td>{{ post.published_at|localtime('%Y-%m-%d') if post.published_at else '-' }}</td>
+                            <td>
+                                {% if post.website_published %}
+                                    {% if post.updated_at and post.website_published_at and post.updated_at > post.website_published_at %}
+                                    <span class="badge bg-warning text-dark" title="On mindrouter.ai but edited since the last sync">On site (stale)</span>
+                                    {% else %}
+                                    <span class="badge bg-primary" title="Published to mindrouter.ai">On site</span>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="text-muted">&mdash;</span>
+                                {% endif %}
+                            </td>
                             <td>{{ post.created_at|localtime('%Y-%m-%d') }}</td>
                             <td>
                                 {% if not is_read_only %}
@@ -58,7 +70,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="6" class="text-muted text-center">No blog posts yet.</td>
+                            <td colspan="7" class="text-muted text-center">No blog posts yet.</td>
                         </tr>
                         {% endfor %}
                     </tbody>

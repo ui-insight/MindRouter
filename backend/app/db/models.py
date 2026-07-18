@@ -1013,6 +1013,14 @@ class BlogPost(Base, TimestampMixin, SoftDeleteMixin):
     is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Public mindrouter.ai site publishing: selective, opt-in, and independent
+    # of is_published. A post reaches mindrouter.ai only when explicitly
+    # selected; the publisher (services/website_publisher.py) commits it to the
+    # mindrouter-website repo and records the commit sha here.
+    website_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    website_published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    website_commit_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
     # Relationships
     author: Mapped["User"] = relationship("User")
 

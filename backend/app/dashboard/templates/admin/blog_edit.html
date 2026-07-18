@@ -146,6 +146,51 @@
             </div>
             {% endif %}
 
+            {% if post %}
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="bi bi-globe me-2"></i>Public Site (mindrouter.ai)</h5>
+                </div>
+                <div class="card-body">
+                    {% if post.website_published %}
+                    <div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+                        <span class="badge bg-success">On mindrouter.ai</span>
+                        {% if post.website_published_at %}
+                        <span class="text-muted small">since {{ post.website_published_at|localtime('%Y-%m-%d %H:%M') }}</span>
+                        {% endif %}
+                        {% if post.updated_at and post.website_published_at and post.updated_at > post.website_published_at %}
+                        <span class="badge bg-warning text-dark">Out of date &mdash; re-sync to update</span>
+                        {% endif %}
+                    </div>
+                    <div class="d-flex gap-2 flex-wrap">
+                        {% if post.is_published %}
+                        <form method="post" action="/admin/blog/{{ post.id }}/website-publish" class="d-inline">
+                            <button type="submit" class="btn btn-outline-primary btn-sm"><i class="bi bi-arrow-repeat me-1"></i>Re-sync</button>
+                        </form>
+                        {% endif %}
+                        <form method="post" action="/admin/blog/{{ post.id }}/website-unpublish" class="d-inline"
+                              onsubmit="return confirm('Remove this post from the public mindrouter.ai site?');">
+                            <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-x-circle me-1"></i>Remove from mindrouter.ai</button>
+                        </form>
+                    </div>
+                    {% elif post.is_published %}
+                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <form method="post" action="/admin/blog/{{ post.id }}/website-publish" class="d-inline"
+                              onsubmit="return confirm('Publish this post to the public mindrouter.ai site?');">
+                            <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-globe me-1"></i>Publish to mindrouter.ai</button>
+                        </form>
+                        <span class="text-muted small">Not currently on the public site.</span>
+                    </div>
+                    {% else %}
+                    <span class="text-muted small">Publish the post first, then you can send it to mindrouter.ai.</span>
+                    {% endif %}
+                    <div class="form-text mt-2">
+                        Selecting commits the generated page to the <code>mindrouter-website</code> repo. It goes live after you pull on mindrouter.ai.
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
             {% else %}
             {# Read-only view for auditor mode #}
             {% if post %}

@@ -332,6 +332,75 @@ async def admin_blog_toggle_publish(
     return RedirectResponse("/admin/blog", status_code=302)
 
 
+@blog_router.post("/admin/blog/{post_id}/website-publish")
+async def admin_blog_website_publish(
+    request: Request,
+    post_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Select a post for the public mindrouter.ai site.
+
+    Requires the post to be app-published first, so drafts never leak to the
+    public site. This records the selection; the GitHub publisher (PR3) commits
+    the generated page/images to the mindrouter-website repo and captures the
+    commit sha.
+    """
+    user, redirect = await _require_admin(request, db)
+    if redirect:
+        return redirect
+
+    post = await crud.get_blog_post_by_id(db, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if not post.is_published:
+        return RedirectResponse(
+            f"/admin/blog/{post_id}/edit?error=Publish+the+post+before+sending+it+to+mindrouter.ai",
+            status_code=302,
+        )
+
+    # PR3: commit to sheneman/mindrouter-website via WebsitePublisher and store
+    # the returned commit sha into website_commit_sha.
+    await crud.update_blog_post(
+        db, post_id,
+        website_published=True,
+        website_published_at=datetime.now(timezone.utc),
+    )
+    await db.commit()
+
+    return RedirectResponse(
+        f"/admin/blog/{post_id}/edit?success=Selected+for+mindrouter.ai", status_code=302
+    )
+
+
+@blog_router.post("/admin/blog/{post_id}/website-unpublish")
+async def admin_blog_website_unpublish(
+    request: Request,
+    post_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Remove a post from the public mindrouter.ai site."""
+    user, redirect = await _require_admin(request, db)
+    if redirect:
+        return redirect
+
+    post = await crud.get_blog_post_by_id(db, post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    # PR3: remove the post's files from mindrouter-website and regenerate the index.
+    await crud.update_blog_post(
+        db, post_id,
+        website_published=False,
+        website_published_at=None,
+        website_commit_sha=None,
+    )
+    await db.commit()
+
+    return RedirectResponse(
+        f"/admin/blog/{post_id}/edit?success=Removed+from+mindrouter.ai", status_code=302
+    )
+
+
 @blog_router.post("/admin/blog/{post_id}/send-email")
 async def admin_blog_send_email(
     request: Request,
