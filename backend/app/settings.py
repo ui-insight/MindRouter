@@ -155,6 +155,15 @@ class Settings(BaseSettings):
     # per-model launch defaults.
     thinking_off_by_default: bool = True
 
+    # Public website publishing (mindrouter.ai static site). Selected blog posts
+    # are committed to the mindrouter-website repo via the GitHub API. The repo
+    # is additionally hard-allowlisted in website_publisher.py so it can never
+    # target another repository. Needs a fine-grained PAT with Contents:RW.
+    website_publish_enabled: bool = False
+    website_publish_repo: str = "sheneman/mindrouter-website"
+    website_publish_branch: str = "main"
+    website_publish_github_token: str = ""
+
     # OpenAI Responses API (/v1/responses)
     responses_api_enabled: bool = True
     responses_store_max_chain_depth: int = 20  # previous_response_id hops

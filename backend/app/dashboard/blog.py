@@ -32,6 +32,7 @@ from backend.app.dashboard.routes import get_session_user_id, _admin_masquerade_
 from backend.app.services import email_service
 from backend.app.storage.artifacts import get_artifact_storage
 from backend.app.dashboard import blog_export
+from backend.app.services.website_publisher import get_website_publisher
 
 blog_router = APIRouter(tags=["blog"])
 
@@ -119,6 +120,13 @@ async def _require_admin_read(request: Request, db: AsyncSession):
     if not user or not user.group or not user.group.has_admin_read:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user, None
+
+
+def _blog_edit_redirect(post_id: int, **params):
+    """Redirect to a post's edit page with url-encoded success/error flash params."""
+    qs = urlencode({k: v for k, v in params.items() if v})
+    suffix = f"?{qs}" if qs else ""
+    return RedirectResponse(f"/admin/blog/{post_id}/edit{suffix}", status_code=302)
 
 
 async def _require_admin(request: Request, db: AsyncSession):
@@ -353,13 +361,11 @@ async def admin_blog_website_publish(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
     if not post.is_published:
-        return RedirectResponse(
-            f"/admin/blog/{post_id}/edit?error=Publish+the+post+before+sending+it+to+mindrouter.ai",
-            status_code=302,
+        return _blog_edit_redirect(
+            post_id, error="Publish the post before sending it to mindrouter.ai."
         )
 
-    # PR3: commit to sheneman/mindrouter-website via WebsitePublisher and store
-    # the returned commit sha into website_commit_sha.
+    # Record the selection first so the regenerated index includes this post.
     await crud.update_blog_post(
         db, post_id,
         website_published=True,
@@ -367,9 +373,24 @@ async def admin_blog_website_publish(
     )
     await db.commit()
 
-    return RedirectResponse(
-        f"/admin/blog/{post_id}/edit?success=Selected+for+mindrouter.ai", status_code=302
-    )
+    publisher = get_website_publisher()
+    if not publisher.enabled:
+        return _blog_edit_redirect(
+            post_id,
+            success="Selected for mindrouter.ai (publishing not configured — set a GitHub token to push).",
+        )
+    try:
+        selected = await crud.get_website_published_blog_posts(db)  # now includes this post
+        sha = await publisher.publish(post, selected)
+        await crud.update_blog_post(db, post_id, website_commit_sha=sha)
+        await db.commit()
+        return _blog_edit_redirect(
+            post_id, success="Published to mindrouter.ai — pull on the host to go live."
+        )
+    except Exception as e:  # noqa: BLE001 - surface any push failure to the admin
+        return _blog_edit_redirect(
+            post_id, error=f"Selected, but the push to mindrouter.ai failed: {e}"
+        )
 
 
 @blog_router.post("/admin/blog/{post_id}/website-unpublish")
@@ -387,7 +408,6 @@ async def admin_blog_website_unpublish(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    # PR3: remove the post's files from mindrouter-website and regenerate the index.
     await crud.update_blog_post(
         db, post_id,
         website_published=False,
@@ -396,9 +416,19 @@ async def admin_blog_website_unpublish(
     )
     await db.commit()
 
-    return RedirectResponse(
-        f"/admin/blog/{post_id}/edit?success=Removed+from+mindrouter.ai", status_code=302
-    )
+    publisher = get_website_publisher()
+    if not publisher.enabled:
+        return _blog_edit_redirect(post_id, success="Removed from mindrouter.ai selection.")
+    try:
+        selected = await crud.get_website_published_blog_posts(db)  # now excludes this post
+        await publisher.unpublish(post, selected)
+        return _blog_edit_redirect(
+            post_id, success="Removed from mindrouter.ai — pull on the host to update."
+        )
+    except Exception as e:  # noqa: BLE001
+        return _blog_edit_redirect(
+            post_id, error=f"Removed from the app selection, but the push to mindrouter.ai failed: {e}"
+        )
 
 
 @blog_router.post("/admin/blog/{post_id}/send-email")
