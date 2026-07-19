@@ -73,8 +73,9 @@ async def export_data():
                 "node_name": node_name,
                 "gpu_indices": b.gpu_indices,
                 "supports_multimodal": b.supports_multimodal,
-                "supports_embeddings": b.supports_embeddings,
                 "supports_structured_output": b.supports_structured_output,
+                "supports_thinking": b.supports_thinking,
+                "supports_tools": b.supports_tools,
             })
 
     print(json.dumps(data, indent=2))
@@ -141,8 +142,9 @@ async def import_data(filepath: str):
             if bdata.get("priority"):
                 backend.priority = bdata["priority"]
             backend.supports_multimodal = bdata.get("supports_multimodal", False)
-            backend.supports_embeddings = bdata.get("supports_embeddings", False)
             backend.supports_structured_output = bdata.get("supports_structured_output", True)
+            backend.supports_thinking = bdata.get("supports_thinking", False)
+            backend.supports_tools = bdata.get("supports_tools", False)
             db.add(backend)
             print(f"  Created backend: {bdata['name']} ({bdata['url']})")
 

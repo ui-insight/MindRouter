@@ -236,7 +236,8 @@ class VLLMAdapter:
                 supports_multimodal = any(
                     x in model_lower
                     for x in ["llava", "vision", "vl", "multimodal",
-                              "qwen3.5", "gemma3", "gemma-3", "gemma4", "gemma-4"]
+                              "qwen3.5", "qwen3.6", "gemma3", "gemma-3", "gemma4", "gemma-4",
+                              "dots"]  # dots.OCR / dots.mocr are vision/OCR models
                 )
 
                 # Auto-detect thinking support for known model families
