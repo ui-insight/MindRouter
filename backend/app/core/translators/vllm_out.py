@@ -156,6 +156,11 @@ class VLLMOutTranslator:
             "messages": messages,
             "stream": canonical.stream,
         }
+        # Request usage on the final streaming chunk so quota accounting uses
+        # real token counts instead of a char-length estimate. MindRouter
+        # consumes this usage chunk internally; it is not forwarded to clients.
+        if canonical.stream:
+            payload["stream_options"] = {"include_usage": True}
 
         # Add optional parameters
         if canonical.temperature is not None:

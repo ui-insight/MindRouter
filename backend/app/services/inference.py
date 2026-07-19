@@ -389,6 +389,7 @@ class InferenceService:
         last_finish_reason = None
         inflight_chars = 0
         inflight_total_tokens = 0
+        real_usage = None  # populated from vLLM's include_usage chunk, if present
         completed = False
 
         try:
@@ -396,6 +397,13 @@ class InferenceService:
                 request, job, user, proxy_fn="_proxy_stream_request"
             ):
                 routed_backend = backend
+
+                # vLLM's include_usage chunk carries real token counts with empty
+                # choices; capture it for accounting and don't forward it (keeps the
+                # client-visible stream unchanged).
+                if chunk.usage is not None and not chunk.choices:
+                    real_usage = chunk.usage
+                    continue
 
                 # Format as SSE (exclude_none to avoid tool_calls:null in chunks)
                 yield f"data: {chunk.model_dump_json(exclude_none=True, by_alias=True)}\n\n".encode()
@@ -437,6 +445,7 @@ class InferenceService:
                 await asyncio.shield(self._complete_streaming_request(
                     db_request, routed_backend.id, full_content, chunk_count, job,
                     finish_reason=last_finish_reason,
+                    usage=real_usage,
                 ))
 
             completed = True
@@ -2099,11 +2108,19 @@ class InferenceService:
         chunk_count: int,
         job: Job,
         finish_reason: Optional[str] = None,
+        usage=None,
     ) -> None:
         """Complete a streaming request."""
-        prompt_tokens = job.estimated_prompt_tokens
-        completion_tokens = self._scheduler.estimate_tokens(content)
-        total_tokens = prompt_tokens + completion_tokens
+        if usage is not None:
+            # Real token counts harvested from vLLM's include_usage chunk.
+            prompt_tokens = usage.prompt_tokens
+            completion_tokens = usage.completion_tokens
+            total_tokens = usage.total_tokens or (prompt_tokens + completion_tokens)
+        else:
+            # Fallback: estimate from prompt sizing + generated content length.
+            prompt_tokens = job.estimated_prompt_tokens
+            completion_tokens = self._scheduler.estimate_tokens(content)
+            total_tokens = prompt_tokens + completion_tokens
 
         # Release backend capacity FIRST
         await self._scheduler.on_job_completed(job, backend_id, total_tokens)
