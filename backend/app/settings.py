@@ -169,6 +169,11 @@ class Settings(BaseSettings):
     # so existing deploys are unaffected; run single-worker on first boot.
     run_migrations: bool = False
 
+    # Request-field validation: 'off' | 'log' | 'enforce'. Surfaces vLLM-dialect
+    # or unknown request fields that would otherwise be silently dropped. Deploy
+    # at 'log' to observe real traffic, then flip to 'enforce'.
+    field_validation: str = "log"
+
     # OpenAI Responses API (/v1/responses)
     responses_api_enabled: bool = True
     responses_store_max_chain_depth: int = 20  # previous_response_id hops

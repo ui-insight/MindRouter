@@ -399,11 +399,13 @@ class InferenceService:
                 routed_backend = backend
 
                 # vLLM's include_usage chunk carries real token counts with empty
-                # choices; capture it for accounting and don't forward it (keeps the
-                # client-visible stream unchanged).
+                # choices. Always capture it for accounting; forward it to the
+                # client only if they asked via stream_options.include_usage
+                # (otherwise the client-visible stream is unchanged).
                 if chunk.usage is not None and not chunk.choices:
                     real_usage = chunk.usage
-                    continue
+                    if not getattr(request, "include_usage", False):
+                        continue  # internal-only; suppress from the client
 
                 # Format as SSE (exclude_none to avoid tool_calls:null in chunks)
                 yield f"data: {chunk.model_dump_json(exclude_none=True, by_alias=True)}\n\n".encode()

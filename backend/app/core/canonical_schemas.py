@@ -156,6 +156,7 @@ class CanonicalChatRequest(BaseModel):
     top_p: Optional[float] = Field(default=None, ge=0, le=1)
     max_tokens: Optional[int] = Field(default=None, ge=1)
     stream: bool = False
+    include_usage: bool = False  # client requested usage in the stream (stream_options.include_usage)
     stop: Optional[Union[str, List[str]]] = None
     presence_penalty: Optional[float] = Field(default=None, ge=-2, le=2)
     frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2)

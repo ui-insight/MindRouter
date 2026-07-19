@@ -49,6 +49,9 @@ class OpenAIInTranslator:
         Returns:
             CanonicalChatRequest
         """
+        from backend.app.core.translators.field_validation import validate_request_fields
+        validate_request_fields(data, dialect="chat")
+
         messages = []
         for msg in data.get("messages", []):
             messages.append(OpenAIInTranslator._translate_message(msg))
@@ -91,6 +94,7 @@ class OpenAIInTranslator:
             user=data.get("user"),
             think=OpenAIInTranslator._resolve_think(data),
             reasoning_effort=data.get("reasoning_effort"),
+            include_usage=bool((data.get("stream_options") or {}).get("include_usage", False)),
         )
 
     @staticmethod
