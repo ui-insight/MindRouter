@@ -209,6 +209,11 @@ class BackendRegisterRequest(BaseModel):
     gpu_type: Optional[str] = None
     node_id: Optional[int] = None
     gpu_indices: Optional[List[int]] = None
+    upsert: bool = Field(
+        default=False,
+        description="If true, update an existing backend with the same name or URL "
+        "instead of returning 409 (idempotent re-registration for installers).",
+    )
 
 
 class BackendResponse(BaseModel):
@@ -305,40 +310,55 @@ async def register_backend(
 
     Requires admin role.
     """
-    # Check for duplicate name
     existing = await crud.get_backend_by_name(db, request.name)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Backend with name '{request.name}' already exists",
-        )
-
-    # Check for duplicate URL
     existing_url = await crud.get_backend_by_url(db, request.url)
-    if existing_url:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Backend with URL '{request.url}' already exists (registered as '{existing_url.name}')",
-        )
-
     registry = get_registry()
 
-    backend = await registry.register_backend(
-        name=request.name,
-        url=request.url,
-        engine=request.engine,
-        max_concurrent=request.max_concurrent,
-        gpu_memory_gb=request.gpu_memory_gb,
-        gpu_type=request.gpu_type,
-        node_id=request.node_id,
-        gpu_indices=request.gpu_indices,
-        db=db,
-    )
+    # Idempotent re-registration: with upsert, update the matching backend in
+    # place (registry.update_backend reconciles the adapter/node mapping) instead
+    # of a 409. Without upsert, duplicates conflict as before.
+    upsert_target = (existing or existing_url) if request.upsert else None
+    if upsert_target is not None:
+        backend = await registry.update_backend(
+            upsert_target.id,
+            name=request.name,
+            url=request.url,
+            engine=request.engine,
+            max_concurrent=request.max_concurrent,
+            gpu_memory_gb=request.gpu_memory_gb,
+            gpu_type=request.gpu_type,
+            node_id=request.node_id,
+            gpu_indices=request.gpu_indices,
+        )
+        audit_action = "backend.upsert"
+    else:
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Backend with name '{request.name}' already exists",
+            )
+        if existing_url:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Backend with URL '{request.url}' already exists (registered as '{existing_url.name}')",
+            )
+        backend = await registry.register_backend(
+            name=request.name,
+            url=request.url,
+            engine=request.engine,
+            max_concurrent=request.max_concurrent,
+            gpu_memory_gb=request.gpu_memory_gb,
+            gpu_type=request.gpu_type,
+            node_id=request.node_id,
+            gpu_indices=request.gpu_indices,
+            db=db,
+        )
+        audit_action = "backend.register"
 
     # Resolve node name
     node_name = None
-    if request.node_id:
-        node = await crud.get_node_by_id(db, request.node_id)
+    if backend.node_id:
+        node = await crud.get_node_by_id(db, backend.node_id)
         if node:
             node_name = node.name
 
@@ -353,7 +373,7 @@ async def register_backend(
         await crud.log_admin_action(
             audit_db,
             user_id=admin.id,
-            action="backend.register",
+            action=audit_action,
             entity_type="backend",
             entity_id=str(backend.id),
             after_value={"name": backend.name, "url": backend.url, "engine": backend.engine.value, "max_concurrent": backend.max_concurrent, "node_id": backend.node_id},
