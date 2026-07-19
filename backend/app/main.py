@@ -345,10 +345,34 @@ _dlp_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
+async def _run_migrations() -> None:
+    """Run 'alembic upgrade head' at startup (opt-in via RUN_MIGRATIONS=1).
+
+    Alembic is synchronous, so run it in a worker thread. Fail fast on error —
+    a clear migration failure beats a downstream "Table 'backends' doesn't
+    exist" crash-loop. NOTE: with multiple workers, run single-worker on first
+    boot (or migrate out-of-band) to avoid a concurrent-DDL race.
+    """
+    def _upgrade() -> None:
+        from alembic import command
+        from alembic.config import Config
+
+        command.upgrade(Config("alembic.ini"), "head")
+
+    logger.info("run_migrations_start")
+    await asyncio.to_thread(_upgrade)
+    logger.info("run_migrations_done")
+
+
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Application lifespan manager."""
     global _cleanup_task, _redis_sync_task, _dlp_task, _cache_warm_task, _trend_warm_task
     logger.info("Starting MindRouter...")
+
+    # Opt-in: bring the schema to head before anything reads it (init_registry
+    # queries the backends table). Prevents a crash-loop on a fresh DB.
+    if get_settings().run_migrations:
+        await _run_migrations()
 
     # Initialize components
     await init_registry()

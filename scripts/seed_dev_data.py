@@ -16,6 +16,7 @@
 """Seed development data for MindRouter."""
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from backend.app.db.session import get_async_db_context
 from backend.app.db import crud
 from backend.app.db.models import UserRole
 from backend.app.security import hash_password, generate_api_key
+from backend.app.security.api_keys import hash_api_key
 from backend.app.settings import get_settings
 
 
@@ -70,11 +72,18 @@ async def seed_users():
         groups = await ensure_groups(db)
         await db.commit()
 
+        # Automation-friendly overrides (env). ADMIN_PASSWORD sets the password;
+        # ADMIN_API_KEY uses a specific key instead of minting; MINT_ADMIN_KEY=1
+        # (re)mints a key for an already-existing admin.
+        admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+        admin_api_key = os.environ.get("ADMIN_API_KEY")
+        mint_admin_key = os.environ.get("MINT_ADMIN_KEY", "").lower() in ("1", "true", "yes")
+
         users_data = [
             {
                 "username": "admin",
                 "email": "admin@mindrouter.local",
-                "password": "admin123",
+                "password": admin_password,
                 "role": UserRole.ADMIN,
                 "group_name": "admin",
                 "full_name": "Administrator",
@@ -82,36 +91,35 @@ async def seed_users():
         ]
 
         for user_data in users_data:
-            # Check if user exists
             existing = await crud.get_user_by_username(db, user_data["username"])
             if existing:
-                print(f"User {user_data['username']} already exists, skipping...")
-                continue
+                user = existing
+                print(f"User {user_data['username']} already exists.")
+                # Only (re)mint a key on demand, to avoid surprise key churn.
+                if not (admin_api_key or mint_admin_key):
+                    continue
+            else:
+                group = groups[user_data["group_name"]]
+                user = await crud.create_user(
+                    db=db,
+                    username=user_data["username"],
+                    email=user_data["email"],
+                    password_hash=hash_password(user_data["password"]),
+                    role=user_data["role"],
+                    full_name=user_data["full_name"],
+                    group_id=group.id,
+                )
+                print(f"Created user: {user.username} (group: {group.display_name})")
+                await crud.create_quota(db=db, user_id=user.id, rpm_limit=group.rpm_limit)
+                print(f"  Created quota: {group.token_budget} tokens")
 
-            group = groups[user_data["group_name"]]
-
-            # Create user
-            user = await crud.create_user(
-                db=db,
-                username=user_data["username"],
-                email=user_data["email"],
-                password_hash=hash_password(user_data["password"]),
-                role=user_data["role"],
-                full_name=user_data["full_name"],
-                group_id=group.id,
-            )
-            print(f"Created user: {user.username} (group: {group.display_name})")
-
-            # Create quota from group defaults
-            await crud.create_quota(
-                db=db,
-                user_id=user.id,
-                rpm_limit=group.rpm_limit,
-            )
-            print(f"  Created quota: {group.token_budget} tokens")
-
-            # Create an API key for each user
-            full_key, key_hash, key_prefix = generate_api_key()
+            # Accept a supplied key (ADMIN_API_KEY) or mint one.
+            if admin_api_key:
+                full_key = admin_api_key
+                key_hash = hash_api_key(admin_api_key)
+                key_prefix = admin_api_key[:12]
+            else:
+                full_key, key_hash, key_prefix = generate_api_key()
             await crud.create_api_key(
                 db=db,
                 user_id=user.id,
@@ -120,7 +128,10 @@ async def seed_users():
                 name="Default Key",
             )
             print(f"  Created API key: {key_prefix}...")
-            print(f"  FULL KEY (save this!): {full_key}")
+            # Full key on ONE parseable line (prefix and key were previously on
+            # separate lines, so automation grabbed the prefix by mistake). It
+            # cannot be re-shown; re-run with MINT_ADMIN_KEY=1 to add a new one.
+            print(f"ADMIN_API_KEY={full_key}")
             print()
 
         await db.commit()

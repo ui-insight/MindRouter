@@ -164,6 +164,11 @@ class Settings(BaseSettings):
     website_publish_branch: str = "main"
     website_publish_github_token: str = ""
 
+    # Startup: opt-in `alembic upgrade head` before serving (env RUN_MIGRATIONS=1)
+    # so a fresh/unmigrated database doesn't crash-loop the app. Off by default
+    # so existing deploys are unaffected; run single-worker on first boot.
+    run_migrations: bool = False
+
     # OpenAI Responses API (/v1/responses)
     responses_api_enabled: bool = True
     responses_store_max_chain_depth: int = 20  # previous_response_id hops

@@ -304,6 +304,47 @@ def _build_ocr_prompt(
     return prompt
 
 
+def _is_image_limit_error(e: Exception) -> bool:
+    """True if a backend rejected a multi-image request — a single-page OCR
+    specialist, or vLLM ``--limit-mm-per-prompt`` below the chunk size."""
+    msg = str(getattr(e, "detail", "") or e).lower()
+    is_400 = "400" in msg or getattr(e, "status_code", None) == 400
+    return is_400 and any(
+        k in msg for k in ("multimodal", "image", "at most", "limit-mm", "mm_per_prompt")
+    )
+
+
+async def _ocr_pages_individually(
+    service, page_images: List[bytes], prompt_template: str, model: str,
+    ocr_config: dict, user, api_key, http_request,
+) -> Tuple[str, Dict[str, int]]:
+    """Fallback OCR: one page per request, concatenated. Used when a backend
+    cannot accept multiple images in a single request."""
+    parts: List[str] = []
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for img_bytes in page_images:
+        b64 = base64.b64encode(img_bytes).decode()
+        canonical = CanonicalChatRequest(
+            model=model,
+            messages=[CanonicalMessage(role="user", content=[
+                TextContent(text=_build_ocr_prompt(1, prompt_template)),
+                ImageUrlContent(image_url={"url": f"data:image/png;base64,{b64}"}),
+            ])],
+            temperature=ocr_config["temperature"],
+            max_tokens=ocr_config["max_tokens"],
+            stream=False,
+            think=False,
+        )
+        result = await service.chat_completion(canonical, user, api_key, http_request)
+        u = result.get("usage", {})
+        for k in usage:
+            usage[k] += u.get(k, 0)
+        parts.append(_strip_fences(
+            result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        ))
+    return "\n\n".join(parts), usage
+
+
 async def ocr_chunk(
     page_images: List[bytes],
     chunk_idx: int,
@@ -370,6 +411,21 @@ async def ocr_chunk(
                     attempt=attempt,
                     error=str(e),
                 )
+                # If the backend can't take a multi-image request, degrade to one
+                # page per request rather than retrying the same failing payload.
+                if num_pages > 1 and _is_image_limit_error(e):
+                    logger.info(
+                        "ocr_chunk_degrade_single_page",
+                        chunk=chunk_idx, pages=num_pages,
+                    )
+                    await chunk_db.rollback()
+                    text, deg_usage = await _ocr_pages_individually(
+                        service, page_images, prompt_template, model,
+                        ocr_config, user, api_key, http_request,
+                    )
+                    for k in total_usage:
+                        total_usage[k] += deg_usage.get(k, 0)
+                    return chunk_idx, text, total_usage
                 if attempt == max_retries:
                     raise
                 # Reset session state for retry
