@@ -243,6 +243,51 @@ Planned coverage:
 
 ---
 
+## 11. vLLM MTP Speculative-Decoding Benchmarks (ops — on GPU nodes)
+
+> **Not part of the repo test suite.** Manual throughput/latency benchmark run on the
+> vLLM GPU hosts; harness lives under `/data/vllm/` (lynx) or `/zdata/data/vllm/`
+> (aspen NFS), not in this repo. No Makefile target.
+
+**Harness:** `vllm_bench_spec.py URL MODEL LABEL [conc_csv]` — concurrency sweep
+(default `1,2,4,8,16`), temp=0, `ignore_eos`, 256 out-tokens, ~650-tok prompt; reports
+median decode tok/s **per stream** (single-stream latency) and **aggregate** tok/s (server
+throughput). `launch-gpu3-qwen-bench.sh <num_spec>` boots a serve on a non-prod port
+(`0`=baseline, `N`=MTP depth); `run-qwen-full.sh` drives the baseline→mtp sweep with
+orphan-safe GPU teardown. Enable built-in MTP via
+`--speculative-config '{"method":"mtp","num_speculative_tokens":N}'`.
+
+**qwen3.6-27b MTP depth sweep** (2026-07-20, lynx-gpu3 H200, vLLM 0.25.1, gpu-mem 0.95, 16K ctx, exclusive GPU):
+
+| depth | conc1 single-stream (tok/s) | conc1 AGG (×base) | conc16 AGG | acceptance |
+|-------|-----------------------------|-------------------|-----------|------------|
+| baseline | 87 | 85 (1.00×) | 1003 | — |
+| mtp-1 | 131 | 127 (1.49×) | 1310 | len 1.93 / 93% |
+| mtp-2 | 179 | 171 (2.01×) | 1623 | len 2.68 / 84% |
+| **mtp-3** | **211** | **200 (2.35×)** | **1729** | len 3.18 / 73% |
+| mtp-4 | 220 | 208 (2.45×) | 1692 | len 3.69 / 67% |
+
+**Finding:** MTP is monotonically faster at every concurrency (1→16) through depth-3, then
+plateaus (mtp-4 ≈ mtp-3, worse per-token efficiency). No regression. **mtp-3 is the deployed
+optimum** on both qwen3.6-27b backends (lynx gpu1/gpu3). Caveat: an idle stray vLLM unit
+sharing the GPU poisoned an earlier run — always bench on an **exclusive** GPU.
+
+**qwen3.5-122b MTP depth sweep** (2026-07-21, aspen1-gpu0 H200, vLLM 0.25.1, 16K ctx, max-num-seqs 8):
+
+| depth | mean accept length (tok / target-forward) | avg accept | AGG conc8 |
+|-------|------------------------------------------|-----------|-----------|
+| 0.23 baseline | — | — | 673 |
+| mtp-1 | 1.83 | 82.8% | 921 |
+| **mtp-2** | **2.43** | 71.3% | **1170** |
+| mtp-3 | 1.88 | **29.4%** | 669 |
+
+**Finding — optimal depth is per-model, always sweep it:** the 122b's MTP head is healthy at
+depth 1–2 (83%/71%) but **collapses at depth 3 (29%)**, where it drafts 7,104 tokens to accept
+2,086 and yields *no more* tokens/forward than mtp-1 — landing back at the 0.23 baseline. **mtp-2
+is the deployed optimum** for the 122b, while qwen3.6-27b/35b hold 73–85% at depth 3 and use mtp-3.
+
+---
+
 ## Configuration Files
 
 | File | Purpose |
