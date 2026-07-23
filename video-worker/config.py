@@ -67,8 +67,21 @@ class WorkerConfig:
         }
 
 
-def frames_for(seconds: str) -> int:
-    """Frame count for a legal duration, or raise ValueError."""
-    if seconds not in DURATION_FRAMES:
+def frames_for(seconds) -> int:
+    """Frame count for a legal duration, or raise ValueError.
+
+    Tolerant of numeric forms: "10", "10.0", 10, and 10.0 all resolve to the
+    "10" preset key (durations are whole seconds), so a float that round-tripped
+    through the DB (10.0) doesn't spuriously miss the matrix.
+    """
+    key = str(seconds).strip()
+    if key not in DURATION_FRAMES:
+        try:
+            f = float(key)
+            if f.is_integer():
+                key = str(int(f))
+        except (ValueError, TypeError):
+            pass
+    if key not in DURATION_FRAMES:
         raise ValueError(f"duration '{seconds}' not in preset matrix {list(DURATION_FRAMES)}")
-    return DURATION_FRAMES[seconds]
+    return DURATION_FRAMES[key]

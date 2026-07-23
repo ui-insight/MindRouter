@@ -247,13 +247,22 @@ class VideoRunner:
                 job["id"], error_code="submit_failed", error_message=str(exc)
             )
 
+    @staticmethod
+    def _fmt_seconds(v: Any) -> str:
+        """Duration as a clean preset string: 10.0 (float from the DB) -> "10"."""
+        try:
+            f = float(v)
+            return str(int(f)) if f.is_integer() else str(f)
+        except (ValueError, TypeError):
+            return str(v)
+
     def _build_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
         """Worker request body for a single text-to-video shot."""
         payload: Dict[str, Any] = {
             "model": job["model"],
             "prompt": job["prompt"],
             "size": job["size"],
-            "seconds": str(job["seconds"]),
+            "seconds": self._fmt_seconds(job["seconds"]),
             "fps": job["fps"],
             "quality": job["quality"],
         }
