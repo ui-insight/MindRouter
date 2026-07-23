@@ -4327,7 +4327,7 @@ async def admin_video_config(
             "allowed_durations": await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10,12,15,20"),
             "default_quality": await crud.get_config_json(db, "vid.default_quality", "standard"),
             "max_concurrent_jobs_per_user": await crud.get_config_json(db, "vid.max_concurrent_jobs_per_user", 1),
-            "max_total_seconds": await crud.get_config_json(db, "vid.max_total_seconds", 90),
+            "max_total_seconds": await crud.get_config_json(db, "vid.max_total_seconds", 30),
             "token_cost_per_second": await crud.get_config_json(db, "vid.token_cost_per_second", 2000),
             "user_storage_cap_gb": await crud.get_config_json(db, "vid.user_storage_cap_gb", 50),
         },
@@ -4358,7 +4358,7 @@ async def admin_video_config_post(request: Request, db: AsyncSession = Depends(g
 
         int_configs = {
             "vid.max_concurrent_jobs_per_user": ("max_concurrent_jobs_per_user", 1, 1, 10),
-            "vid.max_total_seconds": ("max_total_seconds", 90, 1, 600),
+            "vid.max_total_seconds": ("max_total_seconds", 30, 1, 600),
             "vid.token_cost_per_second": ("token_cost_per_second", 2000, 0, 1_000_000),
             "vid.user_storage_cap_gb": ("user_storage_cap_gb", 50, 0, 10_000),
         }

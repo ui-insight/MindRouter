@@ -128,52 +128,60 @@
       </section>
     </div>
 
-    <!-- Output -->
+    <!-- Queue (your render status + the shared render queue) -->
     <div class="col-lg-7">
-      <section class="card" aria-labelledby="vid-output-heading">
+      <section class="card" aria-labelledby="vid-queue-heading">
         <div class="card-body">
-          <h2 id="vid-output-heading" class="h5 mb-3">Result</h2>
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 id="vid-queue-heading" class="h5 mb-0">
+              Queue <span id="vid-queue-count" class="badge bg-secondary align-middle"></span>
+            </h2>
+            <small class="text-body-secondary" id="vid-queue-updated" aria-live="polite"></small>
+          </div>
 
-          <!-- Live status region: long renders MUST be announced -->
+          <!-- Live status of your current render: long renders MUST be announced -->
           <div id="vid-status" class="d-flex align-items-center gap-2 mb-2" role="status" aria-live="polite">
             <span id="vid-status-dot" class="vid-status-dot bg-secondary" aria-hidden="true"></span>
             <span id="vid-status-text">Idle — describe a clip and press Generate.</span>
           </div>
 
-          <div id="vid-progress-wrap" class="progress mb-3 d-none" style="height: .5rem;">
+          <div id="vid-progress-wrap" class="progress mb-2 d-none" style="height: .5rem;">
             <div id="vid-progress" class="progress-bar" role="progressbar"
                  aria-label="Render progress" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
                  style="width: 0%"></div>
           </div>
 
-          <video id="vid-player" class="vid-player d-none" controls preload="metadata"
-                 aria-label="Generated video result"></video>
-
-          <div id="vid-actions" class="d-none mt-3 d-flex gap-2">
-            <a id="vid-download" class="btn btn-outline-secondary btn-sm" download>
-              <i class="bi bi-download" aria-hidden="true"></i> Download
-            </a>
+          <div id="vid-actions" class="d-none mb-3">
             <button id="vid-cancel" type="button" class="btn btn-outline-danger btn-sm d-none">
               <i class="bi bi-x-circle" aria-hidden="true"></i> Cancel
             </button>
           </div>
+
+          <!-- The shared render queue -->
+          <div id="vid-queue-list" aria-live="polite"></div>
+          <p id="vid-queue-empty" class="text-body-secondary small mb-0">
+            Nothing rendering right now — describe a clip and press Generate.
+          </p>
+          <p class="text-body-secondary small mb-0 mt-1">
+            One clip renders at a time. Times are estimates from recent renders.
+          </p>
         </div>
       </section>
     </div>
   </div>
 
-  <!-- Render queue -->
-  <section class="mt-4" id="vid-queue-section" style="display:none;" aria-labelledby="vid-queue-heading">
-    <div class="d-flex justify-content-between align-items-center mb-2">
-      <h2 id="vid-queue-heading" class="h6 mb-0">
-        Render queue <span id="vid-queue-count" class="badge bg-secondary align-middle"></span>
-      </h2>
-      <small class="text-body-secondary" id="vid-queue-updated" aria-live="polite"></small>
+  <!-- Clip (the rendered result) -->
+  <section class="card mt-4 d-none" id="vid-clip-section" aria-labelledby="vid-clip-heading">
+    <div class="card-body">
+      <h2 id="vid-clip-heading" class="h5 mb-3">Clip</h2>
+      <video id="vid-player" class="vid-player" controls preload="metadata"
+             aria-label="Generated video result"></video>
+      <div class="mt-3">
+        <a id="vid-download" class="btn btn-outline-secondary btn-sm" download>
+          <i class="bi bi-download" aria-hidden="true"></i> Download
+        </a>
+      </div>
     </div>
-    <div id="vid-queue-list" aria-live="polite"></div>
-    <p class="text-body-secondary small mb-0">
-      One clip renders at a time. Times are estimates from recent renders.
-    </p>
   </section>
 
   <!-- Library -->
@@ -231,6 +239,7 @@
   const statusText = $("vid-status-text");
   const statusDot = $("vid-status-dot");
   const progWrap = $("vid-progress-wrap");
+  const clipSection = $("vid-clip-section");
   const progBar = $("vid-progress");
   const player = $("vid-player");
   const actions = $("vid-actions");
@@ -347,8 +356,7 @@
     const prompt = $("vid-prompt").value.trim();
     if (!prompt) { setStatus("Please enter a prompt.", "warning"); return; }
     $("vid-generate").disabled = true;
-    player.classList.add("d-none");
-    actions.classList.add("d-none");
+    clipSection.classList.add("d-none");   // hide any previous clip
     const body = {
       prompt: prompt,
       size: $("vid-size").value,
@@ -380,6 +388,7 @@
       try { localStorage.setItem("vidActiveJob", currentId); } catch (e) {}
       cancelBtn.classList.remove("d-none");
       actions.classList.remove("d-none");
+      progWrap.classList.remove("d-none");
       poll();
       refreshQueue();
     } catch (e) {
@@ -427,8 +436,9 @@
   function showVideo(id) {
     const url = "/video/serve/" + encodeURIComponent(id);
     player.src = url;
-    player.classList.remove("d-none");
     dlLink.href = url;
+    clipSection.classList.remove("d-none");   // reveal the Clip section
+    try { player.load(); } catch (e) {}
   }
   function finish() {
     $("vid-generate").disabled = false;
@@ -549,10 +559,16 @@
   }
 
   function renderQueue() {
-    const section = $("vid-queue-section");
     const list = $("vid-queue-list");
-    if (!vqData || !vqData.queue || !vqData.queue.length) { section.style.display = "none"; return; }
-    section.style.display = "block";
+    const empty = $("vid-queue-empty");
+    if (!vqData || !vqData.queue || !vqData.queue.length) {
+      list.innerHTML = "";
+      empty.style.display = "block";
+      $("vid-queue-count").textContent = "";
+      $("vid-queue-updated").textContent = "";
+      return;
+    }
+    empty.style.display = "none";
     $("vid-queue-count").textContent = vqData.total + (vqData.total === 1 ? " job" : " jobs");
     const drift = (performance.now() - vqFetchedAt) / 1000;  // seconds since fetch
     list.innerHTML = "";
@@ -594,6 +610,7 @@
       if (job.status === "queued" || job.status === "in_progress") {
         currentId = id;
         $("vid-generate").disabled = true;
+        actions.classList.remove("d-none");
         cancelBtn.classList.remove("d-none");
         progWrap.classList.remove("d-none");
         setStatus(job.status === "queued" ? "Queued…" : "Rendering…",

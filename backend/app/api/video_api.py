@@ -126,7 +126,7 @@ async def list_video_models(
         db, "vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448"
     )
     min_seconds = int(await crud.get_config_json(db, "vid.min_seconds", 4))
-    max_seconds = int(await crud.get_config_json(db, "vid.max_total_seconds", 90))
+    max_seconds = int(await crud.get_config_json(db, "vid.max_total_seconds", 30))
     registry = get_registry()
     models = []
     for name in await _video_model_names(registry):
@@ -224,7 +224,7 @@ async def submit_video_job(
     )
     allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()]
     min_seconds = int(await crud.get_config_json(db, "vid.min_seconds", 4))
-    max_seconds = int(await crud.get_config_json(db, "vid.max_total_seconds", 90))
+    max_seconds = int(await crud.get_config_json(db, "vid.max_total_seconds", 30))
     max_per_user = await crud.get_config_json(db, "vid.max_concurrent_jobs_per_user", 1)
 
     model = body.get("model") or default_model

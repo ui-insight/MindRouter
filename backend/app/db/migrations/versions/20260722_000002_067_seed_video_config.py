@@ -46,7 +46,7 @@ _DEFAULTS = [
     ("vid.default_fps", 24, "Default frames per second"),
     ("vid.default_quality", "standard", "Default quality tier (draft|standard|final)"),
     ("vid.max_shots", 1, "Max shots per job (v1 = single clip; raised in Phase 2)"),
-    ("vid.max_total_seconds", 90, "Max total video length per job (seconds)"),
+    ("vid.max_total_seconds", 30, "Max total video length per job (seconds)"),
     ("vid.max_continue_chain", 3, "Max last-frame chain length before drift (set from Phase 4 measurement)"),
     ("vid.max_concurrent_jobs_per_user", 1, "In-flight jobs allowed per user (fairness on a 1-render GPU)"),
     ("vid.max_retries_per_shot", 2, "Per-shot render retries (connect/5xx-at-submit only)"),

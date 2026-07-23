@@ -73,7 +73,7 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
     default_size = await crud.get_config_json(db, "vid.default_size", "1280x704")
     default_seconds = str(await crud.get_config_json(db, "vid.default_seconds", 5))
     default_quality = await crud.get_config_json(db, "vid.default_quality", "standard")
-    max_total_seconds = await crud.get_config_json(db, "vid.max_total_seconds", 90)
+    max_total_seconds = await crud.get_config_json(db, "vid.max_total_seconds", 30)
 
     api_keys = await crud.get_user_api_keys(db, user_id, include_revoked=False)
 
