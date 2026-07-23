@@ -65,6 +65,15 @@ from backend.app.db.models import (
     StoredResponseStatus,
     User,
     UserRole,
+    VideoAsset,
+    VideoAssetKind,
+    VideoJob,
+    VideoJobStatus,
+    VideoProject,
+    VideoShot,
+    VideoShotStatus,
+    VideoShotType,
+    VideoTransition,
 )
 
 
@@ -4212,3 +4221,379 @@ async def delete_conversation(
     await db.delete(conversation)
     await db.flush()
     return conversation
+
+
+# ============================================================
+# Video generation (see docs/video-generation-plan.md)
+# v1: text-to-video, single generated shot per job. Callers commit.
+# ============================================================
+async def create_video_project(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    model: str,
+    size: str,
+    fps: int = 24,
+    quality: str = "standard",
+    title: Optional[str] = None,
+    style_prompt: Optional[str] = None,
+    base_seed: Optional[int] = None,
+    storyboard: Optional[dict] = None,
+) -> VideoProject:
+    """Create a project. v1 always makes a one-shot project. Caller commits."""
+    project = VideoProject(
+        user_id=user_id,
+        model=model,
+        size=size,
+        fps=fps,
+        quality=quality,
+        title=title,
+        style_prompt=style_prompt,
+        base_seed=base_seed,
+        storyboard=storyboard,
+    )
+    db.add(project)
+    await db.flush()
+    return project
+
+
+async def create_video_job(
+    db: AsyncSession,
+    *,
+    job_uuid: str,
+    project_id: int,
+    user_id: int,
+    api_key_id: Optional[int] = None,
+    request_id: Optional[int] = None,
+    shots_total: int = 1,
+    expires_at: Optional[datetime] = None,
+    callback_url: Optional[str] = None,
+) -> VideoJob:
+    """Create a queued video job. Caller commits."""
+    job = VideoJob(
+        job_uuid=job_uuid,
+        project_id=project_id,
+        user_id=user_id,
+        api_key_id=api_key_id,
+        request_id=request_id,
+        status=VideoJobStatus.QUEUED,
+        shots_total=shots_total,
+        expires_at=expires_at,
+        callback_url=callback_url,
+    )
+    db.add(job)
+    await db.flush()
+    return job
+
+
+async def create_video_shot(
+    db: AsyncSession,
+    *,
+    job_id: int,
+    shot_index: int,
+    seconds: float,
+    prompt: Optional[str] = None,
+    num_frames: Optional[int] = None,
+    seed: Optional[int] = None,
+    shot_type: VideoShotType = VideoShotType.GENERATED,
+    transition: VideoTransition = VideoTransition.CUT,
+) -> VideoShot:
+    """Create a shot row. Caller commits."""
+    shot = VideoShot(
+        job_id=job_id,
+        shot_index=shot_index,
+        shot_type=shot_type,
+        prompt=prompt,
+        seconds=seconds,
+        num_frames=num_frames,
+        seed=seed,
+        transition=transition,
+        status=VideoShotStatus.PENDING,
+    )
+    db.add(shot)
+    await db.flush()
+    return shot
+
+
+async def get_video_job_by_uuid(
+    db: AsyncSession, job_uuid: str, user_id: Optional[int] = None
+) -> Optional[VideoJob]:
+    """Get a job by its public uuid, optionally scoped to its owner.
+
+    When user_id is provided, a job owned by someone else returns None so the
+    endpoint can 404 (never 403 — no existence leak across users).
+    """
+    conditions = [VideoJob.job_uuid == job_uuid]
+    if user_id is not None:
+        conditions.append(VideoJob.user_id == user_id)
+    result = await db.execute(select(VideoJob).where(and_(*conditions)))
+    return result.scalar_one_or_none()
+
+
+async def list_video_jobs(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[VideoJob], int]:
+    """List a user's jobs (newest first) plus the total count for pagination."""
+    conditions = [VideoJob.user_id == user_id]
+    if status:
+        conditions.append(VideoJob.status == status)
+    where = and_(*conditions)
+
+    total = int(
+        (await db.execute(select(func.count(VideoJob.id)).where(where))).scalar() or 0
+    )
+    result = await db.execute(
+        select(VideoJob)
+        .where(where)
+        .order_by(VideoJob.created_at.desc())
+        .limit(min(limit, 50))
+        .offset(offset)
+    )
+    return list(result.scalars().all()), total
+
+
+async def request_cancel_video_job(db: AsyncSession, job: VideoJob) -> None:
+    """Flag a job for cancellation; the runner propagates to the worker.
+
+    If the job is still queued (never claimed), cancel it outright. Caller commits.
+    """
+    job.cancel_requested = True
+    if job.status == VideoJobStatus.QUEUED:
+        # Never started — cancel outright and refund the reservation.
+        job.status = VideoJobStatus.CANCELLED
+        job.completed_at = datetime.now(timezone.utc)
+        if job.token_equivalent:
+            await refund_video_tokens(db, job.user_id, job.token_equivalent)
+    await db.flush()
+
+
+async def count_active_video_jobs_for_user(db: AsyncSession, user_id: int) -> int:
+    """Count a user's in-flight jobs (queued/planning/rendering/assembling) —
+    the fairness lever on a one-render-at-a-time GPU."""
+    active = [
+        VideoJobStatus.QUEUED,
+        VideoJobStatus.PLANNING,
+        VideoJobStatus.RENDERING,
+        VideoJobStatus.ASSEMBLING,
+    ]
+    result = await db.execute(
+        select(func.count(VideoJob.id)).where(
+            and_(VideoJob.user_id == user_id, VideoJob.status.in_(active))
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+# --- Video runner CRUD (claim / re-adopt / state transitions) -------------
+async def claim_next_video_job(db: AsyncSession, worker_id: str) -> Optional[VideoJob]:
+    """Atomically claim the highest-priority queued job (race-safe across
+    workers via SELECT ... FOR UPDATE SKIP LOCKED). Returns the claimed job
+    (now RENDERING) or None if the queue is empty. Commits."""
+    candidate = (
+        await db.execute(
+            select(VideoJob.id)
+            .where(VideoJob.status == VideoJobStatus.QUEUED)
+            .order_by(VideoJob.priority.desc(), VideoJob.id.asc())
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalar_one_or_none()
+    if candidate is None:
+        return None
+    await db.execute(
+        update(VideoJob)
+        .where(VideoJob.id == candidate)
+        .values(
+            status=VideoJobStatus.RENDERING,
+            claimed_by=worker_id,
+            started_at=func.now(),
+            heartbeat_at=func.now(),
+        )
+    )
+    await db.commit()
+    return (
+        await db.execute(select(VideoJob).where(VideoJob.id == candidate))
+    ).scalar_one_or_none()
+
+
+async def readopt_stale_video_jobs(db: AsyncSession, threshold_seconds: int) -> int:
+    """Requeue jobs stuck in RENDERING whose heartbeat is older than the
+    threshold (a gateway crashed mid-render). Returns how many were requeued.
+    Commits. v1 requeues; later phases re-poll the worker by backend_job_id."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_seconds)
+    result = await db.execute(
+        update(VideoJob)
+        .where(
+            and_(
+                VideoJob.status == VideoJobStatus.RENDERING,
+                VideoJob.heartbeat_at.is_not(None),
+                VideoJob.heartbeat_at < cutoff,
+            )
+        )
+        .values(status=VideoJobStatus.QUEUED, claimed_by=None)
+    )
+    await db.commit()
+    return result.rowcount or 0
+
+
+async def get_video_shots(db: AsyncSession, job_id: int) -> list[VideoShot]:
+    """Shots for a job, ordered by index."""
+    result = await db.execute(
+        select(VideoShot).where(VideoShot.job_id == job_id).order_by(VideoShot.shot_index.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def update_video_job_progress(
+    db: AsyncSession, job: VideoJob, progress: float, *, heartbeat: bool = True
+) -> None:
+    """Update job progress and (by default) bump the heartbeat. Commits."""
+    job.progress = progress
+    if heartbeat:
+        job.heartbeat_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+async def complete_video_job(
+    db: AsyncSession,
+    job: VideoJob,
+    *,
+    output_asset_id: int,
+    duration_seconds: Optional[float] = None,
+    gpu_seconds: int = 0,
+    token_equivalent: Optional[int] = None,
+) -> None:
+    """Mark a job COMPLETED with its output and accounting. Commits."""
+    job.status = VideoJobStatus.COMPLETED
+    job.progress = 100.0
+    job.completed_at = datetime.now(timezone.utc)
+    job.output_asset_id = output_asset_id
+    job.duration_seconds = duration_seconds
+    job.gpu_seconds = gpu_seconds
+    job.token_equivalent = token_equivalent
+    await db.commit()
+
+
+async def fail_video_job(
+    db: AsyncSession, job: VideoJob, *, error_code: str, error_message: str
+) -> None:
+    """Mark a job FAILED and refund its reserved quota. Commits."""
+    job.status = VideoJobStatus.FAILED
+    job.completed_at = datetime.now(timezone.utc)
+    job.error_code = error_code
+    job.error_message = error_message[:1000] if error_message else error_message
+    if job.token_equivalent:
+        await refund_video_tokens(db, job.user_id, job.token_equivalent)
+    await db.commit()
+
+
+async def update_video_shot(db: AsyncSession, shot: VideoShot, **fields) -> None:
+    """Set arbitrary fields on a shot (status, backend_id, backend_job_id,
+    output_asset_id, render_ms, attempts, error_message). Commits."""
+    for key, value in fields.items():
+        setattr(shot, key, value)
+    await db.commit()
+
+
+async def create_video_asset(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    kind: VideoAssetKind,
+    storage_path: str,
+    content_type: str,
+    sha256: str,
+    project_id: Optional[int] = None,
+    size_bytes: Optional[int] = None,
+    duration_ms: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    poster_path: Optional[str] = None,
+) -> VideoAsset:
+    """Create a video asset row. Caller commits."""
+    asset = VideoAsset(
+        user_id=user_id,
+        project_id=project_id,
+        kind=kind,
+        storage_path=storage_path,
+        content_type=content_type,
+        sha256=sha256,
+        size_bytes=size_bytes,
+        duration_ms=duration_ms,
+        width=width,
+        height=height,
+        poster_path=poster_path,
+    )
+    db.add(asset)
+    await db.flush()
+    return asset
+
+
+async def get_video_project(db: AsyncSession, project_id: int) -> Optional[VideoProject]:
+    result = await db.execute(select(VideoProject).where(VideoProject.id == project_id))
+    return result.scalar_one_or_none()
+
+
+async def get_video_job_by_id(db: AsyncSession, job_id: int) -> Optional[VideoJob]:
+    result = await db.execute(select(VideoJob).where(VideoJob.id == job_id))
+    return result.scalar_one_or_none()
+
+
+async def get_video_shot_by_id(db: AsyncSession, shot_id: int) -> Optional[VideoShot]:
+    result = await db.execute(select(VideoShot).where(VideoShot.id == shot_id))
+    return result.scalar_one_or_none()
+
+
+async def get_video_asset(db: AsyncSession, asset_id: int) -> Optional[VideoAsset]:
+    result = await db.execute(select(VideoAsset).where(VideoAsset.id == asset_id))
+    return result.scalar_one_or_none()
+
+
+# --- Video quota reservation (mirrors _check_quota's DB-tokens model) ------
+async def compute_video_token_cost(
+    db: AsyncSession, *, seconds: float, quality: str, size: str
+) -> int:
+    """Token-equivalent cost of a render: per-second rate x quality x resolution
+    multipliers (all app_config, admin-tunable)."""
+    per_sec = await get_config_json(db, "vid.token_cost_per_second", 2000)
+    q_mults = await get_config_json(
+        db, "vid.quality_multipliers", {"draft": 0.5, "standard": 1.0, "final": 2.0}
+    )
+    r_mults = await get_config_json(db, "vid.resolution_multipliers", {})
+    q = q_mults.get(quality, 1.0) if isinstance(q_mults, dict) else 1.0
+    r = r_mults.get(size, 1.0) if isinstance(r_mults, dict) else 1.0
+    return int(float(seconds) * float(per_sec) * float(q) * float(r))
+
+
+async def reserve_video_tokens(db: AsyncSession, user: User, cost: int) -> bool:
+    """Reserve `cost` tokens if the user's group budget allows. Returns False
+    (reject) if it would exceed budget. Charges immediately (a reservation), so
+    concurrent submissions can't each spend the same balance. Caller commits and
+    then calls incr_quota_redis(user.id, cost)."""
+    await reset_quota_if_needed(db, user.id)
+    quota = await get_user_quota(db, user.id)
+    budget = user.group.token_budget if user.group else 0
+    used = quota.tokens_used if quota else 0
+    if budget > 0 and used + cost > budget:
+        return False
+    await update_quota_usage(db, user.id, cost)
+    return True
+
+
+async def refund_video_tokens(db: AsyncSession, user_id: int, amount: int) -> None:
+    """Return a reservation to the user when a render fails or is cancelled
+    (it was never actually consumed). Decrements DB counters (floored) and
+    Redis. Caller commits."""
+    if amount <= 0:
+        return
+    quota = await get_user_quota(db, user_id)
+    if quota:
+        quota.tokens_used = max(0, quota.tokens_used - amount)
+        quota.lifetime_tokens_used = max(0, quota.lifetime_tokens_used - amount)
+        await db.flush()
+    await incr_quota_redis(user_id, -amount)

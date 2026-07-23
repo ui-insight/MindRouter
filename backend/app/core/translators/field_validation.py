@@ -78,6 +78,43 @@ CHAT_DIALECT_HINTS: Dict[str, str] = {
 }
 
 
+# --- Video generation dialect (v1 text-to-video) --------------------------
+# Fields the video create path (submit_video_job) actually consumes.
+VIDEO_ACCEPTED: Set[str] = {
+    "model", "prompt", "size", "seconds", "fps", "quality", "seed",
+    "negative_prompt", "callback_url",
+}
+
+# Accepted-and-dropped (OpenAI-video clients send these harmlessly).
+VIDEO_IGNORED: Set[str] = {"user", "response_format", "metadata"}
+
+# Common video-request fields MindRouter does not honor in v1, each mapped to
+# the supported alternative — so a typo or a wrong-API field is surfaced, not
+# silently dropped (the v2.8.2 field-validation contract).
+VIDEO_DIALECT_HINTS: Dict[str, str] = {
+    "duration": "Use 'seconds' (a value from the preset duration list).",
+    "length": "Use 'seconds' (a value from the preset duration list).",
+    "width": "Use 'size' as 'WIDTHxHEIGHT' from the preset size list.",
+    "height": "Use 'size' as 'WIDTHxHEIGHT' from the preset size list.",
+    "aspect_ratio": "Use 'size' as 'WIDTHxHEIGHT' from the preset size list.",
+    "resolution": "Use 'size' as 'WIDTHxHEIGHT' from the preset size list.",
+    "num_frames": "Frame count is derived from 'seconds'; pick a preset duration.",
+    "frames": "Frame count is derived from 'seconds'; pick a preset duration.",
+    "steps": "Denoising steps are fixed by the 'quality' tier.",
+    "num_inference_steps": "Denoising steps are fixed by the 'quality' tier.",
+    "guidance_scale": "Guidance is fixed by the 'quality' tier.",
+    "cfg_scale": "Guidance is fixed by the 'quality' tier.",
+    "n": "Only one clip is generated per request in v1.",
+    "image": "Image conditioning is not available in v1 (text-to-video only).",
+    "input_reference": "Image-to-video is not available in v1 (text-to-video only).",
+    "first_frame": "Keyframe conditioning is not available in v1 (text-to-video only).",
+    "last_frame": "Keyframe conditioning is not available in v1 (text-to-video only).",
+    "storyboard": "Multi-shot storyboards are not available in v1 (single clip only).",
+    "audio": "Audio generation is not available in v1.",
+    "generate_audio": "Audio generation is not available in v1.",
+}
+
+
 def _error(field: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=400,

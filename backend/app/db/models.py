@@ -65,6 +65,7 @@ class BackendEngine(str, PyEnum):
     OLLAMA = "ollama"
     VLLM = "vllm"
     DIFFUSION = "diffusion"
+    VIDEO = "video"
 
 
 class BackendStatus(str, PyEnum):
@@ -116,6 +117,65 @@ class Modality(str, PyEnum):
     TTS = "tts"
     STT = "stt"
     IMAGE_GENERATION = "image_generation"
+    VIDEO_GENERATION = "video_generation"
+
+
+# --- Video generation enums (see docs/video-generation-plan.md) -----------
+class VideoJobStatus(str, PyEnum):
+    """Lifecycle of a video job (gateway-side, orchestration view)."""
+    QUEUED = "queued"
+    PLANNING = "planning"
+    RENDERING = "rendering"
+    ASSEMBLING = "assembling"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class VideoShotStatus(str, PyEnum):
+    """Per-shot render lifecycle."""
+    PENDING = "pending"
+    QUEUED = "queued"
+    RENDERING = "rendering"
+    RENDERED = "rendered"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class VideoQuality(str, PyEnum):
+    DRAFT = "draft"
+    STANDARD = "standard"
+    FINAL = "final"
+
+
+class VideoSeedPolicy(str, PyEnum):
+    FIXED = "fixed"
+    PER_SHOT = "per_shot"
+
+
+class VideoTransition(str, PyEnum):
+    CUT = "cut"
+    CROSSFADE = "crossfade"
+    CONTINUE = "continue"
+
+
+class VideoShotType(str, PyEnum):
+    """A shot is either model-GENERATED or a user-supplied SOURCE clip.
+
+    ``source`` is Phase 2 (user-supplied clips, decision #4); the column
+    exists in v1 so later phases are additive. v1 only creates ``generated``.
+    """
+    GENERATED = "generated"
+    SOURCE = "source"
+
+
+class VideoAssetKind(str, PyEnum):
+    REFERENCE = "reference"
+    KEYFRAME = "keyframe"
+    UPLOAD = "upload"
+    SOURCE_CLIP = "source_clip"   # user-supplied clip (Phase 2, decision #4)
+    SHOT_OUTPUT = "shot_output"
+    FINAL = "final"
 
 
 # Group Model
@@ -176,6 +236,7 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
 
     # Feature access
     image_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
+    video_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
 
     # Agreement tracking
     agreement_version_accepted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -887,6 +948,184 @@ class UserImage(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_user_images_user_id", "user_id"),
         Index("ix_user_images_created_at", "created_at"),
+    )
+
+
+# --- Video generation tables (see docs/video-generation-plan.md) ----------
+# The full four-table schema is created up front (migration 066) even though
+# v1 only exercises single-shot, text-to-video projects, so later phases
+# (i2v, keyframes, storyboards, source clips, assembly) are additive code
+# rather than a schema redo.
+class VideoProject(Base, TimestampMixin):
+    """A durable authored video document. In v1 every request creates a
+    one-shot project so there is exactly one execution path."""
+
+    __tablename__ = "video_projects"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+
+    title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    size: Mapped[str] = mapped_column(String(20), nullable=False)
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    quality: Mapped[VideoQuality] = mapped_column(
+        Enum(VideoQuality, values_callable=_enum_values),
+        nullable=False, default=VideoQuality.STANDARD,
+    )
+    style_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    seed_policy: Mapped[VideoSeedPolicy] = mapped_column(
+        Enum(VideoSeedPolicy, values_callable=_enum_values),
+        nullable=False, default=VideoSeedPolicy.FIXED,
+    )
+    base_seed: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # Authoritative shot document — the same JSON the API accepts and the UI edits.
+    storyboard: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    generate_audio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+
+    __table_args__ = (
+        Index("ix_video_projects_user_id", "user_id"),
+        Index("ix_video_projects_created_at", "created_at"),
+    )
+
+
+class VideoAsset(Base):
+    """Any stored media: uploads, references, keyframes, shot outputs, final
+    renders, and (Phase 2) user-supplied source clips."""
+
+    __tablename__ = "video_assets"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    project_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("video_projects.id"), nullable=True
+    )
+    kind: Mapped[VideoAssetKind] = mapped_column(
+        Enum(VideoAssetKind, values_callable=_enum_values), nullable=False
+    )
+    # Neutral vocabulary — 'entity', never 'character'/'product'.
+    entity_label: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    storage_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    poster_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    policy_verdict: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_video_assets_user_id", "user_id"),
+        Index("ix_video_assets_project_id", "project_id"),
+        Index("ix_video_assets_sha256", "sha256"),  # vision-judge result caching
+    )
+
+
+class VideoJob(Base, TimestampMixin):
+    """A render job over a project. Claimed and driven by video_runner."""
+
+    __tablename__ = "video_jobs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_uuid: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)  # "vid-<24hex>"
+    project_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("video_projects.id"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    api_key_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("api_keys.id"), nullable=True
+    )
+    request_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("requests.id"), nullable=True
+    )
+    status: Mapped[VideoJobStatus] = mapped_column(
+        Enum(VideoJobStatus, values_callable=_enum_values),
+        nullable=False, default=VideoJobStatus.QUEUED,
+    )
+    progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    shots_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    shots_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    priority: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    token_equivalent: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    output_asset_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("video_assets.id"), nullable=True
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    callback_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    __table_args__ = (
+        # THE claim-query index: ORDER BY priority DESC, id within status='queued'.
+        Index("ix_video_jobs_status_priority", "status", "priority", "id"),
+        Index("ix_video_jobs_user_id", "user_id"),
+        Index("ix_video_jobs_created_at", "created_at"),
+        Index("ix_video_jobs_heartbeat", "status", "heartbeat_at"),  # crash re-adoption
+    )
+
+
+class VideoShot(Base, TimestampMixin):
+    """One shot within a job. v1 jobs have exactly one GENERATED shot."""
+
+    __tablename__ = "video_shots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("video_jobs.id"), nullable=False)
+    shot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    shot_type: Mapped[VideoShotType] = mapped_column(
+        Enum(VideoShotType, values_callable=_enum_values),
+        nullable=False, default=VideoShotType.GENERATED,
+    )
+    prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # null for source shots
+    seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    num_frames: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 8k+1 for LTX generated shots
+    transition: Mapped[VideoTransition] = mapped_column(
+        Enum(VideoTransition, values_callable=_enum_values),
+        nullable=False, default=VideoTransition.CUT,
+    )
+    transition_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    camera: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    seed: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    first_frame_asset_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("video_assets.id"), nullable=True
+    )
+    last_frame_asset_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("video_assets.id"), nullable=True
+    )
+    # Phase 2 (source clips): the uploaded clip + its trim window.
+    source_asset_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("video_assets.id"), nullable=True
+    )
+    trim_start_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trim_end_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reference_asset_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    status: Mapped[VideoShotStatus] = mapped_column(
+        Enum(VideoShotStatus, values_callable=_enum_values),
+        nullable=False, default=VideoShotStatus.PENDING,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    backend_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("backends.id"), nullable=True)
+    backend_job_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)  # worker-side id, for resume
+    output_asset_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("video_assets.id"), nullable=True
+    )
+    render_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "shot_index", name="uq_video_shots_job_index"),
+        Index("ix_video_shots_status", "status"),
     )
 
 

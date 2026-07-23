@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}Video Generation Config - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-md-3 col-lg-2 px-0">
+      {% include "admin/_sidebar.html" %}
+    </div>
+
+    <div class="col-md-9 col-lg-10 py-4 px-4">
+      <h1 class="h3 mb-4">Video Generation</h1>
+
+      {% if success %}
+      <div class="alert alert-success" role="alert">Saved.</div>
+      {% endif %}
+      {% if error %}
+      <div class="alert alert-danger" role="alert">{{ error }}</div>
+      {% endif %}
+
+      {% if user.group and user.group.is_admin %}
+      <!-- Configuration -->
+      <form method="post" action="/admin/video-config" class="mb-5">
+        <input type="hidden" name="action" value="save_config">
+
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Service</h2>
+
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="vidcfg-enabled" name="enabled" role="switch"
+                     {% if enabled %}checked{% endif %}>
+              <label class="form-check-label" for="vidcfg-enabled">Video generation enabled</label>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label for="vidcfg-default-model" class="form-label">Default model</label>
+                <select class="form-select" id="vidcfg-default-model" name="default_model">
+                  {% if not video_models %}
+                  <option value="{{ default_model }}" selected>{{ default_model }} (no video backend registered)</option>
+                  {% endif %}
+                  {% for m in video_models %}
+                  <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-md-3">
+                <label for="vidcfg-default-size" class="form-label">Default size</label>
+                <input type="text" class="form-control" id="vidcfg-default-size" name="default_size" value="{{ default_size }}">
+              </div>
+              <div class="col-md-3">
+                <label for="vidcfg-default-quality" class="form-label">Default quality</label>
+                <select class="form-select" id="vidcfg-default-quality" name="default_quality">
+                  {% for q in ["draft", "standard", "final"] %}
+                  <option value="{{ q }}" {% if q == default_quality %}selected{% endif %}>{{ q }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Preset matrix</h2>
+            <p class="text-body-secondary small">
+              Sizes and durations are a fixed menu (the worker warms torch.compile over them);
+              off-menu values are rejected. Must match the worker's capabilities.
+            </p>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label for="vidcfg-allowed-sizes" class="form-label">Allowed sizes (comma-separated)</label>
+                <input type="text" class="form-control" id="vidcfg-allowed-sizes" name="allowed_sizes" value="{{ allowed_sizes }}">
+              </div>
+              <div class="col-md-6">
+                <label for="vidcfg-allowed-durations" class="form-label">Allowed durations, seconds (comma-separated)</label>
+                <input type="text" class="form-control" id="vidcfg-allowed-durations" name="allowed_durations" value="{{ allowed_durations }}">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Limits &amp; cost</h2>
+            <div class="row g-3">
+              <div class="col-md-3">
+                <label for="vidcfg-max-concurrent" class="form-label">Max in-flight jobs / user</label>
+                <input type="number" class="form-control" id="vidcfg-max-concurrent" name="max_concurrent_jobs_per_user"
+                       value="{{ max_concurrent_jobs_per_user }}" min="1" max="10">
+              </div>
+              <div class="col-md-3">
+                <label for="vidcfg-max-total" class="form-label">Max total seconds / job</label>
+                <input type="number" class="form-control" id="vidcfg-max-total" name="max_total_seconds"
+                       value="{{ max_total_seconds }}" min="1" max="600">
+              </div>
+              <div class="col-md-3">
+                <label for="vidcfg-token-cost" class="form-label">Token cost / second</label>
+                <input type="number" class="form-control" id="vidcfg-token-cost" name="token_cost_per_second"
+                       value="{{ token_cost_per_second }}" min="0" max="1000000">
+              </div>
+              <div class="col-md-3">
+                <label for="vidcfg-storage-cap" class="form-label">Storage cap / user (GB)</label>
+                <input type="number" class="form-control" id="vidcfg-storage-cap" name="user_storage_cap_gb"
+                       value="{{ user_storage_cap_gb }}" min="0" max="10000">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Save configuration</button>
+      </form>
+
+      <!-- Per-user access -->
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h5 mb-0">User access</h2>
+        <span class="badge bg-secondary">{{ enabled_count }} of {{ total_count }} enabled</span>
+      </div>
+
+      <form method="get" action="/admin/video-config" class="input-group mb-3" role="search">
+        <label for="vidcfg-search" class="visually-hidden">Search users</label>
+        <input type="text" class="form-control" id="vidcfg-search" name="search" value="{{ search or '' }}"
+               placeholder="Search users by name or email…">
+        <button class="btn btn-outline-secondary" type="submit">Search</button>
+      </form>
+
+      <div class="card">
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <caption class="px-3">Users and their video generation access</caption>
+            <thead class="table-light">
+              <tr>
+                <th scope="col">User</th>
+                <th scope="col">Email</th>
+                <th scope="col">Group</th>
+                <th scope="col">Role</th>
+                <th scope="col" class="text-center">Video access</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for u in users %}
+              <tr>
+                <th scope="row" class="fw-normal">
+                  <a href="/admin/users/{{ u.id }}">{{ u.username }}</a>
+                  {% if u.full_name %}<br><small class="text-body-secondary">{{ u.full_name }}</small>{% endif %}
+                </th>
+                <td class="small">{{ u.email }}</td>
+                <td>
+                  {% if u.group %}
+                  <span class="badge bg-info text-dark">{{ u.group.display_name or u.group.name }}</span>
+                  {% else %}<span class="text-body-secondary">None</span>{% endif %}
+                </td>
+                <td><span class="badge bg-secondary">{{ u.role.value }}</span></td>
+                <td class="text-center">
+                  <form method="post" action="/admin/video-config" class="d-inline">
+                    <input type="hidden" name="action" value="toggle_user">
+                    <input type="hidden" name="user_id" value="{{ u.id }}">
+                    <div class="form-check form-switch d-flex justify-content-center">
+                      <input class="form-check-input" type="checkbox" role="switch"
+                             {% if u.video_generation_enabled %}checked{% endif %}
+                             onchange="this.form.submit()"
+                             aria-label="Toggle video generation for {{ u.username }}">
+                    </div>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {% if total_pages > 1 %}
+      <nav class="mt-3" aria-label="User pagination">
+        <ul class="pagination justify-content-center">
+          {% for p in range(1, total_pages + 1) %}
+          <li class="page-item {% if p == current_page %}active{% endif %}">
+            <a class="page-link" href="/admin/video-config?page={{ p }}{% if search %}&search={{ search }}{% endif %}">{{ p }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+      </nav>
+      {% endif %}
+
+      {% else %}
+      <div class="alert alert-info">You have read-only admin access. Configuration changes require full admin privileges.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

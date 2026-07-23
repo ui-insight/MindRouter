@@ -41,6 +41,7 @@ from backend.app.dashboard.dlp_routes import dlp_router
 from backend.app.dashboard.email_routes import email_router
 from backend.app.dashboard.chat import chat_router
 from backend.app.dashboard.images import images_router
+from backend.app.dashboard.video import video_router
 from backend.app.dashboard.routes import dashboard_router
 from backend.app.logging_config import (
     bind_request_context,
@@ -422,6 +423,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     from backend.app.services.dlp_worker import dlp_worker_loop
     _dlp_task = asyncio.create_task(dlp_worker_loop())
 
+    # Start video generation runner (claims queued video jobs, drives the worker)
+    _video_task = None
+    if get_settings().video_runner_enabled:
+        from backend.app.services.video_runner import run_video_runner_loop
+        _video_task = asyncio.create_task(run_video_runner_loop())
+
     logger.info("MindRouter started successfully")
 
     yield
@@ -456,6 +463,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _dlp_task.cancel()
         try:
             await _dlp_task
+        except asyncio.CancelledError:
+            pass
+    if _video_task:
+        _video_task.cancel()
+        try:
+            await _video_task
         except asyncio.CancelledError:
             pass
     # Final flush of Redis counters to DB before shutdown
@@ -575,6 +588,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_router)
     app.include_router(chat_router)
     app.include_router(images_router)
+    app.include_router(video_router)
     app.include_router(blog_router)
     app.include_router(email_router)
     app.include_router(dlp_router)
