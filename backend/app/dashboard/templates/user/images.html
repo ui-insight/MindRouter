@@ -662,7 +662,7 @@ async function generateImage() {
         const policyResp = await fetch('/images/api/check-policy', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: body.prompt }),
+            body: JSON.stringify({ prompt: body.prompt, is_edit: isEdit }),
         });
         const policyData = await policyResp.json();
 

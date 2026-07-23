@@ -157,7 +157,12 @@ async def images_api_check_policy(
         return JSONResponse(content={"passed": True, "reason": "No judge model configured"})
 
     from backend.app.services.image_policy import evaluate_prompt
-    verdict = await evaluate_prompt(prompt, policy, judge_model, judge_secondary or None)
+    # is_edit comes from the client's reference-image state (a system signal, not
+    # prompt text) so the judge doesn't fail edit prompts like "put glasses on
+    # this man" as ambiguous.
+    verdict = await evaluate_prompt(
+        prompt, policy, judge_model, judge_secondary or None, is_edit=bool(body.get("is_edit"))
+    )
 
     if not verdict.passed:
         return JSONResponse(
@@ -257,7 +262,10 @@ async def images_api_generate(
         judge_secondary = await crud.get_config_json(db, "img.judge_model_secondary", "")
         if judge_model:
             from backend.app.services.image_policy import evaluate_prompt
-            verdict = await evaluate_prompt(body.get("prompt", ""), policy, judge_model, judge_secondary or None)
+            verdict = await evaluate_prompt(
+                body.get("prompt", ""), policy, judge_model, judge_secondary or None,
+                is_edit=bool(body.get("image")),
+            )
             if not verdict.passed:
                 return JSONResponse(
                     status_code=400,

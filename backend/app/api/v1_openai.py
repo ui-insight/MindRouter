@@ -747,6 +747,7 @@ async def _prepare_image_canonical(
             policy=policy_text,
             primary_model=primary_judge,
             secondary_model=secondary_judge,
+            is_edit=bool(images_b64),
         )
 
         if not policy_verdict.passed:
