@@ -327,6 +327,18 @@ async def submit_video_job(
         callback_url=body.get("callback_url"),
     )
     job.token_equivalent = cost  # the reserved amount (refunded on fail/cancel)
+    # Optional start/end conditioning images — must be assets owned by this user.
+    async def _resolve_ref(aid):
+        if aid in (None, ""):
+            return None
+        asset = await crud.get_video_asset(db, int(aid))
+        if not asset or asset.user_id != user.id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid image asset id")
+        return asset.id
+
+    first_frame = await _resolve_ref(body.get("start_image_asset_id"))
+    last_frame = await _resolve_ref(body.get("end_image_asset_id"))
+
     await crud.create_video_shot(
         db=db,
         job_id=job.id,
@@ -334,6 +346,8 @@ async def submit_video_job(
         seconds=float(seconds),
         prompt=prompt,
         seed=body.get("seed"),
+        first_frame_asset_id=first_frame,
+        last_frame_asset_id=last_frame,
     )
     await db.commit()
     # Sync the reservation to Redis post-commit (the documented quota pattern).

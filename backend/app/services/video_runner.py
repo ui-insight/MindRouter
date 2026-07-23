@@ -257,7 +257,10 @@ class VideoRunner:
             return str(v)
 
     def _build_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        """Worker request body for a single text-to-video shot."""
+        """Worker request body for a single shot, incl. optional start/end
+        conditioning images (base64-encoded from their stored paths)."""
+        import base64
+
         payload: Dict[str, Any] = {
             "model": job["model"],
             "prompt": job["prompt"],
@@ -268,6 +271,14 @@ class VideoRunner:
         }
         if job.get("seed") is not None:
             payload["seed"] = job["seed"]
+        for out_key, path_key in (("start_image", "start_image_path"), ("end_image", "end_image_path")):
+            path = job.get(path_key)
+            if path:
+                try:
+                    with open(path, "rb") as fh:
+                        payload[out_key] = base64.b64encode(fh.read()).decode("ascii")
+                except OSError:
+                    logger.warning("video_runner_conditioning_image_missing", path=path)
         return payload
 
 
@@ -295,6 +306,15 @@ class CrudVideoJobRepo:
             shots = await crud.get_video_shots(db, job.id)
             shot = shots[0] if shots else None
             quality = proj.quality if proj else None
+
+            async def _ref_path(asset_id):
+                if not asset_id:
+                    return None
+                a = await crud.get_video_asset(db, asset_id)
+                return a.storage_path if a else None
+
+            start_path = await _ref_path(shot.first_frame_asset_id) if shot else None
+            end_path = await _ref_path(shot.last_frame_asset_id) if shot else None
             return {
                 "id": job.id,
                 "job_uuid": job.job_uuid,
@@ -310,6 +330,8 @@ class CrudVideoJobRepo:
                 "seed": shot.seed if shot else None,
                 "attempts": shot.attempts if shot else 0,
                 "token_equivalent": job.token_equivalent,
+                "start_image_path": start_path,
+                "end_image_path": end_path,
             }
 
     async def is_cancelled(self, job_id: int) -> bool:

@@ -138,7 +138,30 @@ class LTXEngine:
     def model_ids(self) -> list:
         return [self.config.model_id]
 
+    def _build_images(self, spec, num_frames) -> tuple:  # pragma: no cover
+        """Decode optional start/end conditioning images (base64) to temp files
+        and place them at frame 0 / the last frame. Returns (images, tmp_paths)."""
+        import base64
+        import os
+        import uuid as _uuid
+
+        from ltx_pipelines.utils.args import ImageConditioningInput
+
+        strength = float(spec.get("image_strength") or 1.0)
+        images, tmp = [], []
+        for key, frame_idx in (("start_image", 0), ("end_image", num_frames - 1)):
+            b64 = spec.get(key)
+            if not b64:
+                continue
+            path = os.path.join(self.config.output_dir, f"cond-{_uuid.uuid4().hex[:12]}.png")
+            with open(path, "wb") as fh:
+                fh.write(base64.b64decode(b64))
+            tmp.append(path)
+            images.append(ImageConditioningInput(path, frame_idx, strength))
+        return images, tmp
+
     def generate(self, spec, dest_path, progress_cb, should_cancel) -> Dict[str, Any]:  # pragma: no cover
+        import os
         import time
         import torch
 
@@ -151,21 +174,29 @@ class LTXEngine:
         num_frames = spec.get("num_frames") or frames_for(spec["seconds"])
         fps = float(spec.get("fps") or self.config.default_fps)
         seed = int(spec["seed"]) if spec.get("seed") is not None else 42
+        images, tmp_paths = self._build_images(spec, num_frames)
 
         # LTX drives its own internal tqdm denoise loops; we surface coarse
         # phase progress (per-step callbacks would require pipeline hooks).
         progress_cb(1, 3)
         t0 = time.time()
-        with torch.inference_mode():
-            video, audio = self._pipeline(
-                prompt=spec["prompt"], seed=seed, height=height, width=width,
-                num_frames=num_frames, frame_rate=fps, images=[], tiling_config=self._tiling,
-            )
-            progress_cb(2, 3)
-            self._encode_video(
-                video=video, fps=fps, audio=audio, output_path=dest_path,
-                video_chunks_number=self._get_chunks(num_frames, self._tiling),
-            )
+        try:
+            with torch.inference_mode():
+                video, audio = self._pipeline(
+                    prompt=spec["prompt"], seed=seed, height=height, width=width,
+                    num_frames=num_frames, frame_rate=fps, images=images, tiling_config=self._tiling,
+                )
+                progress_cb(2, 3)
+                self._encode_video(
+                    video=video, fps=fps, audio=audio, output_path=dest_path,
+                    video_chunks_number=self._get_chunks(num_frames, self._tiling),
+                )
+        finally:
+            for p in tmp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         progress_cb(3, 3)
         return {"duration_ms": int(num_frames / fps * 1000), "render_ms": int((time.time() - t0) * 1000)}
 

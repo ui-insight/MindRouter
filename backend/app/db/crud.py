@@ -4297,6 +4297,8 @@ async def create_video_shot(
     seed: Optional[int] = None,
     shot_type: VideoShotType = VideoShotType.GENERATED,
     transition: VideoTransition = VideoTransition.CUT,
+    first_frame_asset_id: Optional[int] = None,
+    last_frame_asset_id: Optional[int] = None,
 ) -> VideoShot:
     """Create a shot row. Caller commits."""
     shot = VideoShot(
@@ -4308,6 +4310,8 @@ async def create_video_shot(
         num_frames=num_frames,
         seed=seed,
         transition=transition,
+        first_frame_asset_id=first_frame_asset_id,
+        last_frame_asset_id=last_frame_asset_id,
         status=VideoShotStatus.PENDING,
     )
     db.add(shot)

@@ -74,6 +74,21 @@
             </div>
           </div>
 
+          <fieldset class="mt-3">
+            <legend class="form-label mb-1">Guide with images <span class="text-body-secondary">(optional)</span></legend>
+            <div class="form-text mb-2">Provide a starting and/or ending image to steer the clip.</div>
+            <div class="row g-3">
+              <div class="col-sm-6">
+                <label for="vid-start-image" class="form-label">Start image</label>
+                <input id="vid-start-image" type="file" class="form-control" accept="image/*">
+              </div>
+              <div class="col-sm-6">
+                <label for="vid-end-image" class="form-label">End image</label>
+                <input id="vid-end-image" type="file" class="form-control" accept="image/*">
+              </div>
+            </div>
+          </fieldset>
+
           <button id="vid-generate" type="button" class="btn btn-primary w-100 mt-4"
                   {% if not has_api_key %}disabled{% endif %}>
             <i class="bi bi-camera-video" aria-hidden="true"></i> Generate video
@@ -159,13 +174,23 @@
     progBar.setAttribute("aria-valuenow", Math.round(pct || 0));
   }
 
+  async function uploadImage(inputEl) {
+    const file = inputEl.files && inputEl.files[0];
+    if (!file) return null;
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch("/video/api/assets", { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error((d.error && d.error.message) || "image upload failed");
+    return d.asset_id;
+  }
+
   async function generate() {
     const prompt = $("vid-prompt").value.trim();
     if (!prompt) { setStatus("Please enter a prompt.", "warning"); return; }
     $("vid-generate").disabled = true;
     player.classList.add("d-none");
     actions.classList.add("d-none");
-    setStatus("Submitting…", "info");
     const body = {
       prompt: prompt,
       size: $("vid-size").value,
@@ -176,6 +201,13 @@
     if (seed !== "") body.seed = parseInt(seed, 10);
 
     try {
+      // Upload optional start/end images first, reference them by asset id.
+      setStatus("Uploading images…", "info");
+      const startId = await uploadImage($("vid-start-image"));
+      const endId = await uploadImage($("vid-end-image"));
+      if (startId) body.start_image_asset_id = startId;
+      if (endId) body.end_image_asset_id = endId;
+      setStatus("Submitting…", "info");
       const r = await fetch("/video/api/videos", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
@@ -190,7 +222,7 @@
       actions.classList.remove("d-none");
       poll();
     } catch (e) {
-      setStatus("Network error", "danger");
+      setStatus(e.message || "Network error", "danger");
       $("vid-generate").disabled = false;
     }
   }

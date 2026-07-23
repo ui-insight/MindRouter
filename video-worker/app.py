@@ -107,6 +107,10 @@ def create_app(config: WorkerConfig | None = None) -> FastAPI:
             "fps": int(body.get("fps") or app.state.config.default_fps),
             "quality": body.get("quality") or "standard",
             "seed": body.get("seed"),
+            # Optional start/end conditioning images (base64 PNG/JPEG).
+            "start_image": body.get("start_image"),
+            "end_image": body.get("end_image"),
+            "image_strength": body.get("image_strength"),
         }
         job = manager().submit(spec)
         return {"id": job.id, "status": job.status}

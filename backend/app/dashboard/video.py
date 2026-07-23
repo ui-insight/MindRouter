@@ -100,6 +100,43 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
     )
 
 
+@video_router.post("/video/api/assets")
+async def video_upload_asset(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Upload an optional start/end conditioning image. Returns its asset id,
+    which the create call references as start_image_asset_id / end_image_asset_id."""
+    import hashlib
+
+    from backend.app.db.models import VideoAssetKind
+
+    user, _ = await _get_video_user(request, db)
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse(status_code=400, content={"error": {"message": "no file provided"}})
+    ct = (getattr(upload, "content_type", "") or "").lower()
+    if not ct.startswith("image/"):
+        return JSONResponse(status_code=400, content={"error": {"message": "file must be an image"}})
+    data = await upload.read()
+    max_bytes = int(await crud.get_config_json(db, "vid.max_image_upload_mb", 10)) * 1024 * 1024
+    if len(data) > max_bytes:
+        return JSONResponse(status_code=400, content={"error": {"message": f"image exceeds {max_bytes // 1024 // 1024}MB"}})
+
+    sha = hashlib.sha256(data).hexdigest()
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(ct, "png")
+    ref_dir = _os.path.join(get_settings().video_storage_path, str(user.id), "refs")
+    _os.makedirs(ref_dir, exist_ok=True)
+    path = _os.path.join(ref_dir, f"{sha}.{ext}")
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+    asset = await crud.create_video_asset(
+        db, user_id=user.id, kind=VideoAssetKind.REFERENCE,
+        storage_path=path, content_type=ct, sha256=sha, size_bytes=len(data),
+    )
+    await db.commit()
+    return {"asset_id": asset.id}
+
+
 @video_router.post("/video/api/videos")
 async def video_create(request: Request, db: AsyncSession = Depends(get_async_db)):
     """Create a job via the SHARED create path (same as POST /v1/videos)."""
