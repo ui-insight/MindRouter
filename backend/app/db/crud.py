@@ -4364,8 +4364,11 @@ async def request_cancel_video_job(db: AsyncSession, job: VideoJob) -> None:
     """
     job.cancel_requested = True
     if job.status == VideoJobStatus.QUEUED:
+        # Never started — cancel outright and refund the reservation.
         job.status = VideoJobStatus.CANCELLED
         job.completed_at = datetime.now(timezone.utc)
+        if job.token_equivalent:
+            await refund_video_tokens(db, job.user_id, job.token_equivalent)
     await db.flush()
 
 
@@ -4479,11 +4482,13 @@ async def complete_video_job(
 async def fail_video_job(
     db: AsyncSession, job: VideoJob, *, error_code: str, error_message: str
 ) -> None:
-    """Mark a job FAILED. Commits."""
+    """Mark a job FAILED and refund its reserved quota. Commits."""
     job.status = VideoJobStatus.FAILED
     job.completed_at = datetime.now(timezone.utc)
     job.error_code = error_code
     job.error_message = error_message[:1000] if error_message else error_message
+    if job.token_equivalent:
+        await refund_video_tokens(db, job.user_id, job.token_equivalent)
     await db.commit()
 
 
@@ -4547,3 +4552,48 @@ async def get_video_shot_by_id(db: AsyncSession, shot_id: int) -> Optional[Video
 async def get_video_asset(db: AsyncSession, asset_id: int) -> Optional[VideoAsset]:
     result = await db.execute(select(VideoAsset).where(VideoAsset.id == asset_id))
     return result.scalar_one_or_none()
+
+
+# --- Video quota reservation (mirrors _check_quota's DB-tokens model) ------
+async def compute_video_token_cost(
+    db: AsyncSession, *, seconds: float, quality: str, size: str
+) -> int:
+    """Token-equivalent cost of a render: per-second rate x quality x resolution
+    multipliers (all app_config, admin-tunable)."""
+    per_sec = await get_config_json(db, "vid.token_cost_per_second", 2000)
+    q_mults = await get_config_json(
+        db, "vid.quality_multipliers", {"draft": 0.5, "standard": 1.0, "final": 2.0}
+    )
+    r_mults = await get_config_json(db, "vid.resolution_multipliers", {})
+    q = q_mults.get(quality, 1.0) if isinstance(q_mults, dict) else 1.0
+    r = r_mults.get(size, 1.0) if isinstance(r_mults, dict) else 1.0
+    return int(float(seconds) * float(per_sec) * float(q) * float(r))
+
+
+async def reserve_video_tokens(db: AsyncSession, user: User, cost: int) -> bool:
+    """Reserve `cost` tokens if the user's group budget allows. Returns False
+    (reject) if it would exceed budget. Charges immediately (a reservation), so
+    concurrent submissions can't each spend the same balance. Caller commits and
+    then calls incr_quota_redis(user.id, cost)."""
+    await reset_quota_if_needed(db, user.id)
+    quota = await get_user_quota(db, user.id)
+    budget = user.group.token_budget if user.group else 0
+    used = quota.tokens_used if quota else 0
+    if budget > 0 and used + cost > budget:
+        return False
+    await update_quota_usage(db, user.id, cost)
+    return True
+
+
+async def refund_video_tokens(db: AsyncSession, user_id: int, amount: int) -> None:
+    """Return a reservation to the user when a render fails or is cancelled
+    (it was never actually consumed). Decrements DB counters (floored) and
+    Redis. Caller commits."""
+    if amount <= 0:
+        return
+    quota = await get_user_quota(db, user_id)
+    if quota:
+        quota.tokens_used = max(0, quota.tokens_used - amount)
+        quota.lifetime_tokens_used = max(0, quota.lifetime_tokens_used - amount)
+        await db.flush()
+    await incr_quota_redis(user_id, -amount)

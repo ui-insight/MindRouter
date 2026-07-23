@@ -215,7 +215,9 @@ class VideoRunner:
 
         duration = float(job.get("seconds") or 0)
         gpu_seconds = int(round(fetch.duration_ms / 1000)) if fetch.duration_ms else 0
-        token_equivalent = int(duration * self.token_cost_per_second)
+        # Keep the amount reserved at submit (charged with quality/resolution
+        # multipliers); only fall back to a flat estimate if none was reserved.
+        token_equivalent = job.get("token_equivalent") or int(duration * self.token_cost_per_second)
 
         await self.repo.mark_shot(
             job["shot_id"], status="rendered", output_asset_id=asset_id
@@ -298,6 +300,7 @@ class CrudVideoJobRepo:
                 "seconds": shot.seconds if shot else None,
                 "seed": shot.seed if shot else None,
                 "attempts": shot.attempts if shot else 0,
+                "token_equivalent": job.token_equivalent,
             }
 
     async def is_cancelled(self, job_id: int) -> bool:
@@ -350,6 +353,8 @@ class CrudVideoJobRepo:
             if job:
                 job.status = VideoJobStatus.CANCELLED
                 job.completed_at = datetime.now(timezone.utc)
+                if job.token_equivalent:
+                    await crud.refund_video_tokens(db, job.user_id, job.token_equivalent)
                 await db.commit()
 
     async def store_output(self, job: Dict[str, Any], src_path: str, fetch: FetchResult) -> int:

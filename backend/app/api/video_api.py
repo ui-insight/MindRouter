@@ -188,6 +188,21 @@ async def submit_video_job(
             detail="Video generation is not enabled for your account. Contact an administrator.",
         )
 
+    # Surface any field MindRouter would silently drop (typos, wrong-API fields,
+    # unsupported-in-v1 params). Runs at the global field_validation setting
+    # ('log' by default — dark launch; flips to reject fleet-wide later).
+    from backend.app.core.translators.field_validation import (
+        VIDEO_ACCEPTED,
+        VIDEO_DIALECT_HINTS,
+        VIDEO_IGNORED,
+        validate_request_fields,
+    )
+
+    validate_request_fields(
+        body, dialect="video",
+        accepted=VIDEO_ACCEPTED, ignored=VIDEO_IGNORED, hints=VIDEO_DIALECT_HINTS,
+    )
+
     job_uuid = f"vid-{uuid.uuid4().hex[:24]}"
     bind_request_context(request_id=job_uuid, user_id=user.id)
 
@@ -259,6 +274,17 @@ async def submit_video_job(
             ),
         )
 
+    # ── Quota reservation (charge up front; refunded if the render fails/cancels).
+    # Video bypasses InferenceService, so it enforces quota here, mirroring
+    # _check_quota's DB-tokens model. Reserving (not just checking) is what
+    # actually bounds spend across concurrent submissions.
+    cost = await crud.compute_video_token_cost(db, seconds=float(seconds), quality=quality, size=size)
+    if not await crud.reserve_video_tokens(db, user, cost):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Insufficient token quota for this video (needs ~{cost:,} tokens).",
+        )
+
     # ── Persist: audit request → one-shot project → job → shot ───
     audit = await crud.create_request(
         db=db,
@@ -291,6 +317,7 @@ async def submit_video_job(
         shots_total=1,
         callback_url=body.get("callback_url"),
     )
+    job.token_equivalent = cost  # the reserved amount (refunded on fail/cancel)
     await crud.create_video_shot(
         db=db,
         job_id=job.id,
@@ -300,6 +327,8 @@ async def submit_video_job(
         seed=body.get("seed"),
     )
     await db.commit()
+    # Sync the reservation to Redis post-commit (the documented quota pattern).
+    await crud.incr_quota_redis(user.id, cost)
     # expire_on_commit may have expired these; reload before serializing.
     await db.refresh(job)
     await db.refresh(project)
