@@ -1146,6 +1146,8 @@ class BackendRegistry:
                             for model_info in caps.models:
                                 if backend.engine == BackendEngine.DIFFUSION:
                                     modality = Modality.IMAGE_GENERATION
+                                elif backend.engine == BackendEngine.VIDEO:
+                                    modality = Modality.VIDEO_GENERATION
                                 elif model_info.supports_multimodal:
                                     modality = Modality.MULTIMODAL
                                 elif "rerank" in model_info.name.lower():

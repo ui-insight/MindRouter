@@ -87,6 +87,14 @@ def test_scheduler_job_modality_has_video():
     assert 'VIDEO_GENERATION = "video_generation"' in src
 
 
+def test_registry_discovers_video_modality():
+    # A video-engine backend's model must be discovered as VIDEO_GENERATION,
+    # else the runner's get_backends_with_model(..., VIDEO_GENERATION) can't route.
+    src = _read("backend/app/core/telemetry/registry.py")
+    assert "BackendEngine.VIDEO" in src
+    assert "Modality.VIDEO_GENERATION" in src
+
+
 # --- Migration 065 (source inspection) ------------------------------------
 
 def test_migration_065_chain_and_enum_widening():
