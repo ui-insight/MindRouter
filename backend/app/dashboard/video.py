@@ -227,17 +227,33 @@ async def video_poll(video_id: str, request: Request, db: AsyncSession = Depends
     job = await crud.get_video_job_by_uuid(db, video_id, user_id=user.id)
     if not job:
         raise HTTPException(status_code=404, detail="Video not found")
-    return _job_to_dict(job)
+    data = _job_to_dict(job)
+    # Surface the shared render queue + this job's place in it (fairness on a
+    # one-render-at-a-time GPU). position is 0 unless the job is still queued.
+    position, depth = await crud.get_video_queue_position(db, job)
+    data["queue_position"] = position
+    data["queue_depth"] = depth
+    return data
 
 
 @video_router.get("/video/api/jobs")
 async def video_library(
-    request: Request, limit: int = 12, offset: int = 0, db: AsyncSession = Depends(get_async_db)
+    request: Request, limit: int = 12, offset: int = 0, status: str = None,
+    db: AsyncSession = Depends(get_async_db),
 ):
     """Paginated library of the user's jobs (newest first), each enriched with
-    its project (size/quality) so the gallery can label clips."""
+    its project (size/quality) so the gallery can label clips. Pass
+    status=completed to paginate only finished videos (the gallery view)."""
     user, _ = await _get_video_user(request, db)
-    jobs, total = await crud.list_video_jobs(db, user.id, limit=limit, offset=offset)
+    st = None
+    if status:
+        try:
+            st = VideoJobStatus(status)
+        except ValueError:
+            st = None
+    jobs, total = await crud.list_video_jobs(
+        db, user.id, status=st, limit=limit, offset=offset
+    )
     data = []
     for j in jobs:
         proj = await crud.get_video_project(db, j.project_id)

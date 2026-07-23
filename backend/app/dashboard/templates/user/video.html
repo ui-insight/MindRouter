@@ -169,6 +169,9 @@
     </div>
     <div id="vid-library" class="vid-lib-grid" aria-live="polite"></div>
     <p id="vid-library-empty" class="text-body-secondary d-none">No videos yet.</p>
+    <div id="vid-lib-more-wrap" class="text-center mt-3 d-none">
+      <button id="vid-lib-more" type="button" class="btn btn-sm btn-outline-secondary">Load more</button>
+    </div>
   </section>
 </div>
 
@@ -364,8 +367,19 @@
       const r = await fetch("/video/api/jobs/" + encodeURIComponent(currentId));
       const job = await r.json();
       const st = job.status;
-      if (st === "queued") setStatus("Queued…", "secondary");
-      else if (st === "in_progress") { setStatus("Rendering… " + Math.round(job.progress || 0) + "%", "info"); setProgress(job.progress); }
+      if (st === "queued") {
+        let msg = "Queued…";
+        if (job.queue_position) {
+          msg = "Queued — you're #" + job.queue_position;
+          if (job.queue_depth) msg += " of " + job.queue_depth + " waiting";
+        }
+        setStatus(msg, "secondary");
+      }
+      else if (st === "in_progress") {
+        let msg = "Rendering… " + Math.round(job.progress || 0) + "%";
+        if (job.queue_depth) msg += " · " + job.queue_depth + " waiting behind";
+        setStatus(msg, "info"); setProgress(job.progress);
+      }
 
       if (st === "completed") {
         setProgress(100);
@@ -407,6 +421,15 @@
     return [size, dur].filter(Boolean).join(" · ");
   }
 
+  function fmtDate(unixSeconds) {
+    if (!unixSeconds) return "";
+    try {
+      return new Date(unixSeconds * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+    } catch (e) {
+      return new Date(unixSeconds * 1000).toLocaleString();
+    }
+  }
+
   async function deleteVideo(id, cardEl) {
     if (!confirm("Delete this video? This cannot be undone.")) return;
     try {
@@ -416,15 +439,22 @@
     } catch (e) { setStatus("Delete failed (network).", "danger"); }
   }
 
-  async function loadLibrary() {
+  let libOffset = 0;
+  const LIB_LIMIT = 12;
+
+  async function loadLibrary(append) {
     const grid = $("vid-library");
     const empty = $("vid-library-empty");
+    const moreWrap = $("vid-lib-more-wrap");
+    if (!append) { libOffset = 0; grid.innerHTML = ""; }
     try {
-      const r = await fetch("/video/api/jobs?limit=12");
+      // Paginate completed videos, newest first (server orders + filters).
+      const r = await fetch("/video/api/jobs?status=completed&limit=" + LIB_LIMIT + "&offset=" + libOffset);
       const data = await r.json();
-      const jobs = (data.data || []).filter((j) => j.status === "completed");
-      grid.innerHTML = "";
-      if (!jobs.length) { empty.classList.remove("d-none"); return; }
+      const jobs = data.data || [];
+      if (!append && jobs.length === 0) {
+        empty.classList.remove("d-none"); moreWrap.classList.add("d-none"); return;
+      }
       empty.classList.add("d-none");
       for (const j of jobs) {
         const card = document.createElement("div");
@@ -457,9 +487,14 @@
         del.innerHTML = '<i class="bi bi-trash" aria-hidden="true"></i>';
         del.addEventListener("click", () => deleteVideo(j.id, card));
         row.appendChild(meta); row.appendChild(del);
-        card.appendChild(vid); card.appendChild(row);
+        const date = document.createElement("small");
+        date.className = "text-body-secondary d-block text-truncate";
+        date.textContent = fmtDate(j.created_at);
+        card.appendChild(vid); card.appendChild(row); card.appendChild(date);
         grid.appendChild(card);
       }
+      libOffset += jobs.length;
+      moreWrap.classList.toggle("d-none", libOffset >= (data.total || 0));
     } catch (e) { /* leave grid as-is */ }
   }
 
@@ -470,7 +505,8 @@
 
   $("vid-generate").addEventListener("click", generate);
   cancelBtn.addEventListener("click", cancel);
-  $("vid-refresh").addEventListener("click", loadLibrary);
+  $("vid-refresh").addEventListener("click", () => loadLibrary());
+  $("vid-lib-more").addEventListener("click", () => loadLibrary(true));
   loadLibrary();
 })();
 </script>

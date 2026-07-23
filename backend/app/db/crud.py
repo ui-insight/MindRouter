@@ -4569,6 +4569,44 @@ async def get_user_image(
     return result.scalar_one_or_none()
 
 
+async def get_video_queue_position(db: AsyncSession, job: VideoJob) -> tuple[int, int]:
+    """Return (position, queue_depth) for a video job.
+
+    queue_depth = total jobs waiting (QUEUED) across all users.
+    position    = 1-based place in processing order for THIS job when QUEUED
+                  (jobs ahead + 1); 0 if the job isn't queued. Processing order
+                  matches the claim query: active jobs first, then QUEUED by
+                  priority DESC, id ASC.
+    """
+    active = [VideoJobStatus.PLANNING, VideoJobStatus.RENDERING, VideoJobStatus.ASSEMBLING]
+    depth = int(
+        (await db.execute(
+            select(func.count(VideoJob.id)).where(VideoJob.status == VideoJobStatus.QUEUED)
+        )).scalar() or 0
+    )
+    if job.status != VideoJobStatus.QUEUED:
+        return (0, depth)
+    ahead_active = int(
+        (await db.execute(
+            select(func.count(VideoJob.id)).where(VideoJob.status.in_(active))
+        )).scalar() or 0
+    )
+    ahead_queued = int(
+        (await db.execute(
+            select(func.count(VideoJob.id)).where(
+                and_(
+                    VideoJob.status == VideoJobStatus.QUEUED,
+                    or_(
+                        VideoJob.priority > job.priority,
+                        and_(VideoJob.priority == job.priority, VideoJob.id < job.id),
+                    ),
+                )
+            )
+        )).scalar() or 0
+    )
+    return (ahead_active + ahead_queued + 1, depth)
+
+
 async def get_user_video_storage_bytes(db: AsyncSession, user_id: int) -> int:
     """Total on-disk bytes a user's video assets occupy — outputs (FINAL/
     shot_output), reference images, everything under their video storage dir.
