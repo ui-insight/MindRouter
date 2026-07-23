@@ -1,6 +1,6 @@
 # Image-to-Image (input-image conditioning) — Scope
 
-Status: **Phase A + Phase B (backend route + MindRouter plumbing) COMPLETE — pending live restart + Phase C UI**
+Status: **Phase A + B + C COMPLETE (code) — pending live FLUX restart + gateway deploy (2.8.17)**
 Owner: Luke Sheneman (RCDS)
 Related: `docs/video-generation-plan.md`, `docs/video-api.md` (FLUX→LTX storyboard bridge)
 
@@ -80,7 +80,7 @@ images.html ──▶ POST /images/api/generate (dashboard proxy)   ┐
 | 4 | Inference service | `inference.py` | `_proxy_image_request` → `/v1/images/edits` when `request.image`. | ✅ DONE |
 | 5 | Public API | `v1_openai.py` | `POST /v1/images/edits` multipart (`image[]`, `prompt`, knobs); shared `_prepare_image_canonical` helper (policy+guardrails) reused by generations. | ✅ DONE |
 | 6a | Dashboard proxy | `images.py` | `/images/api/generate` accepts `image` (str or list) + `strength`. | ✅ DONE |
-| 6b | Dashboard UI | `templates/user/images.html` | Upload/pick input image, strength slider. | ⬜ Phase C |
+| 6b | Dashboard UI | `templates/user/images.html` | Reference-image dropzone (click + drag/drop, ≤10MB, ≤4), thumbnail + clear, button → "Edit Image", edits `image:[b64]` via proxy, API-ref edits example. **Strength slider intentionally omitted — Klein ignores it (would be a no-op).** | ✅ DONE |
 | — | Provenance (optional) | `models.py` `UserImage`, `crud` | Persist input image + link ("edited from X"). | ⬜ deferred |
 
 Tests: `backend/app/tests/unit/test_diffusion_img2img.py` (5, translator passthrough).

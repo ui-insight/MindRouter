@@ -176,6 +176,31 @@
                 </div>
             </div>
 
+            <!-- Reference image (optional) — enables reference-edit (img2img) -->
+            <div class="mb-3">
+                <label class="form-label fw-semibold">
+                    Reference image <span class="text-muted fw-normal">(optional)</span>
+                </label>
+                <div id="refDropzone" class="border rounded d-flex align-items-center gap-3 p-2"
+                     style="cursor:pointer; border-style:dashed !important;">
+                    <img id="refThumb" alt="Reference" style="display:none; width:56px; height:56px; object-fit:cover; border-radius:6px;">
+                    <div id="refPlaceholder" class="d-flex align-items-center gap-2 text-muted">
+                        <i class="bi bi-image" style="font-size:1.4rem; opacity:.6;"></i>
+                        <span>Add an image to edit it with your prompt (keeps its composition)</span>
+                    </div>
+                    <div id="refInfo" class="flex-grow-1 small" style="display:none;"></div>
+                    <button type="button" id="refClearBtn" class="btn btn-sm btn-outline-secondary ms-auto"
+                            style="display:none;" aria-label="Remove reference image">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </div>
+                <input type="file" id="refFile" accept="image/png,image/jpeg,image/webp" style="display:none;">
+                <small id="refHint" class="text-muted" style="display:none;">
+                    <i class="bi bi-info-circle"></i>
+                    Reference edit: the model preserves the image's structure and applies your prompt.
+                </small>
+            </div>
+
             <!-- Aspect Ratio Presets -->
             <div class="mb-3">
                 <label class="form-label fw-semibold">Aspect Ratio</label>
@@ -365,6 +390,16 @@ image_data = response.data[0].b64_json</code></pre>
 });
 const data = await response.json();
 const imageBase64 = data.data[0].b64_json;</code></pre>
+                <h6 class="mt-3">Image-to-image (reference edit)</h6>
+                <p class="small mb-1">Send one or more reference images as multipart form-data to
+                <code>/v1/images/edits</code>. The model preserves the reference's composition and
+                applies your prompt:</p>
+<pre class="p-3 rounded small" style="overflow-x:auto; background: var(--bs-tertiary-bg);"><code>curl -X POST https://mindrouter.uidaho.edu/v1/images/edits \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -F image=@reference.png \
+  -F prompt="the apple is now bright blue" \
+  -F size="{{ default_size }}" \
+  -F response_format=b64_json</code></pre>
             </div>
         </div>
     </div>
@@ -417,6 +452,84 @@ let generating = false;
 let genStartTime = 0;
 let genTimerInterval = null;
 let lastPrompt = '';
+
+// ── Reference image (img2img / reference-edit) ─────────
+let refImageB64 = null;  // raw base64 (no data-URI prefix), or null for txt2img
+const REF_MAX_MB = 10;
+
+function setRefImage(dataUrl, name, sizeBytes) {
+    // Strip the "data:image/...;base64," prefix — send raw base64.
+    refImageB64 = dataUrl.includes(',') ? dataUrl.split(',', 2)[1] : dataUrl;
+    document.getElementById('refThumb').src = dataUrl;
+    document.getElementById('refThumb').style.display = 'block';
+    document.getElementById('refPlaceholder').style.display = 'none';
+    const info = document.getElementById('refInfo');
+    info.style.display = 'block';
+    info.innerHTML = '<span class="fw-semibold">' + (name || 'image') + '</span>' +
+        (sizeBytes ? ' <span class="text-muted">· ' + (sizeBytes / 1024 / 1024).toFixed(1) + ' MB</span>' : '');
+    document.getElementById('refClearBtn').style.display = 'inline-block';
+    document.getElementById('refHint').style.display = 'block';
+    updateGenerateLabel();
+}
+
+function clearRefImage() {
+    refImageB64 = null;
+    document.getElementById('refFile').value = '';
+    document.getElementById('refThumb').style.display = 'none';
+    document.getElementById('refThumb').src = '';
+    document.getElementById('refPlaceholder').style.display = 'flex';
+    document.getElementById('refInfo').style.display = 'none';
+    document.getElementById('refClearBtn').style.display = 'none';
+    document.getElementById('refHint').style.display = 'none';
+    updateGenerateLabel();
+}
+
+function updateGenerateLabel() {
+    const btn = document.getElementById('generateBtn');
+    if (generating) return;
+    btn.innerHTML = refImageB64
+        ? '<i class="bi bi-magic me-1"></i> Edit Image'
+        : '<i class="bi bi-stars me-1"></i> Generate Image';
+}
+
+(function wireRefImage() {
+    const dz = document.getElementById('refDropzone');
+    const fileInput = document.getElementById('refFile');
+    const clearBtn = document.getElementById('refClearBtn');
+
+    function handleFile(file) {
+        if (!file) return;
+        if (!file.type || !file.type.startsWith('image/')) {
+            alert('Please choose an image file (PNG, JPEG, or WebP).');
+            return;
+        }
+        if (file.size > REF_MAX_MB * 1024 * 1024) {
+            alert('Image exceeds ' + REF_MAX_MB + 'MB.');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => setRefImage(reader.result, file.name, file.size);
+        reader.readAsDataURL(file);
+    }
+
+    dz.addEventListener('click', (e) => {
+        if (e.target.closest('#refClearBtn')) return;
+        fileInput.click();
+    });
+    fileInput.addEventListener('change', () => handleFile(fileInput.files[0]));
+    clearBtn.addEventListener('click', (e) => { e.stopPropagation(); clearRefImage(); });
+
+    // Drag & drop
+    ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, (e) => {
+        e.preventDefault(); dz.classList.add('border-primary');
+    }));
+    ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, (e) => {
+        e.preventDefault(); dz.classList.remove('border-primary');
+    }));
+    dz.addEventListener('drop', (e) => {
+        if (e.dataTransfer && e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+})();
 
 // ── Aspect ratio & dimension controls ──────────────────
 const MAX_W = {{ max_width }};
@@ -500,7 +613,8 @@ async function generateImage() {
     lastPrompt = prompt;
     const btn = document.getElementById('generateBtn');
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Generating...';
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> ' +
+        (refImageB64 ? 'Editing...' : 'Generating...');
 
     // Show result area
     const resultArea = document.getElementById('resultArea');
@@ -539,6 +653,9 @@ async function generateImage() {
         response_format: 'b64_json',
     };
     if (seedVal) body.seed = parseInt(seedVal);
+    // Reference-edit (img2img): attach the reference image when present.
+    const isEdit = !!refImageB64;
+    if (isEdit) body.image = [refImageB64];
 
     try {
         // ── Step 1: Policy check (fast) ────────────────────
@@ -567,7 +684,7 @@ async function generateImage() {
         // Policy passed — show green checkmark
         policyBadge.className = 'policy-badge passed';
         policyBadge.innerHTML = '<i class="bi bi-check-circle-fill"></i> Policy check passed';
-        document.getElementById('genStatusText').textContent = 'Generating image...';
+        document.getElementById('genStatusText').textContent = isEdit ? 'Editing image...' : 'Generating image...';
 
         // ── Step 2: Generate image ─────────────────────────
         const resp = await fetch('/images/api/generate', {
@@ -624,7 +741,7 @@ async function generateImage() {
         clearInterval(genTimerInterval);
         generating = false;
         btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-stars me-1"></i> Generate Image';
+        updateGenerateLabel();
     }
 }
 

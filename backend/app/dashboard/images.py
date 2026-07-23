@@ -294,6 +294,14 @@ async def images_api_generate(
             status_code=400,
             content={"error": {"message": "at most 4 reference images allowed", "type": "invalid_request_error"}},
         )
+    if images_b64:
+        # Bound each reference by img.max_image_upload_mb (base64 is ~1.37x raw).
+        max_bytes = int(await crud.get_config_json(db, "img.max_image_upload_mb", 10)) * 1024 * 1024
+        if any(len(s) > int(max_bytes * 1.4) for s in images_b64):
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": f"reference image exceeds {max_bytes // 1024 // 1024}MB", "type": "invalid_request_error"}},
+            )
 
     canonical = CanonicalImageRequest(
         model=body["model"],
