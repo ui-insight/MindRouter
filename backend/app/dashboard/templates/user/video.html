@@ -22,6 +22,16 @@
   .vq-bar.vq-queued > span { background: var(--bs-secondary); opacity: .5; }
   .vq-meta { font-size: .82rem; color: var(--bs-secondary-color); }
   .vq-eta { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+  /* Rendering vs waiting must be unmistakable — only ONE renders at a time. */
+  .vq-row.vq-waiting { opacity: .6; }
+  .vq-pill { display: inline-block; font-size: .7rem; font-weight: 600; padding: .05rem .5rem;
+    border-radius: 1rem; vertical-align: middle; }
+  .vq-pill-live { background: var(--bs-success); color: #fff; }
+  .vq-pill-wait { background: var(--bs-secondary-bg); color: var(--bs-secondary-color);
+    border: 1px solid var(--bs-border-color); }
+  .vq-live-dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%;
+    background: #fff; margin-right: .3rem; animation: vqpulse 1.2s ease-in-out infinite; }
+  @keyframes vqpulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 </style>
 
 <div class="vid-shell py-3">
@@ -569,9 +579,14 @@
       return;
     }
     empty.style.display = "none";
-    $("vid-queue-count").textContent = vqData.total + (vqData.total === 1 ? " job" : " jobs");
+    // Only one clip renders at a time — summarize so it's obvious the rest wait.
+    const rendCount = vqData.queue.filter((x) => x.status === "in_progress").length;
+    const waitCount = vqData.queue.length - rendCount;
+    $("vid-queue-count").textContent =
+      rendCount + " rendering" + (waitCount ? " · " + waitCount + " waiting" : "");
     const drift = (performance.now() - vqFetchedAt) / 1000;  // seconds since fetch
     list.innerHTML = "";
+    let waitPos = 0;
     for (const item of vqData.queue) {
       const rendering = item.status === "in_progress";
       const elapsed = (item.elapsed_seconds != null) ? item.elapsed_seconds + drift : null;
@@ -581,16 +596,23 @@
         const byTime = item.est_seconds ? (elapsed / item.est_seconds) * 100 : 0;
         pct = Math.min(99, Math.max(item.progress || 0, byTime));
       }
+      if (!rendering) waitPos += 1;
       const spec = [item.size, item.seconds ? item.seconds + "s" : null].filter(Boolean).join(" · ");
-      const label = (rendering ? "Rendering" : "Queued") + (item.mine ? " (yours)" : "") + (spec ? " · " + spec : "");
+      const pill = rendering
+        ? '<span class="vq-pill vq-pill-live"><span class="vq-live-dot"></span>Rendering</span>'
+        : '<span class="vq-pill vq-pill-wait">Waiting</span>';
+      const who = item.mine
+        ? '<span class="badge text-bg-primary ms-1">you</span>'
+        : '<span class="text-body-secondary ms-1">another user</span>';
       const right = rendering
         ? '<strong>' + Math.round(pct) + '%</strong><br><span class="vq-meta">' + fmtDur(elapsed) + ' elapsed · ~' + fmtDur(eta) + ' left</span>'
         : '<span class="vq-meta">starts in<br>~' + fmtDur(eta) + '</span>';
       const row = document.createElement("div");
-      row.className = "vq-row" + (item.mine ? " vq-mine" : "");
+      row.className = "vq-row" + (item.mine ? " vq-mine" : "") + (rendering ? "" : " vq-waiting");
       row.innerHTML =
-        '<div class="vq-slot ' + (rendering ? "vq-live" : "") + '">' + (rendering ? "▶" : "#" + item.slot) + '</div>' +
-        '<div><div class="text-truncate">' + esc(label) + '</div>' +
+        '<div class="vq-slot ' + (rendering ? "vq-live" : "") + '">' + (rendering ? "▶" : "#" + waitPos) + '</div>' +
+        '<div><div class="text-truncate">' + pill + who +
+        (spec ? ' <span class="vq-meta">' + esc(spec) + '</span>' : "") + '</div>' +
         '<div class="vq-bar ' + (rendering ? "" : "vq-queued") + '"><span style="width:' + (rendering ? pct : 100) + '%"></span></div></div>' +
         '<div class="vq-eta">' + right + '</div>';
       list.appendChild(row);
