@@ -1,0 +1,14 @@
+# video-worker service deps (own venv — NOT the gateway's).
+# The HTTP/service layer:
+fastapi>=0.110
+uvicorn[standard]>=0.29
+# Tests:
+httpx>=0.27
+pytest>=8.0
+#
+# GPU deps are installed SEPARATELY on the H200 node (mode=ltx), pinned by
+# hash during Phase 0 — they are intentionally NOT listed here so the service
+# layer installs and tests without a GPU:
+#   torch (matching the node CUDA), and the first-party ltx_pipelines package
+#   from github.com/Lightricks/LTX-2 (NO ComfyUI, NO diffusers).
+# Verify at install: `pip show ltx_pipelines` pulls no comfy-* packages.

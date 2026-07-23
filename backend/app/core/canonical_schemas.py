@@ -492,3 +492,87 @@ class CanonicalModelList(BaseModel):
     """List of available models."""
     object: str = "list"
     data: List[CanonicalModelInfo]
+
+
+# Video Generation Schemas
+#
+# v1 scope: text-to-video, single clip. Fields for image conditioning,
+# keyframes, and multi-shot storyboards are deliberately NOT modeled here yet
+# (see docs/video-generation-plan.md — deferred to later phases). The request
+# is structured so those extend additively without reshaping v1.
+class VideoJobStatus(str, Enum):
+    """Lifecycle states for a video generation job (gateway-side)."""
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CanonicalVideoRequest(BaseModel):
+    """Canonical video generation request (text-to-video, single clip).
+
+    Deliberately OpenAI-video-shaped where a convention exists (``seconds`` as a
+    string, ``size`` as ``"WIDTHxHEIGHT"``) so stock clients interoperate. The
+    worker-facing translation lives in ``translators/video_out.py``.
+    """
+    model: str
+    prompt: str
+
+    # Generation parameters. size/seconds/fps/quality are snapped to the legal
+    # preset grid before dispatch (torch.compile is warmed per-shape on the
+    # worker, so off-menu values are rejected, not silently recompiled).
+    size: str = "1280x704"          # "WIDTHxHEIGHT"; must be multiples of 32 for LTX
+    seconds: str = "5"              # clip duration, string per OpenAI video convention
+    fps: int = 24
+    quality: str = "standard"       # "draft" | "standard" | "final"
+    negative_prompt: Optional[str] = None
+    seed: Optional[int] = None
+
+    # MindRouter metadata (mirrors CanonicalImageRequest)
+    request_id: Optional[str] = None
+    user_id: Optional[int] = None
+    api_key_id: Optional[int] = None
+    user: Optional[str] = None
+    policy_verdict: Optional[dict] = None  # Populated by LLM-as-judge
+
+
+class CanonicalVideoJob(BaseModel):
+    """Canonical view of a video job, echoed by every video endpoint.
+
+    Shaped like OpenAI's video job object (``status`` uses ``in_progress``) so
+    stock SDK polling loops work unmodified.
+    """
+    id: str                               # "vid-<24hex>"
+    object: str = "video"
+    status: VideoJobStatus = VideoJobStatus.QUEUED
+    progress: float = 0.0                 # 0-100
+    created_at: int
+    started_at: Optional[int] = None
+    completed_at: Optional[int] = None
+    expires_at: Optional[int] = None
+    eta_seconds: Optional[int] = None
+
+    # Echoed request parameters
+    model: str
+    prompt: Optional[str] = None
+    size: Optional[str] = None
+    seconds: Optional[str] = None
+    fps: Optional[int] = None
+    quality: Optional[str] = None
+    seed: Optional[int] = None
+
+    # Output + accounting
+    content_url: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None  # {"code": ..., "message": ...}
+    usage: Optional[Dict[str, Any]] = None  # {duration_seconds, gpu_seconds, token_equivalent}
+
+    # MindRouter internals
+    backend_id: Optional[int] = None
+
+
+class CanonicalVideoList(BaseModel):
+    """List of a caller's video jobs."""
+    object: str = "list"
+    data: List[CanonicalVideoJob]
+    total: int = 0

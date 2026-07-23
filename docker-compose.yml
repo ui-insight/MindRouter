@@ -24,8 +24,19 @@ services:
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-mindrouter}
       - MCP_SERVER_URL=${MCP_SERVER_URL:-http://127.0.0.1:8001}
       - RESPONSES_API_ENABLED=${RESPONSES_API_ENABLED:-true}
+      # Video generation (see backend/app/settings.py — keep in sync)
+      - VIDEO_STORAGE_PATH=${VIDEO_STORAGE_PATH:-/data/video}
+      - VIDEO_RUNNER_ENABLED=${VIDEO_RUNNER_ENABLED:-true}
+      - VIDEO_RUNNER_POLL_INTERVAL_SECONDS=${VIDEO_RUNNER_POLL_INTERVAL_SECONDS:-5}
+      - VIDEO_WORKER_TIMEOUT_SECONDS=${VIDEO_WORKER_TIMEOUT_SECONDS:-60}
+      - VIDEO_WORKER_FETCH_TIMEOUT_SECONDS=${VIDEO_WORKER_FETCH_TIMEOUT_SECONDS:-900}
+      - VIDEO_JOB_MAX_WALL_SECONDS=${VIDEO_JOB_MAX_WALL_SECONDS:-3600}
+      - VIDEO_JOB_STALE_HEARTBEAT_SECONDS=${VIDEO_JOB_STALE_HEARTBEAT_SECONDS:-120}
+      - VIDEO_MAX_UPLOAD_MB=${VIDEO_MAX_UPLOAD_MB:-64}
+      - VIDEO_WEBHOOK_SIGNING_KEY=${VIDEO_WEBHOOK_SIGNING_KEY:-}
     volumes:
       - /archivedb/artifacts:/data/artifacts
+      - /archivedb/video:/data/video
       - chat_data:/data/chat_files
       - ./backend:/app/backend:ro
     depends_on:

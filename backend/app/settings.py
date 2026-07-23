@@ -96,6 +96,22 @@ class Settings(BaseSettings):
     artifact_max_size_mb: int = 50
     artifact_retention_days: int = 365
 
+    # Video Generation
+    # Every value here MUST also be added to docker-compose.yml as
+    # `- NEW_VAR=${NEW_VAR:-<default>}` (pydantic-settings reads env_file only
+    # inside the container; .env.prod is not mounted). See
+    # docs/video-generation-plan.md. Per-model tunables (presets, quotas,
+    # policy) live as vid.* rows in app_config, NOT here.
+    video_storage_path: str = "/data/video"
+    video_runner_enabled: bool = True
+    video_runner_poll_interval_seconds: int = 5
+    video_worker_timeout_seconds: int = 60          # control-plane calls (submit/poll/cancel)
+    video_worker_fetch_timeout_seconds: int = 900   # artifact fetch (worker -> gateway, large)
+    video_job_max_wall_seconds: int = 3600
+    video_job_stale_heartbeat_seconds: int = 120
+    video_max_upload_mb: int = 64
+    video_webhook_signing_key: str = ""             # host .env only, never in repo
+
     # Default Quotas - per role (deprecated: use Group DB defaults instead)
     default_token_budget_student: int = 100000
     default_rpm_student: int = 30

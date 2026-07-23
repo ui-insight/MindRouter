@@ -1,0 +1,30 @@
+# systemd unit for the LTX-2.3 video worker (one per GPU).
+# Install: /etc/systemd/system/video-worker.service, edit User/paths/GPU, then
+#   systemctl daemon-reload && systemctl enable --now video-worker
+#
+# Pin CUDA_VISIBLE_DEVICES to the reclaimed GPU. Keep VIDEO_WORKER_MODE=ltx on
+# the GPU node; mock is for dev/CI only.
+[Unit]
+Description=MindRouter LTX-2.3 Video Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sheneman
+WorkingDirectory=/opt/mindrouter-video-worker
+Environment=VIDEO_WORKER_MODE=ltx
+Environment=VIDEO_WORKER_MODEL=lightricks/ltx-2.3-distilled
+Environment=VIDEO_WORKER_OUTPUT_DIR=/data/video-worker
+Environment=VIDEO_WORKER_CKPT_DIR=/data/ltx-2.3
+# Pin to the reclaimed GPU (e.g. aspen1 GPU2). Update per node.
+Environment=CUDA_VISIBLE_DEVICES=2
+# EngineCore/port hygiene and Hopper build flags are set during Phase 0.
+ExecStart=/opt/mindrouter-video-worker/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 18300 --log-level info
+Restart=on-failure
+RestartSec=5
+# A cold LTX load + torch.compile warm can take minutes.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
