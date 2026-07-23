@@ -1,6 +1,6 @@
 # Image-to-Image (input-image conditioning) — Scope
 
-Status: **Phase A COMPLETE (passed) — ready for Phase B**
+Status: **Phase A + Phase B (backend route + MindRouter plumbing) COMPLETE — pending live restart + Phase C UI**
 Owner: Luke Sheneman (RCDS)
 Related: `docs/video-generation-plan.md`, `docs/video-api.md` (FLUX→LTX storyboard bridge)
 
@@ -72,15 +72,19 @@ images.html ──▶ POST /images/api/generate (dashboard proxy)   ┐
 
 ## Layers to change
 
-| # | Layer | File | Change |
-|---|-------|------|--------|
-| 1 | **Backend server** ⚠️ | `webbyg2:/data/flux2/serve_klein.py` | Accept input image(s); decode b64→PIL; `pipe(prompt=…, image=[…])`; new route. **Gating work.** |
-| 2 | Canonical schema | `canonical_schemas.py:420` | Add `image: Optional[List[str]]` (b64), `strength: Optional[float]`, optional `mask`. |
-| 3 | Out-translator | `diffusion_out.py:38` | Pass `image`/`strength` into backend payload when present. |
-| 4 | Inference service | `inference.py:1762` | `_proxy_image_request` targets the edits route when an image is present; timeout already ≥300s. |
-| 5 | Public API | `v1_openai.py:683` | Add `/v1/images/edits` (OpenAI-compatible multipart: `image`, `mask`, `prompt`); new multipart handling. |
-| 6 | Dashboard proxy + UI | `images.py:182`, `templates/user/images.html` | Accept an uploaded/selected input image; strength slider; pass as b64. |
-| — | Provenance (optional) | `models.py` `UserImage`, `crud` | Persist input image + link for audit/gallery ("edited from X"). |
+| # | Layer | File | Change | Status |
+|---|-------|------|--------|--------|
+| 1 | **Backend server** | `webbyg2:/data/flux2/serve_klein.py` (repo: `deploy/flux2/`) | `/v1/images/edits`: decode b64→PIL, `pipe(image=[…])`, 1–4 refs, 400 guards. | ✅ DONE (inert until restart) |
+| 2 | Canonical schema | `canonical_schemas.py` | Added `image: Optional[List[str]]`, `strength: Optional[float]`. | ✅ DONE |
+| 3 | Out-translator | `diffusion_out.py` | Passes `image`/`strength` into payload when present. | ✅ DONE |
+| 4 | Inference service | `inference.py` | `_proxy_image_request` → `/v1/images/edits` when `request.image`. | ✅ DONE |
+| 5 | Public API | `v1_openai.py` | `POST /v1/images/edits` multipart (`image[]`, `prompt`, knobs); shared `_prepare_image_canonical` helper (policy+guardrails) reused by generations. | ✅ DONE |
+| 6a | Dashboard proxy | `images.py` | `/images/api/generate` accepts `image` (str or list) + `strength`. | ✅ DONE |
+| 6b | Dashboard UI | `templates/user/images.html` | Upload/pick input image, strength slider. | ⬜ Phase C |
+| — | Provenance (optional) | `models.py` `UserImage`, `crud` | Persist input image + link ("edited from X"). | ⬜ deferred |
+
+Tests: `backend/app/tests/unit/test_diffusion_img2img.py` (5, translator passthrough).
+Full unit suite: 817 pass (pre-existing db-chain collection errors unaffected).
 
 ## Gating verification (Phase A — do first)
 

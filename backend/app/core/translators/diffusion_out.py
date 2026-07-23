@@ -59,6 +59,13 @@ class DiffusionOutTranslator:
         if canonical.seed is not None:
             payload["seed"] = canonical.seed
 
+        # img2img / reference-edit: base64 reference image(s) + optional strength.
+        # Present only for edit requests (routed to /v1/images/edits upstream).
+        if canonical.image:
+            payload["image"] = canonical.image
+        if canonical.strength is not None:
+            payload["strength"] = canonical.strength
+
         return payload
 
     @staticmethod

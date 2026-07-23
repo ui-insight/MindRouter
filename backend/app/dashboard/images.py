@@ -280,6 +280,21 @@ async def images_api_generate(
             content={"error": {"message": "prompt is required", "type": "invalid_request_error"}},
         )
 
+    # Optional img2img: `image` may be a single base64 string or a list of them.
+    # When present the request routes to the diffusion backend's edits route.
+    raw_image = body.get("image")
+    if isinstance(raw_image, str):
+        images_b64 = [raw_image] if raw_image else None
+    elif isinstance(raw_image, list):
+        images_b64 = [s for s in raw_image if isinstance(s, str) and s] or None
+    else:
+        images_b64 = None
+    if images_b64 and len(images_b64) > 4:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "at most 4 reference images allowed", "type": "invalid_request_error"}},
+        )
+
     canonical = CanonicalImageRequest(
         model=body["model"],
         prompt=prompt,
@@ -289,6 +304,8 @@ async def images_api_generate(
         num_inference_steps=body.get("num_inference_steps"),
         guidance_scale=body.get("guidance_scale"),
         seed=body.get("seed"),
+        image=images_b64,
+        strength=body.get("strength"),
     )
 
     if body.get("_policy_verdict"):

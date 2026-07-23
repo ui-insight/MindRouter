@@ -434,6 +434,13 @@ class CanonicalImageRequest(BaseModel):
     guidance_scale: Optional[float] = None
     seed: Optional[int] = None
 
+    # Image-to-image / reference-edit (img2img). When `image` is set the request
+    # is routed to the backend's /v1/images/edits route instead of /generations.
+    # Each entry is a base64-encoded reference image (data-URI accepted).
+    # `strength` is carried for forward-compat; FLUX.2 Klein (distilled) ignores it.
+    image: Optional[List[str]] = None
+    strength: Optional[float] = None
+
     # MindRouter metadata
     request_id: Optional[str] = None
     user_id: Optional[int] = None

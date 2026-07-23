@@ -14,10 +14,11 @@
 
 """OpenAI-compatible API endpoints."""
 
+import base64
 import json
 import time
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -680,46 +681,41 @@ async def ocrmd(
     return PlainTextResponse(result["content"], media_type="text/markdown")
 
 
-@router.post("/images/generations")
-async def image_generations(
+async def _prepare_image_canonical(
+    *,
+    db: AsyncSession,
     request: Request,
-    db: AsyncSession = Depends(get_async_db),
-    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
-):
-    """
-    OpenAI-compatible image generation endpoint.
+    user: User,
+    api_key: ApiKey,
+    request_id: str,
+    endpoint: str,
+    params: Dict[str, Any],
+    images_b64: Optional[List[str]] = None,
+    strength: Optional[float] = None,
+) -> CanonicalImageRequest:
+    """Shared access-control → policy → guardrails → canonical build for both
+    ``/images/generations`` (txt2img) and ``/images/edits`` (img2img).
 
-    Routes to diffusion backends (e.g. FLUX via openedai-images-flux).
+    ``params`` holds the generation knobs (model/prompt/n/size/quality/style/
+    response_format/num_inference_steps/guidance_scale/seed/user). When
+    ``images_b64`` is set the returned canonical carries reference image(s) and
+    is routed to the backend edits route downstream.
     """
-    user, api_key = auth
-
-    # ── Image generation access control ──────────────────────────
+    # ── Access control ───────────────────────────────────────────
     img_enabled = await crud.get_config_json(db, "img.enabled", True)
     if not img_enabled:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Image generation is currently disabled",
         )
-
     if not user.image_generation_enabled:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Image generation is not enabled for your account. Contact an administrator.",
         )
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON body",
-        )
-
-    request_id = f"img-{uuid.uuid4().hex[:24]}"
-    bind_request_context(request_id=request_id, user_id=user.id)
-
-    # Validate required fields
-    if not body.get("prompt"):
+    prompt = params.get("prompt")
+    if not prompt:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="'prompt' is required",
@@ -735,8 +731,7 @@ async def image_generations(
     allowed_sizes_str = await crud.get_config_json(db, "img.allowed_sizes", "512x512,768x768,1024x1024,1024x768,768x1024")
     allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()]
 
-    model = body.get("model") or default_model
-    prompt = body["prompt"]
+    model = params.get("model") or default_model
 
     # ── LLM-as-judge policy check ────────────────────────────────
     policy_verdict = None
@@ -760,14 +755,14 @@ async def image_generations(
                 db=db,
                 user_id=user.id,
                 api_key_id=api_key.id,
-                endpoint="/v1/images/generations",
+                endpoint=endpoint,
                 model=model,
                 modality=Modality.IMAGE_GENERATION,
                 prompt=prompt,
                 parameters={
                     "policy_verdict": policy_verdict.to_dict(),
-                    "size": body.get("size", default_size),
-                    "n": body.get("n", 1),
+                    "size": params.get("size", default_size),
+                    "n": params.get("n", 1),
                 },
                 client_ip=(
                     request.headers.get("x-forwarded-for", "").split(",")[0].strip()
@@ -793,8 +788,8 @@ async def image_generations(
             )
 
     # Enforce guardrails
-    req_n = min(body.get("n", 1), max_n)
-    req_size = body.get("size", default_size)
+    req_n = min(params.get("n", 1), max_n)
+    req_size = params.get("size", default_size)
     if allowed_sizes and req_size not in allowed_sizes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -815,11 +810,11 @@ async def image_generations(
     except ValueError:
         pass  # Non-standard size format — let the backend handle it
 
-    req_steps = body.get("num_inference_steps") or default_steps
+    req_steps = params.get("num_inference_steps") or default_steps
     if req_steps > max_steps:
         req_steps = max_steps
 
-    req_guidance = body.get("guidance_scale") if body.get("guidance_scale") is not None else default_guidance
+    req_guidance = params.get("guidance_scale") if params.get("guidance_scale") is not None else default_guidance
 
     # Build canonical request
     try:
@@ -828,13 +823,15 @@ async def image_generations(
             prompt=prompt,
             n=req_n,
             size=req_size,
-            quality=body.get("quality", "standard"),
-            style=body.get("style"),
-            response_format=body.get("response_format", "url"),
+            quality=params.get("quality", "standard"),
+            style=params.get("style"),
+            response_format=params.get("response_format", "url"),
             num_inference_steps=req_steps,
             guidance_scale=req_guidance,
-            seed=body.get("seed"),
-            user=body.get("user"),
+            seed=params.get("seed"),
+            user=params.get("user"),
+            image=images_b64 or None,
+            strength=strength,
             request_id=request_id,
             user_id=user.id,
             api_key_id=api_key.id,
@@ -860,6 +857,118 @@ async def image_generations(
                 }
             },
         )
+
+    return canonical
+
+
+@router.post("/images/generations")
+async def image_generations(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """
+    OpenAI-compatible image generation endpoint.
+
+    Routes to diffusion backends (e.g. FLUX via openedai-images-flux).
+    """
+    user, api_key = auth
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body",
+        )
+
+    request_id = f"img-{uuid.uuid4().hex[:24]}"
+    bind_request_context(request_id=request_id, user_id=user.id)
+
+    canonical = await _prepare_image_canonical(
+        db=db, request=request, user=user, api_key=api_key,
+        request_id=request_id, endpoint="/v1/images/generations",
+        params=body,
+    )
+
+    service = InferenceService(db)
+    response = await service.image_generation(canonical, user, api_key, request)
+    return response
+
+
+# How many base64 reference images an edit request may carry — mirrors the
+# backend server's MAX_REF_IMAGES cap (VRAM protection).
+_MAX_EDIT_IMAGES = 4
+
+
+@router.post("/images/edits")
+async def image_edits(
+    request: Request,
+    image: List[UploadFile] = File(...),
+    prompt: str = Form(...),
+    model: Optional[str] = Form(None),
+    n: int = Form(1),
+    size: Optional[str] = Form(None),
+    response_format: str = Form("url"),
+    strength: Optional[float] = Form(None),
+    num_inference_steps: Optional[int] = Form(None),
+    guidance_scale: Optional[float] = Form(None),
+    seed: Optional[int] = Form(None),
+    user_field: Optional[str] = Form(None, alias="user"),
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """OpenAI-compatible image **edit** (img2img / reference-edit) endpoint.
+
+    Accepts multipart/form-data with one or more ``image`` files plus a
+    ``prompt``. The reference image(s) condition generation on the diffusion
+    backend's ``/v1/images/edits`` route. FLUX.2 Klein edits are structure-
+    preserving; ``strength`` is accepted for forward-compat but ignored.
+    """
+    user, api_key = auth
+
+    if not image:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="at least one 'image' file is required")
+    if len(image) > _MAX_EDIT_IMAGES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"at most {_MAX_EDIT_IMAGES} reference image(s) allowed (got {len(image)})",
+        )
+
+    # Read + base64-encode each reference image (bounded by img.max_image_upload_mb).
+    max_bytes = int(await crud.get_config_json(db, "img.max_image_upload_mb", 10)) * 1024 * 1024
+    images_b64: List[str] = []
+    for up in image:
+        ct = (up.content_type or "").lower()
+        if not ct.startswith("image/"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="each 'image' must be an image file")
+        data = await up.read()
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"reference image exceeds {max_bytes // 1024 // 1024}MB",
+            )
+        images_b64.append(base64.b64encode(data).decode("utf-8"))
+
+    request_id = f"img-{uuid.uuid4().hex[:24]}"
+    bind_request_context(request_id=request_id, user_id=user.id)
+
+    params: Dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "n": n,
+        "size": size,
+        "response_format": response_format,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "seed": seed,
+        "user": user_field,
+    }
+    canonical = await _prepare_image_canonical(
+        db=db, request=request, user=user, api_key=api_key,
+        request_id=request_id, endpoint="/v1/images/edits",
+        params=params, images_b64=images_b64, strength=strength,
+    )
 
     service = InferenceService(db)
     response = await service.image_generation(canonical, user, api_key, request)

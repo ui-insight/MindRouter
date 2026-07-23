@@ -1764,13 +1764,15 @@ class InferenceService:
         request: CanonicalImageRequest,
         backend: Backend,
     ) -> Dict[str, Any]:
-        """Proxy image generation request to a diffusion backend.
+        """Proxy image generation (or reference-edit) to a diffusion backend.
 
-        The backend is expected to expose an OpenAI-compatible
-        ``/v1/images/generations`` endpoint (e.g. openedai-images-flux).
+        The backend exposes OpenAI-compatible ``/v1/images/generations`` and, for
+        img2img, ``/v1/images/edits``. When the request carries reference image(s)
+        it is routed to the edits route.
         """
         payload = DiffusionOutTranslator.translate_image_request(request)
-        url = f"{backend.url}/v1/images/generations"
+        route = "edits" if request.image else "generations"
+        url = f"{backend.url}/v1/images/{route}"
 
         # Image generation can be slow — use a longer timeout
         timeout = max(
