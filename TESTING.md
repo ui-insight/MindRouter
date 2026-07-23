@@ -77,6 +77,8 @@
 | `backend/app/tests/unit/test_diffusion_img2img.py` | 5 | img2img (reference-edit) request translation: DiffusionOutTranslator omits image/strength for txt2img, passes base64 reference list + strength for edits, image-without-strength case, empty image list stays txt2img (no key), CanonicalImageRequest image/strength default None |
 | `backend/app/tests/unit/test_image_policy_edit.py` | 5 | Edit-aware content-policy judging: edit user-template carries the reference-image/anti-ambiguity note (plain template does not), evaluate_prompt forwards is_edit True/False to _call_judge, no-policy short-circuits PASS even for edits — regression for "put glasses on this man" being FAILED as ambiguous |
 
+| `backend/app/tests/unit/test_runner_lease.py` | 4 | Video-runner leader lease (Redis CAS, fake redis): acquire is exclusive; only the token owner can renew; only the owner can release (then re-acquirable); unavailable Redis is a safe no-op — so only ONE runner is active across uvicorn workers/containers |
+
 **Shared fixtures:** `backend/app/tests/conftest.py`
 
 ---

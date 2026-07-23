@@ -63,6 +63,51 @@ def is_available() -> bool:
     return _available
 
 
+# ── Leader lease (single-active-worker election) ──────────────────────────
+# Compare-and-act so only the token owner can renew or release — a stalled
+# leader whose key expired can never clobber the new leader.
+_RENEW_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end"
+)
+_RELEASE_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+async def acquire_lease(key: str, token: str, ttl_seconds: int) -> bool:
+    """Claim `key` for `token` iff currently unheld (SET NX EX). True if won."""
+    if not _available or not _redis:
+        return False
+    try:
+        return bool(await _redis.set(key, token, nx=True, ex=ttl_seconds))
+    except Exception:
+        logger.exception("lease_acquire_failed", extra={"key": key})
+        return False
+
+
+async def renew_lease(key: str, token: str, ttl_seconds: int) -> bool:
+    """Extend the lease iff we still own it. False means we lost it."""
+    if not _available or not _redis:
+        return False
+    try:
+        return bool(await _redis.eval(_RENEW_LUA, 1, key, token, ttl_seconds))
+    except Exception:
+        logger.exception("lease_renew_failed", extra={"key": key})
+        return False
+
+
+async def release_lease(key: str, token: str) -> None:
+    """Release the lease iff we still own it (safe no-op otherwise)."""
+    if not _available or not _redis:
+        return
+    try:
+        await _redis.eval(_RELEASE_LUA, 1, key, token)
+    except Exception:
+        logger.exception("lease_release_failed", extra={"key": key})
+
+
 async def incr_tokens(user_id: int, amount: int) -> Optional[int]:
     """Atomically increment token counter. Returns new value or None on failure."""
     if not _available or not _redis:

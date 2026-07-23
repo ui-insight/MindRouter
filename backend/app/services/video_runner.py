@@ -586,16 +586,11 @@ class CrudVideoJobRepo:
 
 
 # ── Lifespan entry point ──────────────────────────────────────────────────
-async def run_video_runner_loop() -> None:
-    """Background task started from main.py lifespan when video_runner_enabled."""
-    from backend.app.settings import get_settings
+_RUNNER_LEASE_KEY = "video:runner:leader"
 
-    settings = get_settings()
-    if not settings.video_runner_enabled:
-        logger.info("video_runner_disabled")
-        return
 
-    runner = VideoRunner(
+def _build_runner(settings) -> "VideoRunner":
+    return VideoRunner(
         repo=CrudVideoJobRepo(),
         worker=HttpVideoWorkerClient(
             control_timeout=settings.video_worker_timeout_seconds,
@@ -607,5 +602,62 @@ async def run_video_runner_loop() -> None:
         reconcile_interval=settings.video_reconcile_interval_seconds,
         max_wall_seconds=settings.video_job_max_wall_seconds,
     )
-    logger.info("video_runner_started", worker_id=runner.worker_id)
-    await runner.run_forever()
+
+
+async def run_video_runner_loop() -> None:
+    """Background task started from main.py lifespan when video_runner_enabled.
+
+    The app runs multiple uvicorn workers (and could run multiple containers), so
+    this elects a single leader via a Redis lease — only the leader runs the
+    runner; the rest stand by and take over if the leader dies. Without Redis it
+    falls back to running unguarded (best effort)."""
+    import contextlib
+
+    from backend.app.core import redis_client
+    from backend.app.settings import get_settings
+
+    settings = get_settings()
+    if not settings.video_runner_enabled:
+        logger.info("video_runner_disabled")
+        return
+
+    # No Redis → can't elect a leader; run directly (single-worker assumption).
+    if not redis_client.is_available():
+        logger.warning("video_runner_no_redis_running_unguarded")
+        runner = _build_runner(settings)
+        logger.info("video_runner_started", worker_id=runner.worker_id)
+        await runner.run_forever()
+        return
+
+    ttl = max(10, settings.video_runner_lease_ttl_seconds)
+    renew_every = max(3, ttl // 3)
+    token = uuid.uuid4().hex
+
+    while True:
+        try:
+            if not await redis_client.acquire_lease(_RUNNER_LEASE_KEY, token, ttl):
+                await asyncio.sleep(renew_every)  # stand by; contend to take over
+                continue
+
+            runner = _build_runner(settings)
+            logger.info("video_runner_leader_acquired", worker_id=runner.worker_id)
+            loop_task = asyncio.create_task(runner.run_forever())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({loop_task}, timeout=renew_every)
+                    if loop_task in done:
+                        break  # runner loop ended (error) — release + re-contend
+                    if not await redis_client.renew_lease(_RUNNER_LEASE_KEY, token, ttl):
+                        logger.warning("video_runner_leader_lost")
+                        break  # someone else owns it now — step down
+            finally:
+                loop_task.cancel()
+                with contextlib.suppress(Exception):
+                    await loop_task
+                with contextlib.suppress(Exception):
+                    await redis_client.release_lease(_RUNNER_LEASE_KEY, token)
+        except asyncio.CancelledError:
+            break  # app shutdown
+        except Exception:
+            logger.exception("video_runner_leader_error")
+            await asyncio.sleep(renew_every)

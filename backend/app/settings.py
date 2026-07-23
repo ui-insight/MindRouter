@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     video_job_max_wall_seconds: int = 3600
     video_job_stale_heartbeat_seconds: int = 120
     video_reconcile_interval_seconds: int = 20  # ground-truth sweep for orphaned renders
+    video_runner_lease_ttl_seconds: int = 30    # leader lease so only ONE runner is active
     video_max_upload_mb: int = 64
     video_webhook_signing_key: str = ""             # host .env only, never in repo
 
