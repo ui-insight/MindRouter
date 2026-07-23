@@ -15,6 +15,30 @@ These override anything in the body below that still reads as open. The "Decisio
 3. **FLUX for coherence: keep FLUX.2 Klein for v1.** Klein is sufficient for Phases 1–2, where its only job is generating keyframes/stills from text prompts; v1 subject consistency rests on user-uploaded references + LTX's own i2v/`keyframe_interpolation`. Change `vid.keyframe_model` default from `black-forest-labs/FLUX.2-dev` to the Klein model you actually run. The auto "Generate variants" reference-sheet feature (Phase 3) is gated on TWO things, decided then, not now: (a) new plumbing to pass a reference image through `CanonicalImageRequest`/`DiffusionOutTranslator` — today's image path is text-to-image only — and (b) whether Klein supports reference-conditioned generation (**unverified**; if not, stand up FLUX.2 [dev] on one GPU via the swappable `vid.keyframe_model` config — no re-architecture).
 4. **User-supplied clips are IN SCOPE** (adopts critique P0 #1 — a genuine requirement miss). "Stitching images **and clips**" requires placing an existing mp4 on the timeline, which the merged plan omitted. Fold in: `video_assets.kind` gains `source_clip`; the assets endpoint accepts ffprobe-validated video uploads (codec/duration/resolution allow-list, `vid.max_upload_clip_seconds`); shots gain `type: "generated" | "source"` where a `source` shot carries `{asset_id, trim_start, trim_end}`, skips the GPU path entirely, and flows through `normalize_clip()` like any other segment; the vision judge samples N frames of uploaded clips. This also delivers "trim and re-cut an existing recording," the most-requested general-purpose campus video op. Land it in Phase 2 (assembly), not deferred.
 
+### ARCHITECTURE DECISION — 2026-07-22 (session 3): two layers
+
+**MindRouter is a single-clip text-to-video *provider*, not the creative app.**
+The complex work — multi-shot assembly, coherence workflow, timeline editing
+(the old Phases 2–5) — moves OUT of MindRouter into a **separate web application
+that consumes MindRouter's `/v1/videos` API** as a client (it keeps its own
+storyboard/project state, does its own ffmpeg assembly, and uses `/v1/images`
+for FLUX reference frames).
+
+Consequences:
+- **MindRouter scope = Phase 1 only:** the `/v1/videos` API + a simple dashboard
+  tab (Images-tab complexity). Phase 0 done; the gateway single-clip path is
+  built (releases 2.8.4–2.8.9). Completing Phase 1 = deploy worker + register
+  backend + prod deploy, with `/v1/videos` treated as a stable public contract
+  (documented in [docs/video-api.md](video-api.md)).
+- **Phases 2–5 below are re-homed to the separate app**, not MindRouter. They
+  remain a useful design reference for that app, but MindRouter will not build
+  them. The multi-shot schema already written into MindRouter (storyboard JSON,
+  transitions, continue-chaining, source_clip) becomes **dormant/unused** —
+  harmless (single-clip still uses jobs/shots/assets), left in place rather than
+  ripped out.
+- The `/v1/videos` API contract is now the load-bearing seam between the two
+  layers — see docs/video-api.md.
+
 ### Update — 2026-07-22 (session 2): v1 scope, storage, and GPU pinned down
 
 5. **v1 = text-to-video, single clip, ONLY** (resolves Decision #2, narrower than the original Phase 1). First cut ships t2v single-clip generation end to end: `POST /v1/videos` (single-shot body) → async worker → LTX-2.3 distilled → one MP4, plus the minimal UI (prompt, size/duration/quality from `/v1/videos/models`, render, library) and the admin/quota/retention plumbing. **Explicitly deferred out of v1:** image-to-video, first+last keyframe conditioning, the FLUX reference-bank/coherence engine, multi-shot storyboards, stitching, transitions, and user-supplied source clips. Those remain committed (decisions #3, #4 stand) but land in later phases. Write the FULL four-table schema in the v1 migration anyway so later phases are additive code, not a schema redo — but the runner only walks single-shot projects and the assembly layer (ffmpeg) is not built in v1.
