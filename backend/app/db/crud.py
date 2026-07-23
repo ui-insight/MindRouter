@@ -4622,17 +4622,15 @@ async def delete_video_job(db: AsyncSession, job: VideoJob) -> list[str]:
             paths.append(a.storage_path)
 
     project_id = job.project_id
-    for s in shots:
-        await db.delete(s)
-    await db.delete(job)
-    await db.flush()
-    for aid in asset_ids:
-        a = await get_video_asset(db, aid)
-        if a:
-            await db.delete(a)
-    proj = await get_video_project(db, project_id)
-    if proj:
-        # v1 = one project per job; safe to remove.
-        await db.delete(proj)
+    job_id = job.id
+    # Bulk DELETE in explicit FK-dependency order. (A single ORM flush emitted
+    # the parent delete first — there is no relationship() to order it — so we
+    # issue ordered statements: shots -> job -> assets -> project.)
+    await db.execute(delete(VideoShot).where(VideoShot.job_id == job_id))
+    await db.execute(delete(VideoJob).where(VideoJob.id == job_id))
+    if asset_ids:
+        await db.execute(delete(VideoAsset).where(VideoAsset.id.in_(asset_ids)))
+    if project_id:
+        await db.execute(delete(VideoProject).where(VideoProject.id == project_id))
     await db.commit()
     return paths
