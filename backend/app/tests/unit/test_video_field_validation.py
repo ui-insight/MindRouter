@@ -87,6 +87,8 @@ def test_accepted_fields_are_real_canonical_fields():
     # (or be a routing-only extra the canonical model doesn't carry).
     cs = _load("cs_video", "backend/app/core/canonical_schemas.py")
     fields = set(cs.CanonicalVideoRequest.model_fields)
-    routing_only = {"callback_url"}  # handled by the job, not the canonical request
+    # Handled by the job (submit_video_job resolves them to shot asset ids), not
+    # carried on the canonical request.
+    routing_only = {"callback_url", "start_image_asset_id", "end_image_asset_id"}
     for name in VIDEO_ACCEPTED - routing_only:
         assert name in fields, f"VIDEO_ACCEPTED '{name}' is not a CanonicalVideoRequest field"

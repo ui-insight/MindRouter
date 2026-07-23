@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -397,6 +397,82 @@ async def create_video(
     )
 
 
+# NOTE: declared before /videos/{video_id} so the path param can't swallow "assets".
+@router.post("/videos/assets", status_code=status.HTTP_201_CREATED)
+async def create_video_asset(
+    request: Request,
+    image: UploadFile = File(...),
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Upload a reference image and get back an asset id to use as a video
+    conditioning keyframe (``start_image_asset_id`` / ``end_image_asset_id`` on
+    ``POST /v1/videos``). This is the API-side equivalent of the dashboard's
+    image upload — without it, image-guided video isn't possible over the API,
+    since the create path takes asset ids, not raw images."""
+    import hashlib
+
+    from backend.app.db.models import VideoAssetKind
+    from backend.app.settings import get_settings
+
+    user, _ = auth
+    if not await crud.get_config_json(db, "vid.enabled", True):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Video generation is currently disabled",
+        )
+    if not user.video_generation_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Video generation is not enabled for your account. Contact an administrator.",
+        )
+
+    ct = (image.content_type or "").lower()
+    if not ct.startswith("image/"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'image' must be an image file")
+    data = await image.read()
+    max_bytes = int(await crud.get_config_json(db, "vid.max_image_upload_mb", 10)) * 1024 * 1024
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"image exceeds {max_bytes // 1024 // 1024}MB",
+        )
+
+    # Per-user storage cap (reference images count toward it).
+    cap_gb = int(await crud.get_config_json(db, "vid.user_storage_cap_gb", 50))
+    if cap_gb > 0:
+        used = await crud.get_user_video_storage_bytes(db, user.id)
+        if used + len(data) > cap_gb * 1024 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                detail=(
+                    f"Video storage cap reached ({used / 1024**3:.1f} GB of {cap_gb} GB used). "
+                    "Delete some videos to free space."
+                ),
+            )
+
+    sha = hashlib.sha256(data).hexdigest()
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(ct, "png")
+    ref_dir = os.path.join(get_settings().video_storage_path, str(user.id), "refs")
+    os.makedirs(ref_dir, exist_ok=True)
+    path = os.path.join(ref_dir, f"{sha}.{ext}")
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+    asset = await crud.create_video_asset(
+        db, user_id=user.id, kind=VideoAssetKind.REFERENCE,
+        storage_path=path, content_type=ct, sha256=sha, size_bytes=len(data),
+    )
+    await db.commit()
+    return {
+        "id": asset.id,
+        "object": "video.asset",
+        "kind": "reference",
+        "content_type": ct,
+        "size_bytes": len(data),
+    }
+
+
 @router.get("/videos")
 async def list_videos(
     status_filter: Optional[str] = None,
@@ -433,12 +509,26 @@ async def cancel_video(
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
 ):
-    """Cancel a running job (propagated to the worker by the runner) or delete a
-    terminal one's record."""
+    """Cancel a running job (propagated to the worker by the runner), or DELETE a
+    terminal one — removing its rows + artifact files and reclaiming the storage
+    it counted against the per-user cap. Returns {deleted: true} for a delete."""
     user, _ = auth
     job = await crud.get_video_job_by_uuid(db, video_id, user_id=user.id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
+
+    terminal = {VideoJobStatus.COMPLETED, VideoJobStatus.FAILED, VideoJobStatus.CANCELLED}
+    if job.status in terminal:
+        paths = await crud.delete_video_job(db, job)
+        for p in paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        return {"id": video_id, "object": "video", "deleted": True}
+
+    # Still running/queued → request cancellation (runner propagates + refunds).
     await crud.request_cancel_video_job(db, job)
     await db.commit()
     await db.refresh(job)

@@ -65,6 +65,8 @@
                 <li class="nav-item"><a class="nav-link" href="#architecture">Architecture</a></li>
                 <li class="nav-item"><a class="nav-link" href="#getting-started">Getting Started</a></li>
                 <li class="nav-item"><a class="nav-link" href="#api-reference">API Reference</a></li>
+                <li class="nav-item"><a class="nav-link ms-3" href="#image-generation">&mdash; Image Generation</a></li>
+                <li class="nav-item"><a class="nav-link ms-3" href="#video-generation">&mdash; Video Generation</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-dashboard">Web Dashboard</a></li>
                 <li class="nav-item"><a class="nav-link" href="#users-groups-quotas">Users, Groups &amp; Quotas</a></li>
                 <li class="nav-item"><a class="nav-link" href="#service-api-keys">Service API Keys</a></li>
@@ -308,6 +310,12 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/score</code></td><td>API Key</td><td>Score similarity between text pairs</td></tr>
                         <tr><td>POST</td><td><code>/v1/tokenize</code></td><td>API Key</td><td>Count input tokens for a request</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/generations</code></td><td>API Key</td><td><a href="#image-generation">Image generation</a> (diffusion models; requires per-account enablement)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/images/edits</code></td><td>API Key</td><td><a href="#image-edits">Image-to-image / reference edit</a> (multipart)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/videos</code></td><td>API Key</td><td><a href="#video-generation">Video generation</a> (async; text-to-video + keyframe conditioning)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/videos/assets</code></td><td>API Key</td><td>Upload a keyframe image for image-guided video</td></tr>
+                        <tr><td>GET</td><td><code>/v1/videos/{id}</code></td><td>API Key</td><td>Poll a video job; <code>/content</code> downloads the MP4</td></tr>
+                        <tr><td>POST</td><td><code>/v1/audio/speech</code></td><td>API Key</td><td><a href="#voice">Text-to-speech</a></td></tr>
+                        <tr><td>POST</td><td><code>/v1/audio/transcriptions</code></td><td>API Key</td><td><a href="#voice">Speech-to-text</a></td></tr>
                         <tr><td>GET</td><td><code>/v1/models</code></td><td>API Key</td><td>List available models</td></tr>
                     </tbody>
                 </table>
@@ -630,6 +638,71 @@ with open("idaho.png", "wb") as f:
 
                 <p><strong>Error summary:</strong> <code>400</code> missing prompt / disallowed size / dimensions over limit / policy denial &middot; <code>403</code> image generation not enabled for your account &middot; <code>404</code> unknown model &middot; <code>429</code> rate limit &middot; <code>503</code> image generation disabled or no healthy diffusion backend.</p>
                 <p><strong>Notes:</strong> generation is slow relative to chat (tens of seconds for high step counts &mdash; the gateway allows up to 5 minutes per attempt); request IDs use the <code>img-*</code> prefix; standard RPM rate limits apply.</p>
+
+                <h5 id="image-edits">Image-to-Image (Reference Edits)</h5>
+                <p><code>POST /v1/images/edits</code> edits a reference image &mdash; it preserves the image's composition and applies your prompt (FLUX.2 Klein reference-edit). Send <strong>multipart/form-data</strong>, not JSON.</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light"><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>image</code></td><td>file (1&ndash;4)</td><td><em>required</em></td><td>Reference image file(s), PNG/JPEG/WebP. Up to 4; multiple act as combined references.</td></tr>
+                        <tr><td><code>prompt</code></td><td>string</td><td><em>required</em></td><td>The change to apply. Deictic references ("this man") are not auto-failed as ambiguous for edits, but the <strong>full content policy still applies</strong> to the described change and its result.</td></tr>
+                        <tr><td><code>num_inference_steps</code></td><td>int</td><td><strong>8</strong></td><td>Edits default to 8 steps (vs 20 for generations) &mdash; cleaner reference edits</td></tr>
+                        <tr><td><code>strength</code></td><td>float</td><td>&mdash;</td><td>Accepted for forward-compat but <strong>ignored</strong> by FLUX.2 Klein (a distilled model)</td></tr>
+                        <tr><td><code>size</code>, <code>n</code>, <code>response_format</code>, <code>guidance_scale</code>, <code>seed</code>, <code>model</code></td><td>&mdash;</td><td>&mdash;</td><td>As in generations</td></tr>
+                    </tbody>
+                </table>
+                <pre><code>curl -X POST http://localhost:8000/v1/images/edits \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -F image=@reference.png \
+  -F prompt="the car is now bright red" \
+  -F size="1024x1024" \
+  -F response_format=b64_json</code></pre>
+                <p>The response matches generations. Full reference: <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/images-api.md">docs/images-api.md</a>.</p>
+
+                <h4 id="video-generation">Video Generation</h4>
+                <p><code>POST /v1/videos</code> renders a short text-to-video clip (LTX-2.3), optionally guided by start/end keyframe images. It is <strong>asynchronous</strong>: you get a job immediately (<code>202</code>), poll it, then download the MP4. A dashboard playground is at <a href="/video">/video</a>. Requires per-account enablement (<code>403</code> otherwise) and a global switch (<code>503</code> when off).</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light"><tr><th>Method</th><th>Path</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/v1/videos</code></td><td>Create a job &rarr; <code>202</code> + job object</td></tr>
+                        <tr><td>POST</td><td><code>/v1/videos/assets</code></td><td>Upload a keyframe image (multipart <code>image</code>) &rarr; asset id for conditioning</td></tr>
+                        <tr><td>GET</td><td><code>/v1/videos/{id}</code></td><td>Poll job status / progress</td></tr>
+                        <tr><td>GET</td><td><code>/v1/videos/{id}/content</code></td><td>Download the MP4 (Range/206) once completed</td></tr>
+                        <tr><td>GET</td><td><code>/v1/videos</code></td><td>List your jobs (newest first)</td></tr>
+                        <tr><td>DELETE</td><td><code>/v1/videos/{id}</code></td><td>Cancel a running job, or delete a finished one (frees storage)</td></tr>
+                        <tr><td>GET</td><td><code>/v1/videos/models</code></td><td>Capability discovery (sizes, max length, fps)</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Create parameters:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light"><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>prompt</code></td><td>string</td><td><em>required</em></td><td>What to render</td></tr>
+                        <tr><td><code>size</code></td><td>string</td><td>server default</td><td>From <code>GET /v1/videos/models</code> (e.g. <code>1280x704</code>)</td></tr>
+                        <tr><td><code>seconds</code></td><td>int</td><td>server default</td><td>Whole seconds, 4&ndash;30 (max clip length 30s)</td></tr>
+                        <tr><td><code>quality</code></td><td>string</td><td>standard</td><td><code>draft</code> | <code>standard</code> | <code>final</code></td></tr>
+                        <tr><td><code>start_image_asset_id</code>, <code>end_image_asset_id</code></td><td>int</td><td>&mdash;</td><td>Keyframe asset ids from <code>POST /v1/videos/assets</code> (image-guided video)</td></tr>
+                        <tr><td><code>seed</code></td><td>int</td><td>random</td><td>Reproducibility</td></tr>
+                        <tr><td><code>fps</code></td><td>int</td><td>24</td><td>Accepted but not validated &mdash; only 24 is actually rendered</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Image-guided example</strong> (upload keyframe &rarr; create &rarr; poll &rarr; download):</p>
+                <pre><code># 1. upload a keyframe, capture its asset id
+ASSET=$(curl -s -X POST http://localhost:8000/v1/videos/assets \
+  -H "Authorization: Bearer mr2_your-api-key" -F image=@opening.png | jq -r .id)
+
+# 2. create a clip conditioned on that keyframe
+VID=$(curl -s -X POST http://localhost:8000/v1/videos \
+  -H "Authorization: Bearer mr2_your-api-key" -H "Content-Type: application/json" \
+  -d "{\"prompt\":\"camera slowly pushes in\",\"size\":\"1280x704\",\"seconds\":5,\"start_image_asset_id\":$ASSET}" | jq -r .id)
+
+# 3. poll until completed, then download the MP4
+curl -s http://localhost:8000/v1/videos/$VID -H "Authorization: Bearer mr2_your-api-key" | jq .status
+curl -L http://localhost:8000/v1/videos/$VID/content -H "Authorization: Bearer mr2_your-api-key" -o clip.mp4</code></pre>
+                <p><strong>Job object:</strong> <code>{ id, object: "video", status, progress, content_url, usage, &hellip; }</code>. Statuses: <code>queued &rarr; in_progress &rarr; completed</code> (or <code>failed</code> / <code>cancelled</code>). <code>content_url</code> is <code>null</code> until completed.</p>
+                <p><strong>Limits &amp; behavior:</strong> one clip renders at a time (serialized queue); default one in-flight job per user (else <code>429</code>); 50&nbsp;GB per-user storage cap (<code>507</code> when exceeded &mdash; DELETE finished clips to reclaim); 30s max length; fps 24. <strong>MindRouter renders single clips only</strong> &mdash; multi-shot assembly, stitching, and cross-shot coherence are the consuming app's responsibility.</p>
+                <p><strong>Errors:</strong> <code>401</code> missing/invalid key &middot; <code>400</code> bad size/duration/quality &middot; <code>403</code> not enabled &middot; <code>404</code> unknown model or job &middot; <code>429</code> concurrency/quota &middot; <code>507</code> storage cap &middot; <code>503</code> disabled.</p>
+                <p>Full reference: <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/video-api.md">docs/video-api.md</a>. End-to-end studio/storyboard recipe (images &rarr; keyframes &rarr; clips &rarr; stitch &rarr; narration): <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/media-studio-integration.md">docs/media-studio-integration.md</a>.</p>
 
                 <h3>Ollama-Compatible Endpoints</h3>
                 <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter as a drop-in replacement.</p>

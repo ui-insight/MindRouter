@@ -83,6 +83,8 @@ CHAT_DIALECT_HINTS: Dict[str, str] = {
 VIDEO_ACCEPTED: Set[str] = {
     "model", "prompt", "size", "seconds", "fps", "quality", "seed",
     "negative_prompt", "callback_url",
+    # Optional keyframe conditioning — asset ids from POST /v1/videos/assets.
+    "start_image_asset_id", "end_image_asset_id",
 }
 
 # Accepted-and-dropped (OpenAI-video clients send these harmlessly).
@@ -105,10 +107,10 @@ VIDEO_DIALECT_HINTS: Dict[str, str] = {
     "guidance_scale": "Guidance is fixed by the 'quality' tier.",
     "cfg_scale": "Guidance is fixed by the 'quality' tier.",
     "n": "Only one clip is generated per request in v1.",
-    "image": "Image conditioning is not available in v1 (text-to-video only).",
-    "input_reference": "Image-to-video is not available in v1 (text-to-video only).",
-    "first_frame": "Keyframe conditioning is not available in v1 (text-to-video only).",
-    "last_frame": "Keyframe conditioning is not available in v1 (text-to-video only).",
+    "image": "Upload the image via POST /v1/videos/assets, then pass its id as 'start_image_asset_id'.",
+    "input_reference": "Upload the image via POST /v1/videos/assets, then pass its id as 'start_image_asset_id'.",
+    "first_frame": "Upload the image via POST /v1/videos/assets, then pass its id as 'start_image_asset_id'.",
+    "last_frame": "Upload the image via POST /v1/videos/assets, then pass its id as 'end_image_asset_id'.",
     "storyboard": "Multi-shot storyboards are not available in v1 (single clip only).",
     "audio": "Audio generation is not available in v1.",
     "generate_audio": "Audio generation is not available in v1.",

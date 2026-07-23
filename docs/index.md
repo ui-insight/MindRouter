@@ -26,6 +26,16 @@ MindRouter is a production-ready **LLM inference load balancer and translation l
 16. [Deployment](#deployment)
 17. [Testing](#testing)
 
+### Generative Media API references
+
+Dedicated developer references for the generative endpoints (also summarized on
+the in-app [`/documentation`](#api-reference) page):
+
+- [Image generation & image-to-image](images-api.md) — `/v1/images/generations`, `/v1/images/edits`
+- [Video generation](video-api.md) — `/v1/videos`, keyframe assets, async job model
+- [Voice (TTS / STT)](voice-api.md) — `/v1/audio/speech`, `/v1/audio/transcriptions`
+- [Media studio integration guide](media-studio-integration.md) — end-to-end recipe: images → video keyframes → clips → stitch → narration (for building a storyboarding / ad-mockup app)
+
 ---
 
 ## Overview

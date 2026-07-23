@@ -87,6 +87,7 @@ for _name, _old in _prev.items():
         sys.modules[_name] = _old
 
 create_video = _mod.create_video
+create_video_asset = _mod.create_video_asset
 get_video = _mod.get_video
 cancel_video = _mod.cancel_video
 list_videos = _mod.list_videos
@@ -315,6 +316,57 @@ async def test_create_video_storage_cap_zero_disables_check(monkeypatch):
     _patch_registry(monkeypatch)
     result = await create_video(_request({"prompt": "x"}), db=_db(), auth=_auth())
     assert result["status"] == "queued"
+
+
+# --- POST /v1/videos/assets (public keyframe upload) — gate coverage ------
+class _FakeUpload:
+    def __init__(self, content_type="image/png", data=b"\x89PNG" + b"x" * 20):
+        self.content_type = content_type
+        self._data = data
+
+    async def read(self):
+        return self._data
+
+
+def _auth_no_video():
+    return (SimpleNamespace(id=7, video_generation_enabled=False), SimpleNamespace(id=3))
+
+
+@pytest.mark.asyncio
+async def test_video_asset_disabled_returns_503(monkeypatch):
+    _patch_crud(monkeypatch, config={"vid.enabled": False})
+    with pytest.raises(HTTPException) as e:
+        await create_video_asset(MagicMock(), image=_FakeUpload(), db=_db(), auth=_auth())
+    assert e.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_video_asset_user_flag_off_returns_403(monkeypatch):
+    _patch_crud(monkeypatch, config={"vid.enabled": True})
+    with pytest.raises(HTTPException) as e:
+        await create_video_asset(MagicMock(), image=_FakeUpload(), db=_db(), auth=_auth_no_video())
+    assert e.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_video_asset_non_image_returns_400(monkeypatch):
+    _patch_crud(monkeypatch, config={"vid.enabled": True})
+    with pytest.raises(HTTPException) as e:
+        await create_video_asset(MagicMock(), image=_FakeUpload(content_type="text/plain"), db=_db(), auth=_auth())
+    assert e.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_video_asset_over_storage_cap_returns_507(monkeypatch):
+    # 50 GB cap, already at 60 GB → rejected before writing anything.
+    _patch_crud(
+        monkeypatch,
+        config={"vid.enabled": True, "vid.user_storage_cap_gb": 50, "vid.max_image_upload_mb": 10},
+        storage_bytes=60 * 1024**3,
+    )
+    with pytest.raises(HTTPException) as e:
+        await create_video_asset(MagicMock(), image=_FakeUpload(), db=_db(), auth=_auth())
+    assert e.value.status_code == 507
 
 
 @pytest.mark.asyncio
