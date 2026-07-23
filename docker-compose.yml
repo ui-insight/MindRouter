@@ -1,4 +1,15 @@
 services:
+  # Ensures the video artifact dir is owned by the app user (uid 1000) before the
+  # app starts. Docker auto-creates a missing bind-mount source as root, which
+  # the non-root app can't write to; this runs as root and fixes it idempotently.
+  video-storage-init:
+    image: busybox:1.36
+    user: "0:0"
+    volumes:
+      - /archivedb/video:/data/video
+    command: sh -c "mkdir -p /data/video && chown -R 1000:1000 /data/video"
+    restart: "no"
+
   app:
     build:
       context: .
@@ -46,6 +57,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      video-storage-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 10s

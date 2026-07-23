@@ -302,6 +302,20 @@
         const vid = document.createElement("video");
         vid.className = "vid-lib-poster"; vid.controls = true; vid.preload = "metadata";
         vid.src = url; vid.setAttribute("aria-label", "Saved video " + j.id);
+        // Thumbnail = 10th frame (avoids the black fade-in on frame 0). Seek there
+        // once metadata loads so the element paints that frame as its still; on the
+        // user's first play (if they haven't scrubbed away) rewind to the start.
+        const thumbTime = 10 / ((j.usage && j.usage.fps) || j.fps || 24);
+        vid.addEventListener("loadedmetadata", () => {
+          try { vid.currentTime = thumbTime; } catch (e) { /* seek unsupported */ }
+        }, { once: true });
+        let vidStarted = false;
+        vid.addEventListener("play", () => {
+          if (!vidStarted && Math.abs(vid.currentTime - thumbTime) < 0.05) {
+            try { vid.currentTime = 0; } catch (e) { /* ignore */ }
+          }
+          vidStarted = true;
+        });
         const row = document.createElement("div");
         row.className = "d-flex justify-content-between align-items-center mt-1";
         const meta = document.createElement("small");
