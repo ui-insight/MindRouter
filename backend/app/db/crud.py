@@ -64,6 +64,7 @@ from backend.app.db.models import (
     StoredResponse,
     StoredResponseStatus,
     User,
+    UserImage,
     UserRole,
     VideoAsset,
     VideoAssetKind,
@@ -4555,6 +4556,16 @@ async def get_video_shot_by_id(db: AsyncSession, shot_id: int) -> Optional[Video
 
 async def get_video_asset(db: AsyncSession, asset_id: int) -> Optional[VideoAsset]:
     result = await db.execute(select(VideoAsset).where(VideoAsset.id == asset_id))
+    return result.scalar_one_or_none()
+
+
+async def get_user_image(
+    db: AsyncSession, image_id: int, user_id: int
+) -> Optional[UserImage]:
+    """Fetch a gallery image scoped to its owner (ownership-checked lookup)."""
+    result = await db.execute(
+        select(UserImage).where(UserImage.id == image_id, UserImage.user_id == user_id)
+    )
     return result.scalar_one_or_none()
 
 

@@ -1,8 +1,27 @@
 # Gallery → Video keyframe bridge — Scope
 
-Status: **scoping**
+Status: **BUILT (Release 2.8.18) — ships with the pending gateway deploy; no FLUX restart needed for this piece**
 Owner: Luke Sheneman (RCDS)
 Related: `docs/img2img-scope.md`, `docs/video-generation-plan.md`, `docs/video-api.md`
+
+## Built (2026-07-23)
+
+- `crud.get_user_image(image_id, user_id)` — ownership-checked gallery lookup.
+- `dashboard/video.py`: `_store_reference_asset` helper (shared with the upload
+  endpoint) + `POST /video/api/assets/from-gallery {image_id}` — resolves the
+  UserImage, `ArtifactStorage.retrieve`s its bytes, **copies** them into
+  `/data/video/<uid>/refs/<sha>.<ext>`, mints a `VideoAsset(kind=REFERENCE)`,
+  returns `{asset_id}`. Downstream submit/runner/worker unchanged.
+- `templates/user/video.html`: "Choose from gallery" button on each Start/End
+  slot → scrollable picker modal (data from `/images/history`, paginated) →
+  import → thumbnail + clear; gallery selection wins over the file input in
+  `generate()`. Validated: py_compile, Jinja parse, `node --check` JS.
+
+**QUOTA FLAG (separate, not enforced):** the copy adds ~1–2 MB to the user's
+video storage. The 50 GB/user video quota is a decision but is **not enforced**
+anywhere in code today (no `used_bytes` check exists) — this bridge does not
+change that. Enforcement (sum of the user's VideoAsset/output sizes vs 50 GB, on
+submit and on import) is a separate task; see `docs/video-generation-plan.md`.
 
 ## Problem
 

@@ -100,14 +100,31 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
     )
 
 
-@video_router.post("/video/api/assets")
-async def video_upload_asset(request: Request, db: AsyncSession = Depends(get_async_db)):
-    """Upload an optional start/end conditioning image. Returns its asset id,
-    which the create call references as start_image_asset_id / end_image_asset_id."""
+async def _store_reference_asset(db: AsyncSession, user_id: int, data: bytes, content_type: str):
+    """Write reference-image bytes into the user's video refs dir (sha-named, so
+    re-imports dedup on disk) and create a REFERENCE VideoAsset. Caller commits."""
     import hashlib
 
     from backend.app.db.models import VideoAssetKind
 
+    ct = (content_type or "").lower() or "image/png"
+    sha = hashlib.sha256(data).hexdigest()
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(ct, "png")
+    ref_dir = _os.path.join(get_settings().video_storage_path, str(user_id), "refs")
+    _os.makedirs(ref_dir, exist_ok=True)
+    path = _os.path.join(ref_dir, f"{sha}.{ext}")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return await crud.create_video_asset(
+        db, user_id=user_id, kind=VideoAssetKind.REFERENCE,
+        storage_path=path, content_type=ct, sha256=sha, size_bytes=len(data),
+    )
+
+
+@video_router.post("/video/api/assets")
+async def video_upload_asset(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Upload an optional start/end conditioning image. Returns its asset id,
+    which the create call references as start_image_asset_id / end_image_asset_id."""
     user, _ = await _get_video_user(request, db)
     form = await request.form()
     upload = form.get("file")
@@ -121,18 +138,39 @@ async def video_upload_asset(request: Request, db: AsyncSession = Depends(get_as
     if len(data) > max_bytes:
         return JSONResponse(status_code=400, content={"error": {"message": f"image exceeds {max_bytes // 1024 // 1024}MB"}})
 
-    sha = hashlib.sha256(data).hexdigest()
-    ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(ct, "png")
-    ref_dir = _os.path.join(get_settings().video_storage_path, str(user.id), "refs")
-    _os.makedirs(ref_dir, exist_ok=True)
-    path = _os.path.join(ref_dir, f"{sha}.{ext}")
-    with open(path, "wb") as fh:
-        fh.write(data)
+    asset = await _store_reference_asset(db, user.id, data, ct)
+    await db.commit()
+    return {"asset_id": asset.id}
 
-    asset = await crud.create_video_asset(
-        db, user_id=user.id, kind=VideoAssetKind.REFERENCE,
-        storage_path=path, content_type=ct, sha256=sha, size_bytes=len(data),
-    )
+
+@video_router.post("/video/api/assets/from-gallery")
+async def video_import_gallery_asset(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Import a gallery image (UserImage) as a video conditioning reference.
+
+    COPIES the bytes into the video asset domain — never a shared reference — so
+    deleting a video (which deletes its asset files) can't touch the gallery
+    original. Returns an asset id usable as start_image_asset_id/end_image_asset_id."""
+    from backend.app.storage.artifacts import get_artifact_storage
+
+    user, _ = await _get_video_user(request, db)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "invalid JSON body"}})
+    raw_id = body.get("image_id")
+    try:
+        image_id = int(raw_id)
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": {"message": "image_id is required"}})
+
+    img = await crud.get_user_image(db, image_id, user_id=user.id)
+    if not img:
+        return JSONResponse(status_code=404, content={"error": {"message": "image not found"}})
+    data = await get_artifact_storage().retrieve(img.storage_path)
+    if data is None:
+        return JSONResponse(status_code=404, content={"error": {"message": "image file not found on disk"}})
+
+    asset = await _store_reference_asset(db, user.id, data, img.content_type or "image/png")
     await db.commit()
     return {"asset_id": asset.id}
 

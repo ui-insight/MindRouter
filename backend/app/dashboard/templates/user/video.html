@@ -81,10 +81,30 @@
               <div class="col-sm-6">
                 <label for="vid-start-image" class="form-label">Start image</label>
                 <input id="vid-start-image" type="file" class="form-control" accept="image/*">
+                <div class="d-flex align-items-center gap-2 mt-1">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-gallery-pick="start">
+                    <i class="bi bi-images" aria-hidden="true"></i> Choose from gallery
+                  </button>
+                  <span id="vid-start-chosen" class="d-none align-items-center gap-1">
+                    <img id="vid-start-thumb" alt="Start keyframe" style="width:32px;height:32px;object-fit:cover;border-radius:4px;">
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-1"
+                            data-gallery-clear="start" aria-label="Clear start keyframe"><i class="bi bi-x"></i></button>
+                  </span>
+                </div>
               </div>
               <div class="col-sm-6">
                 <label for="vid-end-image" class="form-label">End image</label>
                 <input id="vid-end-image" type="file" class="form-control" accept="image/*">
+                <div class="d-flex align-items-center gap-2 mt-1">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-gallery-pick="end">
+                    <i class="bi bi-images" aria-hidden="true"></i> Choose from gallery
+                  </button>
+                  <span id="vid-end-chosen" class="d-none align-items-center gap-1">
+                    <img id="vid-end-thumb" alt="End keyframe" style="width:32px;height:32px;object-fit:cover;border-radius:4px;">
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-1"
+                            data-gallery-clear="end" aria-label="Clear end keyframe"><i class="bi bi-x"></i></button>
+                  </span>
+                </div>
               </div>
             </div>
           </fieldset>
@@ -143,6 +163,28 @@
     <p id="vid-library-empty" class="text-body-secondary d-none">No videos yet.</p>
   </section>
 </div>
+
+<!-- Gallery picker: choose a generated image as a start/end keyframe -->
+<div class="modal fade" id="galleryPickerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Choose a keyframe from your images</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-body-secondary small">Pick a generated image to use as the <span id="gp-slot-label">start</span> frame.</p>
+        <div id="gp-grid" class="row g-2"></div>
+        <p id="gp-empty" class="text-body-secondary text-center py-4 d-none">
+          No images in your gallery yet. Generate some on the Images tab first.
+        </p>
+        <div class="text-center mt-3 d-none" id="gp-more-wrap">
+          <button type="button" id="gp-more" class="btn btn-sm btn-outline-secondary">Load more</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -185,6 +227,86 @@
     return d.asset_id;
   }
 
+  // ── Gallery keyframe picker ──────────────────────────────
+  // Reuse a generated image as a start/end keyframe. Importing copies the image
+  // into the video asset domain (server-side) and returns an asset id.
+  const galleryAsset = { start: null, end: null };
+  let gpSlot = "start", gpOffset = 0, gpModal = null;
+  const GP_LIMIT = 12;
+
+  function gpOpen(slot) {
+    gpSlot = slot;
+    $("gp-slot-label").textContent = slot;
+    gpOffset = 0;
+    $("gp-grid").innerHTML = "";
+    $("gp-empty").classList.add("d-none");
+    $("gp-more-wrap").classList.add("d-none");
+    if (!gpModal) gpModal = new bootstrap.Modal($("galleryPickerModal"));
+    gpModal.show();
+    gpLoad();
+  }
+
+  async function gpLoad() {
+    try {
+      const r = await fetch("/images/history?offset=" + gpOffset + "&limit=" + GP_LIMIT);
+      const d = await r.json();
+      const imgs = d.images || [];
+      if (gpOffset === 0 && imgs.length === 0) { $("gp-empty").classList.remove("d-none"); return; }
+      const grid = $("gp-grid");
+      for (const im of imgs) {
+        const col = document.createElement("div");
+        col.className = "col-4 col-sm-3";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn p-0 border rounded overflow-hidden w-100";
+        btn.title = im.prompt || "";
+        const thumb = document.createElement("img");
+        thumb.src = "/images/serve/" + im.id;
+        thumb.alt = im.prompt || "gallery image";
+        thumb.style.cssText = "width:100%;aspect-ratio:1;object-fit:cover;display:block;";
+        btn.appendChild(thumb);
+        btn.addEventListener("click", () => gpChoose(im.id));
+        col.appendChild(btn);
+        grid.appendChild(col);
+      }
+      gpOffset += imgs.length;
+      $("gp-more-wrap").classList.toggle("d-none", gpOffset >= (d.total || 0));
+    } catch (e) { /* leave grid as-is */ }
+  }
+
+  async function gpChoose(imageId) {
+    try {
+      const r = await fetch("/video/api/assets/from-gallery", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_id: imageId }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error((d.error && d.error.message) || "import failed");
+      galleryAsset[gpSlot] = d.asset_id;
+      $("vid-" + gpSlot + "-thumb").src = "/images/serve/" + imageId;
+      const chosen = $("vid-" + gpSlot + "-chosen");
+      chosen.classList.remove("d-none"); chosen.classList.add("d-inline-flex");
+      // Gallery selection wins for this slot — clear + disable the file input.
+      const fileInput = $("vid-" + gpSlot + "-image");
+      fileInput.value = ""; fileInput.disabled = true;
+      if (gpModal) gpModal.hide();
+    } catch (e) { setStatus(e.message || "Could not import image.", "danger"); }
+  }
+
+  function gpClear(slot) {
+    galleryAsset[slot] = null;
+    const chosen = $("vid-" + slot + "-chosen");
+    chosen.classList.add("d-none"); chosen.classList.remove("d-inline-flex");
+    $("vid-" + slot + "-thumb").src = "";
+    $("vid-" + slot + "-image").disabled = false;
+  }
+
+  document.querySelectorAll("[data-gallery-pick]").forEach((b) =>
+    b.addEventListener("click", () => gpOpen(b.getAttribute("data-gallery-pick"))));
+  document.querySelectorAll("[data-gallery-clear]").forEach((b) =>
+    b.addEventListener("click", () => gpClear(b.getAttribute("data-gallery-clear"))));
+  $("gp-more").addEventListener("click", gpLoad);
+
   async function generate() {
     const prompt = $("vid-prompt").value.trim();
     if (!prompt) { setStatus("Please enter a prompt.", "warning"); return; }
@@ -201,10 +323,11 @@
     if (seed !== "") body.seed = parseInt(seed, 10);
 
     try {
-      // Upload optional start/end images first, reference them by asset id.
-      setStatus("Uploading images…", "info");
-      const startId = await uploadImage($("vid-start-image"));
-      const endId = await uploadImage($("vid-end-image"));
+      // Resolve optional start/end keyframes: a gallery selection (already
+      // imported to an asset id) wins; otherwise upload the chosen file.
+      setStatus("Preparing images…", "info");
+      const startId = galleryAsset.start || await uploadImage($("vid-start-image"));
+      const endId = galleryAsset.end || await uploadImage($("vid-end-image"));
       if (startId) body.start_image_asset_id = startId;
       if (endId) body.end_image_asset_id = endId;
       setStatus("Submitting…", "info");
