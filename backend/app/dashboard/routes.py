@@ -4262,6 +4262,145 @@ async def admin_images_config_post(
 
 
 # ---------------------------------------------------------------------------
+# Admin Video Generation Config
+# ---------------------------------------------------------------------------
+
+@dashboard_router.get("/admin/video-config")
+async def admin_video_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin video generation configuration page."""
+    from sqlalchemy import func, select
+    from backend.app.db.models import Modality, User as UserModel
+
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    all_models = await crud.get_all_models_with_backends(db)
+    video_models = sorted({m.name for m in all_models if m.modality == Modality.VIDEO_GENERATION})
+
+    per_page = 50
+    users_list, total_count = await crud.get_users(
+        db, skip=(page - 1) * per_page, limit=per_page,
+        search=search, is_active=True, sort_by="username", sort_dir="asc",
+    )
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+
+    enabled_result = await db.execute(
+        select(func.count()).select_from(UserModel).where(
+            UserModel.video_generation_enabled == True,  # noqa: E712
+            UserModel.deleted_at.is_(None),
+            UserModel.is_active == True,  # noqa: E712
+        )
+    )
+    enabled_count = enabled_result.scalar() or 0
+
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/video_config.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "video_models": video_models,
+            "users": users_list,
+            "total_pages": total_pages,
+            "current_page": page,
+            "search": search,
+            "enabled_count": enabled_count,
+            "total_count": total_count,
+            "success": success,
+            "error": error,
+            "enabled": await crud.get_config_json(db, "vid.enabled", False),
+            "default_model": await crud.get_config_json(db, "vid.default_model", "lightricks/ltx-2.3-distilled"),
+            "default_size": await crud.get_config_json(db, "vid.default_size", "1280x704"),
+            "allowed_sizes": await crud.get_config_json(db, "vid.allowed_sizes", "1280x704,704x1280,960x544,768x448"),
+            "allowed_durations": await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10"),
+            "default_quality": await crud.get_config_json(db, "vid.default_quality", "standard"),
+            "max_concurrent_jobs_per_user": await crud.get_config_json(db, "vid.max_concurrent_jobs_per_user", 1),
+            "max_total_seconds": await crud.get_config_json(db, "vid.max_total_seconds", 90),
+            "token_cost_per_second": await crud.get_config_json(db, "vid.token_cost_per_second", 2000),
+            "user_storage_cap_gb": await crud.get_config_json(db, "vid.user_storage_cap_gb", 50),
+        },
+    )
+
+
+@dashboard_router.post("/admin/video-config")
+async def admin_video_config_post(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Handle video config form submissions."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action", "")
+    _ip = get_client_ip(request)
+
+    if action == "save_config":
+        await crud.set_config(db, "vid.enabled", "enabled" in form)
+        await crud.set_config(db, "vid.default_model", form.get("default_model", "").strip() or "lightricks/ltx-2.3-distilled")
+        await crud.set_config(db, "vid.default_size", form.get("default_size", "").strip() or "1280x704")
+        await crud.set_config(db, "vid.allowed_sizes", form.get("allowed_sizes", "").strip())
+        await crud.set_config(db, "vid.allowed_durations", form.get("allowed_durations", "").strip())
+        await crud.set_config(db, "vid.default_quality", form.get("default_quality", "").strip() or "standard")
+
+        int_configs = {
+            "vid.max_concurrent_jobs_per_user": ("max_concurrent_jobs_per_user", 1, 1, 10),
+            "vid.max_total_seconds": ("max_total_seconds", 90, 1, 600),
+            "vid.token_cost_per_second": ("token_cost_per_second", 2000, 0, 1_000_000),
+            "vid.user_storage_cap_gb": ("user_storage_cap_gb", 50, 0, 10_000),
+        }
+        for key, (field, default, lo, hi) in int_configs.items():
+            try:
+                val = max(lo, min(hi, int(form.get(field, str(default)))))
+            except (ValueError, TypeError):
+                val = default
+            await crud.set_config(db, key, val)
+
+        await crud.log_admin_action(
+            db, user_id=user_id, action="video_config.save", entity_type="config",
+            after_value={"enabled": "enabled" in form, "model": form.get("default_model")},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/video-config?success=config_updated", status_code=302)
+
+    elif action == "toggle_user":
+        target_id = int(form.get("user_id", 0))
+        target_user = await crud.get_user_by_id(db, target_id)
+        if not target_user:
+            return RedirectResponse(url="/admin/video-config?error=User+not+found", status_code=302)
+        new_val = not target_user.video_generation_enabled
+        target_user.video_generation_enabled = new_val
+        await crud.log_admin_action(
+            db, user_id=user_id, action="video_config.toggle_user",
+            entity_type="user", entity_id=str(target_id),
+            before_value={"video_generation_enabled": not new_val},
+            after_value={"video_generation_enabled": new_val},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(
+            url=f"/admin/video-config?success={'user_enabled' if new_val else 'user_disabled'}",
+            status_code=302,
+        )
+
+    return RedirectResponse(url="/admin/video-config?error=Unknown+action", status_code=302)
+
+
+# ---------------------------------------------------------------------------
 # Admin Site Settings (timezone, etc.)
 # ---------------------------------------------------------------------------
 

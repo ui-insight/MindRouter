@@ -114,6 +114,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'video_config' %}active{% endif %}" href="/admin/video-config" {% if active == 'video_config' %}aria-current="page"{% endif %}>
+                <i class="bi bi-camera-video"></i> Video
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'blog' %}active{% endif %}" href="/admin/blog" {% if active == 'blog' %}aria-current="page"{% endif %}>
                 <i class="bi bi-pencil-square"></i> Blog Posts
             </a>
