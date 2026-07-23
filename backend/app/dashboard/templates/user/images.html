@@ -795,10 +795,14 @@ async function saveToGallery(b64Data, prompt, model, size, steps, guidance) {
     } catch (e) { console.error('Failed to save to gallery:', e); }
 }
 
-async function loadHistory(append) {
+async function loadHistory(append, limitOverride) {
     if (!append) historyOffset = 0;
+    // On a fresh (non-append) load we may re-fetch more than one page at once —
+    // e.g. after a delete, reload as many as were showing so later images
+    // backfill the grid instead of leaving a gap.
+    const limit = (!append && limitOverride) ? limitOverride : HISTORY_LIMIT;
     try {
-        const resp = await fetch(`/images/history?offset=${historyOffset}&limit=${HISTORY_LIMIT}`);
+        const resp = await fetch(`/images/history?offset=${historyOffset}&limit=${limit}`);
         const data = await resp.json();
 
         const grid = document.getElementById('galleryGrid');
@@ -847,18 +851,35 @@ async function loadHistory(append) {
 }
 
 let deleteTargetId = null;
+let deleteTargetCol = null;
 function confirmDelete(id, btn) {
     deleteTargetId = id;
+    deleteTargetCol = btn.closest('[class*="col-"]');
     new bootstrap.Modal(document.getElementById('deleteModal')).show();
 }
 document.getElementById('confirmDeleteBtn').addEventListener('click', async () => {
     if (!deleteTargetId) return;
+    const id = deleteTargetId;
+    const col = deleteTargetCol;
+    deleteTargetId = null;
+    deleteTargetCol = null;
+
+    let ok = false;
     try {
-        await fetch(`/images/delete/${deleteTargetId}`, { method: 'DELETE' });
-        bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
-        historyOffset = 0;
-        loadHistory();
+        const resp = await fetch(`/images/delete/${id}`, { method: 'DELETE' });
+        ok = resp.ok;
     } catch (e) { console.error('Delete failed:', e); }
+
+    // Close the modal regardless — never let a hide() hiccup skip the refill.
+    try { bootstrap.Modal.getInstance(document.getElementById('deleteModal'))?.hide(); } catch (e) {}
+
+    if (ok) {
+        // Optimistically drop the card, then reload enough to backfill the gap
+        // from later pages (preserving how many were shown).
+        const shown = document.getElementById('galleryGrid').children.length;
+        if (col) col.remove();
+        loadHistory(false, Math.max(HISTORY_LIMIT, shown));
+    }
 });
 
 function previewImage(src, title) {
