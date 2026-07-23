@@ -91,6 +91,7 @@ get_video = _mod.get_video
 cancel_video = _mod.cancel_video
 list_videos = _mod.list_videos
 list_video_models = _mod.list_video_models
+get_video_content = _mod.get_video_content
 _job_to_dict = _mod._job_to_dict
 
 
@@ -286,6 +287,56 @@ async def test_cancel_video_flags_cancel(monkeypatch):
     monkeypatch.setattr(_mod.crud, "request_cancel_video_job", cancel_mock)
     await cancel_video("vid-abc123", db=_db(), auth=_auth())
     cancel_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_content_missing_job_404(monkeypatch):
+    monkeypatch.setattr(_mod.crud, "get_video_job_by_uuid", AsyncMock(return_value=None))
+    with pytest.raises(HTTPException) as e:
+        await get_video_content("vid-nope", db=_db(), auth=_auth())
+    assert e.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_content_not_ready_409(monkeypatch):
+    job = _job(status=_JS.RENDERING)  # no output_asset_id
+    job.output_asset_id = None
+    monkeypatch.setattr(_mod.crud, "get_video_job_by_uuid", AsyncMock(return_value=job))
+    with pytest.raises(HTTPException) as e:
+        await get_video_content("vid-abc123", db=_db(), auth=_auth())
+    assert e.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_content_file_missing_on_disk_404(monkeypatch):
+    job = _job(status=_JS.COMPLETED, output_asset_id=5)
+    monkeypatch.setattr(_mod.crud, "get_video_job_by_uuid", AsyncMock(return_value=job))
+    monkeypatch.setattr(
+        _mod.crud, "get_video_asset",
+        AsyncMock(return_value=SimpleNamespace(storage_path="/no/such/file.mp4", content_type="video/mp4")),
+    )
+    with pytest.raises(HTTPException) as e:
+        await get_video_content("vid-abc123", db=_db(), auth=_auth())
+    assert e.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_content_streams_file_response(monkeypatch, tmp_path):
+    f = tmp_path / "out.mp4"
+    f.write_bytes(b"\x00\x00\x00\x18ftypmp42fakebytes")
+    job = _job(status=_JS.COMPLETED, output_asset_id=5)
+    monkeypatch.setattr(_mod.crud, "get_video_job_by_uuid", AsyncMock(return_value=job))
+    monkeypatch.setattr(
+        _mod.crud, "get_video_asset",
+        AsyncMock(return_value=SimpleNamespace(storage_path=str(f), content_type="video/mp4")),
+    )
+    resp = await get_video_content("vid-abc123", db=_db(), auth=_auth())
+    # FileResponse streams from disk (Range/206 handled by starlette), never
+    # loading the whole file into a single in-memory Response.
+    from fastapi.responses import FileResponse
+    assert isinstance(resp, FileResponse)
+    assert resp.path == str(f)
+    assert resp.media_type == "video/mp4"
 
 
 @pytest.mark.asyncio

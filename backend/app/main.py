@@ -41,6 +41,7 @@ from backend.app.dashboard.dlp_routes import dlp_router
 from backend.app.dashboard.email_routes import email_router
 from backend.app.dashboard.chat import chat_router
 from backend.app.dashboard.images import images_router
+from backend.app.dashboard.video import video_router
 from backend.app.dashboard.routes import dashboard_router
 from backend.app.logging_config import (
     bind_request_context,
@@ -587,6 +588,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_router)
     app.include_router(chat_router)
     app.include_router(images_router)
+    app.include_router(video_router)
     app.include_router(blog_router)
     app.include_router(email_router)
     app.include_router(dlp_router)

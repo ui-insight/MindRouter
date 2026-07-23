@@ -24,7 +24,10 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import authenticate_request
@@ -159,16 +162,20 @@ async def _video_model_names(registry) -> list:
     return names
 
 
-@router.post("/videos", status_code=status.HTTP_202_ACCEPTED)
-async def create_video(
-    request: Request,
-    db: AsyncSession = Depends(get_async_db),
-    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
-):
-    """Create a text-to-video job. Returns 202 with the job object immediately —
-    never the video. The runner renders it asynchronously."""
-    user, api_key = auth
-
+async def submit_video_job(
+    db: AsyncSession,
+    user: User,
+    api_key: ApiKey,
+    body: Dict[str, Any],
+    *,
+    endpoint: str = "/v1/videos",
+    client_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate a video request and enqueue a job. THE single create path —
+    both the public API (create_video) and the dashboard route call this, so
+    identical bodies produce identical results (no images-style split-brain).
+    Raises HTTPException on any gate. Returns the job object."""
     # ── Access control ───────────────────────────────────────────
     if not await crud.get_config_json(db, "vid.enabled", True):
         raise HTTPException(
@@ -180,11 +187,6 @@ async def create_video(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Video generation is not enabled for your account. Contact an administrator.",
         )
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body")
 
     job_uuid = f"vid-{uuid.uuid4().hex[:24]}"
     bind_request_context(request_id=job_uuid, user_id=user.id)
@@ -262,13 +264,13 @@ async def create_video(
         db=db,
         user_id=user.id,
         api_key_id=api_key.id,
-        endpoint="/v1/videos",
+        endpoint=endpoint,
         model=model,
         modality=Modality.VIDEO_GENERATION,
         prompt=prompt,
         parameters={"size": size, "seconds": seconds, "fps": fps, "quality": quality},
-        client_ip=await _client_ip(request),
-        user_agent=request.headers.get("user-agent"),
+        client_ip=client_ip,
+        user_agent=user_agent,
     )
     project = await crud.create_video_project(
         db=db,
@@ -304,6 +306,26 @@ async def create_video(
 
     logger.info("video_job_created", job_uuid=job_uuid, model=model, size=size, seconds=seconds)
     return _job_to_dict(job, project)
+
+
+@router.post("/videos", status_code=status.HTTP_202_ACCEPTED)
+async def create_video(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+    auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+):
+    """Create a text-to-video job. Returns 202 with the job object immediately —
+    never the video. The runner renders it asynchronously."""
+    user, api_key = auth
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body")
+    return await submit_video_job(
+        db, user, api_key, body,
+        client_ip=await _client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
 
 
 @router.get("/videos")
@@ -360,19 +382,25 @@ async def get_video_content(
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
 ):
-    """Stream the rendered MP4 (Range-capable). Until the runner + worker land,
-    a job never has an output asset, so this reports not-ready."""
+    """Stream the rendered MP4 from disk. FileResponse (starlette) serves
+    Accept-Ranges + 206 partial content so browser <video> scrubbing works —
+    it streams the file rather than loading it into memory (unlike the images
+    path, which does not scale past a few MB)."""
     user, _ = auth
     job = await crud.get_video_job_by_uuid(db, video_id, user_id=user.id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
-    if not job.output_asset_id:
+    if job.output_asset_id is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Video is not ready yet")
+
+    asset = await crud.get_video_asset(db, job.output_asset_id)
+    if not asset or not asset.storage_path or not os.path.exists(asset.storage_path):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Video is not ready yet",
+            status_code=status.HTTP_404_NOT_FOUND, detail="Video file not found on disk"
         )
-    # Streaming delivery (video_store, Range/206) is built with the runner.
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Video content delivery is not yet available",
+    return FileResponse(
+        asset.storage_path,
+        media_type=asset.content_type or "video/mp4",
+        filename=f"{video_id}.mp4",
+        headers={"Cache-Control": "private, max-age=86400"},
     )

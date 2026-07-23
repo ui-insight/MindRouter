@@ -49,7 +49,7 @@
 | `backend/app/tests/unit/test_tool_calling.py` | 33 | Tool calling: schemas, OpenAI/Ollama/Anthropic inbound, vLLM/Ollama outbound, round-trips |
 | `backend/app/tests/unit/test_sidecar_client.py` | 16 | GPU sidecar client: auth, GPU info retrieval, communication |
 | `backend/app/tests/unit/test_version_alignment.py` | 6 | Version alignment: pyproject.toml reading, sidecar VERSION file consistency |
-| `backend/app/tests/unit/test_accessibility.py` | 99 | WCAG 2.1 Level A/AA: ARIA, semantic HTML, heading hierarchy, forms, sidebar include |
+| `backend/app/tests/unit/test_accessibility.py` | 113 | WCAG 2.1 Level A/AA: ARIA, semantic HTML, heading hierarchy, forms, sidebar include, Video tab |
 | `backend/app/tests/unit/test_chat_mobile.py` | 37 | Chat mobile responsiveness: sidebar collapse/backdrop, thinking block collapse, compact layout CSS |
 | `backend/app/tests/unit/test_rerank_translators.py` | 22 | Rerank/score translators: OpenAIIn, VLLMOut rerank & score methods, canonical schema validation |
 | `backend/app/tests/unit/test_model_enrichment.py` | 28 | Model auto-enrichment: brave_web_search api_key param, LLM call helper, enrichment pipeline, CRUD helpers, config gating |
@@ -72,7 +72,7 @@
 | `backend/app/tests/unit/test_context_trim.py` | 6 | truncation:"auto" trimming: turn grouping, tool-pair atomicity, oldest-first drops, system/final-turn protection |
 | `backend/app/tests/unit/test_video_schema_contract.py` | 9 | Video-gen v1 foundation (source-inspection + spec-load, pollution-proof): CanonicalVideoRequest defaults + text-to-video-only shape, CanonicalVideoJob OpenAI shape (in_progress status set), models.py video enums (BackendEngine.VIDEO, Modality.VIDEO_GENERATION, users.video_generation_enabled), JobModality.VIDEO_GENERATION, migration 065 ENUM widening (ALGORITHM=INSTANT) + user flag, migration 066 four tables + claim/heartbeat indexes + source_clip provisions, migration 067 config seed (vid.enabled False by default, cap 50, retention), 065→066→067 chain linear, every video_* setting has docker-compose passthrough |
 | `backend/app/tests/unit/test_video_runner.py` | 11 | VideoRunner state machine (in-memory fake repo + scriptable fake worker, spec-loaded): happy path claim→submit→poll→fetch→complete with token/duration accounting + shot rendering/rendered transitions; no-backend requeues (not fails); cancel before submit; cancel during poll (worker cancel + shot skipped); worker-reported failure fails without retry; transient submit error retries under cap / fails over cap; non-retryable submit fails immediately; tick() empty-queue False; tick() processes claimed job; run_forever re-adopts stale then stops on cancel |
-| `backend/app/tests/unit/test_video_api.py` | 14 | /v1/videos routes (v1 text-to-video, spec-loaded with save/restore sys.modules hygiene): _job_to_dict status mapping (rendering→in_progress) + content_url gating; create_video gates — disabled 503, user-flag-off 403, missing-prompt 400, disallowed size/duration 400, bad quality 400, model-not-found 404, over-concurrency 429; happy path returns 'queued' + persists + non-blocking; get_video 404 (no existence leak); cancel flags cancel; /videos/models capability shape (t2v only, max_shots 1) |
+| `backend/app/tests/unit/test_video_api.py` | 18 | /v1/videos routes (v1 text-to-video, spec-loaded with save/restore sys.modules hygiene): _job_to_dict status mapping (rendering→in_progress) + content_url gating; create_video gates — disabled 503, user-flag-off 403, missing-prompt 400, disallowed size/duration 400, bad quality 400, model-not-found 404, over-concurrency 429; happy path returns 'queued' + persists + non-blocking; get_video 404 (no existence leak); cancel flags cancel; /videos/models capability shape (t2v only, max_shots 1); GET /content — 404 missing job, 409 not-ready, 404 file-missing, FileResponse stream (Range/206 via starlette) |
 
 **Shared fixtures:** `backend/app/tests/conftest.py`
 
@@ -213,7 +213,7 @@ Auto-discovers all tool-capable models via `/v1/models` (filtering by `capabilit
 **Makefile:** `make test-a11y`
 **Requirements:** None (parses template files directly).
 
-Subset of unit tests, broken out for convenience. 99 tests validating WCAG 2.1 Level A and AA compliance across all 19 Jinja2 HTML templates (including sidebar include, user detail, groups, API keys, and data retention).
+Subset of unit tests, broken out for convenience. 113 tests validating WCAG 2.1 Level A and AA compliance across all Jinja2 HTML templates (including the Video tab, sidebar include, user detail, groups, API keys, and data retention).
 
 ---
 

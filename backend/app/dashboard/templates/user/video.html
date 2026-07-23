@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+
+{% block title %}Video Generation - MindRouter{% endblock %}
+
+{% block content %}
+<style>
+  .vid-shell { max-width: 1100px; margin: 0 auto; }
+  .vid-player { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: .5rem; }
+  .vid-lib-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .vid-lib-card video, .vid-lib-card .vid-lib-poster {
+    width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: .375rem; background: #000;
+  }
+  .vid-status-dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; }
+</style>
+
+<div class="vid-shell py-3">
+  <h1 class="h3 mb-1">Video Generation</h1>
+  <p class="text-body-secondary mb-4">
+    Generate short video clips from a text prompt. Choose a size, length, and quality,
+    then render. Useful for demos, teaching, communications, science visualizations, and more.
+  </p>
+
+  {% if not has_api_key %}
+  <div class="alert alert-warning" role="alert">
+    You need an active API key to generate video.
+    <a href="/dashboard" class="alert-link">Create one in your dashboard</a>.
+  </div>
+  {% endif %}
+
+  <div class="row g-4">
+    <!-- Controls -->
+    <div class="col-lg-5">
+      <section class="card" aria-labelledby="vid-controls-heading">
+        <div class="card-body">
+          <h2 id="vid-controls-heading" class="h5 mb-3">New clip</h2>
+
+          <div class="mb-3">
+            <label for="vid-prompt" class="form-label">Prompt</label>
+            <textarea id="vid-prompt" class="form-control" rows="4"
+                      placeholder="Describe the shot — subject, motion, setting, style…"></textarea>
+          </div>
+
+          <div class="row g-3">
+            <div class="col-sm-6">
+              <label for="vid-size" class="form-label">Size</label>
+              <select id="vid-size" class="form-select">
+                {% for s in allowed_sizes %}
+                <option value="{{ s }}" {% if s == default_size %}selected{% endif %}>{{ s }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-sm-6">
+              <label for="vid-seconds" class="form-label">Length (seconds)</label>
+              <select id="vid-seconds" class="form-select">
+                {% for d in allowed_durations %}
+                <option value="{{ d }}" {% if d == default_seconds %}selected{% endif %}>{{ d }}s</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-sm-6">
+              <label for="vid-quality" class="form-label">Quality</label>
+              <select id="vid-quality" class="form-select">
+                <option value="draft" {% if default_quality == 'draft' %}selected{% endif %}>Draft — fast</option>
+                <option value="standard" {% if default_quality == 'standard' %}selected{% endif %}>Standard</option>
+                <option value="final" {% if default_quality == 'final' %}selected{% endif %}>Final — best</option>
+              </select>
+            </div>
+            <div class="col-sm-6">
+              <label for="vid-seed" class="form-label">Seed <span class="text-body-secondary">(optional)</span></label>
+              <input id="vid-seed" type="number" class="form-control" placeholder="random" min="0">
+            </div>
+          </div>
+
+          <button id="vid-generate" type="button" class="btn btn-primary w-100 mt-4"
+                  {% if not has_api_key %}disabled{% endif %}>
+            <i class="bi bi-camera-video" aria-hidden="true"></i> Generate video
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <!-- Output -->
+    <div class="col-lg-7">
+      <section class="card" aria-labelledby="vid-output-heading">
+        <div class="card-body">
+          <h2 id="vid-output-heading" class="h5 mb-3">Result</h2>
+
+          <!-- Live status region: long renders MUST be announced -->
+          <div id="vid-status" class="d-flex align-items-center gap-2 mb-2" role="status" aria-live="polite">
+            <span id="vid-status-dot" class="vid-status-dot bg-secondary" aria-hidden="true"></span>
+            <span id="vid-status-text">Idle — describe a clip and press Generate.</span>
+          </div>
+
+          <div id="vid-progress-wrap" class="progress mb-3 d-none" style="height: .5rem;">
+            <div id="vid-progress" class="progress-bar" role="progressbar"
+                 aria-label="Render progress" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                 style="width: 0%"></div>
+          </div>
+
+          <video id="vid-player" class="vid-player d-none" controls preload="metadata"
+                 aria-label="Generated video result"></video>
+
+          <div id="vid-actions" class="d-none mt-3 d-flex gap-2">
+            <a id="vid-download" class="btn btn-outline-secondary btn-sm" download>
+              <i class="bi bi-download" aria-hidden="true"></i> Download
+            </a>
+            <button id="vid-cancel" type="button" class="btn btn-outline-danger btn-sm d-none">
+              <i class="bi bi-x-circle" aria-hidden="true"></i> Cancel
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Library -->
+  <section class="mt-5" aria-labelledby="vid-library-heading">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 id="vid-library-heading" class="h5 mb-0">Your videos</h2>
+      <button id="vid-refresh" type="button" class="btn btn-sm btn-outline-secondary" aria-label="Refresh library">
+        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> Refresh
+      </button>
+    </div>
+    <div id="vid-library" class="vid-lib-grid" aria-live="polite"></div>
+    <p id="vid-library-empty" class="text-body-secondary d-none">No videos yet.</p>
+  </section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const statusText = $("vid-status-text");
+  const statusDot = $("vid-status-dot");
+  const progWrap = $("vid-progress-wrap");
+  const progBar = $("vid-progress");
+  const player = $("vid-player");
+  const actions = $("vid-actions");
+  const cancelBtn = $("vid-cancel");
+  const dlLink = $("vid-download");
+  let currentId = null;
+  let pollTimer = null;
+
+  function esc(s) {
+    const d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML;
+  }
+  function setStatus(text, color) {
+    statusText.textContent = text;
+    statusDot.className = "vid-status-dot bg-" + (color || "secondary");
+  }
+  function setProgress(pct) {
+    progWrap.classList.remove("d-none");
+    progBar.style.width = (pct || 0) + "%";
+    progBar.setAttribute("aria-valuenow", Math.round(pct || 0));
+  }
+
+  async function generate() {
+    const prompt = $("vid-prompt").value.trim();
+    if (!prompt) { setStatus("Please enter a prompt.", "warning"); return; }
+    $("vid-generate").disabled = true;
+    player.classList.add("d-none");
+    actions.classList.add("d-none");
+    setStatus("Submitting…", "info");
+    const body = {
+      prompt: prompt,
+      size: $("vid-size").value,
+      seconds: $("vid-seconds").value,
+      quality: $("vid-quality").value,
+    };
+    const seed = $("vid-seed").value;
+    if (seed !== "") body.seed = parseInt(seed, 10);
+
+    try {
+      const r = await fetch("/video/api/videos", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        setStatus((data.error && data.error.message) || "Request failed", "danger");
+        $("vid-generate").disabled = false;
+        return;
+      }
+      currentId = data.id;
+      cancelBtn.classList.remove("d-none");
+      actions.classList.remove("d-none");
+      poll();
+    } catch (e) {
+      setStatus("Network error", "danger");
+      $("vid-generate").disabled = false;
+    }
+  }
+
+  async function poll() {
+    if (!currentId) return;
+    try {
+      const r = await fetch("/video/api/jobs/" + encodeURIComponent(currentId));
+      const job = await r.json();
+      const st = job.status;
+      if (st === "queued") setStatus("Queued…", "secondary");
+      else if (st === "in_progress") { setStatus("Rendering… " + Math.round(job.progress || 0) + "%", "info"); setProgress(job.progress); }
+
+      if (st === "completed") {
+        setProgress(100);
+        setStatus("Done.", "success");
+        showVideo(currentId);
+        finish();
+        loadLibrary();
+        return;
+      }
+      if (st === "failed") { setStatus("Failed: " + ((job.error && job.error.message) || "render error"), "danger"); finish(); return; }
+      if (st === "cancelled") { setStatus("Cancelled.", "secondary"); finish(); return; }
+      pollTimer = setTimeout(poll, 2000);
+    } catch (e) {
+      pollTimer = setTimeout(poll, 3000);
+    }
+  }
+
+  function showVideo(id) {
+    const url = "/video/serve/" + encodeURIComponent(id);
+    player.src = url;
+    player.classList.remove("d-none");
+    dlLink.href = url;
+  }
+  function finish() {
+    $("vid-generate").disabled = false;
+    cancelBtn.classList.add("d-none");
+    progWrap.classList.add("d-none");
+  }
+
+  async function cancel() {
+    if (!currentId) return;
+    await fetch("/video/api/jobs/" + encodeURIComponent(currentId), { method: "DELETE" });
+    setStatus("Cancelling…", "secondary");
+  }
+
+  async function loadLibrary() {
+    const grid = $("vid-library");
+    const empty = $("vid-library-empty");
+    try {
+      const r = await fetch("/video/api/jobs?limit=12");
+      const data = await r.json();
+      const jobs = (data.data || []).filter((j) => j.status === "completed");
+      grid.innerHTML = "";
+      if (!jobs.length) { empty.classList.remove("d-none"); return; }
+      empty.classList.add("d-none");
+      for (const j of jobs) {
+        const card = document.createElement("div");
+        card.className = "vid-lib-card";
+        const url = "/video/serve/" + encodeURIComponent(j.id);
+        card.innerHTML =
+          '<video class="vid-lib-poster" controls preload="metadata" src="' + esc(url) + '" ' +
+          'aria-label="Saved video ' + esc(j.id) + '"></video>' +
+          '<div class="small text-body-secondary mt-1 text-truncate">' + esc(j.size || "") + " · " + esc(j.seconds || "") + "s</div>";
+        grid.appendChild(card);
+      }
+    } catch (e) { /* leave grid as-is */ }
+  }
+
+  $("vid-generate").addEventListener("click", generate);
+  cancelBtn.addEventListener("click", cancel);
+  $("vid-refresh").addEventListener("click", loadLibrary);
+  loadLibrary();
+})();
+</script>
+{% endblock %}

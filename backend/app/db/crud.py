@@ -4542,3 +4542,8 @@ async def get_video_job_by_id(db: AsyncSession, job_id: int) -> Optional[VideoJo
 async def get_video_shot_by_id(db: AsyncSession, shot_id: int) -> Optional[VideoShot]:
     result = await db.execute(select(VideoShot).where(VideoShot.id == shot_id))
     return result.scalar_one_or_none()
+
+
+async def get_video_asset(db: AsyncSession, asset_id: int) -> Optional[VideoAsset]:
+    result = await db.execute(select(VideoAsset).where(VideoAsset.id == asset_id))
+    return result.scalar_one_or_none()
