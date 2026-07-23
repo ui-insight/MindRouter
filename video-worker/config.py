@@ -23,8 +23,11 @@ from typing import Dict, List
 # via vid.allowed_sizes / vid.allowed_durations, and the UI renders from
 # GET /v1/capabilities so there is one source of truth.
 #
-# LTX legal constraints: width/height divisible by 32; frame count = 8k + 1.
-SUPPORTED_SIZES: List[str] = ["1280x704", "704x1280", "960x544", "768x448"]
+# LTX legal constraints (measured Phase 0): the TWO-STAGE distilled pipeline
+# requires width/height divisible by 64 (stage 1 renders at half-res, which must
+# then be divisible by 32); frame count = 8k+1. 960x544 was invalid (544/64 is
+# not integer) and is replaced by 1024x576. All four presets below are ÷64.
+SUPPORTED_SIZES: List[str] = ["1280x704", "704x1280", "1024x576", "768x448"]
 
 # duration seconds -> frame count at 24 fps (must satisfy 8k+1)
 DURATION_FRAMES: Dict[str, int] = {"4": 97, "5": 121, "8": 193, "10": 241}

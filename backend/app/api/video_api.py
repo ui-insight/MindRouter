@@ -123,7 +123,7 @@ async def list_video_models(
     """Capability discovery. The UI renders its controls from this so the
     preset matrix has exactly one source of truth."""
     allowed_sizes = await crud.get_config_json(
-        db, "vid.allowed_sizes", "1280x704,704x1280,960x544,768x448"
+        db, "vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448"
     )
     allowed_durations = await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10")
     registry = get_registry()
@@ -217,7 +217,7 @@ async def submit_video_job(
     default_fps = await crud.get_config_json(db, "vid.default_fps", 24)
     default_quality = await crud.get_config_json(db, "vid.default_quality", "standard")
     allowed_sizes_str = await crud.get_config_json(
-        db, "vid.allowed_sizes", "1280x704,704x1280,960x544,768x448"
+        db, "vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448"
     )
     allowed_durations_str = await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10")
     allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()]

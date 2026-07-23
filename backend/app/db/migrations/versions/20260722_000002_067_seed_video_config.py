@@ -40,7 +40,7 @@ _DEFAULTS = [
     ("vid.enabled", False, "Master switch for video generation (off by default; enable in admin)"),
     ("vid.default_model", "lightricks/ltx-2.3-distilled", "Default video model (served-model-name)"),
     ("vid.default_size", "1280x704", "Default resolution WIDTHxHEIGHT"),
-    ("vid.allowed_sizes", "1280x704,704x1280,960x544,768x448", "Legal preset resolutions (torch.compile warm set)"),
+    ("vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448", "Legal preset resolutions (torch.compile warm set)"),
     ("vid.default_seconds", 5, "Default clip duration (seconds)"),
     ("vid.allowed_durations", "4,5,8,10", "Legal clip durations (seconds)"),
     ("vid.default_fps", 24, "Default frames per second"),
