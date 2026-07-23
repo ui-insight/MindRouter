@@ -125,7 +125,8 @@ async def list_video_models(
     allowed_sizes = await crud.get_config_json(
         db, "vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448"
     )
-    allowed_durations = await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10,12,15,20")
+    min_seconds = int(await crud.get_config_json(db, "vid.min_seconds", 4))
+    max_seconds = int(await crud.get_config_json(db, "vid.max_total_seconds", 90))
     registry = get_registry()
     models = []
     for name in await _video_model_names(registry):
@@ -133,7 +134,9 @@ async def list_video_models(
             {
                 "id": name,
                 "supported_sizes": [s.strip() for s in allowed_sizes.split(",") if s.strip()],
-                "supported_durations": [s.strip() for s in allowed_durations.split(",") if s.strip()],
+                # Duration is a continuous whole-second range, not a preset list.
+                "min_seconds": min_seconds,
+                "max_seconds": max_seconds,
                 "supported_fps": [24],
                 "supported_qualities": ["draft", "standard", "final"],
                 "supports_text_to_video": True,
@@ -219,9 +222,9 @@ async def submit_video_job(
     allowed_sizes_str = await crud.get_config_json(
         db, "vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448"
     )
-    allowed_durations_str = await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10,12,15,20")
     allowed_sizes = [s.strip() for s in allowed_sizes_str.split(",") if s.strip()]
-    allowed_durations = [s.strip() for s in allowed_durations_str.split(",") if s.strip()]
+    min_seconds = int(await crud.get_config_json(db, "vid.min_seconds", 4))
+    max_seconds = int(await crud.get_config_json(db, "vid.max_total_seconds", 90))
     max_per_user = await crud.get_config_json(db, "vid.max_concurrent_jobs_per_user", 1)
 
     model = body.get("model") or default_model
@@ -230,18 +233,24 @@ async def submit_video_job(
     fps = int(body.get("fps") or default_fps)
     quality = body.get("quality") or default_quality
 
-    # Off-menu size/duration are rejected, not silently recompiled (torch.compile
-    # is warmed per-shape on the worker).
+    # Sizes are a fixed preset menu (torch.compile shape set). Duration is a
+    # continuous whole-second slider: frames = 24*seconds + 1 (always 8k+1).
     if allowed_sizes and size not in allowed_sizes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Size '{size}' is not allowed. Allowed: {', '.join(allowed_sizes)}",
         )
-    if allowed_durations and seconds not in allowed_durations:
+    try:
+        sec_val = float(seconds)
+        sec_int = int(sec_val)
+    except (ValueError, TypeError):
+        sec_val, sec_int = -1.0, -1
+    if sec_val != sec_int or not (min_seconds <= sec_int <= max_seconds):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Duration '{seconds}' is not allowed. Allowed: {', '.join(allowed_durations)}",
+            detail=f"Duration must be a whole number of seconds between {min_seconds} and {max_seconds}.",
         )
+    seconds = str(sec_int)
     if quality not in ("draft", "standard", "final"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

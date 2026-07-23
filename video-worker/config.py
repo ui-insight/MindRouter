@@ -29,8 +29,14 @@ from typing import Dict, List
 # not integer) and is replaced by 1024x576. All four presets below are ÷64.
 SUPPORTED_SIZES: List[str] = ["1280x704", "704x1280", "1024x576", "768x448"]
 
-# duration seconds -> frame count at 24 fps. frames = 24*seconds + 1, which is
-# always 8k+1 for whole seconds (LTX's required format).
+# Duration is any whole number of seconds in [MIN_SECONDS, MAX_SECONDS].
+# frames = 24*seconds + 1 is always 8k+1 (LTX's required format), so no discrete
+# preset list is needed — the UI uses a slider. MAX_SECONDS is set from measured
+# VRAM headroom on the H200 (see Phase 0 / the ceiling test).
+MIN_SECONDS = 4
+MAX_SECONDS = 90  # provisional; clamped down if the ceiling test shows OOM
+
+# Kept for reference / capability reporting.
 DURATION_FRAMES: Dict[str, int] = {
     "4": 97, "5": 121, "8": 193, "10": 241, "12": 289, "15": 361, "20": 481,
 }
@@ -71,20 +77,18 @@ class WorkerConfig:
 
 
 def frames_for(seconds) -> int:
-    """Frame count for a legal duration, or raise ValueError.
+    """Frame count for a whole-second duration in [MIN_SECONDS, MAX_SECONDS].
 
-    Tolerant of numeric forms: "10", "10.0", 10, and 10.0 all resolve to the
-    "10" preset key (durations are whole seconds), so a float that round-tripped
-    through the DB (10.0) doesn't spuriously miss the matrix.
+    frames = 24*seconds + 1 (always 8k+1). Accepts numeric forms ("10", "10.0",
+    10, 10.0). Raises ValueError for non-integer seconds or out-of-range values.
     """
-    key = str(seconds).strip()
-    if key not in DURATION_FRAMES:
-        try:
-            f = float(key)
-            if f.is_integer():
-                key = str(int(f))
-        except (ValueError, TypeError):
-            pass
-    if key not in DURATION_FRAMES:
-        raise ValueError(f"duration '{seconds}' not in preset matrix {list(DURATION_FRAMES)}")
-    return DURATION_FRAMES[key]
+    try:
+        f = float(str(seconds).strip())
+    except (ValueError, TypeError):
+        raise ValueError(f"duration '{seconds}' is not a number")
+    if not f.is_integer():
+        raise ValueError(f"duration '{seconds}' must be a whole number of seconds")
+    s = int(f)
+    if not (MIN_SECONDS <= s <= MAX_SECONDS):
+        raise ValueError(f"duration {s}s out of range [{MIN_SECONDS}, {MAX_SECONDS}]")
+    return 24 * s + 1

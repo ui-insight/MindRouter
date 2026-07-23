@@ -4597,3 +4597,38 @@ async def refund_video_tokens(db: AsyncSession, user_id: int, amount: int) -> No
         quota.lifetime_tokens_used = max(0, quota.lifetime_tokens_used - amount)
         await db.flush()
     await incr_quota_redis(user_id, -amount)
+
+
+async def delete_video_job(db: AsyncSession, job: VideoJob) -> list[str]:
+    """Delete a job and its one-shot project/shots/assets, returning the on-disk
+    file paths to unlink (caller removes them after commit). Children first to
+    respect FKs: shots -> job -> assets -> project."""
+    paths: list[str] = []
+    asset_ids: set[int] = set()
+    if job.output_asset_id:
+        asset_ids.add(job.output_asset_id)
+    shots = await get_video_shots(db, job.id)
+    for s in shots:
+        for aid in (s.output_asset_id, s.first_frame_asset_id, s.last_frame_asset_id, s.source_asset_id):
+            if aid:
+                asset_ids.add(aid)
+    for aid in asset_ids:
+        a = await get_video_asset(db, aid)
+        if a and a.storage_path:
+            paths.append(a.storage_path)
+
+    project_id = job.project_id
+    for s in shots:
+        await db.delete(s)
+    await db.delete(job)
+    await db.flush()
+    for aid in asset_ids:
+        a = await get_video_asset(db, aid)
+        if a:
+            await db.delete(a)
+    proj = await get_video_project(db, project_id)
+    if proj:
+        # v1 = one project per job; safe to remove.
+        await db.delete(proj)
+    await db.commit()
+    return paths

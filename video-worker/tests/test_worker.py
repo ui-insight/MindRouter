@@ -104,10 +104,15 @@ def test_disallowed_size_rejected(tmp_path):
         assert r.status_code == 400
 
 
-def test_disallowed_duration_rejected(tmp_path):
+def test_out_of_range_duration_rejected(tmp_path):
+    # Duration is a whole-second range [MIN_SECONDS, MAX_SECONDS]; out-of-range
+    # and non-integer values are 400. In-range values (e.g. 60) are accepted.
     with _client(tmp_path) as client:
-        r = client.post("/v1/videos", json={"prompt": "x", "size": "1280x704", "seconds": "60"})
-        assert r.status_code == 400
+        for bad in ("200", "2", "10.5"):
+            r = client.post("/v1/videos", json={"prompt": "x", "size": "1280x704", "seconds": bad})
+            assert r.status_code == 400, f"{bad} should be rejected"
+        ok = client.post("/v1/videos", json={"prompt": "x", "size": "1280x704", "seconds": "60"})
+        assert ok.status_code == 202  # in-range now accepted
 
 
 def test_missing_prompt_rejected(tmp_path):

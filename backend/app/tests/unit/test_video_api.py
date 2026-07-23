@@ -222,12 +222,14 @@ async def test_create_video_disallowed_size_returns_400(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_create_video_disallowed_duration_returns_400(monkeypatch):
-    _patch_crud(monkeypatch, config={"vid.enabled": True, "vid.allowed_durations": "4,5"})
+async def test_create_video_out_of_range_duration_returns_400(monkeypatch):
+    # Duration is a whole-second range [4, max]; out-of-range and non-integer are 400.
+    _patch_crud(monkeypatch, config={"vid.enabled": True, "vid.max_total_seconds": 90})
     _patch_registry(monkeypatch)
-    with pytest.raises(HTTPException) as e:
-        await create_video(_request({"prompt": "x", "seconds": "60"}), db=_db(), auth=_auth())
-    assert e.value.status_code == 400
+    for bad in ("200", "2", "10.5"):
+        with pytest.raises(HTTPException) as e:
+            await create_video(_request({"prompt": "x", "seconds": bad}), db=_db(), auth=_auth())
+        assert e.value.status_code == 400, f"{bad} should be rejected"
 
 
 @pytest.mark.asyncio

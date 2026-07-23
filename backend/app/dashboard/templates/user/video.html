@@ -50,12 +50,15 @@
               </select>
             </div>
             <div class="col-sm-6">
-              <label for="vid-seconds" class="form-label">Length (seconds)</label>
-              <select id="vid-seconds" class="form-select">
-                {% for d in allowed_durations %}
-                <option value="{{ d }}" {% if d == default_seconds %}selected{% endif %}>{{ d }}s</option>
-                {% endfor %}
-              </select>
+              <label for="vid-seconds" class="form-label">
+                Length: <span id="vid-seconds-val" aria-live="polite">{{ default_seconds }}</span>s
+              </label>
+              <input type="range" class="form-range" id="vid-seconds"
+                     min="{{ min_seconds }}" max="{{ max_seconds }}" step="1" value="{{ default_seconds }}"
+                     aria-describedby="vid-seconds-help">
+              <div id="vid-seconds-help" class="form-text">
+                Longer clips take proportionally longer to render (~{{ min_seconds }}–{{ max_seconds }}s).
+              </div>
             </div>
             <div class="col-sm-6">
               <label for="vid-quality" class="form-label">Quality</label>
@@ -235,6 +238,21 @@
     setStatus("Cancelling…", "secondary");
   }
 
+  function libLabel(j) {
+    const size = j.size || "";
+    const dur = (j.usage && j.usage.duration_seconds) ? Math.round(j.usage.duration_seconds) + "s" : "";
+    return [size, dur].filter(Boolean).join(" · ");
+  }
+
+  async function deleteVideo(id, cardEl) {
+    if (!confirm("Delete this video? This cannot be undone.")) return;
+    try {
+      const r = await fetch("/video/api/jobs/" + encodeURIComponent(id), { method: "DELETE" });
+      if (r.ok) { cardEl.remove(); if (!$("vid-library").children.length) $("vid-library-empty").classList.remove("d-none"); }
+      else setStatus("Delete failed.", "danger");
+    } catch (e) { setStatus("Delete failed (network).", "danger"); }
+  }
+
   async function loadLibrary() {
     const grid = $("vid-library");
     const empty = $("vid-library-empty");
@@ -249,14 +267,29 @@
         const card = document.createElement("div");
         card.className = "vid-lib-card";
         const url = "/video/serve/" + encodeURIComponent(j.id);
-        card.innerHTML =
-          '<video class="vid-lib-poster" controls preload="metadata" src="' + esc(url) + '" ' +
-          'aria-label="Saved video ' + esc(j.id) + '"></video>' +
-          '<div class="small text-body-secondary mt-1 text-truncate">' + esc(j.size || "") + " · " + esc(j.seconds || "") + "s</div>";
+        const vid = document.createElement("video");
+        vid.className = "vid-lib-poster"; vid.controls = true; vid.preload = "metadata";
+        vid.src = url; vid.setAttribute("aria-label", "Saved video " + j.id);
+        const row = document.createElement("div");
+        row.className = "d-flex justify-content-between align-items-center mt-1";
+        const meta = document.createElement("small");
+        meta.className = "text-body-secondary text-truncate"; meta.textContent = libLabel(j);
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "btn btn-sm btn-outline-danger ms-2";
+        del.setAttribute("aria-label", "Delete video " + j.id);
+        del.innerHTML = '<i class="bi bi-trash" aria-hidden="true"></i>';
+        del.addEventListener("click", () => deleteVideo(j.id, card));
+        row.appendChild(meta); row.appendChild(del);
+        card.appendChild(vid); card.appendChild(row);
         grid.appendChild(card);
       }
     } catch (e) { /* leave grid as-is */ }
   }
+
+  // Live slider value
+  const secInput = $("vid-seconds");
+  const secVal = $("vid-seconds-val");
+  if (secInput && secVal) secInput.addEventListener("input", () => { secVal.textContent = secInput.value; });
 
   $("vid-generate").addEventListener("click", generate);
   cancelBtn.addEventListener("click", cancel);

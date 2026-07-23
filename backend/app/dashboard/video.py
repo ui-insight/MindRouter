@@ -26,7 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.video_api import submit_video_job, _job_to_dict
 from backend.app.dashboard.routes import get_masquerade_user_id, get_session_user_id
 from backend.app.db import crud
-from backend.app.db.models import ApiKey, User
+import os as _os
+
+from backend.app.db.models import ApiKey, User, VideoJobStatus
 from backend.app.db.session import get_async_db
 from backend.app.settings import get_settings
 
@@ -91,7 +93,8 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
             "default_size": default_size,
             "default_seconds": default_seconds,
             "default_quality": default_quality,
-            "max_total_seconds": max_total_seconds,
+            "min_seconds": await crud.get_config_json(db, "vid.min_seconds", 4),
+            "max_seconds": max_total_seconds,
             "has_api_key": len(api_keys) > 0,
         },
     )
@@ -130,18 +133,38 @@ async def video_poll(video_id: str, request: Request, db: AsyncSession = Depends
 async def video_library(
     request: Request, limit: int = 12, offset: int = 0, db: AsyncSession = Depends(get_async_db)
 ):
-    """Paginated library of the user's jobs (newest first)."""
+    """Paginated library of the user's jobs (newest first), each enriched with
+    its project (size/quality) so the gallery can label clips."""
     user, _ = await _get_video_user(request, db)
     jobs, total = await crud.list_video_jobs(db, user.id, limit=limit, offset=offset)
-    return {"data": [_job_to_dict(j) for j in jobs], "total": total}
+    data = []
+    for j in jobs:
+        proj = await crud.get_video_project(db, j.project_id)
+        data.append(_job_to_dict(j, proj))
+    return {"data": data, "total": total}
 
 
 @video_router.delete("/video/api/jobs/{video_id}")
-async def video_cancel(video_id: str, request: Request, db: AsyncSession = Depends(get_async_db)):
+async def video_delete(video_id: str, request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Cancel a running job, or DELETE a terminal one (removes its artifact +
+    rows) — this is what the gallery delete button calls."""
     user, _ = await _get_video_user(request, db)
     job = await crud.get_video_job_by_uuid(db, video_id, user_id=user.id)
     if not job:
         raise HTTPException(status_code=404, detail="Video not found")
+
+    terminal = {VideoJobStatus.COMPLETED, VideoJobStatus.FAILED, VideoJobStatus.CANCELLED}
+    if job.status in terminal:
+        paths = await crud.delete_video_job(db, job)
+        for p in paths:
+            try:
+                if p and _os.path.exists(p):
+                    _os.remove(p)
+            except OSError:
+                pass
+        return {"id": video_id, "deleted": True}
+
+    # still running/queued -> cancel (runner propagates + refunds quota)
     await crud.request_cancel_video_job(db, job)
     await db.commit()
     await db.refresh(job)
