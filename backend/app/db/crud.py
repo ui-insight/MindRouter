@@ -4607,6 +4607,152 @@ async def get_video_queue_position(db: AsyncSession, job: VideoJob) -> tuple[int
     return (ahead_active + ahead_queued + 1, depth)
 
 
+async def list_stale_rendering_video_jobs(
+    db: AsyncSession, threshold_seconds: int
+) -> list[dict]:
+    """Snapshots of RENDERING jobs whose heartbeat is stale (the runner that
+    owned them is gone) — the reconcile loop re-polls the worker for ground
+    truth. Each snapshot carries enough to finalize, resume, or requeue."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_seconds)
+    result = await db.execute(
+        select(VideoJob)
+        .where(
+            and_(
+                VideoJob.status == VideoJobStatus.RENDERING,
+                or_(VideoJob.heartbeat_at.is_(None), VideoJob.heartbeat_at < cutoff),
+            )
+        )
+        .order_by(VideoJob.id.asc())
+    )
+    jobs = result.scalars().all()
+    out: list[dict] = []
+    for job in jobs:
+        proj = await get_video_project(db, job.project_id)
+        shots = await get_video_shots(db, job.id)
+        shot = shots[0] if shots else None
+        out.append({
+            "id": job.id,
+            "job_uuid": job.job_uuid,
+            "user_id": job.user_id,
+            "project_id": job.project_id,
+            "model": proj.model if proj else None,
+            "seconds": shot.seconds if shot else None,
+            "shot_id": shot.id if shot else None,
+            "attempts": shot.attempts if shot else 0,
+            "token_equivalent": job.token_equivalent,
+            "backend_id": shot.backend_id if shot else None,
+            "backend_job_id": shot.backend_job_id if shot else None,
+            "started_at": _ensure_aware(job.started_at),
+        })
+    return out
+
+
+async def readopt_video_job(
+    db: AsyncSession, job_id: int, worker_id: str, threshold_seconds: int
+) -> bool:
+    """Atomically claim a stale RENDERING job for `worker_id` (fresh heartbeat),
+    but only if it's still RENDERING and still stale — so two runners can't
+    reconcile the same job. Returns True if this caller won the claim."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_seconds)
+    result = await db.execute(
+        update(VideoJob)
+        .where(
+            and_(
+                VideoJob.id == job_id,
+                VideoJob.status == VideoJobStatus.RENDERING,
+                or_(VideoJob.heartbeat_at.is_(None), VideoJob.heartbeat_at < cutoff),
+            )
+        )
+        .values(claimed_by=worker_id, heartbeat_at=datetime.now(timezone.utc))
+    )
+    await db.commit()
+    return (result.rowcount or 0) > 0
+
+
+async def get_backend_snapshot(db: AsyncSession, backend_id: int) -> Optional[dict]:
+    """URL/health of a backend by id (reconcile polls the worker directly)."""
+    b = await db.get(Backend, backend_id)
+    if not b:
+        return None
+    return {"id": b.id, "url": b.url, "healthy": b.status == BackendStatus.HEALTHY}
+
+
+async def get_recent_render_ratio(db: AsyncSession, sample: int = 20, default: float = 6.0) -> float:
+    """Render seconds per output second, averaged over recent completed jobs, so
+    ETA scales with clip length (a 90 s clip ≫ a 5 s clip). Falls back to
+    `default` (~6×, from Phase-0 measurement) when there's no history yet."""
+    result = await db.execute(
+        select(VideoJob.gpu_seconds, VideoJob.duration_seconds)
+        .where(
+            and_(
+                VideoJob.status == VideoJobStatus.COMPLETED,
+                VideoJob.gpu_seconds.is_not(None),
+                VideoJob.duration_seconds.is_not(None),
+                VideoJob.duration_seconds > 0,
+            )
+        )
+        .order_by(VideoJob.id.desc())
+        .limit(sample)
+    )
+    ratios = [g / d for g, d in result.all() if g and d]
+    return (sum(ratios) / len(ratios)) if ratios else default
+
+
+async def get_active_video_queue(db: AsyncSession) -> list[dict]:
+    """All non-terminal jobs across users, in processing order (active first,
+    then QUEUED by priority DESC / id ASC) — the shared render queue. Fields are
+    non-identifying except user_id (the caller flags its own)."""
+    active = [
+        VideoJobStatus.PLANNING, VideoJobStatus.RENDERING, VideoJobStatus.ASSEMBLING,
+    ]
+    result = await db.execute(
+        select(VideoJob)
+        .where(VideoJob.status.in_(active + [VideoJobStatus.QUEUED]))
+        .order_by(
+            case((VideoJob.status == VideoJobStatus.QUEUED, 1), else_=0).asc(),
+            VideoJob.priority.desc(),
+            VideoJob.id.asc(),
+        )
+    )
+    jobs = result.scalars().all()
+    out: list[dict] = []
+    for job in jobs:
+        proj = await get_video_project(db, job.project_id)
+        shots = await get_video_shots(db, job.id)
+        shot = shots[0] if shots else None
+        out.append({
+            "id": job.id,
+            "job_uuid": job.job_uuid,
+            "user_id": job.user_id,
+            "status": _EXTERNAL_VIDEO_STATUS.get(job.status, "queued"),
+            "progress": float(job.progress or 0.0),
+            "seconds": float(shot.seconds) if shot and shot.seconds is not None else None,
+            "quality": getattr(proj.quality, "value", proj.quality) if proj else None,
+            "size": proj.size if proj else None,
+            "created_at": _unix_or_none(job.created_at),
+            "started_at": _unix_or_none(job.started_at),
+        })
+    return out
+
+
+# Job status as exposed to clients (mirrors video_api._EXTERNAL_STATUS; kept here
+# so crud can label queue rows without importing the api layer).
+_EXTERNAL_VIDEO_STATUS = {
+    VideoJobStatus.QUEUED: "queued",
+    VideoJobStatus.PLANNING: "in_progress",
+    VideoJobStatus.RENDERING: "in_progress",
+    VideoJobStatus.ASSEMBLING: "in_progress",
+    VideoJobStatus.COMPLETED: "completed",
+    VideoJobStatus.FAILED: "failed",
+    VideoJobStatus.CANCELLED: "cancelled",
+}
+
+
+def _unix_or_none(dt) -> Optional[int]:
+    dt = _ensure_aware(dt)
+    return int(dt.timestamp()) if dt else None
+
+
 async def get_user_video_storage_bytes(db: AsyncSession, user_id: int) -> int:
     """Total on-disk bytes a user's video assets occupy — outputs (FINAL/
     shot_output), reference images, everything under their video storage dir.

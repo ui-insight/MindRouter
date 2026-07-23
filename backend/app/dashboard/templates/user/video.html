@@ -11,6 +11,17 @@
     width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: .375rem; background: #000;
   }
   .vid-status-dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; }
+  /* Render queue panel */
+  .vq-row { display: grid; grid-template-columns: 2.2rem 1fr auto; gap: .6rem; align-items: center;
+    padding: .5rem .7rem; border: 1px solid var(--bs-border-color); border-radius: .5rem; margin-bottom: .5rem; }
+  .vq-row.vq-mine { border-color: var(--bs-primary); background: rgba(13,110,253,.06); }
+  .vq-slot { font-weight: 600; text-align: center; color: var(--bs-secondary-color); }
+  .vq-slot.vq-live { color: var(--bs-primary); }
+  .vq-bar { height: .5rem; border-radius: .25rem; background: var(--bs-secondary-bg); overflow: hidden; margin-top: .25rem; }
+  .vq-bar > span { display: block; height: 100%; background: var(--bs-primary); transition: width .4s ease; }
+  .vq-bar.vq-queued > span { background: var(--bs-secondary); opacity: .5; }
+  .vq-meta { font-size: .82rem; color: var(--bs-secondary-color); }
+  .vq-eta { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 </style>
 
 <div class="vid-shell py-3">
@@ -150,6 +161,20 @@
       </section>
     </div>
   </div>
+
+  <!-- Render queue -->
+  <section class="mt-4" id="vid-queue-section" style="display:none;" aria-labelledby="vid-queue-heading">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h2 id="vid-queue-heading" class="h6 mb-0">
+        Render queue <span id="vid-queue-count" class="badge bg-secondary align-middle"></span>
+      </h2>
+      <small class="text-body-secondary" id="vid-queue-updated" aria-live="polite"></small>
+    </div>
+    <div id="vid-queue-list" aria-live="polite"></div>
+    <p class="text-body-secondary small mb-0">
+      One clip renders at a time. Times are estimates from recent renders.
+    </p>
+  </section>
 
   <!-- Library -->
   <section class="mt-5" aria-labelledby="vid-library-heading">
@@ -352,9 +377,11 @@
         return;
       }
       currentId = data.id;
+      try { localStorage.setItem("vidActiveJob", currentId); } catch (e) {}
       cancelBtn.classList.remove("d-none");
       actions.classList.remove("d-none");
       poll();
+      refreshQueue();
     } catch (e) {
       setStatus(e.message || "Network error", "danger");
       $("vid-generate").disabled = false;
@@ -407,6 +434,8 @@
     $("vid-generate").disabled = false;
     cancelBtn.classList.add("d-none");
     progWrap.classList.add("d-none");
+    try { localStorage.removeItem("vidActiveJob"); } catch (e) {}
+    refreshQueue();
   }
 
   async function cancel() {
@@ -498,6 +527,84 @@
     } catch (e) { /* leave grid as-is */ }
   }
 
+  // ── Render queue panel (live, auto-refreshing) ─────────
+  let vqData = null;       // last /video/api/queue payload
+  let vqFetchedAt = 0;     // performance.now() at fetch, to extrapolate timers
+
+  function fmtDur(secs) {
+    secs = Math.max(0, Math.round(secs));
+    if (secs < 60) return secs + "s";
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return s ? m + "m " + s + "s" : m + "m";
+  }
+
+  async function refreshQueue() {
+    try {
+      const r = await fetch("/video/api/queue");
+      if (!r.ok) return;
+      vqData = await r.json();
+      vqFetchedAt = performance.now();
+      renderQueue();
+    } catch (e) { /* keep last render */ }
+  }
+
+  function renderQueue() {
+    const section = $("vid-queue-section");
+    const list = $("vid-queue-list");
+    if (!vqData || !vqData.queue || !vqData.queue.length) { section.style.display = "none"; return; }
+    section.style.display = "block";
+    $("vid-queue-count").textContent = vqData.total + (vqData.total === 1 ? " job" : " jobs");
+    const drift = (performance.now() - vqFetchedAt) / 1000;  // seconds since fetch
+    list.innerHTML = "";
+    for (const item of vqData.queue) {
+      const rendering = item.status === "in_progress";
+      const elapsed = (item.elapsed_seconds != null) ? item.elapsed_seconds + drift : null;
+      const eta = (item.eta_seconds != null) ? Math.max(0, item.eta_seconds - drift) : null;
+      let pct = 0;
+      if (rendering) {
+        const byTime = item.est_seconds ? (elapsed / item.est_seconds) * 100 : 0;
+        pct = Math.min(99, Math.max(item.progress || 0, byTime));
+      }
+      const spec = [item.size, item.seconds ? item.seconds + "s" : null].filter(Boolean).join(" · ");
+      const label = (rendering ? "Rendering" : "Queued") + (item.mine ? " (yours)" : "") + (spec ? " · " + spec : "");
+      const right = rendering
+        ? '<strong>' + Math.round(pct) + '%</strong><br><span class="vq-meta">' + fmtDur(elapsed) + ' elapsed · ~' + fmtDur(eta) + ' left</span>'
+        : '<span class="vq-meta">starts in<br>~' + fmtDur(eta) + '</span>';
+      const row = document.createElement("div");
+      row.className = "vq-row" + (item.mine ? " vq-mine" : "");
+      row.innerHTML =
+        '<div class="vq-slot ' + (rendering ? "vq-live" : "") + '">' + (rendering ? "▶" : "#" + item.slot) + '</div>' +
+        '<div><div class="text-truncate">' + esc(label) + '</div>' +
+        '<div class="vq-bar ' + (rendering ? "" : "vq-queued") + '"><span style="width:' + (rendering ? pct : 100) + '%"></span></div></div>' +
+        '<div class="vq-eta">' + right + '</div>';
+      list.appendChild(row);
+    }
+    $("vid-queue-updated").textContent = "auto-updating";
+  }
+
+  // Re-attach to an in-flight job when returning to the page.
+  async function restoreActiveJob() {
+    let id = null;
+    try { id = localStorage.getItem("vidActiveJob"); } catch (e) {}
+    if (!id) return;
+    try {
+      const r = await fetch("/video/api/jobs/" + encodeURIComponent(id));
+      if (!r.ok) { try { localStorage.removeItem("vidActiveJob"); } catch (e) {} return; }
+      const job = await r.json();
+      if (job.status === "queued" || job.status === "in_progress") {
+        currentId = id;
+        $("vid-generate").disabled = true;
+        cancelBtn.classList.remove("d-none");
+        progWrap.classList.remove("d-none");
+        setStatus(job.status === "queued" ? "Queued…" : "Rendering…",
+                  job.status === "queued" ? "secondary" : "info");
+        poll();  // resume driving status + result
+      } else {
+        try { localStorage.removeItem("vidActiveJob"); } catch (e) {}
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   // Live slider value
   const secInput = $("vid-seconds");
   const secVal = $("vid-seconds-val");
@@ -507,7 +614,17 @@
   cancelBtn.addEventListener("click", cancel);
   $("vid-refresh").addEventListener("click", () => loadLibrary());
   $("vid-lib-more").addEventListener("click", () => loadLibrary(true));
+
+  // Auto-refresh the queue (server fetch) + a 1s ticker so timers keep moving,
+  // and re-sync immediately whenever the user returns to the tab.
+  setInterval(refreshQueue, 4000);
+  setInterval(renderQueue, 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshQueue(); });
+  window.addEventListener("focus", refreshQueue);
+
   loadLibrary();
+  refreshQueue();
+  restoreActiveJob();
 })();
 </script>
 {% endblock %}

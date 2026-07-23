@@ -47,6 +47,12 @@ logger = get_logger(__name__)
 class VideoJobRepo(Protocol):
     async def readopt_stale(self, threshold_seconds: int) -> int: ...
 
+    async def list_stale_rendering(self, threshold_seconds: int) -> List[Dict[str, Any]]: ...
+
+    async def readopt(self, job_id: int, worker_id: str, threshold_seconds: int) -> bool: ...
+
+    async def get_backend(self, backend_id: int) -> Optional[Dict[str, Any]]: ...
+
     async def claim_next(self, worker_id: str) -> Optional[Dict[str, Any]]: ...
 
     async def is_cancelled(self, job_id: int) -> bool: ...
@@ -94,6 +100,8 @@ class VideoRunner:
         stale_threshold_seconds: int = 120,
         max_retries_per_shot: int = 2,
         token_cost_per_second: int = 2000,
+        reconcile_interval: float = 20.0,
+        max_wall_seconds: int = 3600,
     ):
         self.repo = repo
         self.worker = worker
@@ -103,19 +111,23 @@ class VideoRunner:
         self.stale_threshold_seconds = stale_threshold_seconds
         self.max_retries_per_shot = max_retries_per_shot
         self.token_cost_per_second = token_cost_per_second
+        self.reconcile_interval = reconcile_interval
+        self.max_wall_seconds = max_wall_seconds
 
     # -- lifecycle ---------------------------------------------------------
     async def run_forever(self) -> None:
-        """Re-adopt crashed renders, then loop claiming and processing jobs."""
-        try:
-            n = await self.repo.readopt_stale(self.stale_threshold_seconds)
-            if n:
-                logger.info("video_runner_readopted", count=n)
-        except Exception:
-            logger.exception("video_runner_readopt_error")
+        """Reconcile orphaned renders against worker ground truth (at startup and
+        periodically), then loop claiming and processing queued jobs."""
+        import time
+
+        await self._safe_reconcile()
+        last_reconcile = time.monotonic()
 
         while True:
             try:
+                if time.monotonic() - last_reconcile >= self.reconcile_interval:
+                    await self._safe_reconcile()
+                    last_reconcile = time.monotonic()
                 did_work = await self.tick()
                 if not did_work:
                     await asyncio.sleep(self.poll_interval)
@@ -124,6 +136,109 @@ class VideoRunner:
             except Exception:
                 logger.exception("video_runner_tick_error")
                 await asyncio.sleep(self.poll_interval)
+
+    async def _safe_reconcile(self) -> None:
+        try:
+            await self.reconcile()
+        except Exception:
+            logger.exception("video_runner_reconcile_error")
+
+    # -- reconciliation (no permanently stuck jobs) ------------------------
+    async def reconcile(self) -> int:
+        """Check every stale RENDERING job against the worker's ground truth and
+        drive it to a correct state. Returns how many jobs were reconciled.
+
+        A stale job is one whose heartbeat lapsed — the runner that owned it is
+        gone (crash / redeploy mid-render). This is what makes a mid-render
+        restart self-healing instead of leaving a job stuck in `rendering`."""
+        stale = await self.repo.list_stale_rendering(self.stale_threshold_seconds)
+        for job in stale:
+            try:
+                await self.reconcile_job(job)
+            except Exception:
+                logger.exception("video_runner_reconcile_job_error", extra={"job": job.get("job_uuid")})
+        return len(stale)
+
+    async def reconcile_job(self, job: Dict[str, Any]) -> None:
+        job_id = job["id"]
+        job_uuid = job.get("job_uuid")
+
+        # Hard wall-clock deadline — never let a render run (or hang) unbounded.
+        started = job.get("started_at")
+        if started is not None and self._elapsed(started) > self.max_wall_seconds:
+            await self.repo.fail(
+                job_id, error_code="wall_timeout",
+                error_message=f"render exceeded the {self.max_wall_seconds}s time limit",
+            )
+            logger.warning("video_reconcile_wall_timeout", job=job_uuid)
+            return
+
+        backend_job_id = job.get("backend_job_id")
+        backend_id = job.get("backend_id")
+        if not backend_job_id or not backend_id:
+            # Died before/at submit — nothing running on a worker; safe to requeue.
+            await self.repo.requeue(job_id)
+            logger.info("video_reconcile_requeue_presubmit", job=job_uuid)
+            return
+
+        backend = await self.repo.get_backend(backend_id)
+        if backend is None:
+            await self.repo.requeue(job_id)
+            logger.info("video_reconcile_requeue_no_backend", job=job_uuid)
+            return
+
+        # Ground truth: ask the worker what actually happened to this render.
+        try:
+            status = await self.worker.poll(backend["url"], backend_job_id)
+        except Exception as exc:  # 404 / unreachable → the worker lost it
+            await self._reconcile_lost(job, str(exc))
+            return
+
+        # Claim it for us before mutating (atomic — loses to a peer runner safely).
+        if not await self.repo.readopt(job_id, self.worker_id, self.stale_threshold_seconds):
+            return  # another runner already took it
+
+        state = status.get("status")
+        if state == "completed":
+            await self._finalize(job, backend, backend_job_id)
+            logger.info("video_reconcile_recovered", job=job_uuid)
+        elif state == "failed":
+            err = status.get("error") or {}
+            await self.repo.mark_shot(job["shot_id"], status="failed")
+            await self.repo.fail(
+                job_id, error_code=err.get("code", "render_failed"),
+                error_message=err.get("message", "worker reported failure"),
+            )
+            logger.info("video_reconcile_failed", job=job_uuid)
+        else:
+            # Still rendering on the worker — resume driving it to completion.
+            await self.repo.update_progress(job_id, float(status.get("progress", 0.0)))
+            logger.info("video_reconcile_resumed", job=job_uuid)
+            await self._poll_to_completion(job, backend, backend_job_id)
+
+    async def _reconcile_lost(self, job: Dict[str, Any], reason: str) -> None:
+        """The worker has no record of this render (lost). Requeue under the
+        retry cap so it re-renders from scratch; otherwise fail (+refund)."""
+        attempts = int(job.get("attempts", 0)) + 1
+        if attempts <= self.max_retries_per_shot:
+            await self.repo.mark_shot(job["shot_id"], attempts=attempts, backend_job_id=None)
+            await self.repo.requeue(job["id"])
+            logger.warning("video_reconcile_requeue_lost", job=job.get("job_uuid"), attempt=attempts)
+        else:
+            await self.repo.fail(
+                job["id"], error_code="render_lost",
+                error_message=f"worker lost the render after {attempts} attempt(s): {reason}",
+            )
+            logger.warning("video_reconcile_fail_lost", job=job.get("job_uuid"))
+
+    @staticmethod
+    def _elapsed(started) -> float:
+        """Seconds since `started` (a tz-aware datetime)."""
+        from datetime import datetime, timezone
+        try:
+            return (datetime.now(timezone.utc) - started).total_seconds()
+        except Exception:
+            return 0.0
 
     async def tick(self) -> bool:
         """Claim and process one job. Returns False if the queue was empty."""
@@ -292,6 +407,27 @@ class CrudVideoJobRepo:
 
         async with get_async_db_context() as db:
             return await crud.readopt_stale_video_jobs(db, threshold_seconds)
+
+    async def list_stale_rendering(self, threshold_seconds: int) -> List[Dict[str, Any]]:
+        from backend.app.db import crud
+        from backend.app.db.session import get_async_db_context
+
+        async with get_async_db_context() as db:
+            return await crud.list_stale_rendering_video_jobs(db, threshold_seconds)
+
+    async def readopt(self, job_id: int, worker_id: str, threshold_seconds: int) -> bool:
+        from backend.app.db import crud
+        from backend.app.db.session import get_async_db_context
+
+        async with get_async_db_context() as db:
+            return await crud.readopt_video_job(db, job_id, worker_id, threshold_seconds)
+
+    async def get_backend(self, backend_id: int) -> Optional[Dict[str, Any]]:
+        from backend.app.db import crud
+        from backend.app.db.session import get_async_db_context
+
+        async with get_async_db_context() as db:
+            return await crud.get_backend_snapshot(db, backend_id)
 
     async def claim_next(self, worker_id: str) -> Optional[Dict[str, Any]]:
         from backend.app.db import crud
@@ -468,6 +604,8 @@ async def run_video_runner_loop() -> None:
         storage_root=settings.video_storage_path,
         poll_interval=settings.video_runner_poll_interval_seconds,
         stale_threshold_seconds=settings.video_job_stale_heartbeat_seconds,
+        reconcile_interval=settings.video_reconcile_interval_seconds,
+        max_wall_seconds=settings.video_job_max_wall_seconds,
     )
     logger.info("video_runner_started", worker_id=runner.worker_id)
     await runner.run_forever()

@@ -72,7 +72,7 @@ WorkerSubmitError = _wc.WorkerSubmitError
 class FakeRepo:
     """In-memory VideoJobRepo. Records terminal transitions for assertions."""
 
-    def __init__(self, job=None, backend=None, cancelled_after=None):
+    def __init__(self, job=None, backend=None, cancelled_after=None, stale=None, readopt_ok=True):
         self._job = job
         self._backend = backend
         # is_cancelled returns True once this many calls have been made.
@@ -81,6 +81,9 @@ class FakeRepo:
         self.progress = []
         self.shot_updates = []
         self.readopted = 0
+        self._stale = list(stale or [])
+        self._readopt_ok = readopt_ok
+        self.readopt_calls = 0
         self.state = None            # 'completed' | 'failed' | 'cancelled' | 'requeued'
         self.completed_kwargs = None
         self.fail_kwargs = None
@@ -88,6 +91,17 @@ class FakeRepo:
 
     async def readopt_stale(self, threshold_seconds):
         return self.readopted
+
+    async def list_stale_rendering(self, threshold_seconds):
+        s, self._stale = self._stale, []  # one-shot, so run_forever loops don't spin
+        return s
+
+    async def readopt(self, job_id, worker_id, threshold_seconds):
+        self.readopt_calls += 1
+        return self._readopt_ok
+
+    async def get_backend(self, backend_id):
+        return self._backend
 
     async def claim_next(self, worker_id):
         j, self._job = self._job, None
@@ -125,9 +139,10 @@ class FakeRepo:
 
 
 class FakeWorker:
-    def __init__(self, poll_sequence=None, submit_error=None, fetch=None):
+    def __init__(self, poll_sequence=None, submit_error=None, fetch=None, poll_error=None):
         self._poll = list(poll_sequence or [{"status": "completed", "progress": 100}])
         self._submit_error = submit_error
+        self._poll_error = poll_error
         self._fetch = fetch or FetchResult(sha256="abc", size_bytes=1234, duration_ms=5000)
         self.submitted = False
         self.cancelled = False
@@ -139,6 +154,8 @@ class FakeWorker:
         return "wjob-1"
 
     async def poll(self, base_url, worker_job_id):
+        if self._poll_error:
+            raise self._poll_error
         return self._poll.pop(0) if len(self._poll) > 1 else self._poll[0]
 
     async def fetch(self, base_url, worker_job_id, dest_path):
@@ -148,6 +165,11 @@ class FakeWorker:
 
     async def cancel(self, base_url, worker_job_id):
         self.cancelled = True
+
+
+def _now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
 
 
 def _job(**over):
@@ -271,10 +293,13 @@ async def test_tick_processes_a_claimed_job(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_forever_readopts_then_stops_on_cancel(tmp_path):
-    repo = FakeRepo(job=None)
-    repo.readopted = 3
-    r = _runner(repo, FakeWorker(), tmp_path, poll_interval=0.01)
+async def test_run_forever_reconciles_then_stops_on_cancel(tmp_path):
+    # A stale RENDERING job the worker still owns → reconcile recovers it.
+    stale = _job(id=2, job_uuid="vid-stale", backend_id=5, backend_job_id="wjob-9",
+                 started_at=_now())
+    repo = FakeRepo(job=None, backend={"id": 5, "url": "http://w"}, stale=[stale])
+    worker = FakeWorker(poll_sequence=[{"status": "completed", "progress": 100}])
+    r = _runner(repo, worker, tmp_path, poll_interval=0.01, reconcile_interval=0.01)
     task = asyncio.create_task(r.run_forever())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -282,4 +307,92 @@ async def test_run_forever_readopts_then_stops_on_cancel(tmp_path):
         await task
     except asyncio.CancelledError:
         pass
-    assert repo.readopted == 3  # readopt_stale was invoked on startup
+    assert repo.state == "completed"  # reconcile recovered the orphaned render
+
+
+# --- reconciliation (no permanently stuck jobs) ---------------------------
+
+def _stale_job(**over):
+    j = _job(id=2, job_uuid="vid-orphan", backend_id=5, backend_job_id="wjob-9",
+             started_at=_now())
+    j.update(over)
+    return j
+
+
+@pytest.mark.asyncio
+async def test_reconcile_completed_recovers_output(tmp_path):
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    worker = FakeWorker(poll_sequence=[{"status": "completed", "progress": 100}])
+    r = _runner(repo, worker, tmp_path)
+    await r.reconcile_job(_stale_job())
+    assert repo.state == "completed"          # fetched + completed, no rework
+    assert repo.readopt_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_failed_fails(tmp_path):
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    worker = FakeWorker(poll_sequence=[{"status": "failed", "error": {"code": "oom", "message": "OOM"}}])
+    r = _runner(repo, worker, tmp_path)
+    await r.reconcile_job(_stale_job())
+    assert repo.state == "failed"
+    assert repo.fail_kwargs["error_code"] == "oom"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_still_rendering_resumes_to_completion(tmp_path):
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    worker = FakeWorker(poll_sequence=[{"status": "in_progress", "progress": 40},
+                                       {"status": "completed", "progress": 100}])
+    r = _runner(repo, worker, tmp_path)
+    await r.reconcile_job(_stale_job())
+    assert repo.state == "completed"          # resumed polling drove it home
+
+
+@pytest.mark.asyncio
+async def test_reconcile_worker_lost_requeues_under_cap(tmp_path):
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    worker = FakeWorker(poll_error=RuntimeError("404 not found"))
+    r = _runner(repo, worker, tmp_path)
+    await r.reconcile_job(_stale_job(attempts=0))
+    assert repo.state == "requeued"           # lost render re-renders from scratch
+
+
+@pytest.mark.asyncio
+async def test_reconcile_worker_lost_over_cap_fails(tmp_path):
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    worker = FakeWorker(poll_error=RuntimeError("404 not found"))
+    r = _runner(repo, worker, tmp_path)
+    await r.reconcile_job(_stale_job(attempts=2))
+    assert repo.state == "failed"
+    assert repo.fail_kwargs["error_code"] == "render_lost"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_wall_timeout_fails(tmp_path):
+    from datetime import datetime, timezone, timedelta
+    old = datetime.now(timezone.utc) - timedelta(seconds=99999)
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    r = _runner(repo, FakeWorker(), tmp_path, max_wall_seconds=3600)
+    await r.reconcile_job(_stale_job(started_at=old))
+    assert repo.state == "failed"
+    assert repo.fail_kwargs["error_code"] == "wall_timeout"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_presubmit_requeues(tmp_path):
+    # died before submit — no backend_job_id → safe to requeue
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"})
+    r = _runner(repo, FakeWorker(), tmp_path)
+    await r.reconcile_job(_stale_job(backend_job_id=None))
+    assert repo.state == "requeued"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_readopt_lost_to_peer_is_noop(tmp_path):
+    # another runner already claimed it → we back off without mutating
+    repo = FakeRepo(backend={"id": 5, "url": "http://w"}, readopt_ok=False)
+    worker = FakeWorker(poll_sequence=[{"status": "completed", "progress": 100}])
+    r = _runner(repo, worker, tmp_path)
+    await r.reconcile_job(_stale_job())
+    assert repo.state is None                 # left untouched for the winner

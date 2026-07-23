@@ -221,6 +221,61 @@ async def video_create(request: Request, db: AsyncSession = Depends(get_async_db
     return job
 
 
+@video_router.get("/video/api/queue")
+async def video_queue(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """The shared render queue with per-job elapsed time and ETA, for the live
+    queue panel. Rows are in processing order (rendering first, then the waiting
+    line). Only the caller's own rows carry an id; others are anonymous."""
+    import time
+
+    user, _ = await _get_video_user(request, db)
+    rows = await crud.get_active_video_queue(db)
+    ratio = await crud.get_recent_render_ratio(db)
+    now = time.time()
+
+    def _est(row):
+        secs = row.get("seconds") or 0
+        base = ratio * secs
+        q = (row.get("quality") or "standard")
+        mult = {"draft": 0.6, "standard": 1.0, "final": 1.6}.get(q, 1.0)
+        return max(5.0, base * mult)
+
+    out = []
+    ahead = 0.0          # estimated seconds until the next queued job starts
+    slot = 0
+    for row in rows:
+        slot += 1
+        est = _est(row)
+        rendering = row["status"] == "in_progress"
+        started = row.get("started_at")
+        elapsed = (now - started) if started else None
+        if rendering:
+            remaining = max(0.0, est - (elapsed or 0.0))
+            eta = remaining
+            ahead = remaining        # this job's remaining gates the queue
+        else:
+            eta = ahead              # time until THIS job begins
+            ahead += est
+        item = {
+            "slot": slot,
+            "mine": row["user_id"] == user.id,
+            "status": row["status"],
+            "progress": round(row.get("progress") or 0.0, 1),
+            "size": row.get("size"),
+            "seconds": row.get("seconds"),
+            "elapsed_seconds": round(elapsed) if elapsed is not None else None,
+            "est_seconds": round(est),
+            "eta_seconds": round(eta),
+            "created_at": row.get("created_at"),
+        }
+        if row["user_id"] == user.id:
+            item["id"] = row["job_uuid"]
+        out.append(item)
+
+    depth = sum(1 for r in rows if r["status"] == "queued")
+    return {"queue": out, "depth": depth, "total": len(rows)}
+
+
 @video_router.get("/video/api/jobs/{video_id}")
 async def video_poll(video_id: str, request: Request, db: AsyncSession = Depends(get_async_db)):
     user, _ = await _get_video_user(request, db)

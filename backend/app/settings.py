@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     video_worker_fetch_timeout_seconds: int = 900   # artifact fetch (worker -> gateway, large)
     video_job_max_wall_seconds: int = 3600
     video_job_stale_heartbeat_seconds: int = 120
+    video_reconcile_interval_seconds: int = 20  # ground-truth sweep for orphaned renders
     video_max_upload_mb: int = 64
     video_webhook_signing_key: str = ""             # host .env only, never in repo
 
