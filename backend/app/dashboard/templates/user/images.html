@@ -456,6 +456,17 @@ let lastPrompt = '';
 // ── Reference image (img2img / reference-edit) ─────────
 let refImageB64 = null;  // raw base64 (no data-URI prefix), or null for txt2img
 const REF_MAX_MB = 10;
+// FLUX.2 Klein edits look better with fewer steps; entering edit mode defaults
+// the step slider to this, and clearing the image restores the txt2img default.
+const EDIT_DEFAULT_STEPS = {{ edit_default_steps }};
+const TXT2IMG_DEFAULT_STEPS = {{ default_steps }};
+
+function setSteps(n) {
+    const s = document.getElementById('steps');
+    if (!s) return;
+    s.value = n;
+    document.getElementById('stepsVal').textContent = n;
+}
 
 function setRefImage(dataUrl, name, sizeBytes) {
     // Strip the "data:image/...;base64," prefix — send raw base64.
@@ -469,6 +480,7 @@ function setRefImage(dataUrl, name, sizeBytes) {
         (sizeBytes ? ' <span class="text-muted">· ' + (sizeBytes / 1024 / 1024).toFixed(1) + ' MB</span>' : '');
     document.getElementById('refClearBtn').style.display = 'inline-block';
     document.getElementById('refHint').style.display = 'block';
+    setSteps(EDIT_DEFAULT_STEPS);  // fewer steps for edits
     updateGenerateLabel();
 }
 
@@ -481,6 +493,7 @@ function clearRefImage() {
     document.getElementById('refInfo').style.display = 'none';
     document.getElementById('refClearBtn').style.display = 'none';
     document.getElementById('refHint').style.display = 'none';
+    setSteps(TXT2IMG_DEFAULT_STEPS);  // restore generation default
     updateGenerateLabel();
 }
 

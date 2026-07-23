@@ -94,6 +94,7 @@ async def images_page(
     default_model = await crud.get_config_json(db, "img.default_model", "")
     default_size = await crud.get_config_json(db, "img.default_size", "1024x1024")
     default_steps = await crud.get_config_json(db, "img.default_steps", 30)
+    edit_default_steps = await crud.get_config_json(db, "img.edit_default_steps", 8)
     max_steps = await crud.get_config_json(db, "img.max_steps", 50)
     default_guidance = await crud.get_config_json(db, "img.default_guidance_scale", 3.5)
     allowed_sizes_str = await crud.get_config_json(db, "img.allowed_sizes", "")
@@ -121,6 +122,7 @@ async def images_page(
             "default_model": default_model,
             "default_size": default_size,
             "default_steps": default_steps,
+            "edit_default_steps": edit_default_steps,
             "max_steps": max_steps,
             "default_guidance": default_guidance,
             "allowed_sizes": allowed_sizes,
@@ -205,7 +207,12 @@ async def images_api_generate(
 
     default_model = await crud.get_config_json(db, "img.default_model", "")
     default_size = await crud.get_config_json(db, "img.default_size", "1024x1024")
-    default_steps = await crud.get_config_json(db, "img.default_steps", 30)
+    # Reference-edits (img2img) look better with fewer steps — default to
+    # img.edit_default_steps (8) when a reference image is attached.
+    if body.get("image"):
+        default_steps = await crud.get_config_json(db, "img.edit_default_steps", 8)
+    else:
+        default_steps = await crud.get_config_json(db, "img.default_steps", 30)
     max_steps = await crud.get_config_json(db, "img.max_steps", 50)
     default_guidance = await crud.get_config_json(db, "img.default_guidance_scale", 3.5)
     max_n = await crud.get_config_json(db, "img.max_n", 1)

@@ -724,7 +724,12 @@ async def _prepare_image_canonical(
     # ── Load config defaults and guardrails ──────────────────────
     default_model = await crud.get_config_json(db, "img.default_model", "black-forest-labs/FLUX.2-dev")
     default_size = await crud.get_config_json(db, "img.default_size", "1024x1024")
-    default_steps = await crud.get_config_json(db, "img.default_steps", 20)
+    # FLUX.2 Klein reference-edits look better with FEWER steps; edits default to
+    # img.edit_default_steps (8) unless the caller passes an explicit step count.
+    if images_b64:
+        default_steps = await crud.get_config_json(db, "img.edit_default_steps", 8)
+    else:
+        default_steps = await crud.get_config_json(db, "img.default_steps", 20)
     default_guidance = await crud.get_config_json(db, "img.default_guidance_scale", 3.5)
     max_n = await crud.get_config_json(db, "img.max_n", 4)
     max_steps = await crud.get_config_json(db, "img.max_steps", 50)
