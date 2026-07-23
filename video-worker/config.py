@@ -29,8 +29,11 @@ from typing import Dict, List
 # not integer) and is replaced by 1024x576. All four presets below are ÷64.
 SUPPORTED_SIZES: List[str] = ["1280x704", "704x1280", "1024x576", "768x448"]
 
-# duration seconds -> frame count at 24 fps (must satisfy 8k+1)
-DURATION_FRAMES: Dict[str, int] = {"4": 97, "5": 121, "8": 193, "10": 241}
+# duration seconds -> frame count at 24 fps. frames = 24*seconds + 1, which is
+# always 8k+1 for whole seconds (LTX's required format).
+DURATION_FRAMES: Dict[str, int] = {
+    "4": 97, "5": 121, "8": 193, "10": 241, "12": 289, "15": 361, "20": 481,
+}
 
 QUALITY_TIERS: List[str] = ["draft", "standard", "final"]
 

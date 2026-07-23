@@ -67,7 +67,7 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
         return RedirectResponse(url="/dashboard", status_code=302)
 
     allowed_sizes = await crud.get_config_json(db, "vid.allowed_sizes", "1280x704,704x1280,1024x576,768x448")
-    allowed_durations = await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10")
+    allowed_durations = await crud.get_config_json(db, "vid.allowed_durations", "4,5,8,10,12,15,20")
     default_size = await crud.get_config_json(db, "vid.default_size", "1280x704")
     default_seconds = str(await crud.get_config_json(db, "vid.default_seconds", 5))
     default_quality = await crud.get_config_json(db, "vid.default_quality", "standard")
