@@ -283,6 +283,23 @@ async def submit_video_job(
             ),
         )
 
+    # ── Per-user storage cap (soft): block new renders once at/over the cap.
+    # Output size isn't known until rendered, so this gates on CURRENT usage —
+    # a single in-flight clip may push slightly over, then the next submit is
+    # blocked until the user deletes videos to free space.
+    cap_gb = int(await crud.get_config_json(db, "vid.user_storage_cap_gb", 50))
+    if cap_gb > 0:
+        used = await crud.get_user_video_storage_bytes(db, user.id)
+        cap_bytes = cap_gb * 1024 * 1024 * 1024
+        if used >= cap_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                detail=(
+                    f"Video storage cap reached ({used / 1024**3:.1f} GB of {cap_gb} GB used). "
+                    "Delete some videos to free space, then try again."
+                ),
+            )
+
     # ── Quota reservation (charge up front; refunded if the render fails/cancels).
     # Video bypasses InferenceService, so it enforces quota here, mirroring
     # _check_quota's DB-tokens model. Reserving (not just checking) is what

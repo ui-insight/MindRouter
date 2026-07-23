@@ -96,8 +96,28 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
             "min_seconds": await crud.get_config_json(db, "vid.min_seconds", 4),
             "max_seconds": max_total_seconds,
             "has_api_key": len(api_keys) > 0,
+            "storage_cap_gb": int(await crud.get_config_json(db, "vid.user_storage_cap_gb", 50)),
+            "storage_used_gb": round(await crud.get_user_video_storage_bytes(db, user_id) / 1024**3, 2),
         },
     )
+
+
+async def _storage_cap_error(db: AsyncSession, user_id: int, incoming_bytes: int):
+    """Return a 507 JSONResponse if adding `incoming_bytes` would exceed the
+    per-user video storage cap (vid.user_storage_cap_gb), else None."""
+    cap_gb = int(await crud.get_config_json(db, "vid.user_storage_cap_gb", 50))
+    if cap_gb <= 0:
+        return None
+    used = await crud.get_user_video_storage_bytes(db, user_id)
+    if used + incoming_bytes > cap_gb * 1024 * 1024 * 1024:
+        return JSONResponse(
+            status_code=507,
+            content={"error": {"message": (
+                f"Video storage cap reached ({used / 1024**3:.1f} GB of {cap_gb} GB used). "
+                "Delete some videos to free space."
+            )}},
+        )
+    return None
 
 
 async def _store_reference_asset(db: AsyncSession, user_id: int, data: bytes, content_type: str):
@@ -138,6 +158,9 @@ async def video_upload_asset(request: Request, db: AsyncSession = Depends(get_as
     if len(data) > max_bytes:
         return JSONResponse(status_code=400, content={"error": {"message": f"image exceeds {max_bytes // 1024 // 1024}MB"}})
 
+    cap_err = await _storage_cap_error(db, user.id, len(data))
+    if cap_err:
+        return cap_err
     asset = await _store_reference_asset(db, user.id, data, ct)
     await db.commit()
     return {"asset_id": asset.id}
@@ -170,6 +193,9 @@ async def video_import_gallery_asset(request: Request, db: AsyncSession = Depend
     if data is None:
         return JSONResponse(status_code=404, content={"error": {"message": "image file not found on disk"}})
 
+    cap_err = await _storage_cap_error(db, user.id, len(data))
+    if cap_err:
+        return cap_err
     asset = await _store_reference_asset(db, user.id, data, img.content_type or "image/png")
     await db.commit()
     return {"asset_id": asset.id}

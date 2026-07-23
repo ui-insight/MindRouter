@@ -4569,6 +4569,18 @@ async def get_user_image(
     return result.scalar_one_or_none()
 
 
+async def get_user_video_storage_bytes(db: AsyncSession, user_id: int) -> int:
+    """Total on-disk bytes a user's video assets occupy — outputs (FINAL/
+    shot_output), reference images, everything under their video storage dir.
+    This backs the per-user storage cap (vid.user_storage_cap_gb)."""
+    result = await db.execute(
+        select(func.coalesce(func.sum(VideoAsset.size_bytes), 0)).where(
+            VideoAsset.user_id == user_id
+        )
+    )
+    return int(result.scalar() or 0)
+
+
 # --- Video quota reservation (mirrors _check_quota's DB-tokens model) ------
 async def compute_video_token_cost(
     db: AsyncSession, *, seconds: float, quality: str, size: str

@@ -122,10 +122,13 @@ def _request(body):
     return req
 
 
-def _patch_crud(monkeypatch, config=None, active_jobs=0, reserve_ok=True, cost=10000):
+def _patch_crud(monkeypatch, config=None, active_jobs=0, reserve_ok=True, cost=10000, storage_bytes=0):
     monkeypatch.setattr(_mod.crud, "get_config_json", _make_config(config))
     monkeypatch.setattr(
         _mod.crud, "count_active_video_jobs_for_user", AsyncMock(return_value=active_jobs)
+    )
+    monkeypatch.setattr(
+        _mod.crud, "get_user_video_storage_bytes", AsyncMock(return_value=storage_bytes)
     )
     monkeypatch.setattr(_mod.crud, "compute_video_token_cost", AsyncMock(return_value=cost))
     monkeypatch.setattr(_mod.crud, "reserve_video_tokens", AsyncMock(return_value=reserve_ok))
@@ -269,6 +272,49 @@ async def test_create_video_over_quota_returns_429(monkeypatch):
     assert e.value.status_code == 429
     # nothing persisted when the reservation is rejected
     _mod.crud.create_video_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_video_over_storage_cap_returns_507(monkeypatch):
+    # 50 GB cap, user already sitting at 60 GB → blocked before any reservation.
+    _patch_crud(
+        monkeypatch,
+        config={"vid.enabled": True, "vid.user_storage_cap_gb": 50},
+        storage_bytes=60 * 1024**3,
+    )
+    _patch_registry(monkeypatch)
+    with pytest.raises(HTTPException) as e:
+        await create_video(_request({"prompt": "x"}), db=_db(), auth=_auth())
+    assert e.value.status_code == 507
+    _mod.crud.reserve_video_tokens.assert_not_awaited()
+    _mod.crud.create_video_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_video_under_storage_cap_proceeds(monkeypatch):
+    # 10 GB used against a 50 GB cap → the gate does not fire (job is created).
+    _patch_crud(
+        monkeypatch,
+        config={"vid.enabled": True, "vid.user_storage_cap_gb": 50},
+        storage_bytes=10 * 1024**3,
+    )
+    _patch_registry(monkeypatch)
+    result = await create_video(_request({"prompt": "x"}), db=_db(), auth=_auth())
+    assert result["status"] == "queued"
+    _mod.crud.create_video_job.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_video_storage_cap_zero_disables_check(monkeypatch):
+    # cap_gb=0 disables the gate even if usage is huge.
+    _patch_crud(
+        monkeypatch,
+        config={"vid.enabled": True, "vid.user_storage_cap_gb": 0},
+        storage_bytes=999 * 1024**3,
+    )
+    _patch_registry(monkeypatch)
+    result = await create_video(_request({"prompt": "x"}), db=_db(), auth=_auth())
+    assert result["status"] == "queued"
 
 
 @pytest.mark.asyncio

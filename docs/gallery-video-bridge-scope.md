@@ -17,11 +17,14 @@ Related: `docs/img2img-scope.md`, `docs/video-generation-plan.md`, `docs/video-a
   import → thumbnail + clear; gallery selection wins over the file input in
   `generate()`. Validated: py_compile, Jinja parse, `node --check` JS.
 
-**QUOTA FLAG (separate, not enforced):** the copy adds ~1–2 MB to the user's
-video storage. The 50 GB/user video quota is a decision but is **not enforced**
-anywhere in code today (no `used_bytes` check exists) — this bridge does not
-change that. Enforcement (sum of the user's VideoAsset/output sizes vs 50 GB, on
-submit and on import) is a separate task; see `docs/video-generation-plan.md`.
+**QUOTA — NOW ENFORCED (Release 2.8.19):** `crud.get_user_video_storage_bytes`
+sums a user's `VideoAsset.size_bytes` (outputs + reference images). The cap
+(`vid.user_storage_cap_gb`, default 50, already seeded in migration 067) is gated
+at: (a) **submit** (`submit_video_job`) — soft gate on *current* usage ≥ cap →
+`507`, since output size isn't known until rendered (one in-flight clip may push
+slightly over, then the next submit is blocked); (b) **upload + gallery-import**
+(`_storage_cap_error`) — usage + incoming bytes > cap → `507`. Video page shows
+`used / cap GB`. cap_gb=0 disables the check.
 
 ## Problem
 

@@ -155,9 +155,17 @@
   <section class="mt-5" aria-labelledby="vid-library-heading">
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h2 id="vid-library-heading" class="h5 mb-0">Your videos</h2>
-      <button id="vid-refresh" type="button" class="btn btn-sm btn-outline-secondary" aria-label="Refresh library">
-        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> Refresh
-      </button>
+      <div class="d-flex align-items-center gap-3">
+        {% if storage_cap_gb and storage_cap_gb > 0 %}
+        <small class="text-body-secondary" title="Video storage used">
+          <i class="bi bi-hdd" aria-hidden="true"></i>
+          {{ storage_used_gb }} / {{ storage_cap_gb }} GB
+        </small>
+        {% endif %}
+        <button id="vid-refresh" type="button" class="btn btn-sm btn-outline-secondary" aria-label="Refresh library">
+          <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> Refresh
+        </button>
+      </div>
     </div>
     <div id="vid-library" class="vid-lib-grid" aria-live="polite"></div>
     <p id="vid-library-empty" class="text-body-secondary d-none">No videos yet.</p>
