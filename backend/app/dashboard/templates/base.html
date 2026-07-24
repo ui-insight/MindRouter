@@ -33,58 +33,71 @@
     {# Admin-defined branding: accent colors for light & dark themes. Values are
        sanitized server-side (validated hex only) so this injection is safe. #}
     <style id="mr-brand-vars">
+        /* Fills use the true brand color; text uses a contrast-adjusted "ink"
+           (--mr-accent-ink) and fills carry an accessible foreground
+           (--mr-accent-on) so e.g. Pride Gold buttons get black, legible text. */
         :root {
             --mindrouter-primary: {{ brand.primary_light }};
             --bs-primary: {{ brand.primary_light }};
             --bs-primary-rgb: {{ brand.primary_light_rgb }};
-            --bs-link-color: {{ brand.primary_light }};
+            --bs-link-color: {{ brand.primary_light_ink }};
             --bs-link-color-rgb: {{ brand.primary_light_rgb }};
             --bs-link-hover-color: {{ brand.primary_light_hover }};
             --mr-accent-hover: {{ brand.primary_light_hover }};
             --mr-accent-active: {{ brand.primary_light_active }};
+            --mr-accent-on: {{ brand.primary_light_on }};
+            --mr-accent-ink: {{ brand.primary_light_ink }};
         }
         [data-bs-theme="dark"] {
             --mindrouter-primary: {{ brand.primary_dark }};
             --bs-primary: {{ brand.primary_dark }};
             --bs-primary-rgb: {{ brand.primary_dark_rgb }};
-            --bs-link-color: {{ brand.primary_dark }};
+            --bs-link-color: {{ brand.primary_dark_ink }};
             --bs-link-color-rgb: {{ brand.primary_dark_rgb }};
             --bs-link-hover-color: {{ brand.primary_dark_hover }};
             --mr-accent-hover: {{ brand.primary_dark_hover }};
             --mr-accent-active: {{ brand.primary_dark_active }};
+            --mr-accent-on: {{ brand.primary_dark_on }};
+            --mr-accent-ink: {{ brand.primary_dark_ink }};
         }
         .btn-primary {
             --bs-btn-bg: var(--bs-primary);
             --bs-btn-border-color: var(--bs-primary);
+            --bs-btn-color: var(--mr-accent-on);
             --bs-btn-hover-bg: var(--mr-accent-hover);
             --bs-btn-hover-border-color: var(--mr-accent-hover);
+            --bs-btn-hover-color: var(--mr-accent-on);
             --bs-btn-active-bg: var(--mr-accent-active);
             --bs-btn-active-border-color: var(--mr-accent-active);
+            --bs-btn-active-color: var(--mr-accent-on);
             --bs-btn-disabled-bg: var(--bs-primary);
             --bs-btn-disabled-border-color: var(--bs-primary);
+            --bs-btn-disabled-color: var(--mr-accent-on);
         }
         .btn-outline-primary {
-            --bs-btn-color: var(--bs-primary);
+            --bs-btn-color: var(--mr-accent-ink);
             --bs-btn-border-color: var(--bs-primary);
             --bs-btn-hover-bg: var(--bs-primary);
             --bs-btn-hover-border-color: var(--bs-primary);
+            --bs-btn-hover-color: var(--mr-accent-on);
             --bs-btn-active-bg: var(--bs-primary);
             --bs-btn-active-border-color: var(--bs-primary);
+            --bs-btn-active-color: var(--mr-accent-on);
         }
         .card-stat.primary { border-left-color: var(--bs-primary) !important; }
-        .skip-link { background: var(--bs-primary); }
-        .text-primary { color: var(--bs-primary) !important; }
-        .bg-primary { background-color: var(--bs-primary) !important; }
+        .skip-link { background: var(--bs-primary); color: var(--mr-accent-on); }
+        .text-primary { color: var(--mr-accent-ink) !important; }
+        .bg-primary { background-color: var(--bs-primary) !important; color: var(--mr-accent-on) !important; }
         .border-primary { border-color: var(--bs-primary) !important; }
-        .page-link { color: var(--bs-primary); }
-        .page-item.active .page-link { background-color: var(--bs-primary); border-color: var(--bs-primary); }
-        .nav-pills .nav-link.active, .nav-pills .show > .nav-link { background-color: var(--bs-primary); }
+        .page-link { color: var(--mr-accent-ink); }
+        .page-item.active .page-link { background-color: var(--bs-primary); border-color: var(--bs-primary); color: var(--mr-accent-on); }
+        .nav-pills .nav-link.active, .nav-pills .show > .nav-link { background-color: var(--bs-primary); color: var(--mr-accent-on); }
         .form-control:focus, .form-select:focus, .form-check-input:focus {
             border-color: var(--bs-primary);
             box-shadow: 0 0 0 0.25rem rgba(var(--bs-primary-rgb), 0.25);
         }
         .form-check-input:checked { background-color: var(--bs-primary); border-color: var(--bs-primary); }
-        .sidebar .nav-link.active { color: var(--bs-primary) !important; }
+        .sidebar .nav-link.active { color: var(--mr-accent-ink) !important; }
         .navbar-brand img { height: 28px; width: auto; vertical-align: middle; }
         /* Theme-swapped brand logo for surfaces whose background follows the theme */
         .mr-logo-dark { display: none; }

@@ -116,6 +116,59 @@ def _shade(hex_color: str, factor: float) -> str:
     return f"#{clamp(r):02x}{clamp(g):02x}{clamp(b):02x}"
 
 
+# Body backgrounds the accent is judged against for text contrast — must match
+# --mr-body-bg in static/css/style.css (light = white, dark = near-black).
+_BODY_BG_LIGHT = "#ffffff"
+_BODY_BG_DARK = "#1a1d21"
+
+
+def _rel_luminance(rgb: tuple[int, int, int]) -> float:
+    """WCAG relative luminance of an sRGB color."""
+    def chan(c: int) -> float:
+        s = c / 255
+        return s / 12.92 if s <= 0.03928 else ((s + 0.055) / 1.055) ** 2.4
+    r, g, b = rgb
+    return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
+
+
+def _contrast(hex_a: str, hex_b: str) -> float:
+    """WCAG contrast ratio between two hex colors (1.0 – 21.0)."""
+    la = _rel_luminance(_hex_to_rgb(hex_a))
+    lb = _rel_luminance(_hex_to_rgb(hex_b))
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _best_fg(accent: str) -> str:
+    """Foreground (black/white) for text ON a solid accent fill.
+
+    Prefer white — the conventional button-text color — and switch to black only
+    when white is genuinely insufficient on a light accent (e.g. U of I Pride
+    Gold #F1B300 or Bootstrap warning yellow). The 3.0 threshold matches
+    Bootstrap's own convention (white on blue/red/green, dark on gold/yellow),
+    so stock mid-tone accents are left untouched.
+    """
+    return "#ffffff" if _contrast(accent, "#ffffff") >= 3.0 else "#000000"
+
+
+def _accessible_ink(accent: str, bg: str, target: float = 4.5) -> str:
+    """Return the accent adjusted until it meets ``target`` contrast on ``bg``.
+
+    Used where the accent is TEXT on the page background (links, .text-primary,
+    outline-button text). A light accent on a white page is darkened; on a dark
+    page it is lightened. Fills/borders keep the true brand color.
+    """
+    if _contrast(accent, bg) >= target:
+        return accent
+    darken = _rel_luminance(_hex_to_rgb(bg)) > 0.5  # light bg → darken accent
+    c = accent
+    for _ in range(24):
+        c = _shade(c, -0.08 if darken else 0.08)
+        if _contrast(c, bg) >= target or c in ("#000000", "#ffffff"):
+            break
+    return c
+
+
 def _derive_colors(primary_light: str, primary_dark: str) -> dict[str, str]:
     """Compute the extra color values base.html needs for Bootstrap overrides."""
     return {
@@ -127,6 +180,12 @@ def _derive_colors(primary_light: str, primary_dark: str) -> dict[str, str]:
         "primary_dark_hover": _shade(primary_dark, -0.12),
         "primary_light_active": _shade(primary_light, -0.20),
         "primary_dark_active": _shade(primary_dark, -0.20),
+        # Accessible foreground ON an accent fill (button text).
+        "primary_light_on": _best_fg(primary_light),
+        "primary_dark_on": _best_fg(primary_dark),
+        # Accessible accent as TEXT on the page background (links, outline text).
+        "primary_light_ink": _accessible_ink(primary_light, _BODY_BG_LIGHT),
+        "primary_dark_ink": _accessible_ink(primary_dark, _BODY_BG_DARK),
     }
 
 

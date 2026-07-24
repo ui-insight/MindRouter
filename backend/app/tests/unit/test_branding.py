@@ -161,3 +161,50 @@ def test_content_type_for():
     assert branding.content_type_for("x.svg") == "image/svg+xml"
     assert branding.content_type_for("x.ico") == "image/x-icon"
     assert branding.content_type_for("x.unknown") == "application/octet-stream"
+
+
+# ── Accessible foreground / ink derivation ───────────────────────
+
+def test_contrast_bounds():
+    assert round(branding._contrast("#000000", "#ffffff"), 1) == 21.0
+    assert branding._contrast("#123456", "#123456") == 1.0
+
+
+def test_best_fg_prefers_white_but_rescues_light_accents():
+    # Conventional mid-tone accents keep white text (Bootstrap convention).
+    assert branding._best_fg("#0d6efd") == "#ffffff"   # blue
+    assert branding._best_fg("#dc3545") == "#ffffff"   # red
+    # Light accents flip to black so text stays legible.
+    assert branding._best_fg("#f1b300") == "#000000"   # U of I Pride Gold
+    assert branding._best_fg("#ffc107") == "#000000"   # warning yellow
+    # The chosen fg always clears the 3.0 UI-text threshold on its fill.
+    for accent in ("#0d6efd", "#f1b300", "#ffc107", "#dc3545", "#008080"):
+        assert branding._contrast(branding._best_fg(accent), accent) >= 3.0, accent
+
+
+def test_accessible_ink_meets_target_on_body_bg():
+    # A light accent on a white page is darkened until it reads as text.
+    ink_light = branding._accessible_ink("#f1b300", "#ffffff")
+    assert branding._contrast(ink_light, "#ffffff") >= 4.5
+    assert ink_light != "#f1b300"                       # was too light, got darkened
+    # The same gold on a dark page already passes, so it's left as-is.
+    ink_dark = branding._accessible_ink("#f1b300", "#1a1d21")
+    assert ink_dark == "#f1b300"
+    assert branding._contrast(ink_dark, "#1a1d21") >= 4.5
+
+
+def test_build_view_exposes_on_and_ink_for_both_themes():
+    v = branding._build_view({"primary_light": "#F1B300", "primary_dark": "#F1B300"})
+    for k in ("primary_light_on", "primary_dark_on",
+              "primary_light_ink", "primary_dark_ink"):
+        assert branding.is_valid_hex(v[k]), k
+    # Gold button text is black and high-contrast; light-mode links are darkened.
+    assert v["primary_light_on"] == "#000000"
+    assert branding._contrast(v["primary_light_ink"], "#ffffff") >= 4.5
+
+
+def test_default_look_unchanged():
+    """Unbranded install keeps stock blue with white button text."""
+    d = branding._build_view({})
+    assert d["primary_light_on"] == "#ffffff"
+    assert d["primary_light_ink"] == "#0d6efd"
