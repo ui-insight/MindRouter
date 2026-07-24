@@ -21,9 +21,14 @@ audit log (`branding.*` actions).
 | Tagline | Footer, beside the name |
 | Accent color — light theme | Buttons, links, focus rings, stat-card accents (light mode) |
 | Accent color — dark theme | Same, in dark mode |
-| Logo — dark theme | Top navbar (always a dark background) and dark-mode surfaces |
-| Logo — light theme | Light-mode surfaces (e.g. the login card) |
+| Logo — dark theme | Top navbar (always a dark background), plus footer and login card in dark mode |
+| Logo — light theme | Footer and login card in light mode |
 | Favicon | Browser tab icon |
+
+Logos appear in the **navbar (header)**, the **footer**, and the **login card**.
+The navbar always has a dark background, so it uses the dark-theme logo (falling
+back to the light one); the footer and login card follow the active theme and
+swap between the two logo variants automatically.
 
 The **live preview** on the page shows a mock navbar, buttons, link, and stat
 card in both light and dark themes, updating as you pick colors. Nothing is
@@ -31,6 +36,27 @@ applied site-wide until you click **Save**.
 
 Use **Reset to defaults** to restore the stock MindRouter name, colors, and
 remove all uploaded assets.
+
+## Accessible accent colors (contrast handling)
+
+A brand accent is often a light color (e.g. University of Idaho *Pride Gold*
+`#F1B300`) that would be illegible with the default white button text. For each
+theme's accent, MindRouter derives two accessible companions so light accents
+stay readable:
+
+- **`--mr-accent-on`** — the foreground used *on* an accent fill (button text).
+  White by default; flips to black when white would fall below a 3.0 contrast
+  ratio on the accent (matching Bootstrap's convention: white on blue/red, dark
+  on gold/yellow). A gold button gets black, legible text.
+- **`--mr-accent-ink`** — the accent used as *text* on the page background
+  (links, `.text-primary`, outline-button text, active sidebar item). Darkened
+  (light page) or lightened (dark page) only as far as needed to reach a 4.5:1
+  WCAG contrast ratio. Fills, borders, and focus rings keep the true brand color.
+
+Stock mid-tone accents (default blue `#0d6efd`) are left untouched — the
+derivation only intervenes when the accent would otherwise be unreadable. The
+math lives in `_best_fg` / `_accessible_ink` in
+`backend/app/services/branding.py`.
 
 ## How it works
 

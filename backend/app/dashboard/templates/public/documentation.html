@@ -68,6 +68,7 @@
                 <li class="nav-item"><a class="nav-link ms-3" href="#image-generation">&mdash; Image Generation</a></li>
                 <li class="nav-item"><a class="nav-link ms-3" href="#video-generation">&mdash; Video Generation</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-dashboard">Web Dashboard</a></li>
+                <li class="nav-item"><a class="nav-link" href="#branding">Branding &amp; Theming</a></li>
                 <li class="nav-item"><a class="nav-link" href="#users-groups-quotas">Users, Groups &amp; Quotas</a></li>
                 <li class="nav-item"><a class="nav-link" href="#service-api-keys">Service API Keys</a></li>
                 <li class="nav-item"><a class="nav-link" href="#backend-management">Backend Management</a></li>
@@ -1219,6 +1220,7 @@ client.conversations.delete(conv.id)               # delete state anytime</code>
                         <tr><td>Chat Configuration</td><td><code>/admin/chat-config</code></td><td>Configure chat UI defaults: core models, default model, system prompt, max tokens, temperature, thinking mode</td></tr>
                         <tr><td>Search</td><td><code>/admin/search-config</code></td><td>Configure web search API: provider selection (Brave, SearXNG), API keys, quota cost, health checks, test search</td></tr>
                         <tr><td>Blog Management</td><td><code>/admin/blog</code></td><td>Blog CMS: create, edit, publish/unpublish, and delete blog posts</td></tr>
+                        <tr><td>Branding</td><td><code>/admin/branding</code></td><td>UI branding &amp; theming: organization name, tagline, light/dark accent colors, navbar/footer/login logos, favicon, live preview (see <a href="#branding">Branding &amp; Theming</a>)</td></tr>
                         <tr><td>Site Settings</td><td><code>/admin/settings</code></td><td>Global settings: display timezone, Ollama context length enforcement</td></tr>
                     </tbody>
                 </table>
@@ -1446,6 +1448,49 @@ client.conversations.delete(conv.id)               # delete state anytime</code>
                     <li>Image lightbox for viewing uploaded images full-size</li>
                     <li>Auto-titling of conversations based on the first message</li>
                 </ul>
+            </section>
+
+            <hr>
+
+            <section id="branding">
+                <h2>Branding &amp; Theming</h2>
+                <p>MindRouter can be rebranded per deployment so a single installation matches one institution's visual identity &mdash; organization name, tagline, logos, favicon, and accent colors &mdash; across the entire web UI, in both light and dark mode. Branding is <strong>installation-wide</strong> (not per-user or per-group): every user of the deployment sees the same brand. An un-branded install renders identically to stock MindRouter.</p>
+
+                <h3>Where</h3>
+                <p>Admin menu &rarr; <strong>Branding</strong> (<code>/admin/branding</code>). Viewing requires admin-read; saving requires a full admin (<code>is_admin</code>). All changes are recorded in the <a href="#web-dashboard">admin audit log</a> as <code>branding.*</code> actions. The page includes a <strong>live preview</strong> (a mock navbar, buttons, link, and stat card rendered in both light and dark, updating as you pick colors) and a <strong>Reset to defaults</strong> action that restores the stock name/colors and removes all uploaded assets.</p>
+
+                <h3>What you can customize</h3>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light">
+                        <tr><th>Field</th><th>Applies to</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Organization / app name</td><td>Top navbar, browser tab titles, footer</td></tr>
+                        <tr><td>Tagline</td><td>Footer, beside the name</td></tr>
+                        <tr><td>Accent color &mdash; light theme</td><td>Buttons, links, focus rings, stat-card accents, active nav (light mode)</td></tr>
+                        <tr><td>Accent color &mdash; dark theme</td><td>Same, in dark mode</td></tr>
+                        <tr><td>Logo &mdash; dark theme</td><td>Top navbar (always a dark background), plus the footer and login card in dark mode</td></tr>
+                        <tr><td>Logo &mdash; light theme</td><td>Footer and login card in light mode</td></tr>
+                        <tr><td>Favicon</td><td>Browser tab icon</td></tr>
+                    </tbody>
+                </table>
+                <p>Logos appear in the <strong>navbar (header)</strong>, the <strong>footer</strong>, and the <strong>login card</strong>. The navbar always has a dark background, so it uses the dark-theme logo (falling back to the light one). The footer and login card follow the active theme and swap between the two logo variants automatically. Uploads are capped at <code>BRANDING_MAX_LOGO_MB</code> (default 4&nbsp;MB); allowed logo types are PNG, JPG, WebP, SVG, GIF (favicon: ICO, PNG, SVG).</p>
+
+                <h3>Accessible accent colors (contrast handling)</h3>
+                <p>Accent colors are applied as CSS custom properties layered on top of Bootstrap 5's theming, scoped to <code>:root</code> (light) and <code>[data-bs-theme="dark"]</code> (dark). A brand accent is often a light color (for example, University of Idaho <em>Pride Gold</em> <code>#F1B300</code>) that would be illegible with the default white button text, so MindRouter derives two accessible companions for each theme's accent:</p>
+                <ul>
+                    <li><strong><code>--mr-accent-on</code></strong> &mdash; the foreground used <em>on</em> an accent fill (button text). It is white by default and automatically flips to black when white would fall below a 3.0 contrast ratio on the accent (matching Bootstrap's own convention: white text on blue/red, dark text on gold/yellow). A gold button therefore gets black, legible text.</li>
+                    <li><strong><code>--mr-accent-ink</code></strong> &mdash; the accent used as <em>text</em> on the page background (links, <code>.text-primary</code>, outline-button text, active sidebar item). It is darkened (on a light page) or lightened (on a dark page) only as far as needed to reach a 4.5:1 WCAG contrast ratio. Fills, borders, and focus rings keep the true brand color.</li>
+                </ul>
+                <p>Stock mid-tone accents (such as the default blue <code>#0d6efd</code>) are left untouched &mdash; the derivation only intervenes when the chosen accent would otherwise be unreadable. Only server-validated hex values are ever emitted into the page, so the injection is safe.</p>
+
+                <h3>How it works</h3>
+                <ul>
+                    <li><strong>Text/color values</strong> are stored as <code>branding.*</code> rows in the <a href="#app-config">AppConfig</a> key/value table.</li>
+                    <li><strong>Uploaded logos/favicon</strong> are written to <code>BRANDING_STORAGE_PATH</code> (default <code>/data/branding</code>, a persistent <code>branding_data</code> volume) and served, with a long immutable cache, from the public route <code>GET /branding/asset/{filename}</code> &mdash; public so logos also render on the login page. Filenames are server-generated with a random token, so replacing an asset cache-busts automatically.</li>
+                    <li><strong>Applied on every page</strong> via a small in-memory cache (<code>backend/app/services/branding.py</code>) loaded at startup and refreshed every ~15&nbsp;seconds, exposed to templates as a Jinja global. A save propagates to all uvicorn workers within a few seconds <em>without a restart</em> (the saving worker refreshes immediately).</li>
+                </ul>
+                <p><strong>Deployment note:</strong> <code>BRANDING_STORAGE_PATH</code> and <code>BRANDING_MAX_LOGO_MB</code> must be present in both <code>settings.py</code> and <code>docker-compose.yml</code>, and the <code>branding_data</code> named volume must be mounted, so uploaded assets survive container rebuilds. See the <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/branding.md">branding guide</a> for details.</p>
             </section>
 
             <hr>

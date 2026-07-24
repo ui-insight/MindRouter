@@ -29,6 +29,7 @@ Interactive API docs are also available at `/docs` (Swagger UI) and `/redoc` (Re
 - **Voice API**: Public TTS and STT endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`) with API key auth and quota tracking
 - **Full Audit Logging**: All prompts, responses, and artifacts stored for review
 - **Dual Dashboards**: Public status + authenticated user/admin interfaces with dark mode
+- **Custom Branding & Theming**: Rebrand a deployment for one institution — organization name, logos (navbar/footer/login), favicon, and accessible light/dark accent colors, from Admin → Branding ([guide](docs/branding.md))
 
 ## Quickstart
 

@@ -36,6 +36,10 @@ the in-app [`/documentation`](#api-reference) page):
 - [Voice (TTS / STT)](voice-api.md) — `/v1/audio/speech`, `/v1/audio/transcriptions`
 - [Media studio integration guide](media-studio-integration.md) — end-to-end recipe: images → video keyframes → clips → stitch → narration (for building a storyboarding / ad-mockup app)
 
+### Operator / admin guides
+
+- [UI branding & theming](branding.md) — rebrand a deployment for one institution: organization name, logos (navbar / footer / login), favicon, and accessible light/dark accent colors, from Admin → Branding
+
 ---
 
 ## Overview
