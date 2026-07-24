@@ -793,9 +793,11 @@ async def _prepare_image_canonical(
                 },
             )
 
-    # Enforce guardrails
-    req_n = min(params.get("n", 1), max_n)
-    req_size = params.get("size", default_size)
+    # Enforce guardrails. Use `or default` (not .get(k, default)) because the
+    # multipart edits endpoint passes these as explicit None when omitted — a
+    # present-but-None key would otherwise slip past .get()'s default.
+    req_n = min(params.get("n") or 1, max_n)
+    req_size = params.get("size") or default_size
     if allowed_sizes and req_size not in allowed_sizes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
