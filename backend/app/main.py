@@ -396,6 +396,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     async with AsyncSessionLocal() as db:
         await _init_tz_cache(db)
 
+    # Load UI branding into the in-memory cache before serving any page
+    from backend.app.services import branding as branding_service
+    async with AsyncSessionLocal() as db:
+        await branding_service.refresh_branding_cache(db)
+
     # Initialize archive database if configured
     settings_ref = get_settings()
     if settings_ref.archive_database_url:
@@ -422,6 +427,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Start DLP background worker
     from backend.app.services.dlp_worker import dlp_worker_loop
     _dlp_task = asyncio.create_task(dlp_worker_loop())
+
+    # Keep the branding cache fresh so an admin save propagates across workers
+    _branding_task = asyncio.create_task(branding_service.branding_refresh_loop())
 
     # Start video generation runner (claims queued video jobs, drives the worker)
     _video_task = None
@@ -469,6 +477,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _video_task.cancel()
         try:
             await _video_task
+        except asyncio.CancelledError:
+            pass
+    if _branding_task:
+        _branding_task.cancel()
+        try:
+            await _branding_task
         except asyncio.CancelledError:
             pass
     # Final flush of Redis counters to DB before shutdown

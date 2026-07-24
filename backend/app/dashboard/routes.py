@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,6 +100,12 @@ templates.env.filters["urlize"] = lambda s: re.sub(
 )
 templates.env.filters["mini_md"] = _mini_md
 templates.env.globals["version"] = get_settings().app_version
+
+# UI branding (org name, logos, accent colors) — resolved from an in-memory
+# cache so every template can read it synchronously without threading a value
+# through each route. See backend/app/services/branding.py.
+from backend.app.services import branding as branding_service  # noqa: E402
+templates.env.globals["branding"] = branding_service.get_branding
 
 # ---------------------------------------------------------------------------
 # Timezone filter — converts UTC datetimes to the configured app timezone
@@ -4684,6 +4690,174 @@ async def admin_settings_post(
             return RedirectResponse(url=f"/admin/settings?error={quote_plus(str(e))}", status_code=302)
 
     return RedirectResponse(url="/admin/settings?error=Unknown+action", status_code=302)
+
+
+# ------------------------------------------------------------------
+# UI Branding / Theming
+# ------------------------------------------------------------------
+
+
+@dashboard_router.get("/branding/asset/{filename}")
+async def branding_asset(filename: str):
+    """Serve an uploaded branding asset (logo/favicon).
+
+    Public (no auth) so logos render on the login page. Long-lived cache: the
+    filename carries a random token that changes whenever the asset is replaced.
+    """
+    full = branding_service.asset_path(filename)
+    if not full:
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        full,
+        media_type=branding_service.content_type_for(filename),
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@dashboard_router.get("/admin/branding", response_class=HTMLResponse)
+async def admin_branding(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin UI branding / theming page."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    brand = await branding_service.load_branding(db)
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/branding.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "brand": brand,
+            "defaults": branding_service.DEFAULTS,
+            "max_logo_mb": get_settings().branding_max_logo_mb,
+            "success": success,
+            "error": error,
+        },
+    )
+
+
+@dashboard_router.post("/admin/branding")
+async def admin_branding_post(
+    request: Request,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Handle branding form submissions (identity, colors, logo/favicon, reset)."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action")
+    _ip = get_client_ip(request)
+    max_bytes = get_settings().branding_max_logo_mb * 1024 * 1024
+
+    async def _finish(detail: str, redirect: str):
+        await crud.log_admin_action(
+            db, user_id=user_id, action=f"branding.{action}",
+            entity_type="config", detail=detail, ip_address=_ip,
+        )
+        await db.commit()
+        # Refresh this worker's cache immediately; other workers pick it up via
+        # the background refresh loop within a few seconds.
+        await branding_service.refresh_branding_cache(db)
+        return RedirectResponse(url=redirect, status_code=302)
+
+    if action == "save_identity":
+        app_name = (form.get("app_name") or "").strip()
+        tagline = (form.get("tagline") or "").strip()
+        primary_light = (form.get("primary_light") or "").strip()
+        primary_dark = (form.get("primary_dark") or "").strip()
+        if app_name and len(app_name) > 80:
+            return RedirectResponse(url="/admin/branding?error=Name+too+long+(max+80)", status_code=302)
+        if len(tagline) > 160:
+            return RedirectResponse(url="/admin/branding?error=Tagline+too+long+(max+160)", status_code=302)
+        if primary_light and not branding_service.is_valid_hex(primary_light):
+            return RedirectResponse(url="/admin/branding?error=Invalid+light+color", status_code=302)
+        if primary_dark and not branding_service.is_valid_hex(primary_dark):
+            return RedirectResponse(url="/admin/branding?error=Invalid+dark+color", status_code=302)
+
+        await crud.set_config(db, branding_service.KEY_APP_NAME, app_name,
+                              description="Branding: application/organization name")
+        await crud.set_config(db, branding_service.KEY_TAGLINE, tagline,
+                              description="Branding: tagline / subtitle")
+        await crud.set_config(db, branding_service.KEY_PRIMARY_LIGHT, primary_light,
+                              description="Branding: accent color (light theme)")
+        await crud.set_config(db, branding_service.KEY_PRIMARY_DARK, primary_dark,
+                              description="Branding: accent color (dark theme)")
+        return await _finish(f"app_name={app_name}", "/admin/branding?success=identity_updated")
+
+    elif action in ("upload_logo_light", "upload_logo_dark", "upload_favicon"):
+        slot = {"upload_logo_light": "logo_light",
+                "upload_logo_dark": "logo_dark",
+                "upload_favicon": "favicon"}[action]
+        key = {"logo_light": branding_service.KEY_LOGO_LIGHT,
+               "logo_dark": branding_service.KEY_LOGO_DARK,
+               "favicon": branding_service.KEY_FAVICON}[slot]
+        upload = form.get(slot)
+        if not upload or not hasattr(upload, "read"):
+            return RedirectResponse(url="/admin/branding?error=No+file+uploaded", status_code=302)
+        data = await upload.read()
+        if not data:
+            return RedirectResponse(url="/admin/branding?error=Empty+file", status_code=302)
+        if len(data) > max_bytes:
+            return RedirectResponse(
+                url=f"/admin/branding?error=File+too+large+(max+{get_settings().branding_max_logo_mb}+MB)",
+                status_code=302,
+            )
+        try:
+            stored = branding_service.save_asset(slot, upload.filename or "", data)
+        except ValueError as exc:
+            return RedirectResponse(url=f"/admin/branding?error={quote_plus(str(exc))}", status_code=302)
+        # Remove the previously stored file, if any.
+        old = await crud.get_config_json(db, key, None)
+        if old and old != stored:
+            branding_service.delete_asset(old)
+        await crud.set_config(db, key, stored, description=f"Branding: {slot} asset filename")
+        return await _finish(f"{slot}={stored}", f"/admin/branding?success={slot}_updated")
+
+    elif action in ("remove_logo_light", "remove_logo_dark", "remove_favicon"):
+        slot = {"remove_logo_light": "logo_light",
+                "remove_logo_dark": "logo_dark",
+                "remove_favicon": "favicon"}[action]
+        key = {"logo_light": branding_service.KEY_LOGO_LIGHT,
+               "logo_dark": branding_service.KEY_LOGO_DARK,
+               "favicon": branding_service.KEY_FAVICON}[slot]
+        old = await crud.get_config_json(db, key, None)
+        if old:
+            branding_service.delete_asset(old)
+        await crud.set_config(db, key, "", description=f"Branding: {slot} asset filename")
+        return await _finish(f"removed {slot}", f"/admin/branding?success={slot}_removed")
+
+    elif action == "reset_all":
+        # Delete uploaded files, then clear every branding.* key.
+        for key in (branding_service.KEY_LOGO_LIGHT, branding_service.KEY_LOGO_DARK,
+                    branding_service.KEY_FAVICON):
+            old = await crud.get_config_json(db, key, None)
+            if old:
+                branding_service.delete_asset(old)
+        for key in (branding_service.KEY_APP_NAME, branding_service.KEY_TAGLINE,
+                    branding_service.KEY_PRIMARY_LIGHT, branding_service.KEY_PRIMARY_DARK,
+                    branding_service.KEY_LOGO_LIGHT, branding_service.KEY_LOGO_DARK,
+                    branding_service.KEY_FAVICON):
+            await crud.set_config(db, key, "", description="Branding: reset to default")
+        return await _finish("reset all branding", "/admin/branding?success=reset")
+
+    return RedirectResponse(url="/admin/branding?error=Unknown+action", status_code=302)
 
 
 async def _init_tz_cache(db: AsyncSession) -> None:

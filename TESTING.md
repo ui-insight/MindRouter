@@ -49,7 +49,7 @@
 | `backend/app/tests/unit/test_tool_calling.py` | 33 | Tool calling: schemas, OpenAI/Ollama/Anthropic inbound, vLLM/Ollama outbound, round-trips |
 | `backend/app/tests/unit/test_sidecar_client.py` | 16 | GPU sidecar client: auth, GPU info retrieval, communication |
 | `backend/app/tests/unit/test_version_alignment.py` | 6 | Version alignment: pyproject.toml reading, sidecar VERSION file consistency |
-| `backend/app/tests/unit/test_accessibility.py` | 117 | WCAG 2.1 Level A/AA: ARIA, semantic HTML, heading hierarchy, forms, sidebar include, Video tab + admin Video config (sidebar include, table scope/caption) |
+| `backend/app/tests/unit/test_accessibility.py` | 119 | WCAG 2.1 Level A/AA: ARIA, semantic HTML, heading hierarchy, forms, sidebar include, Video tab + admin Video config (sidebar include, table scope/caption); admin Branding page + login logo included in the all-templates sweep |
 | `backend/app/tests/unit/test_chat_mobile.py` | 37 | Chat mobile responsiveness: sidebar collapse/backdrop, thinking block collapse, compact layout CSS |
 | `backend/app/tests/unit/test_rerank_translators.py` | 22 | Rerank/score translators: OpenAIIn, VLLMOut rerank & score methods, canonical schema validation |
 | `backend/app/tests/unit/test_model_enrichment.py` | 28 | Model auto-enrichment: brave_web_search api_key param, LLM call helper, enrichment pipeline, CRUD helpers, config gating |
@@ -78,6 +78,8 @@
 | `backend/app/tests/unit/test_image_policy_edit.py` | 5 | Edit-aware content-policy judging: edit user-template carries the reference-image/anti-ambiguity note (plain template does not), evaluate_prompt forwards is_edit True/False to _call_judge, no-policy short-circuits PASS even for edits — regression for "put glasses on this man" being FAILED as ambiguous |
 
 | `backend/app/tests/unit/test_runner_lease.py` | 4 | Video-runner leader lease (Redis CAS, fake redis): acquire is exclusive; only the token owner can renew; only the owner can release (then re-acquirable); unavailable Redis is a safe no-op — so only ONE runner is active across uvicorn workers/containers |
+
+| `backend/app/tests/unit/test_branding.py` | 15 | UI branding service: hex validation/normalization (#abc→#aabbcc, invalid→default), color shade math (clamped), template-view builder (defaults, custom values, asset URL derivation, is_customized), and traversal-safe on-disk asset save/resolve/delete (slot-prefixed filenames, extension allow-lists per slot, favicon rejects webp, blocks ../ and absolute paths) |
 
 **Shared fixtures:** `backend/app/tests/conftest.py`
 

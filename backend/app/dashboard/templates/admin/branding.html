@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% block title %}Branding - {{ brand.app_name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row">
+        {% set active = "branding" %}
+        {% include "admin/_sidebar.html" %}
+
+        <div class="col-md-10 py-3">
+            <h1><i class="bi bi-palette"></i> Branding &amp; Theming</h1>
+            <p class="text-muted">Customize the look of this MindRouter installation — organization name, logos, and accent colors. Changes apply across the whole UI in both light and dark mode.</p>
+
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'identity_updated' %}Name, tagline, and colors saved.
+                {% elif success == 'logo_light_updated' %}Light-theme logo uploaded.
+                {% elif success == 'logo_dark_updated' %}Dark-theme logo uploaded.
+                {% elif success == 'favicon_updated' %}Favicon uploaded.
+                {% elif success == 'logo_light_removed' %}Light-theme logo removed.
+                {% elif success == 'logo_dark_removed' %}Dark-theme logo removed.
+                {% elif success == 'favicon_removed' %}Favicon removed.
+                {% elif success == 'reset' %}Branding reset to defaults.
+                {% else %}{{ success }}{% endif %}
+                <span class="ms-1 text-muted small">Reload other open tabs to see the change.</span>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
+            {% if is_read_only %}
+            <div class="alert alert-info">You have read-only access. Branding changes require an administrator.</div>
+            {% endif %}
+
+            <div class="row g-4">
+                <!-- Identity + colors -->
+                <div class="col-lg-6">
+                    <div class="card h-100">
+                        <div class="card-header"><h5 class="mb-0">Identity &amp; Colors</h5></div>
+                        <div class="card-body">
+                            <form method="post" action="/admin/branding">
+                                <input type="hidden" name="action" value="save_identity">
+                                <div class="mb-3">
+                                    <label class="form-label" for="app_name">Organization / app name</label>
+                                    <input type="text" class="form-control" id="app_name" name="app_name" maxlength="80"
+                                           value="{{ brand.app_name }}" placeholder="{{ defaults.app_name }}" {% if is_read_only %}disabled{% endif %}>
+                                    <div class="form-text">Shown in the top bar, page titles, and footer.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label" for="tagline">Tagline <span class="text-muted">(optional)</span></label>
+                                    <input type="text" class="form-control" id="tagline" name="tagline" maxlength="160"
+                                           value="{{ brand.tagline }}" placeholder="{{ defaults.tagline }}" {% if is_read_only %}disabled{% endif %}>
+                                    <div class="form-text">Appears in the footer beside the name.</div>
+                                </div>
+                                <div class="row">
+                                    <div class="col-6 mb-3">
+                                        <label class="form-label" for="primary_light_text">Accent — light theme</label>
+                                        <div class="input-group">
+                                            <input type="color" class="form-control form-control-color" id="primary_light"
+                                                   value="{{ brand.primary_light }}" {% if is_read_only %}disabled{% endif %}
+                                                   aria-label="Accent color for light theme">
+                                            <input type="text" class="form-control" id="primary_light_text" name="primary_light"
+                                                   value="{{ brand.primary_light }}" pattern="#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})"
+                                                   {% if is_read_only %}disabled{% endif %}>
+                                        </div>
+                                    </div>
+                                    <div class="col-6 mb-3">
+                                        <label class="form-label" for="primary_dark_text">Accent — dark theme</label>
+                                        <div class="input-group">
+                                            <input type="color" class="form-control form-control-color" id="primary_dark"
+                                                   value="{{ brand.primary_dark }}" {% if is_read_only %}disabled{% endif %}
+                                                   aria-label="Accent color for dark theme">
+                                            <input type="text" class="form-control" id="primary_dark_text" name="primary_dark"
+                                                   value="{{ brand.primary_dark }}" pattern="#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})"
+                                                   {% if is_read_only %}disabled{% endif %}>
+                                        </div>
+                                    </div>
+                                </div>
+                                {% if not is_read_only %}
+                                <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check-lg"></i> Save identity &amp; colors</button>
+                                {% endif %}
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live preview -->
+                <div class="col-lg-6">
+                    <div class="card h-100">
+                        <div class="card-header"><h5 class="mb-0">Live preview</h5></div>
+                        <div class="card-body">
+                            <div class="row g-3">
+                                <div class="col-6"><div id="previewLight" data-bs-theme="light">{% include "admin/_branding_preview.html" %}</div></div>
+                                <div class="col-6"><div id="previewDark" data-bs-theme="dark">{% include "admin/_branding_preview.html" %}</div></div>
+                            </div>
+                            <p class="form-text mt-2 mb-0">Preview updates as you pick colors. Save to apply site-wide.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Logos + favicon -->
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Logos &amp; Favicon</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">PNG, SVG, JPG, WebP, or GIF up to {{ max_logo_mb }} MB (favicon: ICO/PNG/SVG). The top bar uses the dark-theme logo (it always has a dark background); the light-theme logo is used on light backgrounds such as the login page.</p>
+                            <div class="row g-4">
+                                {% set slots = [
+                                    ('logo_dark', 'Logo — dark theme', brand.logo_dark_url, '#212529'),
+                                    ('logo_light', 'Logo — light theme', brand.logo_light_url, '#ffffff'),
+                                    ('favicon', 'Favicon', brand.favicon_url, 'transparent')
+                                ] %}
+                                {% for slot, label, url, bg in slots %}
+                                <div class="col-md-4">
+                                    <label class="form-label fw-semibold">{{ label }}</label>
+                                    <div class="border rounded d-flex align-items-center justify-content-center mb-2"
+                                         style="height:96px; background:{{ bg }};">
+                                        {% if url %}
+                                        <img src="{{ url }}" alt="{{ label }} preview" style="max-height:72px; max-width:90%;">
+                                        {% else %}
+                                        <span class="text-muted small">Not set (using default)</span>
+                                        {% endif %}
+                                    </div>
+                                    {% if not is_read_only %}
+                                    <form method="post" action="/admin/branding" enctype="multipart/form-data" class="mb-1">
+                                        <input type="hidden" name="action" value="upload_{{ slot }}">
+                                        <div class="input-group input-group-sm">
+                                            <input type="file" class="form-control" name="{{ slot }}"
+                                                   accept="{% if slot == 'favicon' %}.ico,.png,.svg,image/x-icon,image/png,image/svg+xml{% else %}image/png,image/jpeg,image/webp,image/svg+xml,image/gif{% endif %}" required>
+                                            <button type="submit" class="btn btn-outline-primary"><i class="bi bi-upload"></i></button>
+                                        </div>
+                                    </form>
+                                    {% if url %}
+                                    <form method="post" action="/admin/branding" onsubmit="return confirm('Remove this asset?');">
+                                        <input type="hidden" name="action" value="remove_{{ slot }}">
+                                        <button type="submit" class="btn btn-link btn-sm text-danger p-0"><i class="bi bi-trash"></i> Remove</button>
+                                    </form>
+                                    {% endif %}
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Reset -->
+                {% if not is_read_only %}
+                <div class="col-12">
+                    <div class="card border-danger">
+                        <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div>
+                                <h6 class="mb-1">Reset branding</h6>
+                                <p class="text-muted small mb-0">Restore the default MindRouter name, colors, and remove all uploaded logos.</p>
+                            </div>
+                            <form method="post" action="/admin/branding" onsubmit="return confirm('Reset ALL branding to defaults? Uploaded logos will be deleted.');">
+                                <input type="hidden" name="action" value="reset_all">
+                                <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-arrow-counterclockwise"></i> Reset to defaults</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+    function shade(hex, factor) {
+        hex = hex.replace('#', '');
+        if (hex.length === 3) hex = hex.split('').map(function (c) { return c + c; }).join('');
+        var r = parseInt(hex.substr(0, 2), 16), g = parseInt(hex.substr(2, 2), 16), b = parseInt(hex.substr(4, 2), 16);
+        if (factor >= 0) { r += (255 - r) * factor; g += (255 - g) * factor; b += (255 - b) * factor; }
+        else { var f = 1 + factor; r *= f; g *= f; b *= f; }
+        function h(x) { x = Math.max(0, Math.min(255, Math.round(x))); return ('0' + x.toString(16)).slice(-2); }
+        return '#' + h(r) + h(g) + h(b);
+    }
+    var isHex = function (v) { return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v); };
+
+    function apply(previewId, color) {
+        if (!isHex(color)) return;
+        var el = document.getElementById(previewId);
+        if (!el) return;
+        el.style.setProperty('--bs-primary', color);
+        el.style.setProperty('--mr-accent-hover', shade(color, -0.12));
+        el.querySelectorAll('[data-brand-accent="bg"]').forEach(function (n) {
+            n.style.backgroundColor = color; n.style.borderColor = color;
+        });
+        el.querySelectorAll('[data-brand-accent="text"]').forEach(function (n) { n.style.color = color; });
+        el.querySelectorAll('[data-brand-accent="outline"]').forEach(function (n) {
+            n.style.color = color; n.style.borderColor = color;
+        });
+        el.querySelectorAll('[data-brand-accent="border"]').forEach(function (n) { n.style.borderLeftColor = color; });
+    }
+
+    function wire(colorId, textId, previewId) {
+        var c = document.getElementById(colorId), t = document.getElementById(textId);
+        if (!c || !t) return;
+        function fromColor() { t.value = c.value; apply(previewId, c.value); }
+        function fromText() { if (isHex(t.value)) { c.value = t.value; apply(previewId, t.value); } }
+        c.addEventListener('input', fromColor);
+        t.addEventListener('input', fromText);
+        apply(previewId, t.value);
+    }
+
+    wire('primary_light', 'primary_light_text', 'previewLight');
+    wire('primary_dark', 'primary_dark_text', 'previewDark');
+})();
+</script>
+{% endblock %}

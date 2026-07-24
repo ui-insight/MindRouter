@@ -8,6 +8,12 @@
         <div class="col-md-5">
             <div class="card shadow">
                 <div class="card-body p-4">
+                    {% if brand.logo_light_url or brand.logo_dark_url %}
+                    <div class="text-center mb-3">
+                        <img class="mr-logo-light" src="{{ brand.logo_light_url or brand.logo_dark_url }}" alt="{{ brand.app_name }}" style="max-height:64px; max-width:80%;">
+                        <img class="mr-logo-dark" src="{{ brand.logo_dark_url or brand.logo_light_url }}" alt="{{ brand.app_name }}" style="max-height:64px; max-width:80%;">
+                    </div>
+                    {% endif %}
                     <h1 class="card-title text-center mb-4 h3">
                         <i class="bi bi-person-lock" aria-hidden="true"></i> Sign In
                     </h1>

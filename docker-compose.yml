@@ -47,10 +47,14 @@ services:
       - VIDEO_RUNNER_LEASE_TTL_SECONDS=${VIDEO_RUNNER_LEASE_TTL_SECONDS:-30}
       - VIDEO_MAX_UPLOAD_MB=${VIDEO_MAX_UPLOAD_MB:-64}
       - VIDEO_WEBHOOK_SIGNING_KEY=${VIDEO_WEBHOOK_SIGNING_KEY:-}
+      # UI branding (see backend/app/settings.py — keep in sync)
+      - BRANDING_STORAGE_PATH=${BRANDING_STORAGE_PATH:-/data/branding}
+      - BRANDING_MAX_LOGO_MB=${BRANDING_MAX_LOGO_MB:-4}
     volumes:
       - /archivedb/artifacts:/data/artifacts
       - /archivedb/video:/data/video
       - chat_data:/data/chat_files
+      - branding_data:/data/branding
       - ./backend:/app/backend:ro
     depends_on:
       mariadb:
@@ -202,3 +206,4 @@ volumes:
   redis_data:
   artifact_data:
   chat_data:
+  branding_data:

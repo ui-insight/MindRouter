@@ -114,6 +114,14 @@ class Settings(BaseSettings):
     video_max_upload_mb: int = 64
     video_webhook_signing_key: str = ""             # host .env only, never in repo
 
+    # UI Branding / Theming
+    # Admin-configurable look-and-feel (org name, logos, accent colors) stored as
+    # branding.* rows in app_config; uploaded logo/favicon files live on disk here.
+    # BRANDING_STORAGE_PATH must also be added to docker-compose.yml (see note on
+    # video block above) and the named volume `branding_data` mounted there.
+    branding_storage_path: str = "/data/branding"
+    branding_max_logo_mb: int = 4                    # per-file cap for logo/favicon uploads
+
     # Default Quotas - per role (deprecated: use Group DB defaults instead)
     default_token_budget_student: int = 100000
     default_rpm_student: int = 30

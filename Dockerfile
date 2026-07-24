@@ -40,7 +40,7 @@ COPY scripts/ scripts/
 COPY alembic.ini ./
 
 # Create directories
-RUN mkdir -p /data/artifacts /data/chat_files /var/log/mindrouter && \
+RUN mkdir -p /data/artifacts /data/chat_files /data/branding /var/log/mindrouter && \
     chown -R appuser:appuser /app /data /var/log/mindrouter
 
 # Switch to non-root user

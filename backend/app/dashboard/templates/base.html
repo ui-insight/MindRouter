@@ -1,9 +1,11 @@
+{%- set brand = branding() -%}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>{% block title %}MindRouter{% endblock %}</title>
+    <title>{% block title %}{{ brand.app_name }}{% endblock %}</title>
+    {% if brand.favicon_url %}<link rel="icon" href="{{ brand.favicon_url }}">{% endif %}
     <script>
     (function() {
         var t = localStorage.getItem('mr-theme') ||
@@ -28,14 +30,82 @@
         .skip-link { position: absolute; top: -40px; left: 0; background: #0d6efd; color: #fff; padding: 8px 16px; z-index: 9999; text-decoration: none; font-weight: 600; }
         .skip-link:focus { top: 0; }
     </style>
+    {# Admin-defined branding: accent colors for light & dark themes. Values are
+       sanitized server-side (validated hex only) so this injection is safe. #}
+    <style id="mr-brand-vars">
+        :root {
+            --mindrouter-primary: {{ brand.primary_light }};
+            --bs-primary: {{ brand.primary_light }};
+            --bs-primary-rgb: {{ brand.primary_light_rgb }};
+            --bs-link-color: {{ brand.primary_light }};
+            --bs-link-color-rgb: {{ brand.primary_light_rgb }};
+            --bs-link-hover-color: {{ brand.primary_light_hover }};
+            --mr-accent-hover: {{ brand.primary_light_hover }};
+            --mr-accent-active: {{ brand.primary_light_active }};
+        }
+        [data-bs-theme="dark"] {
+            --mindrouter-primary: {{ brand.primary_dark }};
+            --bs-primary: {{ brand.primary_dark }};
+            --bs-primary-rgb: {{ brand.primary_dark_rgb }};
+            --bs-link-color: {{ brand.primary_dark }};
+            --bs-link-color-rgb: {{ brand.primary_dark_rgb }};
+            --bs-link-hover-color: {{ brand.primary_dark_hover }};
+            --mr-accent-hover: {{ brand.primary_dark_hover }};
+            --mr-accent-active: {{ brand.primary_dark_active }};
+        }
+        .btn-primary {
+            --bs-btn-bg: var(--bs-primary);
+            --bs-btn-border-color: var(--bs-primary);
+            --bs-btn-hover-bg: var(--mr-accent-hover);
+            --bs-btn-hover-border-color: var(--mr-accent-hover);
+            --bs-btn-active-bg: var(--mr-accent-active);
+            --bs-btn-active-border-color: var(--mr-accent-active);
+            --bs-btn-disabled-bg: var(--bs-primary);
+            --bs-btn-disabled-border-color: var(--bs-primary);
+        }
+        .btn-outline-primary {
+            --bs-btn-color: var(--bs-primary);
+            --bs-btn-border-color: var(--bs-primary);
+            --bs-btn-hover-bg: var(--bs-primary);
+            --bs-btn-hover-border-color: var(--bs-primary);
+            --bs-btn-active-bg: var(--bs-primary);
+            --bs-btn-active-border-color: var(--bs-primary);
+        }
+        .card-stat.primary { border-left-color: var(--bs-primary) !important; }
+        .skip-link { background: var(--bs-primary); }
+        .text-primary { color: var(--bs-primary) !important; }
+        .bg-primary { background-color: var(--bs-primary) !important; }
+        .border-primary { border-color: var(--bs-primary) !important; }
+        .page-link { color: var(--bs-primary); }
+        .page-item.active .page-link { background-color: var(--bs-primary); border-color: var(--bs-primary); }
+        .nav-pills .nav-link.active, .nav-pills .show > .nav-link { background-color: var(--bs-primary); }
+        .form-control:focus, .form-select:focus, .form-check-input:focus {
+            border-color: var(--bs-primary);
+            box-shadow: 0 0 0 0.25rem rgba(var(--bs-primary-rgb), 0.25);
+        }
+        .form-check-input:checked { background-color: var(--bs-primary); border-color: var(--bs-primary); }
+        .sidebar .nav-link.active { color: var(--bs-primary) !important; }
+        .navbar-brand img { height: 28px; width: auto; vertical-align: middle; }
+        /* Theme-swapped brand logo for surfaces whose background follows the theme */
+        .mr-logo-dark { display: none; }
+        [data-bs-theme="dark"] .mr-logo-light { display: none; }
+        [data-bs-theme="dark"] .mr-logo-dark { display: inline; }
+    </style>
     {% block extra_css %}{% endblock %}
 </head>
 <body>
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark" aria-label="Main navigation">
         <div class="container-fluid">
-            <a class="navbar-brand" href="/">
-                <i class="bi bi-router"></i> MindRouter <small style="font-size:0.55rem; vertical-align:super; color:rgba(255,255,255,0.35); font-weight:400;">v{{ version }}</small>
+            <a class="navbar-brand d-inline-flex align-items-center gap-2" href="/">
+                {% set navlogo = brand.logo_dark_url or brand.logo_light_url %}
+                {% if navlogo %}
+                <img src="{{ navlogo }}" alt="{{ brand.app_name }} logo">
+                {% else %}
+                <i class="bi bi-router"></i>
+                {% endif %}
+                <span>{{ brand.app_name }}</span>
+                <small style="font-size:0.55rem; vertical-align:super; color:rgba(255,255,255,0.35); font-weight:400;">v{{ version }}</small>
             </a>
             <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
@@ -116,7 +186,7 @@
 
     <footer class="py-3 mt-5" style="background: var(--mr-sidebar-bg);">
         <div class="container text-center text-muted">
-            <small>MindRouter - LLM Inference Load Balancer</small><br>
+            <small>{{ brand.app_name }}{% if brand.tagline %} - {{ brand.tagline }}{% endif %}</small><br>
             <small>Powered by <a href="https://hpc.uidaho.edu" class="text-muted">RCDS</a></small><br>
             <small class="d-inline-flex align-items-center gap-1 mt-1">
                 <img src="/static/img/nsf-logo.png" alt="NSF" height="16">

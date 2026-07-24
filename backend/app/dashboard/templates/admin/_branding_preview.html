@@ -1,0 +1,24 @@
+{# Self-contained brand preview card. Included twice (light + dark). JS recolors
+   elements tagged data-brand-accent as the admin picks colors. #}
+<div class="border rounded overflow-hidden" style="background: var(--mr-body-bg); color: var(--mr-text-primary);">
+    <div class="d-flex align-items-center gap-2 px-2 py-1" style="background:#212529; color:#fff; font-size:.7rem;">
+        {% set navlogo = brand.logo_dark_url or brand.logo_light_url %}
+        {% if navlogo %}
+        <img src="{{ navlogo }}" alt="" style="height:16px; width:auto;">
+        {% else %}
+        <i class="bi bi-router"></i>
+        {% endif %}
+        <span class="fw-bold">{{ brand.app_name }}</span>
+    </div>
+    <div class="p-2 d-flex flex-column gap-2" style="font-size:.72rem;">
+        <div class="d-flex gap-1">
+            <span class="btn btn-sm text-white py-0 px-2" data-brand-accent="bg" style="font-size:.7rem;">Primary</span>
+            <span class="btn btn-sm py-0 px-2 border" data-brand-accent="outline" style="font-size:.7rem;">Outline</span>
+        </div>
+        <div>Body text with a <a href="#" data-brand-accent="text" onclick="return false;">colored link</a>.</div>
+        <div class="border rounded p-2" style="border-left-width:4px !important; background: var(--mr-sidebar-bg);" data-brand-accent="border">
+            <div class="fw-bold">1,234</div>
+            <div class="text-muted" style="font-size:.65rem;">Stat card</div>
+        </div>
+    </div>
+</div>

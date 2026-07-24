@@ -139,6 +139,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'branding' %}active{% endif %}" href="/admin/branding" {% if active == 'branding' %}aria-current="page"{% endif %}>
+                <i class="bi bi-palette"></i> Branding
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'settings' %}active{% endif %}" href="/admin/settings" {% if active == 'settings' %}aria-current="page"{% endif %}>
                 <i class="bi bi-gear"></i> Settings
             </a>
