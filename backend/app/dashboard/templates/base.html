@@ -199,6 +199,12 @@
 
     <footer class="py-3 mt-5" style="background: var(--mr-sidebar-bg);">
         <div class="container text-center text-muted">
+            {% if brand.logo_light_url or brand.logo_dark_url %}
+            <div class="mb-2">
+                <img class="mr-logo-light" src="{{ brand.logo_light_url or brand.logo_dark_url }}" alt="{{ brand.app_name }}" style="height:40px; width:auto;">
+                <img class="mr-logo-dark" src="{{ brand.logo_dark_url or brand.logo_light_url }}" alt="{{ brand.app_name }}" style="height:40px; width:auto;">
+            </div>
+            {% endif %}
             <small>{{ brand.app_name }}{% if brand.tagline %} - {{ brand.tagline }}{% endif %}</small><br>
             <small>Powered by <a href="https://hpc.uidaho.edu" class="text-muted">RCDS</a></small><br>
             <small class="d-inline-flex align-items-center gap-1 mt-1">
