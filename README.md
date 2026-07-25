@@ -1,6 +1,6 @@
 # MindRouter
 
-A production-ready **LLM inference load balancer** that fronts a heterogeneous backend cluster of **Ollama** and **vLLM** inference nodes, providing a unified OpenAI-compatible API surface with native Ollama compatibility.
+A production-ready **LLM inference load balancer** that fronts a heterogeneous backend cluster of **vLLM** and **Ollama**  inference nodes, exposing a unified API service supporting the OpenAI, Anthropic, and Ollama front-end API dialects.
 
 ## Documentation
 
