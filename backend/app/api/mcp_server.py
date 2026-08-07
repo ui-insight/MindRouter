@@ -45,7 +45,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
 
 from backend.app.db.session import get_async_db_context
