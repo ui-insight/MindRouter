@@ -1253,6 +1253,31 @@ class InferenceService:
         """Handle Ollama embedding request."""
         return await self.embedding(request, user, api_key, http_request)
 
+    # Flat quota cost per generated image. 0 disables the charge entirely
+    # (images then cost nothing), mirroring search.quota_tokens_per_request.
+    # The default is one average chat exchange on this cluster — measured at
+    # ~10,663 total tokens — so "an image costs about as much as a
+    # conversation turn" is a defensible, explainable rule.
+    DEFAULT_IMAGE_TOKEN_COST = 10000
+
+    async def _image_token_cost(self) -> int:
+        """Configured quota cost per image (img.quota_tokens_per_image)."""
+        try:
+            from backend.app.db import crud as _crud
+
+            raw = await _crud.get_config_json(
+                self.db, "img.quota_tokens_per_image", self.DEFAULT_IMAGE_TOKEN_COST
+            )
+            cost = int(raw)
+        except (TypeError, ValueError):
+            return self.DEFAULT_IMAGE_TOKEN_COST
+        except Exception:
+            # A config read failure must not fail the request that just
+            # succeeded; fall back to the default rather than charging nothing.
+            logger.warning("image_token_cost_unreadable", exc_info=True)
+            return self.DEFAULT_IMAGE_TOKEN_COST
+        return max(0, cost)
+
     async def _check_quota(self, user: User, api_key: ApiKey) -> None:
         """Check if user has sufficient quota."""
         # Reset quota if period expired
@@ -2623,6 +2648,26 @@ class InferenceService:
         if tokens_estimated:
             prompt_tokens = job.estimated_prompt_tokens
             completion_tokens = job.estimated_completion_tokens
+
+        # Image generation is billed at a FLAT configured rate, not by the
+        # length of the prompt text.
+        #
+        # Diffusion backends return no `usage`, so the fallback above charged a
+        # token count of the prompt string: a 24-character prompt cost 6 tokens,
+        # the same as typing that sentence into chat. But an image occupies one
+        # of a handful of max_concurrent=1 diffusion workers for seconds of
+        # exclusive GPU time — the scarcest capacity on the cluster — so the
+        # metering was inverted: the most expensive request to serve was the
+        # cheapest to charge for. See img.quota_tokens_per_image.
+        if modality == Modality.IMAGE_GENERATION:
+            per_image = await self._image_token_cost()
+            if per_image > 0:
+                # Charge per image actually returned: an n>1 request costs n
+                # times as much, because it occupied the worker n times over.
+                images = len(response.get("data") or []) or 1
+                prompt_tokens = per_image * images
+                completion_tokens = 0
+                tokens_estimated = True
 
         total_tokens = prompt_tokens + completion_tokens
 

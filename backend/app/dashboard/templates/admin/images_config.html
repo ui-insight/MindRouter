@@ -80,6 +80,22 @@
                                     <input type="number" class="form-control" id="max_n" name="max_n" value="{{ max_n }}" min="1" max="10">
                                     <div class="form-text">Maximum number of images a single request can generate.</div>
                                 </div>
+
+                                <div class="mb-3">
+                                    <label for="quota_tokens_per_image" class="form-label">Quota Tokens Per Image</label>
+                                    <input type="number" class="form-control" id="quota_tokens_per_image"
+                                           name="quota_tokens_per_image" value="{{ quota_tokens_per_image }}"
+                                           min="0" max="10000000" step="500">
+                                    <div class="form-text">
+                                        Flat charge against the user's group token budget for each image generated
+                                        (multiplied by <code>n</code>). Diffusion backends report no token usage, so
+                                        without this an image is billed only for the length of its prompt text &mdash;
+                                        a 24-character prompt cost 6 tokens, while occupying an entire
+                                        <code>max_concurrent=1</code> diffusion worker for several seconds of exclusive
+                                        GPU time. Default <strong>10000</strong> &asymp; one average chat exchange on
+                                        this cluster. <strong>0</strong> makes images free.
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>

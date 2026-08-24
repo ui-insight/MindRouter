@@ -41,6 +41,7 @@ from backend.app.dashboard.sso import enabled_providers, sso_router
 from backend.app.db import crud, chat_crud
 from backend.app.db.models import ApiKeyStatus, BackendEngine, QuotaRequestStatus, ServiceKeyRequestStatus, UserRole
 from backend.app.db.session import get_async_db, get_async_db_context
+from backend.app.services.inference import InferenceService
 from backend.app.logging_config import get_logger
 from backend.app.security import generate_api_key, hash_password, verify_password
 from backend.app.settings import get_settings
@@ -5245,6 +5246,9 @@ async def admin_images_config(
             "max_width": await crud.get_config_json(db, "img.max_width", 1024),
             "max_height": await crud.get_config_json(db, "img.max_height", 1024),
             "policy": await crud.get_config_json(db, "img.policy", ""),
+            "quota_tokens_per_image": await crud.get_config_json(
+                db, "img.quota_tokens_per_image", InferenceService.DEFAULT_IMAGE_TOKEN_COST
+            ),
             "watermark_enabled": await crud.get_config_json(db, "img.watermark_enabled", True),
             "watermark_text": await crud.get_config_json(
                 db, "img.watermark_text", _image_watermark.WATERMARK_DEFAULT_TEXT
@@ -5302,6 +5306,23 @@ async def admin_images_config_post(
         from urllib.parse import quote_plus as _qp
         from backend.app.services.image_watermark import validate_watermark_text
 
+        # Flat quota cost per generated image. Validated BEFORE any write so a
+        # bad value can't land half a save, same as the watermark text below.
+        # 0 means images are free; the ceiling is a sanity bound, not policy.
+        raw_cost = (form.get("quota_tokens_per_image") or "").strip()
+        try:
+            quota_per_image = int(raw_cost) if raw_cost else InferenceService.DEFAULT_IMAGE_TOKEN_COST
+        except (TypeError, ValueError):
+            return RedirectResponse(
+                url="/admin/images-config?error=Tokens+per+image+must+be+a+whole+number",
+                status_code=302,
+            )
+        if not (0 <= quota_per_image <= 10_000_000):
+            return RedirectResponse(
+                url="/admin/images-config?error=Tokens+per+image+must+be+0+(free)+to+10000000",
+                status_code=302,
+            )
+
         wm_on = "watermark_enabled" in form
         wm_text = (form.get("watermark_text") or "").strip()
         if wm_on or wm_text:
@@ -5311,6 +5332,7 @@ async def admin_images_config_post(
                     url=f"/admin/images-config?error={_qp(wm_error)}", status_code=302
                 )
             await crud.set_config(db, "img.watermark_text", wm_text)
+        await crud.set_config(db, "img.quota_tokens_per_image", quota_per_image)
         await crud.set_config(db, "img.watermark_enabled", wm_on)
 
         await crud.set_config(db, "img.enabled", "enabled" in form)
