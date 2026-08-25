@@ -249,6 +249,11 @@ class Settings(BaseSettings):
     backend_request_timeout: int = 300
     backend_request_timeout_per_attempt: int = 180
     backend_retry_max_attempts: int = 3
+    # Per-attempt ceiling for diffusion (image) backends. Image jobs are long
+    # and legitimately variable (n x steps x size), so they get their own
+    # budget instead of the chat per-attempt timeout, and a timeout is NOT
+    # retried on another backend (see InferenceService._proxy_with_retry).
+    backend_image_request_timeout: int = 600
     structured_output_retry_on_invalid: bool = True
     # Upper bound on the OpenAI `n` parameter (completions per request) —
     # a large n multiplies backend load and cost.

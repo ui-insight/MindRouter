@@ -5,7 +5,7 @@
 # OpenAI-compatible /v1/images/generations + /v1/images/edits
 # endpoints backed by FLUX.2 Klein 9B via HuggingFace diffusers.
 #
-# GPU-resident, BF16, no CPU offload.
+# GPU-resident, BF16 (or FP16 on pre-Ampere GPUs), no CPU offload.
 #
 # Luke Sheneman / RCDS / University of Idaho
 #
@@ -24,7 +24,7 @@ from typing import List, Optional
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -89,7 +89,44 @@ pipe = None
 model_id = None
 device_str = None
 quantize_mode = "none"
+dtype_mode = "bf16"
+output_dir = "/data/flux2/output"
 gen_lock = threading.Lock()  # Serialize GPU access
+
+# How often the request watcher polls for a client disconnect. Diffusion
+# steps take ~0.2-0.5 s, so half a second bounds the wasted work to a step
+# or two once the caller (MindRouter, on its per-attempt timeout) gives up.
+DISCONNECT_POLL_S = 0.5
+
+
+class GenerationCancelled(Exception):
+    """Raised from inside the denoise loop when the client has gone away."""
+
+
+def _cancel_callback(cancel: threading.Event):
+    """diffusers `callback_on_step_end` hook that aborts the pipeline when
+    `cancel` is set. Without this the worker keeps the GPU busy to completion
+    for a response nobody will read, while the gateway has already released
+    the slot and possibly re-sent the job to another worker."""
+
+    def _cb(pipe, step, timestep, callback_kwargs):
+        if cancel.is_set():
+            raise GenerationCancelled(f"client disconnected at step {step}")
+        return callback_kwargs
+
+    return _cb
+
+
+async def _watch_disconnect(http_request: Request, cancel: threading.Event):
+    """Set `cancel` once the HTTP client disconnects; cancelled on completion."""
+    try:
+        while not cancel.is_set():
+            if await http_request.is_disconnected():
+                cancel.set()
+                return
+            await asyncio.sleep(DISCONNECT_POLL_S)
+    except asyncio.CancelledError:
+        pass
 
 
 def parse_size(size: str):
@@ -115,14 +152,21 @@ def _pack_image(image: Image.Image, response_format: str, prompt: str) -> ImageD
         image.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return ImageData(b64_json=b64, revised_prompt=prompt)
-    os.makedirs("/data/flux2/output", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     fname = f"{uuid.uuid4().hex}.png"
-    image.save(f"/data/flux2/output/{fname}", format="PNG")
+    image.save(os.path.join(output_dir, fname), format="PNG")
     return ImageData(url=f"/images/{fname}", revised_prompt=prompt)
 
 
-def load_pipeline(model: str, device: str, quantize: str = "none"):
+_DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def load_pipeline(model: str, device: str, quantize: str = "none", dtype: str = "bf16"):
     """Load the FLUX.2 Klein pipeline, fully on GPU.
+
+    dtype="fp16" is for pre-Ampere GPUs (Turing / SM 7.5, e.g. Quadro RTX
+    8000) which have no native BF16 tensor cores; BF16 there is either
+    unsupported or emulated at a large slowdown. Ampere+ should keep BF16.
 
     quantize="fp8" applies torchao float8 dynamic-activation/weight
     quantization (Hopper-native e4m3, needs compute capability >= 8.9) to
@@ -133,12 +177,12 @@ def load_pipeline(model: str, device: str, quantize: str = "none"):
     """
     from diffusers import Flux2KleinPipeline
 
-    print(f"Loading {model} on {device} (quantize={quantize})...")
+    print(f"Loading {model} on {device} (dtype={dtype}, quantize={quantize})...")
     t0 = time.time()
 
     pipeline = Flux2KleinPipeline.from_pretrained(
         model,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=_DTYPES[dtype],
     ).to(device)
 
     if quantize == "fp8":
@@ -169,7 +213,7 @@ def load_pipeline(model: str, device: str, quantize: str = "none"):
 async def lifespan(app: FastAPI):
     """Load model on startup."""
     global pipe, model_id, device_str
-    pipe = load_pipeline(model_id, device_str, quantize_mode)
+    pipe = load_pipeline(model_id, device_str, quantize_mode, dtype_mode)
     yield
     del pipe
     torch.cuda.empty_cache()
@@ -187,7 +231,13 @@ async def health():
     if pipe is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     vram = torch.cuda.memory_allocated() / 1e9
-    return {"status": "ok", "vram_gb": round(vram, 1), "model": "FLUX.2-klein-9B"}
+    return {
+        "status": "ok",
+        "vram_gb": round(vram, 1),
+        "model": "FLUX.2-klein-9B",
+        "dtype": dtype_mode,
+        "quantize": quantize_mode,
+    }
 
 
 @app.get("/v1/models")
@@ -206,9 +256,11 @@ async def list_models():
     }
 
 
-def _generate_sync(req, width, height, num_steps, guidance, generator):
+def _generate_sync(req, width, height, num_steps, guidance, generator, cancel):
     """Run generation under the GPU lock (called from thread pool)."""
     with gen_lock:
+        if cancel.is_set():
+            raise GenerationCancelled("client disconnected while queued")
         with torch.inference_mode():
             result = pipe(
                 prompt=req.prompt,
@@ -217,14 +269,17 @@ def _generate_sync(req, width, height, num_steps, guidance, generator):
                 num_inference_steps=num_steps,
                 guidance_scale=guidance,
                 generator=generator,
+                callback_on_step_end=_cancel_callback(cancel),
             )
         return result.images[0]
 
 
-def _edit_sync(prompt, ref_images, width, height, num_steps, guidance, generator):
+def _edit_sync(prompt, ref_images, width, height, num_steps, guidance, generator, cancel):
     """Run a reference-edit under the GPU lock. `image=[pil,...]` is the
     reference-edit call shape validated in Phase A (diffusers 0.37.1)."""
     with gen_lock:
+        if cancel.is_set():
+            raise GenerationCancelled("client disconnected while queued")
         with torch.inference_mode():
             result = pipe(
                 prompt=prompt,
@@ -234,16 +289,19 @@ def _edit_sync(prompt, ref_images, width, height, num_steps, guidance, generator
                 num_inference_steps=num_steps,
                 guidance_scale=guidance,
                 generator=generator,
+                callback_on_step_end=_cancel_callback(cancel),
             )
         return result.images[0]
 
 
 @app.post("/v1/images/generations")
-async def generate_images(req: ImageGenerationRequest):
+async def generate_images(req: ImageGenerationRequest, http_request: Request):
     if pipe is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     width, height = parse_size(req.size)
+    cancel = threading.Event()
+    watcher = asyncio.create_task(_watch_disconnect(http_request, cancel))
 
     # Klein defaults: fewer steps needed than Dev
     num_steps = req.num_inference_steps or (28 if req.quality == "hd" else 20)
@@ -256,19 +314,26 @@ async def generate_images(req: ImageGenerationRequest):
 
     images_data: List[ImageData] = []
 
-    for i in range(req.n):
-        t0 = time.time()
+    try:
+        for i in range(req.n):
+            t0 = time.time()
 
-        # Run in thread pool so we don't block the event loop
-        loop = asyncio.get_event_loop()
-        image = await loop.run_in_executor(
-            None, _generate_sync, req, width, height, num_steps, guidance, generator
-        )
+            # Run in thread pool so we don't block the event loop
+            loop = asyncio.get_event_loop()
+            image = await loop.run_in_executor(
+                None, _generate_sync, req, width, height, num_steps, guidance, generator, cancel
+            )
 
-        elapsed = time.time() - t0
-        print(f"Generated image {i+1}/{req.n} in {elapsed:.1f}s ({width}x{height}, {num_steps} steps)")
+            elapsed = time.time() - t0
+            print(f"Generated image {i+1}/{req.n} in {elapsed:.1f}s ({width}x{height}, {num_steps} steps)")
 
-        images_data.append(_pack_image(image, req.response_format, req.prompt))
+            images_data.append(_pack_image(image, req.response_format, req.prompt))
+    except GenerationCancelled as e:
+        print(f"Generation cancelled: {e} ({width}x{height}, {num_steps} steps, {len(images_data)}/{req.n} done)")
+        # Nobody is listening; 499 mirrors nginx's "client closed request".
+        return JSONResponse(status_code=499, content={"error": "client disconnected"})
+    finally:
+        watcher.cancel()
 
     return ImageGenerationResponse(
         created=int(time.time()),
@@ -277,7 +342,7 @@ async def generate_images(req: ImageGenerationRequest):
 
 
 @app.post("/v1/images/edits")
-async def edit_images(req: ImageEditRequest):
+async def edit_images(req: ImageEditRequest, http_request: Request):
     """Reference-edit (img2img): render `prompt` conditioned on reference image(s)."""
     if pipe is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -302,22 +367,30 @@ async def edit_images(req: ImageEditRequest):
         generator = torch.Generator(device="cpu").manual_seed(req.seed)
 
     images_data: List[ImageData] = []
+    cancel = threading.Event()
+    watcher = asyncio.create_task(_watch_disconnect(http_request, cancel))
 
-    for i in range(req.n):
-        t0 = time.time()
+    try:
+        for i in range(req.n):
+            t0 = time.time()
 
-        loop = asyncio.get_event_loop()
-        image = await loop.run_in_executor(
-            None, _edit_sync, req.prompt, ref_images, width, height, num_steps, guidance, generator
-        )
+            loop = asyncio.get_event_loop()
+            image = await loop.run_in_executor(
+                None, _edit_sync, req.prompt, ref_images, width, height, num_steps, guidance, generator, cancel
+            )
 
-        elapsed = time.time() - t0
-        print(
-            f"Edited image {i+1}/{req.n} in {elapsed:.1f}s "
-            f"({len(ref_images)} ref, {width}x{height}, {num_steps} steps)"
-        )
+            elapsed = time.time() - t0
+            print(
+                f"Edited image {i+1}/{req.n} in {elapsed:.1f}s "
+                f"({len(ref_images)} ref, {width}x{height}, {num_steps} steps)"
+            )
 
-        images_data.append(_pack_image(image, req.response_format, req.prompt))
+            images_data.append(_pack_image(image, req.response_format, req.prompt))
+    except GenerationCancelled as e:
+        print(f"Edit cancelled: {e} ({width}x{height}, {num_steps} steps, {len(images_data)}/{req.n} done)")
+        return JSONResponse(status_code=499, content={"error": "client disconnected"})
+    finally:
+        watcher.cancel()
 
     return ImageGenerationResponse(
         created=int(time.time()),
@@ -329,7 +402,7 @@ from fastapi.staticfiles import StaticFiles
 
 
 def main():
-    global model_id, device_str, quantize_mode
+    global model_id, device_str, quantize_mode, dtype_mode, output_dir
 
     parser = argparse.ArgumentParser(description="FLUX.2 Klein OpenAI-compatible API server")
     parser.add_argument("--model", default="/data/flux2/models/FLUX.2-klein-9B",
@@ -341,15 +414,21 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--quantize", choices=["none", "fp8"], default="none",
                         help="fp8: torchao float8dq on transformer + text encoder")
+    parser.add_argument("--dtype", choices=sorted(_DTYPES), default="bf16",
+                        help="weight/activation dtype; fp16 for pre-Ampere (Turing) GPUs")
+    parser.add_argument("--output-dir", default="/data/flux2/output",
+                        help="where response_format=url images are written (served at /images)")
     args = parser.parse_args()
 
     model_id = args.model
     device_str = args.device
     quantize_mode = args.quantize
+    dtype_mode = args.dtype
+    output_dir = args.output_dir
     app.state.served_model_name = args.served_model_name or args.model
 
-    os.makedirs("/data/flux2/output", exist_ok=True)
-    app.mount("/images", StaticFiles(directory="/data/flux2/output"), name="images")
+    os.makedirs(output_dir, exist_ok=True)
+    app.mount("/images", StaticFiles(directory=output_dir), name="images")
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

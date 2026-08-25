@@ -1,0 +1,192 @@
+[warn] turn_timeout (600s) > drain_timeout (180s): turns still in flight at drain end are recorded as 'cancelled' (right-censored) rather than reaching a terminal timeout status.
+chat_bench: direct -> https://marten.hpc.uidaho.edu:8001 model=qwen/qwen3.6-35b stages=[16, 32, 96, 128, 160, 192, 224, 256] x1 stage=120s warmup=20s adapt=False seed=42
+warmup ok: ttft=0.11s tokens=2
+
+=== stage 0: 16 users (repeat 1/1) ===
+  [ 16u +   10s] turns=0 running=21.0 waiting=0.0 kv=7%
+  [ 16u +   20s] turns=0 running=22.0 waiting=0.0 kv=8%
+  [ 16u +   30s] turns=0 running=20.0 waiting=0.0 kv=7%
+  [ 16u +   40s] turns=6 running=21.0 waiting=0.0 kv=7%
+  [ 16u +   50s] turns=21 running=21.0 waiting=0.0 kv=8%
+  [ 16u +   60s] turns=46 running=21.0 waiting=0.0 kv=8%
+  [ 16u +   70s] turns=71 running=21.0 waiting=0.0 kv=8%
+  [ 16u +   80s] turns=93 running=21.0 waiting=0.0 kv=8%
+  [ 16u +   90s] turns=114 running=20.0 waiting=0.0 kv=7%
+  [ 16u +  100s] turns=141 running=20.0 waiting=0.0 kv=8%
+  [ 16u +  110s] turns=162 running=19.0 waiting=0.0 kv=7%
+  [ 16u +  120s] turns=189 running=20.0 waiting=0.0 kv=7%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+
+  [warn] backend did not go idle before next stage
+
+=== stage 1: 32 users (repeat 1/1) ===
+  [ 32u +   10s] turns=0 running=19.0 waiting=0.0 kv=7%
+  [ 32u +   20s] turns=0 running=34.0 waiting=0.0 kv=11%
+  [ 32u +   30s] turns=0 running=36.0 waiting=0.0 kv=12%
+  [ 32u +   40s] turns=21 running=36.0 waiting=0.0 kv=12%
+  [ 32u +   50s] turns=65 running=35.0 waiting=0.0 kv=12%
+  [ 32u +   60s] turns=113 running=35.0 waiting=0.0 kv=12%
+  [ 32u +   70s] turns=154 running=36.0 waiting=0.0 kv=13%
+  [ 32u +   80s] turns=190 running=36.0 waiting=0.0 kv=13%
+  [ 32u +   90s] turns=228 running=35.0 waiting=0.0 kv=13%
+  [ 32u +  100s] turns=263 running=36.0 waiting=0.0 kv=13%
+  [ 32u +  110s] turns=290 running=36.0 waiting=0.0 kv=13%
+  [ 32u +  120s] turns=323 running=36.0 waiting=0.0 kv=13%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+
+  [warn] backend did not go idle before next stage
+
+=== stage 2: 96 users (repeat 1/1) ===
+  [ 96u +   10s] turns=0 running=43.0 waiting=0.0 kv=14%
+  [ 96u +   20s] turns=0 running=98.0 waiting=0.0 kv=31%
+  [ 96u +   30s] turns=0 running=97.0 waiting=0.0 kv=31%
+  [ 96u +   40s] turns=15 running=97.0 waiting=0.0 kv=32%
+  [ 96u +   50s] turns=71 running=97.0 waiting=0.0 kv=32%
+  [ 96u +   60s] turns=146 running=97.0 waiting=0.0 kv=33%
+  [ 96u +   70s] turns=218 running=96.0 waiting=0.0 kv=33%
+  [ 96u +   80s] turns=295 running=98.0 waiting=0.0 kv=34%
+  [ 96u +   90s] turns=359 running=96.0 waiting=0.0 kv=33%
+  [ 96u +  100s] turns=430 running=95.0 waiting=0.0 kv=33%
+  [ 96u +  110s] turns=510 running=97.0 waiting=0.0 kv=34%
+  [ 96u +  120s] turns=579 running=95.0 waiting=0.0 kv=33%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+       96 |         0 |       744 |       0.0 |         0 |     0.229 |     0.354 |     45.55 |    5309.3 |      96.3 |       0.0 |     0.344 | PASS
+
+
+=== stage 3: 128 users (repeat 1/1) ===
+  [128u +   10s] turns=0 running=69.0 waiting=0.0 kv=22%
+  [128u +   20s] turns=0 running=126.0 waiting=0.0 kv=40%
+  [128u +   30s] turns=0 running=127.0 waiting=0.0 kv=41%
+  [128u +   40s] turns=30 running=129.0 waiting=0.0 kv=41%
+  [128u +   50s] turns=91 running=127.0 waiting=0.0 kv=42%
+  [128u +   60s] turns=170 running=123.0 waiting=0.0 kv=41%
+  [128u +   70s] turns=276 running=128.0 waiting=0.0 kv=43%
+  [128u +   80s] turns=347 running=127.0 waiting=0.0 kv=43%
+  [128u +   90s] turns=421 running=130.0 waiting=0.0 kv=44%
+  [128u +  100s] turns=511 running=129.0 waiting=0.0 kv=44%
+  [128u +  110s] turns=577 running=128.0 waiting=0.0 kv=44%
+  [128u +  120s] turns=631 running=125.0 waiting=0.0 kv=43%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+       96 |         0 |       744 |       0.0 |         0 |     0.229 |     0.354 |     45.55 |    5309.3 |      96.3 |       0.0 |     0.344 | PASS
+      128 |         0 |       841 |       0.0 |         0 |     0.264 |     0.404 |     35.81 |    5666.3 |     127.3 |       1.0 |     0.442 | PASS
+
+  [warn] backend did not go idle before next stage
+
+=== stage 4: 160 users (repeat 1/1) ===
+  [160u +   10s] turns=0 running=51.0 waiting=0.0 kv=16%
+  [160u +   20s] turns=0 running=148.0 waiting=0.0 kv=47%
+  [160u +   30s] turns=0 running=162.0 waiting=0.0 kv=52%
+  [160u +   40s] turns=16 running=160.0 waiting=0.0 kv=51%
+  [160u +   50s] turns=62 running=162.0 waiting=0.0 kv=52%
+  [160u +   60s] turns=129 running=159.0 waiting=0.0 kv=52%
+  [160u +   70s] turns=220 running=162.0 waiting=0.0 kv=54%
+  [160u +   80s] turns=325 running=161.0 waiting=0.0 kv=54%
+  [160u +   90s] turns=407 running=163.0 waiting=0.0 kv=55%
+  [160u +  100s] turns=492 running=162.0 waiting=0.0 kv=55%
+  [160u +  110s] turns=574 running=162.0 waiting=0.0 kv=55%
+  [160u +  120s] turns=659 running=162.0 waiting=0.0 kv=55%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+       96 |         0 |       744 |       0.0 |         0 |     0.229 |     0.354 |     45.55 |    5309.3 |      96.3 |       0.0 |     0.344 | PASS
+      128 |         0 |       841 |       0.0 |         0 |     0.264 |     0.404 |     35.81 |    5666.3 |     127.3 |       1.0 |     0.442 | PASS
+      160 |         0 |       901 |       0.0 |         0 |     0.248 |     0.371 |     28.91 |    5346.3 |     161.4 |       0.0 |     0.551 | PASS
+
+  [warn] backend did not go idle before next stage
+
+=== stage 5: 192 users (repeat 1/1) ===
+  [192u +   10s] turns=0 running=70.0 waiting=0.0 kv=23%
+  [192u +   20s] turns=0 running=195.0 waiting=0.0 kv=62%
+  [192u +   30s] turns=0 running=194.0 waiting=0.0 kv=62%
+  [192u +   40s] turns=16 running=194.0 waiting=0.0 kv=62%
+  [192u +   50s] turns=46 running=192.0 waiting=0.0 kv=62%
+  [192u +   60s] turns=100 running=196.0 waiting=0.0 kv=63%
+  [192u +   70s] turns=178 running=196.0 waiting=0.0 kv=64%
+  [192u +   80s] turns=259 running=196.0 waiting=0.0 kv=65%
+  [192u +   90s] turns=339 running=196.0 waiting=0.0 kv=65%
+  [192u +  100s] turns=426 running=193.0 waiting=0.0 kv=64%
+  [192u +  110s] turns=515 running=195.0 waiting=0.0 kv=65%
+  [192u +  120s] turns=600 running=195.0 waiting=0.0 kv=65%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+       96 |         0 |       744 |       0.0 |         0 |     0.229 |     0.354 |     45.55 |    5309.3 |      96.3 |       0.0 |     0.344 | PASS
+      128 |         0 |       841 |       0.0 |         0 |     0.264 |     0.404 |     35.81 |    5666.3 |     127.3 |       1.0 |     0.442 | PASS
+      160 |         0 |       901 |       0.0 |         0 |     0.248 |     0.371 |     28.91 |    5346.3 |     161.4 |       0.0 |     0.551 | PASS
+      192 |         0 |       882 |       0.0 |         0 |     0.269 |      0.35 |     27.17 |    5914.0 |     195.0 |       1.0 |     0.658 | PASS
+
+  [warn] backend did not go idle before next stage
+
+=== stage 6: 224 users (repeat 1/1) ===
+  [224u +   10s] turns=0 running=104.0 waiting=0.0 kv=33%
+  [224u +   20s] turns=0 running=226.0 waiting=0.0 kv=72%
+  [224u +   30s] turns=0 running=225.0 waiting=0.0 kv=72%
+  [224u +   40s] turns=14 running=226.0 waiting=0.0 kv=72%
+  [224u +   50s] turns=46 running=222.0 waiting=0.0 kv=71%
+  [224u +   60s] turns=110 running=227.0 waiting=0.0 kv=73%
+  [224u +   70s] turns=199 running=223.0 waiting=0.0 kv=73%
+  [224u +   80s] turns=288 running=222.0 waiting=0.0 kv=74%
+  [224u +   90s] turns=374 running=226.0 waiting=0.0 kv=76%
+  [224u +  100s] turns=461 running=225.0 waiting=0.0 kv=75%
+  [224u +  110s] turns=555 running=223.0 waiting=0.0 kv=75%
+  [224u +  120s] turns=649 running=223.0 waiting=0.0 kv=75%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+       96 |         0 |       744 |       0.0 |         0 |     0.229 |     0.354 |     45.55 |    5309.3 |      96.3 |       0.0 |     0.344 | PASS
+      128 |         0 |       841 |       0.0 |         0 |     0.264 |     0.404 |     35.81 |    5666.3 |     127.3 |       1.0 |     0.442 | PASS
+      160 |         0 |       901 |       0.0 |         0 |     0.248 |     0.371 |     28.91 |    5346.3 |     161.4 |       0.0 |     0.551 | PASS
+      192 |         0 |       882 |       0.0 |         0 |     0.269 |      0.35 |     27.17 |    5914.0 |     195.0 |       1.0 |     0.658 | PASS
+      224 |         0 |       969 |       0.0 |         0 |     0.292 |     0.441 |     25.83 |    6541.1 |     224.1 |       0.0 |     0.757 | PASS
+
+
+=== stage 7: 256 users (repeat 1/1) ===
+  [256u +   10s] turns=0 running=155.0 waiting=0.0 kv=49%
+  [256u +   20s] turns=0 running=255.0 waiting=2.0 kv=81%
+  [256u +   30s] turns=0 running=255.0 waiting=0.0 kv=81%
+  [256u +   40s] turns=14 running=254.0 waiting=1.0 kv=81%
+  [256u +   50s] turns=71 running=255.0 waiting=0.0 kv=82%
+  [256u +   60s] turns=154 running=256.0 waiting=2.0 kv=83%
+  [256u +   70s] turns=254 running=254.0 waiting=1.0 kv=83%
+  [256u +   80s] turns=373 running=254.0 waiting=0.0 kv=84%
+  [256u +   90s] turns=488 running=256.0 waiting=0.0 kv=85%
+  [256u +  100s] turns=589 running=255.0 waiting=1.0 kv=85%
+  [256u +  110s] turns=701 running=253.0 waiting=0.0 kv=84%
+  [256u +  120s] turns=806 running=253.0 waiting=2.0 kv=84%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+       16 |         0 |       229 |       0.0 |         0 |     0.135 |     0.236 |     87.63 |    1658.6 |      20.3 |       0.0 |     0.079 | PASS
+       32 |         0 |       388 |       0.0 |         0 |     0.146 |     0.262 |     70.49 |    2822.8 |      35.8 |       0.0 |     0.136 | PASS
+       96 |         0 |       744 |       0.0 |         0 |     0.229 |     0.354 |     45.55 |    5309.3 |      96.3 |       0.0 |     0.344 | PASS
+      128 |         0 |       841 |       0.0 |         0 |     0.264 |     0.404 |     35.81 |    5666.3 |     127.3 |       1.0 |     0.442 | PASS
+      160 |         0 |       901 |       0.0 |         0 |     0.248 |     0.371 |     28.91 |    5346.3 |     161.4 |       0.0 |     0.551 | PASS
+      192 |         0 |       882 |       0.0 |         0 |     0.269 |      0.35 |     27.17 |    5914.0 |     195.0 |       1.0 |     0.658 | PASS
+      224 |         0 |       969 |       0.0 |         0 |     0.292 |     0.441 |     25.83 |    6541.1 |     224.1 |       0.0 |     0.757 | PASS
+      256 |         0 |      1163 |       0.0 |         0 |     0.418 |     0.674 |     25.79 |    7483.5 |     254.3 |       3.0 |     0.852 | PASS
+
+  [warn] backend did not go idle before next stage
+
+Done. Results in q36-35b-marten-s256/saturation/ (turns.jsonl, server_samples.jsonl, summary.json)
+Capacity NOT located: >= 256 users (all stages passed TTFT p95<=2.0s uncensored, stream p10>=15.0 tok/s, err<=1.0%, stall<=2.0%, e2e p95<=139s) — extend the sweep (--max-users).

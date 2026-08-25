@@ -1735,6 +1735,16 @@ class InferenceService:
         tried_backends: Set[int] = set()
         last_error: Optional[Exception] = None
         context_recap_done = False
+        # Diffusion jobs get their own (longer) per-attempt budget, and a
+        # timeout there is treated as "the job is too big", not "the backend
+        # is sick": the worker keeps the slot busy regardless, so re-running
+        # the same job on a second and third GPU only multiplies the cost.
+        is_image = proxy_fn == "_proxy_image_request"
+        attempt_timeout = float(
+            self._settings.backend_image_request_timeout
+            if is_image
+            else self._settings.backend_request_timeout_per_attempt
+        )
 
         for attempt in range(max_attempts):
             # First attempt waits normally for capacity; retries fail fast.
@@ -1814,7 +1824,7 @@ class InferenceService:
             try:
                 response = await asyncio.wait_for(
                     getattr(self, proxy_fn)(request, backend),
-                    timeout=float(self._settings.backend_request_timeout_per_attempt),
+                    timeout=attempt_timeout,
                 )
                 # Success — record latency
                 elapsed_ms = (time.monotonic() - start_time) * 1000
@@ -1827,6 +1837,26 @@ class InferenceService:
                 return response, backend
 
             except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+                elapsed_ms = (time.monotonic() - start_time) * 1000
+                if is_image:
+                    # Release the slot but do not blame the backend and do
+                    # not retry elsewhere: an image that outran the budget on
+                    # a healthy worker will do the same on the next one.
+                    logger.warning(
+                        "image_backend_timeout",
+                        backend_id=backend.id,
+                        timeout_s=attempt_timeout,
+                        elapsed_ms=elapsed_ms,
+                        error=type(e).__name__,
+                    )
+                    await self._scheduler.on_job_failed(job, backend.id)
+                    raise HTTPException(
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                        detail=(
+                            f"Image generation exceeded {attempt_timeout:.0f}s; "
+                            "reduce n, size or num_inference_steps"
+                        ),
+                    )
                 # The per-request httpx client's async-with block closes the
                 # TCP connection on cancellation, signalling vLLM to abort
                 # the in-progress generation and free the execution slot.
@@ -1835,7 +1865,8 @@ class InferenceService:
                     backend_id=backend.id,
                     attempt=attempt + 1,
                     max_attempts=max_attempts,
-                    elapsed_ms=(time.monotonic() - start_time) * 1000,
+                    elapsed_ms=elapsed_ms,
+                    error=type(e).__name__,
                 )
                 await self._scheduler.on_job_failed(job, backend.id)
                 await self._registry.report_live_failure(backend.id)
@@ -1901,10 +1932,16 @@ class InferenceService:
                 await self._registry.report_live_failure(backend.id)
                 last_error = e
 
-        # All attempts exhausted
+        # All attempts exhausted. str() of an httpx timeout is empty, so name
+        # the exception class as well — otherwise the audit row reads
+        # "Last error: " and says nothing.
+        last_desc = (
+            f"{type(last_error).__name__}: {last_error}".rstrip(": ")
+            if last_error is not None else "none"
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"All {max_attempts} backend attempts failed. Last error: {last_error}",
+            detail=f"All {max_attempts} backend attempts failed. Last error: {last_desc}",
         )
 
     async def _proxy_stream_with_retry(
@@ -2337,11 +2374,10 @@ class InferenceService:
         if wm_enabled:
             payload["response_format"] = "b64_json"
 
-        # Image generation can be slow — use a longer timeout
-        timeout = max(
-            float(self._settings.backend_request_timeout_per_attempt),
-            300.0,
-        )
+        # Image generation is slow and variable; the attempt budget is the
+        # dedicated image setting (the same value _proxy_with_retry enforces
+        # from the outside, so neither timer silently shadows the other).
+        timeout = float(self._settings.backend_image_request_timeout)
 
         async with self._make_inference_client() as client:
             response = await client.post(url, json=payload, timeout=timeout)

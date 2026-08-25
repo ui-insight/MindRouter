@@ -1,0 +1,203 @@
+[warn] turn_timeout (600s) > drain_timeout (180s): turns still in flight at drain end are recorded as 'cancelled' (right-censored) rather than reaching a terminal timeout status.
+chat_bench: direct -> https://marten.hpc.uidaho.edu:8001 model=qwen/qwen3.6-35b stages=[128, 192, 256, 320] x1 stage=180s warmup=30s adapt=True seed=42
+warmup ok: ttft=0.05s tokens=2
+
+=== stage 0: 128 users (repeat 1/1) ===
+  [128u +   10s] turns=0 running=20.0 waiting=0.0 kv=6%
+  [128u +   20s] turns=0 running=18.0 waiting=0.0 kv=6%
+  [128u +   30s] turns=0 running=4.0 waiting=0.0 kv=1%
+  [128u +   40s] turns=0 running=1.0 waiting=0.0 kv=0%
+  [128u +   50s] turns=3 running=1.0 waiting=0.0 kv=0%
+  [128u +   60s] turns=11 running=7.0 waiting=0.0 kv=2%
+  [128u +   70s] turns=26 running=12.0 waiting=0.0 kv=4%
+  [128u +   80s] turns=49 running=15.0 waiting=0.0 kv=5%
+  [128u +   90s] turns=79 running=13.0 waiting=0.0 kv=4%
+  [128u +  100s] turns=115 running=6.0 waiting=0.0 kv=2%
+  [128u +  110s] turns=141 running=3.0 waiting=0.0 kv=1%
+  [128u +  120s] turns=159 running=11.0 waiting=0.0 kv=4%
+  [128u +  130s] turns=176 running=7.0 waiting=0.0 kv=2%
+  [128u +  140s] turns=199 running=11.0 waiting=0.0 kv=4%
+  [128u +  150s] turns=223 running=10.0 waiting=0.0 kv=3%
+  [128u +  160s] turns=249 running=13.0 waiting=0.0 kv=4%
+  [128u +  170s] turns=276 running=5.0 waiting=0.0 kv=2%
+  [128u +  180s] turns=303 running=9.0 waiting=0.0 kv=3%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+
+
+=== stage 1: 192 users (repeat 1/1) ===
+  [192u +   10s] turns=0 running=45.0 waiting=0.0 kv=14%
+  [192u +   20s] turns=0 running=49.0 waiting=0.0 kv=15%
+  [192u +   30s] turns=0 running=24.0 waiting=0.0 kv=8%
+  [192u +   40s] turns=0 running=3.0 waiting=0.0 kv=1%
+  [192u +   50s] turns=10 running=3.0 waiting=0.0 kv=1%
+  [192u +   60s] turns=17 running=4.0 waiting=0.0 kv=1%
+  [192u +   70s] turns=37 running=13.0 waiting=0.0 kv=4%
+  [192u +   80s] turns=64 running=27.0 waiting=0.0 kv=9%
+  [192u +   90s] turns=109 running=28.0 waiting=0.0 kv=9%
+  [192u +  100s] turns=161 running=13.0 waiting=0.0 kv=4%
+  [192u +  110s] turns=207 running=14.0 waiting=0.0 kv=4%
+  [192u +  120s] turns=243 running=9.0 waiting=0.0 kv=3%
+  [192u +  130s] turns=275 running=8.0 waiting=0.0 kv=3%
+  [192u +  140s] turns=296 running=11.0 waiting=0.0 kv=4%
+  [192u +  150s] turns=321 running=23.0 waiting=0.0 kv=8%
+  [192u +  160s] turns=360 running=14.0 waiting=0.0 kv=5%
+  [192u +  170s] turns=411 running=10.0 waiting=0.0 kv=3%
+  [192u +  180s] turns=447 running=12.0 waiting=0.0 kv=4%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+      192 |         0 |       490 |       0.0 |         0 |     0.108 |     0.186 |    117.06 |    1972.1 |      13.3 |       0.0 |     0.098 | PASS
+
+
+=== stage 2: 256 users (repeat 1/1) ===
+  [256u +   10s] turns=0 running=70.0 waiting=0.0 kv=22%
+  [256u +   20s] turns=0 running=95.0 waiting=0.0 kv=30%
+  [256u +   30s] turns=0 running=66.0 waiting=0.0 kv=21%
+  [256u +   40s] turns=0 running=2.0 waiting=0.0 kv=1%
+  [256u +   50s] turns=11 running=4.0 waiting=0.0 kv=1%
+  [256u +   60s] turns=28 running=4.0 waiting=0.0 kv=1%
+  [256u +   70s] turns=51 running=16.0 waiting=0.0 kv=5%
+  [256u +   80s] turns=81 running=38.0 waiting=0.0 kv=12%
+  [256u +   90s] turns=122 running=57.0 waiting=0.0 kv=18%
+  [256u +  100s] turns=180 running=44.0 waiting=0.0 kv=14%
+  [256u +  110s] turns=251 running=19.0 waiting=0.0 kv=6%
+  [256u +  120s] turns=312 running=19.0 waiting=0.0 kv=6%
+  [256u +  130s] turns=355 running=10.0 waiting=0.0 kv=3%
+  [256u +  140s] turns=391 running=13.0 waiting=0.0 kv=4%
+  [256u +  150s] turns=423 running=15.0 waiting=0.0 kv=5%
+  [256u +  160s] turns=459 running=44.0 waiting=0.0 kv=14%
+  [256u +  170s] turns=503 running=31.0 waiting=0.0 kv=10%
+  [256u +  180s] turns=557 running=33.0 waiting=0.0 kv=11%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+      192 |         0 |       490 |       0.0 |         0 |     0.108 |     0.186 |    117.06 |    1972.1 |      13.3 |       0.0 |     0.098 | PASS
+      256 |         0 |       636 |       0.0 |         0 |     0.126 |     0.218 |     85.06 |    2689.8 |      22.3 |       0.0 |     0.186 | PASS
+
+
+=== stage 3: 320 users (repeat 1/1) ===
+  [320u +   10s] turns=0 running=95.0 waiting=0.0 kv=30%
+  [320u +   20s] turns=0 running=93.0 waiting=47.0 kv=29%
+  [320u +   30s] turns=0 running=95.0 waiting=31.0 kv=30%
+  [320u +   40s] turns=0 running=26.0 waiting=0.0 kv=8%
+  [320u +   50s] turns=16 running=9.0 waiting=0.0 kv=3%
+  [320u +   60s] turns=41 running=6.0 waiting=0.0 kv=2%
+  [320u +   70s] turns=63 running=10.0 waiting=0.0 kv=3%
+  [320u +   80s] turns=97 running=25.0 waiting=0.0 kv=8%
+  [320u +   90s] turns=138 running=49.0 waiting=0.0 kv=16%
+  [320u +  100s] turns=190 running=74.0 waiting=0.0 kv=24%
+  [320u +  110s] turns=258 running=49.0 waiting=0.0 kv=16%
+  [320u +  120s] turns=342 running=23.0 waiting=0.0 kv=7%
+  [320u +  130s] turns=409 running=21.0 waiting=0.0 kv=7%
+  [320u +  140s] turns=453 running=27.0 waiting=0.0 kv=9%
+  [320u +  150s] turns=500 running=37.0 waiting=0.0 kv=12%
+  [320u +  160s] turns=544 running=27.0 waiting=0.0 kv=9%
+  [320u +  170s] turns=610 running=43.0 waiting=0.0 kv=14%
+  [320u +  180s] turns=667 running=44.0 waiting=0.0 kv=14%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+      192 |         0 |       490 |       0.0 |         0 |     0.108 |     0.186 |    117.06 |    1972.1 |      13.3 |       0.0 |     0.098 | PASS
+      256 |         0 |       636 |       0.0 |         0 |     0.126 |     0.218 |     85.06 |    2689.8 |      22.3 |       0.0 |     0.186 | PASS
+      320 |         0 |       771 |       0.0 |         0 |     0.138 |     0.229 |     76.19 |    3212.2 |      33.1 |       0.0 |     0.273 | PASS
+
+[adapt] all stages pass — extending sweep to 480 users
+
+=== stage 4: 480 users (repeat 1/1) ===
+  [480u +   10s] turns=0 running=95.0 waiting=40.0 kv=30%
+  [480u +   20s] turns=0 running=95.0 waiting=157.0 kv=30%
+  [480u +   30s] turns=0 running=95.0 waiting=182.0 kv=30%
+  [480u +   40s] turns=0 running=96.0 waiting=107.0 kv=30%
+  [480u +   50s] turns=0 running=96.0 waiting=40.0 kv=30%
+  [480u +   60s] turns=0 running=45.0 waiting=0.0 kv=14%
+  [480u +   70s] turns=37 running=36.0 waiting=0.0 kv=11%
+  [480u +   80s] turns=91 running=50.0 waiting=0.0 kv=16%
+  [480u +   90s] turns=148 running=61.0 waiting=0.0 kv=19%
+  [480u +  100s] turns=218 running=77.0 waiting=0.0 kv=24%
+  [480u +  110s] turns=292 running=86.0 waiting=0.0 kv=27%
+  [480u +  120s] turns=372 running=95.0 waiting=15.0 kv=30%
+  [480u +  130s] turns=444 running=90.0 waiting=0.0 kv=29%
+  [480u +  140s] turns=535 running=75.0 waiting=0.0 kv=24%
+  [480u +  150s] turns=624 running=64.0 waiting=0.0 kv=21%
+  [480u +  160s] turns=716 running=62.0 waiting=0.0 kv=20%
+  [480u +  170s] turns=792 running=68.0 waiting=0.0 kv=22%
+  [480u +  180s] turns=866 running=63.0 waiting=0.0 kv=21%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+      192 |         0 |       490 |       0.0 |         0 |     0.108 |     0.186 |    117.06 |    1972.1 |      13.3 |       0.0 |     0.098 | PASS
+      256 |         0 |       636 |       0.0 |         0 |     0.126 |     0.218 |     85.06 |    2689.8 |      22.3 |       0.0 |     0.186 | PASS
+      320 |         0 |       771 |       0.0 |         0 |     0.138 |     0.229 |     76.19 |    3212.2 |      33.1 |       0.0 |     0.273 | PASS
+      480 |         0 |      1014 |       0.0 |         0 |     0.211 |     1.663 |     59.05 |    4243.9 |      71.5 |     148.0 |     0.304 | PASS
+
+[adapt] all stages pass — extending sweep to 720 users
+
+=== stage 5: 720 users (repeat 1/1) ===
+  [720u +   10s] turns=0 running=96.0 waiting=121.0 kv=30%
+  [720u +   20s] turns=0 running=94.0 waiting=220.0 kv=30%
+  [720u +   30s] turns=0 running=96.0 waiting=426.0 kv=30%
+  [720u +   40s] turns=0 running=95.0 waiting=345.0 kv=30%
+  [720u +   50s] turns=0 running=96.0 waiting=285.0 kv=30%
+  [720u +   60s] turns=0 running=96.0 waiting=225.0 kv=30%
+  [720u +   71s] turns=0 running=96.0 waiting=201.0 kv=30%
+  [720u +   85s] turns=0 running=96.0 waiting=201.0 kv=30%
+  [720u +  103s] turns=2 running=95.0 waiting=46.0 kv=30%
+  [720u +  115s] turns=71 running=2.0 waiting=0.0 kv=1%
+  [720u +  126s] turns=100 running=10.0 waiting=0.0 kv=3%
+  [720u +  137s] turns=112 running=12.0 waiting=0.0 kv=4%
+  [720u +  147s] turns=145 running=20.0 waiting=0.0 kv=6%
+  [720u +  157s] turns=182 running=39.0 waiting=0.0 kv=12%
+  [720u +  167s] turns=226 running=95.0 waiting=423.0 kv=30%
+  [720u +  177s] turns=293 running=95.0 waiting=385.0 kv=30%
+  [720u +  180s] turns=377 running=95.0 waiting=355.0 kv=30%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+      192 |         0 |       490 |       0.0 |         0 |     0.108 |     0.186 |    117.06 |    1972.1 |      13.3 |       0.0 |     0.098 | PASS
+      256 |         0 |       636 |       0.0 |         0 |     0.126 |     0.218 |     85.06 |    2689.8 |      22.3 |       0.0 |     0.186 | PASS
+      320 |         0 |       771 |       0.0 |         0 |     0.138 |     0.229 |     76.19 |    3212.2 |      33.1 |       0.0 |     0.273 | PASS
+      480 |         0 |      1014 |       0.0 |         0 |     0.211 |     1.663 |     59.05 |    4243.9 |      71.5 |     148.0 |     0.304 | PASS
+      720 |         0 |       850 |      0.12 |         0 |    46.674 |    96.942 |     52.87 |    3689.3 |      62.4 |     423.0 |     0.305 | fail(ttft_p95,stall_pct)
+
+[adapt] bisecting knee between 480 (pass) and 720 (fail): adding 600
+
+=== stage 6: 600 users (repeat 1/1) ===
+  [600u +   11s] turns=0 running=0.0 waiting=0.0 kv=0%
+  [600u +   22s] turns=0 running=3.0 waiting=0.0 kv=1%
+  [600u +   33s] turns=0 running=17.0 waiting=0.0 kv=5%
+  [600u +   43s] turns=0 running=36.0 waiting=0.0 kv=11%
+  [600u +   53s] turns=0 running=96.0 waiting=363.0 kv=30%
+  [600u +   63s] turns=1 running=95.0 waiting=273.0 kv=30%
+  [600u +   73s] turns=1 running=95.0 waiting=212.0 kv=30%
+  [600u +   83s] turns=1 running=96.0 waiting=147.0 kv=30%
+  [600u +   93s] turns=1 running=95.0 waiting=119.0 kv=30%
+  [600u +  104s] turns=4 running=96.0 waiting=36.0 kv=31%
+  [600u +  118s] turns=42 running=96.0 waiting=36.0 kv=31%
+  [600u +  129s] turns=130 running=96.0 waiting=36.0 kv=31%
+  [600u +  140s] turns=162 running=6.0 waiting=0.0 kv=2%
+  [600u +  151s] turns=178 running=5.0 waiting=0.0 kv=2%
+  [600u +  161s] turns=203 running=18.0 waiting=0.0 kv=6%
+  [600u +  172s] turns=240 running=44.0 waiting=0.0 kv=14%
+  [600u +  180s] turns=287 running=95.0 waiting=314.0 kv=30%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      128 |         0 |       326 |       0.0 |         0 |     0.102 |     0.172 |    146.72 |    1440.3 |       7.9 |       0.0 |     0.067 | PASS
+      192 |         0 |       490 |       0.0 |         0 |     0.108 |     0.186 |    117.06 |    1972.1 |      13.3 |       0.0 |     0.098 | PASS
+      256 |         0 |       636 |       0.0 |         0 |     0.126 |     0.218 |     85.06 |    2689.8 |      22.3 |       0.0 |     0.186 | PASS
+      320 |         0 |       771 |       0.0 |         0 |     0.138 |     0.229 |     76.19 |    3212.2 |      33.1 |       0.0 |     0.273 | PASS
+      480 |         0 |      1014 |       0.0 |         0 |     0.211 |     1.663 |     59.05 |    4243.9 |      71.5 |     148.0 |     0.304 | PASS
+      720 |         0 |       850 |      0.12 |         0 |    46.674 |    96.942 |     52.87 |    3689.3 |      62.4 |     423.0 |     0.305 | fail(ttft_p95,stall_pct)
+      600 |         0 |       743 |       0.0 |         0 |    31.468 |    76.018 |     53.47 |    3483.6 |      66.0 |     363.0 |     0.305 | fail(ttft_p95,stall_pct)
+
+
+Done. Results in q36-35b-marten-s96/realistic/ (turns.jsonl, server_samples.jsonl, summary.json)
+Capacity: 480 users pass all SLOs (TTFT p95<=2.0s uncensored, stream p10>=15.0 tok/s, err<=1.0%, stall<=2.0%, e2e p95<=139s); first failure at 600 users.

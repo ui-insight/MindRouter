@@ -1,0 +1,26 @@
+[warn] turn_timeout (600s) > drain_timeout (180s): turns still in flight at drain end are recorded as 'cancelled' (right-censored) rather than reaching a terminal timeout status.
+chat_bench: direct -> https://marten.hpc.uidaho.edu:8001 model=qwen/qwen3.6-35b stages=[256] x1 stage=120s warmup=20s adapt=False seed=7
+warmup ok: ttft=0.17s tokens=2
+
+=== stage 0: 256 users (repeat 1/1) ===
+  [256u +   10s] turns=0 running=157.0 waiting=0.0 kv=50%
+  [256u +   20s] turns=0 running=256.0 waiting=0.0 kv=81%
+  [256u +   30s] turns=0 running=251.0 waiting=0.0 kv=80%
+  [256u +   40s] turns=27 running=255.0 waiting=1.0 kv=81%
+  [256u +   50s] turns=93 running=254.0 waiting=0.0 kv=82%
+  [256u +   60s] turns=176 running=255.0 waiting=0.0 kv=83%
+  [256u +   70s] turns=291 running=255.0 waiting=0.0 kv=84%
+  [256u +   80s] turns=404 running=255.0 waiting=1.0 kv=84%
+  [256u +   90s] turns=514 running=254.0 waiting=0.0 kv=85%
+  [256u +  100s] turns=621 running=252.0 waiting=0.0 kv=84%
+  [256u +  110s] turns=741 running=256.0 waiting=2.0 kv=85%
+  [256u +  120s] turns=845 running=255.0 waiting=3.0 kv=85%
+
+    users |       rep |     turns |      err% |       cxl |  ttft p50 |  ttft p95 |   tps p10 |   agg tps |   run avg |   wait mx |     kv mx | slo
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      256 |         0 |      1194 |       0.0 |         0 |     0.348 |     0.601 |     25.34 |    7486.4 |     254.2 |       3.0 |     0.856 | PASS
+
+  [warn] backend did not go idle before next stage
+
+Done. Results in q36-35b-marten-s256/warmup/ (turns.jsonl, server_samples.jsonl, summary.json)
+Capacity NOT located: >= 256 users (all stages passed TTFT p95<=2.0s uncensored, stream p10>=15.0 tok/s, err<=1.0%, stall<=2.0%, e2e p95<=139s) — extend the sweep (--max-users).

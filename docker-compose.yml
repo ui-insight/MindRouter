@@ -33,6 +33,7 @@ services:
       - CHAT_FILES_PATH=/data/chat_files
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEBUG=${DEBUG:-false}
+      - BACKEND_IMAGE_REQUEST_TIMEOUT=${BACKEND_IMAGE_REQUEST_TIMEOUT:-600}
       # Security hardening (2.9.18 audit remediation — see backend/app/settings.py).
       # Defaults preserve current behavior; set the prod-hardening values in .env:
       #   SESSION_COOKIE_SECURE=true, ENABLE_API_DOCS=false.

@@ -251,6 +251,23 @@ Key flags: `--users 1,2,4,...` `--stage-duration 300` `--min-turns 30`
 `--think off|on|none` (default off, matching the gateway fleet default).
 See the module docstring for the full traffic-model and measurement notes.
 
+### Image-capacity benchmark (`imgbench.py`)
+
+**Runner:** `python imgbench.py --base-url <gateway-or-worker> [--api-key mr2_...] --users N --inference-steps S --duration 180`
+**Requirements:** Python 3.11+ with httpx. Against the gateway pass an API key;
+against a bare `serve_klein.py` worker (same endpoint shape) omit it. No
+Makefile target on purpose: capacity experiment, not a CI check.
+
+| File | What it covers |
+|------|----------------|
+| `imgbench.py` | Closed-loop simulated image users (generate → random think time → generate) for `--duration` seconds. Latency is measured **client-side** because the image path does not populate `started_at` / `queue_delay_ms` / `processing_time_ms` on Request rows. Reports steady-state img/min (after `--warmup`), latency p50/p90/p95/p99/max, error count, and a p95 SLO gate (`--slo-p95`, default 30s). `--json` writes a summary for sweep scripts. |
+
+Key flags: `--users N` `--inference-steps 4|20` `--size 800x800` `--pause 2-6`
+(`0` = pure saturation) `--warmup 15` `--prompt` (fixed prompt instead of the
+rotating built-in set) `--insecure` `--json out.json`. Fleet numbers measured
+with it on 2026-08-24 are in the memory/docs notes for image capacity (20 steps:
+33 img/min, 12 users at p95 ≤ 30s; 4 steps: ~146 img/min, ~40 users).
+
 ---
 
 ## 6. Structured Output + Thinking Compliance Tests
@@ -431,6 +448,7 @@ Per-file test counts live in the section 1 table (`test_dlp_harness_*` rows).
 |------|---------|
 | `pyproject.toml` | pytest paths, asyncio mode, markers, coverage config |
 | `backend/app/tests/conftest.py` | Shared fixtures: mock settings, backends, users, API keys, streaming data |
+| `backend/app/tests/unit/test_image_timeout.py` | Image-generation timeout semantics in `_proxy_with_retry`: diffusion attempts use `backend_image_request_timeout`, a timeout returns 504 without cross-backend retry and without a live-failure mark; chat timeouts still retry 3x and the 502 names the exception class |
 | `Makefile` | All `make test-*` targets |
 
 ---
