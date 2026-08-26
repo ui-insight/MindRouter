@@ -448,7 +448,7 @@ Per-file test counts live in the section 1 table (`test_dlp_harness_*` rows).
 |------|---------|
 | `pyproject.toml` | pytest paths, asyncio mode, markers, coverage config |
 | `backend/app/tests/conftest.py` | Shared fixtures: mock settings, backends, users, API keys, streaming data |
-| `backend/app/tests/unit/test_image_timeout.py` | Image-generation timeout semantics in `_proxy_with_retry`: diffusion attempts use `backend_image_request_timeout`, a timeout returns 504 without cross-backend retry and without a live-failure mark; chat timeouts still retry 3x and the 502 names the exception class |
+| `backend/app/tests/unit/test_image_timeout.py` | Timeout semantics in `_proxy_with_retry`. 2.9.61: diffusion attempts use `backend_image_request_timeout`, an image timeout returns 504 without cross-backend retry and without a live-failure mark. 2.9.62: chat timeouts likewise default to 504 / no retry / no breaker (`backend_retry_on_timeout`, `backend_timeout_trips_breaker` restore the old behaviour; the legacy 502 names the exception class); 5xx still retries 3x and trips the breaker |
 | `Makefile` | All `make test-*` targets |
 
 ---

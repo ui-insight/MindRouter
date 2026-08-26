@@ -254,6 +254,15 @@ class Settings(BaseSettings):
     # budget instead of the chat per-attempt timeout, and a timeout is NOT
     # retried on another backend (see InferenceService._proxy_with_retry).
     backend_image_request_timeout: int = 600
+    # A per-attempt timeout on a non-streaming chat request is almost always
+    # the JOB (max_tokens 65536, a 30k-token answer racing the wall), not the
+    # backend — vLLM aborts on disconnect and the engine is usually idle. So a
+    # timeout neither counts toward the circuit breaker (5xx and connection
+    # errors still do) nor is re-run on other replicas by default; the caller
+    # gets a 504 telling it to stream or lower max_tokens. Both are settings
+    # so the pre-2.9.62 behaviour (retry 3x, breaker trips) can be restored.
+    backend_timeout_trips_breaker: bool = False
+    backend_retry_on_timeout: bool = False
     structured_output_retry_on_invalid: bool = True
     # Upper bound on the OpenAI `n` parameter (completions per request) —
     # a large n multiplies backend load and cost.

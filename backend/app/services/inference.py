@@ -1860,6 +1860,27 @@ class InferenceService:
                 # The per-request httpx client's async-with block closes the
                 # TCP connection on cancellation, signalling vLLM to abort
                 # the in-progress generation and free the execution slot.
+                # A timeout says "this job outran the wall", not "this
+                # backend is sick": it only feeds the circuit breaker and
+                # only retries on other replicas when configured to.
+                await self._scheduler.on_job_failed(job, backend.id)
+                if self._settings.backend_timeout_trips_breaker:
+                    await self._registry.report_live_failure(backend.id)
+                if not self._settings.backend_retry_on_timeout:
+                    logger.warning(
+                        "backend_timeout_no_retry",
+                        backend_id=backend.id,
+                        timeout_s=attempt_timeout,
+                        elapsed_ms=elapsed_ms,
+                        error=type(e).__name__,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                        detail=(
+                            f"Backend attempt exceeded {attempt_timeout:.0f}s; "
+                            "use streaming or reduce max_tokens"
+                        ),
+                    )
                 logger.warning(
                     "backend_timeout",
                     backend_id=backend.id,
@@ -1868,8 +1889,6 @@ class InferenceService:
                     elapsed_ms=elapsed_ms,
                     error=type(e).__name__,
                 )
-                await self._scheduler.on_job_failed(job, backend.id)
-                await self._registry.report_live_failure(backend.id)
                 last_error = e
 
             except httpx.HTTPStatusError as e:

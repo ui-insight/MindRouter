@@ -1,4 +1,4 @@
-"""Image-generation timeout semantics in InferenceService._proxy_with_retry.
+"""Timeout semantics in InferenceService._proxy_with_retry (2.9.61 images, 2.9.62 chat).
 
 Diffusion workers (serve_klein.py) keep the GPU busy for the whole job even
 after the gateway hangs up, so a per-attempt timeout on an image must NOT be
@@ -29,13 +29,16 @@ from backend.app.tests.unit import test_hotpath_trims as hp
 inf = hp.inf
 
 
-def _make_service(image_timeout=7, chat_timeout=5, attempts=3):
+def _make_service(image_timeout=7, chat_timeout=5, attempts=3,
+                  retry_on_timeout=False, timeout_trips_breaker=False):
     svc = inf.InferenceService.__new__(inf.InferenceService)
     svc.db = MagicMock()
     svc._settings = SimpleNamespace(
         backend_retry_max_attempts=attempts,
         backend_request_timeout_per_attempt=chat_timeout,
         backend_image_request_timeout=image_timeout,
+        backend_retry_on_timeout=retry_on_timeout,
+        backend_timeout_trips_breaker=timeout_trips_breaker,
         thinking_off_by_default=False,
     )
     svc._scheduler = AsyncMock()
@@ -92,8 +95,25 @@ class TestImageTimeout:
         assert seen["timeout"] == 123.0
 
     @pytest.mark.asyncio
-    async def test_chat_timeout_still_retries_on_other_backends(self):
+    async def test_chat_timeout_default_is_504_no_retry_no_breaker(self):
+        """2.9.62 default: a chat attempt timeout is the job's fault."""
         svc, backends, routed = _make_service(chat_timeout=5)
+        svc._proxy_chat_request = AsyncMock(side_effect=asyncio.TimeoutError())
+        request = hp._make_request(max_tokens=10)
+        with pytest.raises(HTTPException) as exc:
+            await svc._proxy_with_retry(request, SimpleNamespace(model="test-model", request_id="r"), MagicMock())
+        assert exc.value.status_code == 504
+        assert "exceeded 5s" in exc.value.detail and "streaming" in exc.value.detail
+        assert svc._proxy_chat_request.await_count == 1
+        assert routed["n"] == 1
+        svc._scheduler.on_job_failed.assert_awaited_once()
+        svc._registry.report_live_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_chat_timeout_legacy_retry_setting_retries_without_breaker(self):
+        """backend_retry_on_timeout=true restores the 3-attempt behaviour but
+        still leaves the breaker alone unless backend_timeout_trips_breaker."""
+        svc, backends, routed = _make_service(chat_timeout=5, retry_on_timeout=True)
         svc._proxy_chat_request = AsyncMock(side_effect=asyncio.TimeoutError())
         request = hp._make_request(max_tokens=10)
         with pytest.raises(HTTPException) as exc:
@@ -101,9 +121,31 @@ class TestImageTimeout:
         assert exc.value.status_code == 502
         assert svc._proxy_chat_request.await_count == 3
         assert routed["n"] == 3
-        assert svc._registry.report_live_failure.await_count == 3
+        assert svc._scheduler.on_job_failed.await_count == 3
+        svc._registry.report_live_failure.assert_not_awaited()
         # The empty str() of a timeout no longer produces "Last error: "
         assert exc.value.detail.endswith("Last error: TimeoutError")
+
+    @pytest.mark.asyncio
+    async def test_chat_timeout_trips_breaker_only_when_configured(self):
+        svc, backends, routed = _make_service(chat_timeout=5, retry_on_timeout=True, timeout_trips_breaker=True)
+        svc._proxy_chat_request = AsyncMock(side_effect=asyncio.TimeoutError())
+        with pytest.raises(HTTPException):
+            await svc._proxy_with_retry(hp._make_request(max_tokens=10), SimpleNamespace(model="test-model", request_id="r"), MagicMock())
+        assert svc._registry.report_live_failure.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_chat_5xx_still_retries_and_trips_breaker(self):
+        """Only timeouts changed: a 5xx is still a backend problem."""
+        svc, backends, routed = _make_service(chat_timeout=5)
+        req = httpx.Request("POST", "http://backend/v1/chat/completions")
+        err = httpx.HTTPStatusError("500", request=req, response=httpx.Response(500, request=req))
+        svc._proxy_chat_request = AsyncMock(side_effect=err)
+        with pytest.raises(HTTPException) as exc:
+            await svc._proxy_with_retry(hp._make_request(max_tokens=10), SimpleNamespace(model="test-model", request_id="r"), MagicMock())
+        assert exc.value.status_code == 502
+        assert svc._proxy_chat_request.await_count == 3
+        assert svc._registry.report_live_failure.await_count == 3
 
     @pytest.mark.asyncio
     async def test_chat_attempt_uses_chat_budget(self, monkeypatch):
