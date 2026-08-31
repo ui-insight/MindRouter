@@ -4,9 +4,33 @@
 
 ## Connection Options
 
-### Hosted SSE Server (Recommended)
+### Hosted Server (Recommended)
 
 MindRouter hosts a built-in MCP server — no local Python, no dependencies, no processes to manage. Just configure your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "mindrouter": {
+      "type": "http",
+      "url": "https://mindrouter.uidaho.edu/mcp",
+      "headers": {
+        "Authorization": "Bearer mr2_your_key_here"
+      }
+    }
+  }
+}
+```
+
+This is the **Streamable HTTP** transport (MCP spec 2025-03-26, refined
+2025-06-18) — a single endpoint that current MCP clients speak natively.
+
+#### Legacy SSE endpoint (deprecated)
+
+The older HTTP+SSE transport (spec 2024-11-05) remains available at
+`https://mindrouter.uidaho.edu/mcp/sse` with `"type": "sse"` for clients that
+cannot yet speak Streamable HTTP. It will be removed in a future release —
+please migrate to `/mcp`.
 
 ```json
 {

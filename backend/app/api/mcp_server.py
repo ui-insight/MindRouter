@@ -12,28 +12,37 @@
 #
 ############################################################
 
-"""Server-side SSE MCP server for MindRouter.
+"""MCP server for MindRouter, exposing tools such as ``web_search``.
 
-Exposes MindRouter tools (e.g., ``web_search``) over SSE transport so
-MCP-compatible agents can connect directly without local dependencies.
+Two transports are served in parallel during the deprecation window:
 
-Mount path: ``/mcp`` (configured in mcp_entrypoint.py)
-  - GET  /mcp/sse          — SSE stream (requires API key)
-  - POST /mcp/messages/    — client messages (session-bound)
+**Streamable HTTP (2025-03-26, current)** — a single endpoint, ``POST /mcp``.
+The JSON-RPC response comes back inline in that same POST response, either as
+one ``application/json`` body or as an SSE stream. This is what modern MCP
+clients speak. It runs ``stateless=True``, so there is no server-side session
+affinity and it is served directly from the main multi-worker app.
 
-Client configuration::
+**HTTP+SSE (2024-11-05, legacy, deprecated)** — ``GET /mcp/sse`` opens a
+long-lived stream and ``POST /mcp/messages/`` posts into it. Session state
+lives in memory, so this transport requires the dedicated single-worker
+process on :8001 (see mcp_entrypoint.py) fronted by mcp_proxy.py.
+
+Client configuration (preferred)::
 
     {
       "mcpServers": {
         "mindrouter": {
-          "type": "sse",
-          "url": "https://mindrouter.uidaho.edu/mcp/sse",
+          "type": "http",
+          "url": "https://mindrouter.uidaho.edu/mcp",
           "headers": {
             "Authorization": "Bearer mr2_your_key_here"
           }
         }
       }
     }
+
+Legacy clients that cannot speak Streamable HTTP may still use
+``"type": "sse"`` against ``https://mindrouter.uidaho.edu/mcp/sse``.
 """
 
 import contextvars
@@ -47,9 +56,11 @@ from starlette.routing import Mount, Route
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from backend.app.db.session import get_async_db_context
 from backend.app.logging_config import get_logger
+from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
 
@@ -177,6 +188,12 @@ async def web_search(query: str, max_results: Optional[int] = 5) -> str:
         return "\n".join(lines)
 
 
+_MISSING_KEY_ERROR = (
+    "Missing API key. Provide via "
+    "'Authorization: Bearer <key>' or 'X-API-Key: <key>' header."
+)
+
+
 def _extract_api_key(request: Request) -> Optional[str]:
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
@@ -184,34 +201,76 @@ def _extract_api_key(request: Request) -> Optional[str]:
     return request.headers.get("x-api-key")
 
 
-async def _handle_sse(request: Request) -> Response:
-    """SSE connection endpoint with MindRouter API key authentication."""
+async def _resolve_auth(api_key_str: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
+    """Verify a MindRouter API key.
+
+    Returns ``(auth, None)`` on success or ``(None, error_message)`` on
+    rejection. Shared by both transports so they cannot drift apart.
+    """
     from backend.app.security.api_keys import api_key_rejection_reason, verify_api_key
 
-    api_key_str = _extract_api_key(request)
     if not api_key_str:
-        return JSONResponse(
-            {
-                "error": (
-                    "Missing API key. Provide via "
-                    "'Authorization: Bearer <key>' or 'X-API-Key: <key>' header."
-                )
-            },
-            status_code=401,
-        )
+        return None, _MISSING_KEY_ERROR
 
     async with get_async_db_context() as db:
         api_key = await verify_api_key(db, api_key_str)
         if not api_key:
-            return JSONResponse({"error": "Invalid API key"}, status_code=401)
+            return None, "Invalid API key"
         # Shared post-verify gate: rejects revoked, expired, and
         # inactive/deleted-user keys — same checks as authenticate_request
         reason = api_key_rejection_reason(api_key)
         if reason:
-            return JSONResponse({"error": reason}, status_code=401)
-        user = api_key.user
-        _auth_info.set({"user_id": user.id, "api_key_id": api_key.id})
-        logger.info("mcp_sse_connect", user_id=user.id)
+            return None, reason
+        # Read ids inside the session — the instance is detached on exit.
+        return {"user_id": api_key.user.id, "api_key_id": api_key.id}, None
+
+
+class StreamableHTTPEndpoint:
+    """ASGI endpoint for the Streamable HTTP transport at ``POST /mcp``.
+
+    ``StreamableHTTPSessionManager`` performs no authentication of its own, so
+    every request is authenticated here before the scope is handed to the SDK
+    — unlike the legacy SSE path, which can only authenticate at connect time.
+
+    This is an ASGI app rather than a Starlette endpoint function on purpose:
+    Starlette wraps plain functions in ``request_response()``, which would
+    consume the body and defeat the streaming response. Registering it as
+    ``Route("/mcp", endpoint=<instance>)`` also serves the canonical path with
+    no trailing slash — a ``Mount`` would 307-redirect ``POST /mcp`` to
+    ``/mcp/``, which not every client follows on a POST.
+    """
+
+    def __init__(self, session_manager: StreamableHTTPSessionManager) -> None:
+        self._session_manager = session_manager
+
+    async def __call__(self, scope, receive, send) -> None:
+        # Header-only access; the body is left for the session manager.
+        request = Request(scope, receive)
+        auth, error = await _resolve_auth(_extract_api_key(request))
+        if error:
+            await JSONResponse({"error": error}, status_code=401)(scope, receive, send)
+            return
+
+        # Set per-request so the tool can read it. Verified to propagate into
+        # the tool under stateless=True (the SDK spawns the server task from
+        # this request's context) with no bleed between concurrent requests.
+        _auth_info.set(auth)
+        logger.info(
+            "mcp_streamable_request",
+            user_id=auth["user_id"],
+            method=scope.get("method"),
+        )
+        await self._session_manager.handle_request(scope, receive, send)
+
+
+async def _handle_sse(request: Request) -> Response:
+    """Legacy SSE connection endpoint with MindRouter API key authentication."""
+    auth, error = await _resolve_auth(_extract_api_key(request))
+    if error:
+        return JSONResponse({"error": error}, status_code=401)
+
+    _auth_info.set(auth)
+    logger.info("mcp_sse_connect", user_id=auth["user_id"])
 
     async with sse_transport.connect_sse(
         request.scope, request.receive, request._send
@@ -230,3 +289,36 @@ mcp_app = Starlette(
         Mount("/messages", app=sse_transport.handle_post_message),
     ],
 )
+
+
+# --- Streamable HTTP (current transport) ------------------------------------
+#
+# stateless=True gives every request its own transport, so there is no
+# server-side session to pin a client to. That is what lets this transport be
+# served from the main multi-worker app instead of the dedicated :8001 process
+# the legacy SSE transport needs. Trading it for stateful sessions would buy
+# resumable streams (with an event_store) at the cost of bringing session
+# affinity back — and would also break per-request auth, because the server
+# task is then spawned once per session and the auth contextvar would freeze
+# at whoever opened it.
+streamable_session_manager = StreamableHTTPSessionManager(
+    app=mcp._mcp_server,
+    event_store=None,  # no resumability in stateless mode
+    json_response=get_settings().mcp_streamable_json_response,
+    stateless=True,
+)
+
+streamable_endpoint = StreamableHTTPEndpoint(streamable_session_manager)
+
+
+def streamable_http_route(path: str = "/mcp") -> Route:
+    """Build the route to register on the main app.
+
+    DELETE is part of the spec (session termination); it is a no-op under
+    stateless=True but is accepted so clients do not see a 405.
+    """
+    return Route(
+        path,
+        endpoint=streamable_endpoint,
+        methods=["POST", "GET", "DELETE"],
+    )

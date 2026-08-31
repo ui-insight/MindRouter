@@ -6,7 +6,7 @@ Tools, skills, and servers that let AI coding agents and agentic systems use Min
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **Hosted MCP Server** | *(built into MindRouter)* | Server-side SSE MCP endpoint — no local setup needed |
+| **Hosted MCP Server** | *(built into MindRouter)* | Streamable HTTP MCP endpoint — no local setup needed |
 | **Local MCP Server** | [`mcp/`](mcp/) | [Model Context Protocol](https://modelcontextprotocol.io/) stdio server for local use |
 | **Agent Skills** | [`skills/`](skills/) | Markdown-based skill definitions for AI coding agents |
 
@@ -18,7 +18,7 @@ Tools, skills, and servers that let AI coding agents and agentic systems use Min
 
 ### Option 1: Hosted MCP Server (Recommended)
 
-Connect directly to MindRouter's built-in MCP endpoint over SSE. No Python, no dependencies, no local processes.
+Connect directly to MindRouter's built-in MCP endpoint. No Python, no dependencies, no local processes.
 
 Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
 
@@ -26,8 +26,8 @@ Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
 {
   "mcpServers": {
     "mindrouter": {
-      "type": "sse",
-      "url": "https://mindrouter.uidaho.edu/mcp/sse",
+      "type": "http",
+      "url": "https://mindrouter.uidaho.edu/mcp",
       "headers": {
         "Authorization": "Bearer mr2_your_key_here"
       }
@@ -39,10 +39,15 @@ Add to your MCP client config (`.mcp.json`, `.cursor/mcp.json`, etc.):
 Or via Claude Code CLI:
 
 ```bash
-claude mcp add --transport sse \
+claude mcp add --transport http \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter https://mindrouter.uidaho.edu/mcp/sse
+  mindrouter https://mindrouter.uidaho.edu/mcp
 ```
+
+> **Legacy SSE endpoint.** The deprecated HTTP+SSE transport is still served at
+> `https://mindrouter.uidaho.edu/mcp/sse` (`--transport sse`, `"type": "sse"`)
+> for older clients, and will be removed in a future release. See
+> [`mcp/README.md`](mcp/README.md).
 
 ### Option 2: Local MCP Server (stdio)
 

@@ -504,12 +504,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         from backend.app.services.video_runner import run_video_runner_loop
         _video_task = asyncio.create_task(run_video_runner_loop())
 
+    # The Streamable HTTP session manager owns the task group that runs each
+    # request's MCP server task, so it must be running for POST /mcp to work.
+    # run() may only be called once per instance.
+    _mcp_stack = None
+    if get_settings().mcp_streamable_enabled:
+        try:
+            from contextlib import AsyncExitStack
+            from backend.app.api.mcp_server import streamable_session_manager
+            _mcp_stack = AsyncExitStack()
+            await _mcp_stack.enter_async_context(streamable_session_manager.run())
+            logger.info("mcp_streamable_started", path="/mcp")
+        except Exception:
+            logger.exception("mcp_streamable_start_failed")
+            _mcp_stack = None
+
     logger.info("MindRouter started successfully")
 
     yield
 
     # Shutdown
     logger.info("Shutting down MindRouter...")
+    if _mcp_stack is not None:
+        try:
+            await _mcp_stack.aclose()
+        except Exception:
+            logger.exception("mcp_streamable_stop_failed")
     if _cleanup_task:
         _cleanup_task.cancel()
         try:
@@ -744,8 +764,23 @@ def create_app() -> FastAPI:
     app.include_router(email_router)
     app.include_router(dlp_router)
     app.include_router(apps_admin_router)
-    # Proxy /mcp/* to the standalone MCP service (single-worker process
-    # that avoids SseServerTransport session-affinity issues).
+    # MCP transports. Order matters: the exact-path /mcp route for the modern
+    # Streamable HTTP transport must be registered BEFORE the catch-all proxy
+    # mount below, because Starlette matches routes in order and the mount
+    # would otherwise swallow /mcp and forward it to :8001.
+    #
+    # Streamable HTTP is stateless, so it is served here in the main
+    # multi-worker app — no session affinity, no proxy hop.
+    if get_settings().mcp_streamable_enabled:
+        try:
+            from backend.app.api.mcp_server import streamable_http_route
+            app.router.routes.append(streamable_http_route("/mcp"))
+        except Exception:
+            logger.exception("mcp_streamable_mount_failed")
+
+    # Legacy: proxy /mcp/sse and /mcp/messages/ to the standalone MCP service
+    # (single-worker process that avoids SseServerTransport session-affinity
+    # issues). Deprecated — remove once clients have moved to POST /mcp.
     try:
         from backend.app.api.mcp_proxy import mcp_proxy_app
         app.mount("/mcp", mcp_proxy_app)

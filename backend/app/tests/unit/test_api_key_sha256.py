@@ -343,11 +343,25 @@ class TestCallerEnforcement:
     def test_all_gap_sites_invoke_rejection_predicate(self):
         # Every verify_api_key caller outside authenticate_request must apply
         # the same gate — the fast path's safety argument depends on it.
+        # Both MCP transports share one authenticator, _resolve_auth, so the
+        # gate is asserted there — and then that neither transport can reach
+        # the tools without going through it.
         mcp = (_APP_DIR / "api" / "mcp_server.py").read_text()
-        body = mcp[mcp.index("async def _handle_sse"):]
+        body = mcp[mcp.index("async def _resolve_auth"):]
+        body = body[: body.index("\nclass StreamableHTTPEndpoint")]
         assert (
             body.index("api_key_rejection_reason(api_key)")
             > body.index("await verify_api_key(db, api_key_str)")
+        )
+        # Legacy SSE transport
+        sse = mcp[mcp.index("async def _handle_sse"):]
+        assert "_resolve_auth(" in sse[: sse.index("connect_sse")]
+        # Streamable HTTP transport: authenticated before the SDK sees the scope
+        streamable = mcp[mcp.index("class StreamableHTTPEndpoint"):]
+        streamable = streamable[: streamable.index("async def _handle_sse")]
+        assert (
+            streamable.index("_resolve_auth(")
+            < streamable.index("handle_request(scope, receive, send)")
         )
         auth_src = (_APP_DIR / "api" / "auth.py").read_text()
         for fn in ("def require_admin_or_session", "def require_admin_read_or_session"):
