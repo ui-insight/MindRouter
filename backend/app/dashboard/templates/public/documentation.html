@@ -165,7 +165,9 @@
 
 MCP Client (Claude Code, Cursor, etc.)
         |
-        v  SSE transport
+        +--&gt; Streamable HTTP  &rarr; POST /mcp (stateless, served by the main app)
+        |
+        v  SSE transport (legacy)
 +-----------------------------+
 |    MCP Server Container     |  &larr; /mcp/sse (dedicated single-worker process)
 +-----------------------------+
@@ -179,7 +181,7 @@ MCP Client (Claude Code, Cursor, etc.)
                 <ul>
                     <li>A <strong>Node</strong> is a physical GPU server running a sidecar agent.</li>
                     <li>A <strong>Backend</strong> is an inference endpoint (Ollama or vLLM instance) running on a node. Multiple backends can share a node, each assigned specific GPUs via <code>gpu_indices</code>.</li>
-                    <li>The <strong>MCP Server</strong> runs as a separate single-worker container, exposing MindRouter tools (e.g., web search) to MCP-compatible agents over SSE transport. The main app proxies <code>/mcp/*</code> requests to this container.</li>
+                    <li>The <strong>MCP Server</strong> exposes MindRouter tools (e.g., web search) to MCP-compatible agents. The current <strong>Streamable HTTP</strong> transport is stateless and served directly by the main multi-worker app at <code>POST /mcp</code>. The deprecated <strong>HTTP+SSE</strong> transport needs session affinity, so it runs in a separate single-worker container that the main app proxies <code>/mcp/sse</code> and <code>/mcp/messages/</code> to.</li>
                 </ul>
             </section>
 
@@ -2126,13 +2128,13 @@ for r in results:
                             <td><strong>Web Search</strong></td>
                             <td><code>web_search</code></td>
                             <td>Search the web via MindRouter (Brave Search / SearXNG)</td>
-                            <td><code>/mcp/sse</code></td>
+                            <td><code>/mcp</code></td>
                             <td><a href="https://github.com/ui-insight/MindRouter/tree/main/agentic_ai/mcp/search" target="_blank"><code>agentic_ai/mcp/search/</code></a></td>
                         </tr>
                     </tbody>
                 </table>
 
-                <h3>Option 1: Hosted SSE Server (Recommended)</h3>
+                <h3>Option 1: Hosted Server (Recommended)</h3>
                 <p>The simplest way to connect. MindRouter hosts the MCP server &mdash; no Python, no dependencies, no local processes. Just add a few lines to your MCP client config.</p>
 
                 <h4>1. Get your API key</h4>
@@ -2143,8 +2145,8 @@ for r in results:
 <pre><code>{
   "mcpServers": {
     "mindrouter": {
-      "type": "sse",
-      "url": "https://mindrouter.uidaho.edu/mcp/sse",
+      "type": "http",
+      "url": "https://mindrouter.uidaho.edu/mcp",
       "headers": {
         "Authorization": "Bearer mr2_your_key_here"
       }
@@ -2152,9 +2154,15 @@ for r in results:
   }
 }</code></pre>
                 <p>Or in Claude Code via CLI:</p>
-<pre><code>claude mcp add --transport sse \
+<pre><code>claude mcp add --transport http \
   -H "Authorization: Bearer mr2_your_key_here" \
-  mindrouter https://mindrouter.uidaho.edu/mcp/sse</code></pre>
+  mindrouter https://mindrouter.uidaho.edu/mcp</code></pre>
+
+                <p><strong>Legacy SSE endpoint (deprecated).</strong> Clients that
+                cannot speak Streamable HTTP may still use <code>"type": "sse"</code>
+                against <code>https://mindrouter.uidaho.edu/mcp/sse</code>. That
+                transport is deprecated by the MCP specification and will be removed
+                in a future release &mdash; please migrate to <code>/mcp</code>.</p>
 
                 <h4>3. Verify</h4>
                 <p>In Claude Code, run <code>/mcp</code> to confirm the connection and the <code>web_search</code> tool is listed. In other clients, check your MCP server status panel.</p>
@@ -2174,6 +2182,11 @@ for r in results:
 
                 <h4>3. Configure</h4>
                 <p>Enter your MindRouter API key when prompted. The server URL defaults to <code>https://mindrouter.uidaho.edu/mcp/sse</code> &mdash; change it only if you run your own MindRouter instance.</p>
+
+                <p><em>Note:</em> the desktop extension still bridges over the legacy
+                SSE transport. It continues to work for the duration of the
+                deprecation window and will be migrated to <code>/mcp</code> in a
+                future release.</p>
 
                 <div class="alert alert-info mb-3">
                     <strong>How it works:</strong> The extension runs a lightweight bridge script (bundled inside the <code>.mcpb</code>) that connects to MindRouter&rsquo;s hosted SSE server and translates it to the stdio transport that Claude Desktop expects. Claude Desktop provides the Node.js runtime &mdash; no local installation required.

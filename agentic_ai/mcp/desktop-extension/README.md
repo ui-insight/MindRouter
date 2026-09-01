@@ -21,6 +21,12 @@ Bridges Claude Desktop to MindRouter's SSE MCP server via stdio transport. Provi
 | **API Key** | *(required)* | Your MindRouter API key (`mr2_...`) |
 | **Server URL** | `https://mindrouter.uidaho.edu/mcp/sse` | MCP SSE endpoint. Change if you run your own MindRouter instance. |
 
+> **Transport note.** This extension bridges over the **legacy HTTP+SSE**
+> transport (`/mcp/sse`). MindRouter also serves the current Streamable HTTP
+> transport at `POST /mcp`; MCP clients that speak it natively should use that
+> instead and skip this extension entirely. The extension keeps working for the
+> duration of the deprecation window and is slated for migration.
+
 ## Rebuilding
 
 From this directory:

@@ -61,8 +61,16 @@ class Settings(BaseSettings):
     debug: bool = False
     reload: bool = False
 
-    # MCP server (standalone single-worker process)
+    # MCP server (standalone single-worker process, legacy SSE transport only)
     mcp_server_url: str = "http://127.0.0.1:8001"
+
+    # Streamable HTTP transport (POST /mcp), served from the main app.
+    # Kill switch: turning this off leaves only the legacy /mcp/sse path.
+    mcp_streamable_enabled: bool = True
+    # False = SSE framing inside the POST response (spec default).
+    # True = a single application/json body. Flip to True if the fronting
+    # Apache proxy is found to buffer the streamed response.
+    mcp_streamable_json_response: bool = False
 
     # Database
     database_url: str = Field(

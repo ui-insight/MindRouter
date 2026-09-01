@@ -12,11 +12,17 @@
 #
 ############################################################
 
-"""Reverse proxy that forwards /mcp/* requests to the standalone MCP service.
+"""Reverse proxy that forwards legacy /mcp/* requests to the standalone MCP service.
 
-The MCP SSE server runs as a separate single-worker process (port 8001)
-to avoid session-affinity issues with multi-worker uvicorn. This proxy
-preserves the public URL at /mcp/sse while routing to that service.
+The deprecated HTTP+SSE transport keeps session state in memory, so it runs as
+a separate single-worker process (port 8001) to avoid session-affinity issues
+with multi-worker uvicorn. This proxy preserves the public URL at /mcp/sse
+while routing to that service.
+
+The current Streamable HTTP transport does NOT come through here: it is
+stateless and is served directly by the main app at POST /mcp (registered
+ahead of this mount in main.py). Anything that reaches this proxy is legacy
+traffic.
 """
 
 import httpx
@@ -71,16 +77,37 @@ async def _proxy(request: Request) -> Response:
         )
 
     body = await request.body()
-    resp = await client.request(
-        method=request.method,
-        url=target_url,
-        headers=headers,
-        content=body,
+    req = client.build_request(
+        request.method, target_url, headers=headers, content=body
     )
+    upstream = await client.send(req, stream=True)
+
+    # A POST whose response is an SSE stream must not be buffered: reading
+    # .content here would hold the whole stream until the upstream closed it.
+    # The legacy transport does not answer POSTs this way today, but streaming
+    # the response costs nothing and removes the trap if it ever does.
+    if "text/event-stream" in upstream.headers.get("content-type", ""):
+        resp_headers = dict(upstream.headers)
+        resp_headers["Cache-Control"] = "no-cache, no-store"
+        resp_headers["X-Accel-Buffering"] = "no"
+        resp_headers.pop("content-length", None)
+        resp_headers.pop("Content-Length", None)
+        return StreamingResponse(
+            upstream.aiter_raw(),
+            status_code=upstream.status_code,
+            headers=resp_headers,
+            media_type="text/event-stream",
+            background=upstream.aclose,
+        )
+
+    try:
+        content = await upstream.aread()
+    finally:
+        await upstream.aclose()
     return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers=dict(resp.headers),
+        content=content,
+        status_code=upstream.status_code,
+        headers=dict(upstream.headers),
     )
 
 
