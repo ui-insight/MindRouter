@@ -40,6 +40,7 @@ from backend.app.db import crud
 from backend.app.db.models import ApiKey, BackendEngine, Modality, RequestStatus, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
+from backend.app.services.image_policy import CATEGORY_OK
 from backend.app.services.inference import InferenceService, count_request_text_chars
 from backend.app.settings import get_settings
 
@@ -1086,11 +1087,6 @@ async def image_edits(
     response = await service.image_generation(canonical, user, api_key, request)
     return response
 
-
-# Verdict categories for the moderations extension field. Imported at module
-# scope (not lazily) because the no-policy early return needs it before any
-# judge import happens.
-from backend.app.services.image_policy import CATEGORY_OK
 
 _MODERATION_MAX_INPUT = 10_000
 _MODERATION_MAX_INPUTS = 4
