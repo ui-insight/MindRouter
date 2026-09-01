@@ -338,6 +338,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/ocrmd</code></td><td>API Key</td><td>Same OCR pipeline as <code>/v1/ocr</code>, returns raw <code>text/markdown</code></td></tr>
                         <tr><td>POST</td><td><code>/v1/search</code></td><td>API Key</td><td><a href="#web-search">Web search</a> via the configured provider (also served at <code>/api/search</code>)</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/generations</code></td><td>API Key</td><td><a href="#image-generation">Image generation</a> (diffusion models; requires per-account enablement)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/images/edits</code></td><td>API Key</td><td><a href="#image-editing">Image editing</a> (img2img / reference edit; <code>multipart/form-data</code>)</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/edits</code></td><td>API Key</td><td><a href="#image-edits">Image-to-image / reference edit</a> (multipart)</td></tr>
                         <tr><td>POST</td><td><code>/v1/moderations</code></td><td>API Key</td><td>Check text against the image content policy without generating, in the <strong>standard OpenAI moderations shape</strong> &mdash; <code>moderations.create()</code> parses it. <code>input</code> accepts a string or up to 4 strings; a policy violation reports <code>flagged: true</code> with the explanation in the <code>policy_reason</code> extension field (the OpenAI category booleans are always false &mdash; verdicts come from the institutional policy, not that taxonomy). MindRouter extension <code>context: "prompt"|"edit"</code> selects the edit-aware judge template (pass via <code>extra_body</code> in the SDK). Rate-limited and recorded like other endpoints.</td></tr>
                         <tr><td>POST</td><td><code>/v1/videos</code></td><td>API Key</td><td><a href="#video-generation">Video generation</a> (async; text-to-video + keyframe conditioning)</td></tr>
@@ -636,6 +637,19 @@ max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
     {"b64_json": "&lt;base64-encoded PNG&gt;"}
   ]
 }</code></pre>
+
+                <h4 id="image-editing">Editing an existing image (img2img / reference edit)</h4>
+                <p><code>POST /v1/images/generations</code> is <strong>stateless text-to-image</strong>: every call starts from scratch and has no memory of any image generated before it. A follow-up like <em>&ldquo;make it red&rdquo;</em> or <em>&ldquo;the same image, unchanged&rdquo;</em> sent to that endpoint has nothing to act on and will be rejected as an unclear prompt (<code>prompt_unclear</code>).</p>
+
+                <p>To change an existing image, send it to <code>POST /v1/images/edits</code> as <code>multipart/form-data</code>, with the source image in the <code>image</code> field (up to 4 reference images). FLUX.2 Klein edits are structure-preserving.</p>
+
+                <pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/images/edits \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -F image=@poster.png \
+  -F prompt="the same image, in portrait orientation" \
+  -F size=880x1184</code></pre>
+
+                <p>The content-policy judge is told when a request is an edit, so deictic phrasing (&ldquo;this man&rdquo;, &ldquo;their shirt&rdquo;) is expected there and is not treated as ambiguity &mdash; another reason to use this endpoint rather than describing an edit to the generations endpoint.</p>
 
                 <h5>SDK Usage (Python)</h5>
                 <pre><code>import base64

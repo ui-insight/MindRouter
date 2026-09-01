@@ -788,6 +788,29 @@ async def _prepare_image_canonical(
         )
 
         if not policy_verdict.passed:
+            # An UNCLEAR verdict means the prompt was not judged unsafe, only
+            # unusable as an image description — most often a follow-up like
+            # "make it red" or "the same image, unchanged" aimed at an image
+            # the caller believes is in play. Text-to-image is stateless: each
+            # call starts fresh and carries no previous image. Report that as
+            # a request problem the caller can act on, not a policy violation.
+            unclear = getattr(policy_verdict, "is_unclear", False)
+            if unclear:
+                from backend.app.services.image_policy import looks_like_edit_instruction
+
+                if not images_b64 and looks_like_edit_instruction(prompt):
+                    guidance = (
+                        "This looks like an instruction to change an existing image, "
+                        "but no source image was provided and image generation does not "
+                        "remember previous images. Describe the complete image you want, "
+                        "or send the source image to /v1/images/edits to edit it."
+                    )
+                else:
+                    guidance = (
+                        "This prompt does not describe an image to generate. "
+                        "Describe the complete image you want."
+                    )
+
             # Record the denied request for auditing
             denied_req = await crud.create_request(
                 db=db,
@@ -810,9 +833,25 @@ async def _prepare_image_canonical(
                 user_agent=request.headers.get("user-agent"),
             )
             denied_req.status = RequestStatus.FAILED
-            denied_req.error_message = f"Policy violation: {policy_verdict.reason}"
-            denied_req.error_code = "policy_violation"
+            if unclear:
+                denied_req.error_message = f"Unclear prompt: {policy_verdict.reason}"
+                denied_req.error_code = "prompt_unclear"
+            else:
+                denied_req.error_message = f"Policy violation: {policy_verdict.reason}"
+                denied_req.error_code = "policy_violation"
             await db.commit()
+
+            if unclear:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": {
+                            "message": guidance,
+                            "type": "invalid_request_error",
+                            "code": "prompt_unclear",
+                        }
+                    },
+                )
 
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
