@@ -340,9 +340,8 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/ocrmd</code></td><td>API Key</td><td>Same OCR pipeline as <code>/v1/ocr</code>, returns raw <code>text/markdown</code></td></tr>
                         <tr><td>POST</td><td><code>/v1/search</code></td><td>API Key</td><td><a href="#web-search">Web search</a> via the configured provider (also served at <code>/api/search</code>)</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/generations</code></td><td>API Key</td><td><a href="#image-generation">Image generation</a> (diffusion models; requires per-account enablement)</td></tr>
-                        <tr><td>POST</td><td><code>/v1/images/edits</code></td><td>API Key</td><td><a href="#image-editing">Image editing</a> (img2img / reference edit; <code>multipart/form-data</code>)</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/edits</code></td><td>API Key</td><td><a href="#image-edits">Image-to-image / reference edit</a> (multipart)</td></tr>
-                        <tr><td>POST</td><td><code>/v1/moderations</code></td><td>API Key</td><td>Check text against the image content policy without generating, in the <strong>standard OpenAI moderations shape</strong> &mdash; <code>moderations.create()</code> parses it. <code>input</code> accepts a string or up to 4 strings; a policy violation reports <code>flagged: true</code> with the explanation in the <code>policy_reason</code> extension field (the OpenAI category booleans are always false &mdash; verdicts come from the institutional policy, not that taxonomy). MindRouter extension <code>context: "prompt"|"edit"</code> selects the edit-aware judge template (pass via <code>extra_body</code> in the SDK). Rate-limited and recorded like other endpoints.</td></tr>
+                        <tr><td>POST</td><td><code>/v1/moderations</code></td><td>API Key</td><td>Check text against the image content policy without generating, in the <strong>standard OpenAI moderations shape</strong> &mdash; <code>moderations.create()</code> parses it. <code>input</code> accepts a string or up to 4 strings; a rejected input reports <code>flagged: true</code> with the explanation in the <code>policy_reason</code> extension field (the OpenAI category booleans are always false &mdash; verdicts come from the institutional policy, not that taxonomy). The <code>policy_category</code> extension field distinguishes <code>"policy"</code> (a real content violation) from <code>"unclear"</code> (the input is simply not a usable image description, e.g. a follow-up like &ldquo;make it red&rdquo;) &mdash; both are flagged, but only the first should be shown to a user as a policy problem. MindRouter extension <code>context: "prompt"|"edit"</code> selects the edit-aware judge template (pass via <code>extra_body</code> in the SDK). Rate-limited and recorded like other endpoints.</td></tr>
                         <tr><td>POST</td><td><code>/v1/videos</code></td><td>API Key</td><td><a href="#video-generation">Video generation</a> (async; text-to-video + keyframe conditioning)</td></tr>
                         <tr><td>POST</td><td><code>/v1/videos/assets</code></td><td>API Key</td><td>Upload a keyframe image for image-guided video</td></tr>
                         <tr><td>GET</td><td><code>/v1/videos/{id}</code></td><td>API Key</td><td>Poll a video job; <code>/content</code> downloads the MP4</td></tr>
@@ -640,19 +639,6 @@ max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
   ]
 }</code></pre>
 
-                <h4 id="image-editing">Editing an existing image (img2img / reference edit)</h4>
-                <p><code>POST /v1/images/generations</code> is <strong>stateless text-to-image</strong>: every call starts from scratch and has no memory of any image generated before it. A follow-up like <em>&ldquo;make it red&rdquo;</em> or <em>&ldquo;the same image, unchanged&rdquo;</em> sent to that endpoint has nothing to act on and will be rejected as an unclear prompt (<code>prompt_unclear</code>).</p>
-
-                <p>To change an existing image, send it to <code>POST /v1/images/edits</code> as <code>multipart/form-data</code>, with the source image in the <code>image</code> field (up to 4 reference images). FLUX.2 Klein edits are structure-preserving.</p>
-
-                <pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/images/edits \
-  -H "Authorization: Bearer mr2_your-api-key" \
-  -F image=@poster.png \
-  -F prompt="the same image, in portrait orientation" \
-  -F size=880x1184</code></pre>
-
-                <p>The content-policy judge is told when a request is an edit, so deictic phrasing (&ldquo;this man&rdquo;, &ldquo;their shirt&rdquo;) is expected there and is not treated as ambiguity &mdash; another reason to use this endpoint rather than describing an edit to the generations endpoint.</p>
-
                 <h5>SDK Usage (Python)</h5>
                 <pre><code>import base64
 from openai import OpenAI
@@ -674,7 +660,9 @@ with open("idaho.png", "wb") as f:
                 <p>If you want server-side persistence with browsable history, use the <a href="/images">/images</a> dashboard playground instead &mdash; its save/history features store images on the server, but they apply only to images generated through that page, not through the API.</p>
 
                 <h5>Content Policy</h5>
-                <p>When an administrator has configured an image content policy, every prompt is screened by an LLM judge <em>before</em> generation. Denied prompts return <code>400</code> with the OpenAI error envelope:</p>
+                <p>When an administrator has configured an image content policy, every prompt is screened by an LLM judge <em>before</em> generation. The judge returns one of three verdicts, and the two failing ones are reported differently &mdash; they mean different things and call for different action:</p>
+
+                <p><strong>1. Policy violation.</strong> The prompt would produce content the policy forbids. Returns <code>400</code>:</p>
                 <pre><code>{
   "error": {
     "message": "Your image request was denied by content policy: &lt;reason&gt;",
@@ -682,12 +670,23 @@ with open("idaho.png", "wb") as f:
     "code": "policy_violation"
   }
 }</code></pre>
-                <p>Denied requests are recorded in the audit log with the judge's verdict. The <a href="/images">/images</a> playground offers a pre-flight policy check so you can test a prompt without spending a generation.</p>
+
+                <p><strong>2. Unclear prompt.</strong> The text is not a usable image description at all &mdash; a conversational reply (<em>&ldquo;Try again.&rdquo;</em>), or a follow-up aimed at an image the caller believes is in play (<em>&ldquo;make it red&rdquo;</em>, <em>&ldquo;the same image, unchanged&rdquo;</em>). This is <strong>not</strong> a safety finding: nothing objectionable was requested. Returns <code>400</code>:</p>
+                <pre><code>{
+  "error": {
+    "message": "&lt;what to do instead&gt;",
+    "type": "invalid_request_error",
+    "code": "prompt_unclear"
+  }
+}</code></pre>
+                <p>The most common cause is treating image generation as a conversation. <code>POST /v1/images/generations</code> is <strong>stateless</strong>: every call starts from scratch and has no memory of any image generated before it, so a follow-up has nothing to act on. Either describe the complete image you want, or &mdash; to change an existing image &mdash; send that image to <a href="#image-edits"><code>POST /v1/images/edits</code></a>, where deictic phrasing is expected and is not treated as ambiguity.</p>
+
+                <p>Both outcomes deny generation and are recorded in the audit log with the judge's verdict, under distinct <code>error_code</code> values (<code>policy_violation</code> and <code>prompt_unclear</code>) so the two are not conflated. The <a href="/images">/images</a> playground offers a pre-flight policy check so you can test a prompt without spending a generation.</p>
 
                 <h5>Server-Side Guardrails</h5>
                 <p>Administrators configure defaults and limits that are applied to every request (values above a cap are clamped, not rejected, except for <code>size</code>): default model, default/maximum inference steps, default guidance scale, maximum image count per request, allowed sizes, and maximum dimensions.</p>
 
-                <p><strong>Error summary:</strong> <code>400</code> missing prompt / disallowed size / dimensions over limit / policy denial &middot; <code>403</code> image generation not enabled for your account &middot; <code>404</code> unknown model &middot; <code>429</code> rate limit &middot; <code>503</code> image generation disabled or no healthy diffusion backend.</p>
+                <p><strong>Error summary:</strong> <code>400</code> missing prompt / disallowed size / dimensions over limit / policy denial (<code>policy_violation</code>) / unusable prompt (<code>prompt_unclear</code>) &middot; <code>403</code> image generation not enabled for your account &middot; <code>404</code> unknown model &middot; <code>429</code> rate limit &middot; <code>503</code> image generation disabled or no healthy diffusion backend.</p>
                 <p><strong>Notes:</strong> generation is slow relative to chat (tens of seconds for high step counts &mdash; the gateway allows up to 5 minutes per attempt); request IDs use the <code>img-*</code> prefix; standard RPM rate limits apply.</p>
 
                 <h5 id="image-edits">Image-to-Image (Reference Edits)</h5>
