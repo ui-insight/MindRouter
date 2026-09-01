@@ -40,6 +40,7 @@ from backend.app.db import crud
 from backend.app.db.models import ApiKey, BackendEngine, Modality, RequestStatus, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
+from backend.app.services.image_policy import CATEGORY_OK
 from backend.app.services.inference import InferenceService, count_request_text_chars
 from backend.app.settings import get_settings
 
@@ -1103,11 +1104,21 @@ _MODERATION_CATEGORIES = (
 )
 
 
-def _moderation_result(flagged: bool, reason: str, judge_model: str) -> Dict[str, Any]:
+def _moderation_result(
+    flagged: bool, reason: str, judge_model: str, category: str = ""
+) -> Dict[str, Any]:
     """One OpenAI-shaped moderation result + MindRouter extension fields.
 
-    openai-python preserves unknown fields (model_extra), so policy_reason
-    and judge_model survive SDK parsing — verified against openai 2.45.0.
+    openai-python preserves unknown fields (model_extra), so policy_reason,
+    judge_model and policy_category survive SDK parsing — verified against
+    openai 2.45.0.
+
+    `flagged` keeps its OpenAI meaning of "this input was not approved", so
+    callers using it as a gate behave unchanged. But not every rejection is a
+    safety finding: a prompt that is merely not an image description ("make it
+    red") is flagged too, and reporting that to a user as a content violation
+    is both wrong and unactionable. `policy_category` tells the two apart —
+    "policy" for a real violation, "unclear" for an unusable prompt.
     """
     return {
         "flagged": flagged,
@@ -1116,6 +1127,7 @@ def _moderation_result(flagged: bool, reason: str, judge_model: str) -> Dict[str
         "category_applied_input_types": {c: [] for c in _MODERATION_CATEGORIES},
         "policy_reason": reason,
         "judge_model": judge_model,
+        "policy_category": category,
     }
 
 
@@ -1204,7 +1216,8 @@ async def moderations(
             "id": request_id,
             "model": "",
             "results": [
-                _moderation_result(False, "No policy configured", "") for _ in inputs
+                _moderation_result(False, "No policy configured", "", CATEGORY_OK)
+                for _ in inputs
             ],
             "policy_configured": False,
         }
@@ -1254,7 +1267,7 @@ async def moderations(
         "id": request_id,
         "model": judged_model,
         "results": [
-            _moderation_result(not v.passed, v.reason, v.judge_model)
+            _moderation_result(not v.passed, v.reason, v.judge_model, v.category)
             for v in verdicts
         ],
         "policy_configured": True,

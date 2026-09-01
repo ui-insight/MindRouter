@@ -164,3 +164,85 @@ def test_unclear_message_points_at_the_edits_endpoint():
     assert "/v1/images/edits" in src
     # (the sentence wraps across source lines, so match a single-line fragment)
     assert "remember previous images" in src
+
+
+# --------------------------------------------------------------------------
+# /v1/moderations must not conflate the two either
+# --------------------------------------------------------------------------
+
+
+def test_moderations_result_exposes_the_category():
+    """VandalChat uses /v1/moderations as a pre-check; `flagged` alone cannot
+    tell "unsafe" from "not an image description"."""
+    from backend.app.api.v1_openai import _moderation_result
+
+    unclear = _moderation_result(True, "not an image", "judge", ip.CATEGORY_UNCLEAR)
+    violation = _moderation_result(True, "real person", "judge", ip.CATEGORY_POLICY)
+
+    # `flagged` keeps its OpenAI meaning so existing gates behave unchanged...
+    assert unclear["flagged"] is True and violation["flagged"] is True
+    # ...and the category is what tells them apart.
+    assert unclear["policy_category"] == ip.CATEGORY_UNCLEAR
+    assert violation["policy_category"] == ip.CATEGORY_POLICY
+
+
+def test_moderations_no_policy_path_is_ok_category():
+    from backend.app.api.v1_openai import _moderation_result
+
+    r = _moderation_result(False, "No policy configured", "", ip.CATEGORY_OK)
+    assert r["flagged"] is False
+    assert r["policy_category"] == ip.CATEGORY_OK
+
+
+def test_moderations_handler_forwards_the_verdict_category():
+    src = _source("api", "v1_openai.py")
+    assert "_moderation_result(not v.passed, v.reason, v.judge_model, v.category)" in src
+    # the no-policy early return is explicit, not relying on the default
+    assert "CATEGORY_OK)" in src
+
+
+def test_openai_shape_is_preserved():
+    """The extension field must not disturb the fields the SDK requires."""
+    from backend.app.api.v1_openai import _moderation_result, _MODERATION_CATEGORIES
+
+    r = _moderation_result(True, "x", "j", ip.CATEGORY_UNCLEAR)
+    for key in ("flagged", "categories", "category_scores", "category_applied_input_types"):
+        assert key in r
+    assert set(r["categories"]) == set(_MODERATION_CATEGORIES)
+    assert all(v is False for v in r["categories"].values())
+
+
+# --------------------------------------------------------------------------
+# Public documentation must describe what the API actually does
+# --------------------------------------------------------------------------
+
+
+def _docs():
+    import pathlib
+
+    return (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "dashboard" / "templates" / "public" / "documentation.html"
+    ).read_text()
+
+
+def test_docs_document_both_denial_envelopes():
+    d = _docs()
+    assert "prompt_unclear" in d
+    assert "policy_violation" in d
+    assert "invalid_request_error" in d
+    # and say plainly that the second is not a safety finding
+    assert "not</strong> a safety finding" in d or "not a safety finding" in d
+
+
+def test_docs_document_the_moderations_category_field():
+    assert "policy_category" in _docs()
+
+
+def test_docs_do_not_duplicate_the_image_edits_section():
+    """Regression: a second edits section/table row was added alongside the
+    pre-existing #image-edits one."""
+    d = _docs()
+    assert d.count('id="image-edits"') == 1
+    assert 'id="image-editing"' not in d
+    assert d.count("<code>/v1/images/edits</code></td>") == 1
