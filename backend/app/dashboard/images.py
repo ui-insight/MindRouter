@@ -292,6 +292,34 @@ async def images_api_generate(
                 is_edit=bool(body.get("image")),
             )
             if not verdict.passed:
+                # UNCLEAR = "that is not an image description", not "that is
+                # unsafe". Telling a user who typed "make it red" that they
+                # violated content policy is both wrong and unhelpful.
+                if getattr(verdict, "is_unclear", False):
+                    from backend.app.services.image_policy import looks_like_edit_instruction
+
+                    if not body.get("image") and looks_like_edit_instruction(body.get("prompt", "")):
+                        message = (
+                            "This looks like an instruction to change an existing image, "
+                            "but no source image was attached and image generation does not "
+                            "remember previous images. Describe the complete image you want, "
+                            "or attach the image you want to edit."
+                        )
+                    else:
+                        message = (
+                            "This prompt does not describe an image to generate. "
+                            "Describe the complete image you want."
+                        )
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "message": message,
+                                "type": "invalid_request_error",
+                                "code": "prompt_unclear",
+                            }
+                        },
+                    )
                 return JSONResponse(
                     status_code=400,
                     content={
