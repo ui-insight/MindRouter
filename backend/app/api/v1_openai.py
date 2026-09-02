@@ -799,7 +799,17 @@ async def _prepare_image_canonical(
             if unclear:
                 from backend.app.services.image_policy import looks_like_edit_instruction
 
-                if not images_b64 and looks_like_edit_instruction(prompt):
+                if images_b64:
+                    # An edit DID carry a source image, so the generation-worded
+                    # advice would be nonsense here. After the edit-path judge
+                    # note this branch is rare — it means the text named no
+                    # actionable change at all.
+                    guidance = (
+                        "Describe the change you would like to make to the image "
+                        "— for example, \"rotate 90 degrees clockwise\" or "
+                        "\"add a hat\"."
+                    )
+                elif looks_like_edit_instruction(prompt):
                     guidance = (
                         "This looks like an instruction to change an existing image, "
                         "but no source image was provided and image generation does not "

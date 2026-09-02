@@ -98,3 +98,55 @@ def test_injection_cannot_add_a_closing_delimiter_to_edit_template():
     )
     assert attacked.count("</PROMPT>") == benign.count("</PROMPT>")
     assert attacked.count("<PROMPT>") == benign.count("<PROMPT>")
+
+
+# ==========================================================================
+# Regression (2026-09-02): the edit note must override the UNCLEAR rule.
+#
+# 2.9.63 added a third judge verdict, UNCLEAR, whose rule asks "does this text
+# describe an image?". On the EDIT path that question is wrong: a pure
+# transformation instruction ("rotate 90 degrees clockwise", "make it
+# portrait") names no visual subject, so the judge returned UNCLEAR and the
+# gateway rejected legitimate edits with HTTP 400 prompt_unclear. Additive
+# edits ("add a hat") named new content and passed — exactly the split seen in
+# production. The note now overrides rule 4 for edits.
+# ==========================================================================
+
+
+def test_edit_note_overrides_the_unclear_rule():
+    note = ip._JUDGE_EDIT_NOTE
+    low = note.lower()
+    assert "overrides rule 4" in low
+    # An edit instruction is usable even when it describes no new content.
+    assert "never" in low and "unclear" in low
+    assert "instruction" in low
+
+
+def test_edit_note_names_geometric_and_format_changes():
+    """These are the cases that actually broke — no visual subject at all."""
+    low = ip._JUDGE_EDIT_NOTE.lower()
+    for phrase in ("rotate", "flip", "crop", "portrait", "landscape"):
+        assert phrase in low, phrase
+
+
+def test_edit_note_names_removal_as_actionable():
+    """phi-4 (the fallback judge) called 'remove the background' UNCLEAR until
+    the note said removal counts as an action."""
+    low = ip._JUDGE_EDIT_NOTE.lower()
+    assert "remov" in low
+    assert "action" in low
+
+
+def test_edit_note_still_reserves_unclear_for_non_instructions():
+    """The override must not make UNCLEAR unreachable on the edit path."""
+    low = ip._JUDGE_EDIT_NOTE.lower()
+    assert "only when" in low
+    assert "empty" in low or "greeting" in low
+
+
+def test_generation_template_is_untouched_by_the_edit_note():
+    """The note is injected only via the edit template, so the generation
+    path's UNCLEAR behaviour cannot regress."""
+    gen = ip._JUDGE_USER_TEMPLATE.format(prompt="make it red")
+    assert "overrides rule 4" not in gen.lower()
+    assert "rotate" not in gen.lower()

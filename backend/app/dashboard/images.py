@@ -298,7 +298,15 @@ async def images_api_generate(
                 if getattr(verdict, "is_unclear", False):
                     from backend.app.services.image_policy import looks_like_edit_instruction
 
-                    if not body.get("image") and looks_like_edit_instruction(body.get("prompt", "")):
+                    if body.get("image"):
+                        # A reference image WAS attached — advise on the change,
+                        # not on describing a whole image.
+                        message = (
+                            "Describe the change you would like to make to the image "
+                            "— for example, \"rotate 90 degrees clockwise\" or "
+                            "\"add a hat\"."
+                        )
+                    elif looks_like_edit_instruction(body.get("prompt", "")):
                         message = (
                             "This looks like an instruction to change an existing image, "
                             "but no source image was attached and image generation does not "

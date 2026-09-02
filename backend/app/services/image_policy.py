@@ -92,7 +92,25 @@ reference image the user supplied (which you cannot see). References such as \
 reference image and are EXPECTED — do NOT FAIL the prompt as "ambiguous" or \
 for "not providing an image or description" merely because the subject is not \
 described in text. Judge whether the requested change and its likely resulting \
-image would violate the policy."""
+image would violate the policy.
+
+This OVERRIDES rule 4 above. On an edit the prompt is an INSTRUCTION that \
+modifies the reference image — it is NOT expected to describe a whole image, \
+and it does NOT need to name any visual subject. A clear modification \
+instruction is USABLE: judge it PASS, or FAIL only on the policy, and NEVER \
+UNCLEAR. That includes instructions that describe no new content at all, such \
+as geometric or format changes ("rotate 90 degrees clockwise", "flip \
+horizontally", "mirror it", "crop to square", "resize", "zoom in", "make it \
+portrait", "make it landscape"), recolouring and restyling ("make it black and \
+white", "warmer tones"), and adding, removing or replacing elements.
+
+The test is simply: can you name an action to perform on the image? If yes, \
+it is actionable — judge PASS or FAIL, never UNCLEAR. Removing or deleting \
+something ("remove the background", "erase the text") is an action and is \
+actionable, even though it adds no new content.
+
+Use UNCLEAR for an edit ONLY when the text gives no actionable change at all — \
+it is empty, a greeting, or pure conversation ("thanks", "ok great")."""
 
 _JUDGE_USER_TEMPLATE_EDIT = """\
 Evaluate the following image EDIT prompt for policy compliance.

@@ -246,3 +246,37 @@ def test_docs_do_not_duplicate_the_image_edits_section():
     assert d.count('id="image-edits"') == 1
     assert 'id="image-editing"' not in d
     assert d.count("<code>/v1/images/edits</code></td>") == 1
+
+
+# --------------------------------------------------------------------------
+# A genuinely-unusable EDIT prompt gets edit-appropriate advice
+# --------------------------------------------------------------------------
+
+
+def test_api_unclear_branch_has_an_edit_specific_message():
+    """With a source image attached, "describe the complete image you want" is
+    nonsense advice — the caller wants to change the image they sent."""
+    src = _source("api", "v1_openai.py")
+    body = src[src.index("if not policy_verdict.passed:"):]
+    body = body[: body.index("# Enforce guardrails")]
+    # the edit case is decided by the presence of a reference image
+    assert "if images_b64:" in body
+    assert "Describe the change you would like to make" in body
+    # and the no-image cases still exist
+    assert "looks_like_edit_instruction" in body
+    assert "does not describe an image to generate" in body
+
+
+def test_dashboard_unclear_branch_has_an_edit_specific_message():
+    src = _source("dashboard", "images.py")
+    body = src[src.index("if not verdict.passed:"):]
+    body = body[: body.index("# Attach verdict for audit trail")]
+    assert 'if body.get("image"):' in body
+    assert "Describe the change you would like to make" in body
+
+
+def test_edit_guidance_still_uses_the_prompt_unclear_code():
+    """Wording changed; the machine-readable contract did not."""
+    src = _source("api", "v1_openai.py")
+    assert '"code": "prompt_unclear"' in src
+    assert 'denied_req.error_code = "prompt_unclear"' in src
