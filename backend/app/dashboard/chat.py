@@ -392,6 +392,22 @@ async def chat_page(
     voice_tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
     voice_stt_enabled = await crud.get_config_json(db, "voice.stt_enabled", False)
 
+    # Admin-configurable notice shown on entering chat (Admin -> Chat).
+    # `version` is bumped whenever an admin saves, so an edited notice is shown
+    # again to people who had already dismissed the previous wording.
+    notice = {
+        "enabled": await crud.get_config_json(db, "chat.notice_enabled", False),
+        "title": await crud.get_config_json(db, "chat.notice_title", "") or "",
+        "html": await crud.get_config_json(db, "chat.notice_html", "") or "",
+        "link_url": await crud.get_config_json(db, "chat.notice_link_url", "") or "",
+        "link_text": await crud.get_config_json(db, "chat.notice_link_text", "") or "",
+        "show_once": await crud.get_config_json(db, "chat.notice_show_once", True),
+        "version": await crud.get_config_json(db, "chat.notice_version", 1),
+    }
+    # Nothing to show is the same as disabled — never pop an empty dialog.
+    if not (notice["title"] or notice["html"] or notice["link_url"]):
+        notice["enabled"] = False
+
     return templates.TemplateResponse(
         "chat.html",
         {
@@ -401,6 +417,7 @@ async def chat_page(
             "masquerade_user": masquerade_user,
             "voice_tts_enabled": voice_tts_enabled,
             "voice_stt_enabled": voice_stt_enabled,
+            "chat_notice": notice,
         },
     )
 
