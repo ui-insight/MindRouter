@@ -846,6 +846,74 @@
     </div>
 </div>
 
+{# Admin-configurable chat notice (Admin -> Chat). Rendered only when an
+   admin has enabled it AND there is something to say — a Jinja comment so a
+   disabled notice leaves no trace in the page source. #}
+{% if chat_notice and chat_notice.enabled %}
+<div class="modal fade" id="chatNoticeModal" tabindex="-1" aria-labelledby="chatNoticeLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="chatNoticeLabel">
+                    <i class="bi bi-info-circle"></i>
+                    {{ chat_notice.title if chat_notice.title else 'A note before you start' }}
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            {% if chat_notice.html %}
+            <div class="modal-body">{{ chat_notice.html|safe }}</div>
+            {% endif %}
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Continue here</button>
+                {% if chat_notice.link_url %}
+                <a class="btn btn-primary" href="{{ chat_notice.link_url }}"
+                   target="_blank" rel="noopener noreferrer">
+                    {{ chat_notice.link_text if chat_notice.link_text else 'Learn more' }}
+                </a>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    // Dismissal is remembered per browser and keyed by the notice version, so
+    // editing the notice in Admin -> Chat shows it again to everyone.
+    var VERSION = {{ chat_notice.version | tojson }};
+    var SHOW_ONCE = {{ 'true' if chat_notice.show_once else 'false' }};
+    var KEY = 'mr.chatNoticeDismissed';
+
+    function alreadySeen() {
+        if (!SHOW_ONCE) return false;
+        try {
+            return window.localStorage.getItem(KEY) === String(VERSION);
+        } catch (e) {
+            // Private mode / storage blocked: show the notice rather than
+            // suppressing it, and never break the chat page over this.
+            return false;
+        }
+    }
+
+    function remember() {
+        if (!SHOW_ONCE) return;
+        try {
+            window.localStorage.setItem(KEY, String(VERSION));
+        } catch (e) { /* nothing we can do; the notice simply repeats */ }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        var el = document.getElementById('chatNoticeModal');
+        if (!el || alreadySeen() || typeof bootstrap === 'undefined') return;
+        el.addEventListener('hidden.bs.modal', remember);
+        // Remember on the link too: following it counts as having seen it.
+        var link = el.querySelector('.modal-footer a');
+        if (link) link.addEventListener('click', remember);
+        new bootstrap.Modal(el).show();
+    });
+})();
+</script>
+{% endif %}
+
 <!-- Multimodal warning modal -->
 <div class="modal fade" id="multimodalWarningModal" tabindex="-1" aria-labelledby="multimodalWarningLabel" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">

@@ -4678,6 +4678,14 @@ async def admin_chat_config(
     chat_temperature = await crud.get_config_json(db, "chat.temperature", None)
     chat_think = await crud.get_config_json(db, "chat.think", None)
 
+    # Chat notice (shown to users on entering chat)
+    notice_enabled = await crud.get_config_json(db, "chat.notice_enabled", False)
+    notice_title = await crud.get_config_json(db, "chat.notice_title", "") or ""
+    notice_html = await crud.get_config_json(db, "chat.notice_html", "") or ""
+    notice_link_url = await crud.get_config_json(db, "chat.notice_link_url", "") or ""
+    notice_link_text = await crud.get_config_json(db, "chat.notice_link_text", "") or ""
+    notice_show_once = await crud.get_config_json(db, "chat.notice_show_once", True)
+
     # Voice settings (chat-specific)
     tts_enabled = await crud.get_config_json(db, "voice.tts_enabled", False)
     tts_provider = await crud.get_config_json(db, "voice.tts_provider", "kokoro")
@@ -4699,6 +4707,12 @@ async def admin_chat_config(
             "chat_max_tokens": chat_max_tokens,
             "chat_temperature": chat_temperature,
             "chat_think": chat_think,
+            "notice_enabled": notice_enabled,
+            "notice_title": notice_title,
+            "notice_html": notice_html,
+            "notice_link_url": notice_link_url,
+            "notice_link_text": notice_link_text,
+            "notice_show_once": notice_show_once,
             "tts_enabled": tts_enabled,
             "tts_provider": tts_provider,
             "tts_voice": tts_voice,
@@ -4728,6 +4742,58 @@ async def admin_chat_config_post(
     action = form.get("action")
 
     _ip = get_client_ip(request)
+
+    if action == "save_chat_notice":
+        # Admin-authored HTML, rendered as-is in the chat modal — the same
+        # trust model as the site-wide use agreement. Only full admins reach
+        # this handler.
+        n_enabled = form.get("notice_enabled") == "on"
+        n_title = (form.get("notice_title") or "").strip()
+        n_html = (form.get("notice_html") or "").strip()
+        n_url = (form.get("notice_link_url") or "").strip()
+        n_text = (form.get("notice_link_text") or "").strip()
+        n_once = form.get("notice_show_once") == "on"
+
+        # A link URL must be http(s) or site-relative: an admin typo like
+        # "javascript:..." would otherwise become a live script handle.
+        if n_url and not (
+            n_url.startswith("https://")
+            or n_url.startswith("http://")
+            or n_url.startswith("/")
+        ):
+            return RedirectResponse(
+                url="/admin/chat-config?error=Link+URL+must+start+with+https%3A%2F%2F%2C+http%3A%2F%2F+or+%2F",
+                status_code=302,
+            )
+
+        await crud.set_config(db, "chat.notice_enabled", n_enabled)
+        await crud.set_config(db, "chat.notice_title", n_title)
+        await crud.set_config(db, "chat.notice_html", n_html)
+        await crud.set_config(db, "chat.notice_link_url", n_url)
+        await crud.set_config(db, "chat.notice_link_text", n_text)
+        await crud.set_config(db, "chat.notice_show_once", n_once)
+        # Bump the version so an edited notice reappears for people who
+        # already dismissed the previous wording.
+        _ver = await crud.get_config_json(db, "chat.notice_version", 1)
+        try:
+            _ver = int(_ver) + 1
+        except (TypeError, ValueError):
+            _ver = 1
+        await crud.set_config(db, "chat.notice_version", _ver)
+
+        await crud.log_admin_action(
+            db, user_id=user_id, action="chat_config.save_chat_notice",
+            entity_type="config",
+            after_value={
+                "enabled": n_enabled,
+                "show_once": n_once,
+                "link_url": n_url,
+                "version": _ver,
+            },
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/chat-config?success=notice_updated", status_code=302)
 
     if action == "set_default":
         default_model = form.get("default_model", "")
