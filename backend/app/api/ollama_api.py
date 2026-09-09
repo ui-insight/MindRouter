@@ -21,6 +21,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.model_availability import (
+    AVAILABLE,
+    model_availability,
+    openai_error,
+)
 from backend.app.api.auth import authenticate_request
 from backend.app.core.translators import OllamaInTranslator
 from backend.app.db.models import ApiKey, User
@@ -77,10 +82,11 @@ async def ollama_chat(
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"model '{canonical.model}' not found",
+            status_code=_code, detail=_detail["error"]["message"], headers=_headers
         )
 
     service = InferenceService(db)
@@ -146,10 +152,11 @@ async def ollama_generate(
     # Early model validation
     registry = get_registry()
     chat_canonical.model, _ = registry.resolve_alias(chat_canonical.model)
-    if not await registry.model_exists(chat_canonical.model):
+    _availability = await model_availability(registry, chat_canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(chat_canonical.model, _availability)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"model '{chat_canonical.model}' not found",
+            status_code=_code, detail=_detail["error"]["message"], headers=_headers
         )
 
     service = InferenceService(db)
@@ -269,10 +276,11 @@ async def ollama_embeddings(
     # Early model validation
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"model '{canonical.model}' not found",
+            status_code=_code, detail=_detail["error"]["message"], headers=_headers
         )
 
     service = InferenceService(db)

@@ -1711,6 +1711,100 @@ class InferenceService:
     # Retry-with-failover wrappers
     # ------------------------------------------------------------------
 
+    # Substrings that identify a 5xx caused by the REQUEST rather than the
+    # backend: deterministic engine-fatal failures that will reproduce on the
+    # next replica. Kept short and specific — the same-error-twice rule below
+    # is the general safety net for signatures not listed here.
+    # Below this, an error body carries no distinguishing information and the
+    # same-error-twice rule is not applied (see _is_request_fault).
+    _MIN_FAULT_BODY_CHARS = 40
+
+    _REQUEST_FAULT_SIGNATURES = (
+        "enginedeaderror",
+        "json_schema_converter",
+        "xgrammar",
+        "compile_grammar",
+        "compile_json_schema",
+        "enum array must not be empty",
+    )
+
+    @staticmethod
+    def _error_fingerprint(exc: Any) -> str:
+        """Stable signature for a backend 5xx, for same-error-twice detection."""
+        try:
+            body = exc.response.text or ""
+        except Exception:
+            body = str(exc)
+        status_code = getattr(getattr(exc, "response", None), "status_code", 0)
+        # Drop digits so ids/pids/timestamps do not defeat the comparison.
+        normalized = "".join("#" if c.isdigit() else c for c in body[:600])
+        return f"{status_code}:{normalized}"
+
+    def _is_request_fault(self, exc: Any, fingerprint: str,
+                          last_fingerprint: Optional[str],
+                          last_backend_id: Optional[int],
+                          backend_id: int) -> bool:
+        """Is this 5xx the request's fault rather than the backend's?"""
+        # getattr: partial settings objects (tests, trimmed configs) must not
+        # crash the retry path — default to detection ON.
+        if not getattr(self._settings, "backend_request_fault_detection", True):
+            return False
+        try:
+            body = (exc.response.text or "").lower()
+        except Exception:
+            body = str(exc).lower()
+        if any(sig in body for sig in self._REQUEST_FAULT_SIGNATURES):
+            return True
+        # Same failure on a different machine == the input is the problem —
+        # but only for a DISTINCTIVE error. A bare 500 with an empty body is
+        # the generic shape of any upstream failure, so two of them are not
+        # evidence of anything; matching on those would turn an ordinary
+        # fleet-wide outage into a bogus "your request is invalid".
+        if len(body.strip()) < self._MIN_FAULT_BODY_CHARS:
+            return False
+        return (
+            last_fingerprint is not None
+            and fingerprint == last_fingerprint
+            and last_backend_id is not None
+            and last_backend_id != backend_id
+        )
+
+    def _guard_structured_output(self, request: Any) -> None:
+        """Reject a schema that would crash the backend's grammar compiler.
+
+        Guided decoding compiles the caller's JSON schema inside the engine,
+        and some malformed schemas abort that compiler hard enough to kill the
+        worker (vLLM: EngineCore dies -> the whole process restarts). Catching
+        it here costs microseconds and keeps one bad request from costing a
+        GPU worker — see backend/app/core/schema_guard.py.
+        """
+        rf = getattr(request, "response_format", None)
+        if rf is None:
+            return
+        from backend.app.core.schema_guard import (
+            SchemaRejection,
+            validate_canonical_response_format,
+        )
+
+        try:
+            validate_canonical_response_format(rf)
+        except SchemaRejection as exc:
+            logger.warning(
+                "structured_output_schema_rejected",
+                reason=exc.reason,
+                path=exc.path,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": {
+                        "message": exc.message,
+                        "type": "invalid_request_error",
+                        "code": "invalid_json_schema",
+                    }
+                },
+            ) from None
+
     async def _proxy_with_retry(
         self,
         request,
@@ -1728,6 +1822,8 @@ class InferenceService:
         Returns:
             (response, backend) on success.
         """
+        self._guard_structured_output(request)
+
         span = trace.get_current_span()
         span.set_attribute("mindrouter.model", job.model)
         span.set_attribute("mindrouter.request_id", job.request_id or "")
@@ -1745,6 +1841,11 @@ class InferenceService:
             if is_image
             else self._settings.backend_request_timeout_per_attempt
         )
+
+        # Same-error-on-a-different-backend detection (see
+        # backend_request_fault_detection).
+        last_5xx_fingerprint: Optional[str] = None
+        last_5xx_backend_id: Optional[int] = None
 
         for attempt in range(max_attempts):
             # First attempt waits normally for capacity; retries fail fast.
@@ -1893,6 +1994,39 @@ class InferenceService:
 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code >= 500:
+                    _fp = self._error_fingerprint(e)
+                    if self._is_request_fault(
+                        e, _fp, last_5xx_fingerprint, last_5xx_backend_id, backend.id
+                    ):
+                        # Deterministic: it will kill the next replica too.
+                        # Release the slot, but do NOT charge the breaker —
+                        # the backend did not misbehave, the request did.
+                        logger.error(
+                            "backend_5xx_request_fault",
+                            backend_id=backend.id,
+                            status=e.response.status_code,
+                            attempt=attempt + 1,
+                        )
+                        await self._scheduler.on_job_failed(job, backend.id)
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={
+                                "error": {
+                                    "message": (
+                                        "This request could not be processed by the "
+                                        "inference engine and was not retried on other "
+                                        "backends, because the same failure would recur. "
+                                        "This usually means the request itself is invalid "
+                                        "— most often a malformed JSON schema in "
+                                        "response_format."
+                                    ),
+                                    "type": "invalid_request_error",
+                                    "code": "request_rejected_by_backend",
+                                }
+                            },
+                        ) from None
+                    last_5xx_fingerprint = _fp
+                    last_5xx_backend_id = backend.id
                     logger.warning(
                         "backend_5xx",
                         backend_id=backend.id,
@@ -1980,6 +2114,8 @@ class InferenceService:
         Yields:
             (chunk, backend) tuples.
         """
+        self._guard_structured_output(request)
+
         span = trace.get_current_span()
         span.set_attribute("mindrouter.model", job.model)
         span.set_attribute("mindrouter.request_id", job.request_id or "")
@@ -1988,6 +2124,11 @@ class InferenceService:
         tried_backends: Set[int] = set()
         last_error: Optional[Exception] = None
         context_recap_done = False
+
+        # Same-error-on-a-different-backend detection (see
+        # backend_request_fault_detection).
+        last_5xx_fingerprint: Optional[str] = None
+        last_5xx_backend_id: Optional[int] = None
 
         for attempt in range(max_attempts):
             # First attempt waits normally for capacity; retries fail fast.
@@ -2131,6 +2272,38 @@ class InferenceService:
                     )
                 if first_chunk_received:
                     raise
+                _fp = self._error_fingerprint(e)
+                if self._is_request_fault(
+                    e, _fp, last_5xx_fingerprint, last_5xx_backend_id, backend.id
+                ):
+                    # Deterministic — do not hand it to another replica, and
+                    # do not charge the breaker for the request's fault.
+                    logger.error(
+                        "stream_backend_5xx_request_fault",
+                        backend_id=backend.id,
+                        status=e.response.status_code,
+                        attempt=attempt + 1,
+                    )
+                    await self._scheduler.on_job_failed(job, backend.id)
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={
+                            "error": {
+                                "message": (
+                                    "This request could not be processed by the "
+                                    "inference engine and was not retried on other "
+                                    "backends, because the same failure would recur. "
+                                    "This usually means the request itself is invalid "
+                                    "— most often a malformed JSON schema in "
+                                    "response_format."
+                                ),
+                                "type": "invalid_request_error",
+                                "code": "request_rejected_by_backend",
+                            }
+                        },
+                    ) from None
+                last_5xx_fingerprint = _fp
+                last_5xx_backend_id = backend.id
                 logger.warning(
                     "stream_backend_5xx",
                     backend_id=backend.id,

@@ -59,7 +59,24 @@ _models_stub.VideoJob = MagicMock
 _models_stub.ApiKey = MagicMock
 _models_stub.User = MagicMock
 
+
+# The API modules import the pure `model_availability` helper (404-vs-503
+# decision). It has no heavy dependencies, so load the REAL module rather than
+# stubbing it — a MagicMock here would make every model look unavailable.
+def _load_model_availability():
+    import importlib.util as _ilu
+
+    _s = _ilu.spec_from_file_location(
+        "backend.app.api.model_availability",
+        _api_dir / "model_availability.py",
+        submodule_search_locations=[],
+    )
+    _m = _ilu.module_from_spec(_s)
+    _s.loader.exec_module(_m)
+    return _m
+
 _STUBS = {
+    "backend.app.api.model_availability": _load_model_availability(),
     "backend": MagicMock(),
     "backend.app": MagicMock(),
     "backend.app.api": MagicMock(),
@@ -174,6 +191,9 @@ def _patch_registry(monkeypatch, exists=True):
     reg = MagicMock()
     reg.resolve_alias = MagicMock(side_effect=lambda m: (m, None))
     reg.model_exists = AsyncMock(return_value=exists)
+    # Unknown-model fixtures: configured mirrors exists (503 is the
+    # configured-but-no-healthy-backend case, covered separately).
+    reg.model_is_configured = AsyncMock(return_value=exists)
     monkeypatch.setattr(_mod, "get_registry", lambda: reg)
 
 
