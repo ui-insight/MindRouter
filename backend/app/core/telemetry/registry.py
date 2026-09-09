@@ -508,6 +508,15 @@ class BackendRegistry:
         backends = await self.get_backends_with_model(model_name)
         return len(backends) > 0
 
+    async def model_is_configured(self, model_name: str) -> bool:
+        """Is the model known at all, even if no backend is currently healthy?
+
+        Used to tell "this model does not exist" (404) apart from "every
+        replica of this model is down right now" (503).
+        """
+        async with get_async_db_context() as db:
+            return await crud.model_is_configured(db, model_name)
+
     # --- Model alias cache ---------------------------------------------------
 
     async def load_alias_cache(self) -> None:

@@ -22,6 +22,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.model_availability import (
+    AVAILABLE,
+    RETRY_AFTER_SECONDS,
+    UNAVAILABLE,
+    model_availability,
+    unavailable_message,
+)
 from backend.app.api.auth import authenticate_request
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.core.translators.anthropic_in import AnthropicInTranslator
@@ -87,18 +94,31 @@ async def messages(
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        logger.warning("anthropic_model_not_found", model=canonical.model, raw_model=body.get("model"))
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        logger.warning(
+            "anthropic_model_unavailable",
+            model=canonical.model,
+            raw_model=body.get("model"),
+            availability=_availability,
+        )
         from fastapi.responses import JSONResponse
+
+        _unavailable = _availability == UNAVAILABLE
         return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=(
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if _unavailable
+                else status.HTTP_404_NOT_FOUND
+            ),
             content={
                 "type": "error",
                 "error": {
-                    "type": "not_found_error",
-                    "message": f"model: {canonical.model}",
+                    "type": "overloaded_error" if _unavailable else "not_found_error",
+                    "message": unavailable_message(canonical.model, _availability),
                 },
             },
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)} if _unavailable else None,
         )
 
     # Create inference service

@@ -25,6 +25,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.model_availability import (
+    AVAILABLE,
+    model_availability,
+    openai_error,
+)
 from backend.app.api.auth import authenticate_request, get_current_api_key
 from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
@@ -94,17 +99,10 @@ async def chat_completions(
     # Early model validation — reject unknown models before queuing
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{canonical.model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     # Create inference service
     service = InferenceService(db)
@@ -174,17 +172,10 @@ async def completions(
     # Early model validation
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{canonical.model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     service = InferenceService(db)
 
@@ -244,17 +235,10 @@ async def embeddings(
     # Early model validation
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{canonical.model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     service = InferenceService(db)
     response = await service.embedding(canonical, user, api_key, request)
@@ -297,17 +281,10 @@ async def rerank(
     # Early model validation
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{canonical.model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     service = InferenceService(db)
     response = await service.rerank(canonical, user, api_key, request)
@@ -350,17 +327,10 @@ async def score(
     # Early model validation
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{canonical.model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     service = InferenceService(db)
     response = await service.score(canonical, user, api_key, request)
@@ -404,17 +374,10 @@ async def tokenize(
 
     registry = get_registry()
     model, _ = registry.resolve_alias(model)
-    if not await registry.model_exists(model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     # Translate to canonical format for token counting
     try:
@@ -567,11 +530,10 @@ async def ocr(
     # Validate model exists
     registry = get_registry()
     model, _ = registry.resolve_alias(model)
-    if not await registry.model_exists(model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Model '{model}' not found",
-        )
+    _availability = await model_availability(registry, model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     # Read file
     file_bytes = await file.read()
@@ -673,8 +635,12 @@ async def ocrmd(
 
     registry = get_registry()
     model, _ = registry.resolve_alias(model)
-    if not await registry.model_exists(model):
-        return PlainTextResponse(f"Model '{model}' not found", status_code=404)
+    _availability = await model_availability(registry, model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(model, _availability)
+        return PlainTextResponse(
+            _detail["error"]["message"], status_code=_code, headers=_headers
+        )
 
     file_bytes = await file.read()
     max_size = ocr_config["max_file_size_mb"] * 1024 * 1024
@@ -936,17 +902,10 @@ async def _prepare_image_canonical(
     # Early model validation
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{canonical.model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(canonical.model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     return canonical
 
