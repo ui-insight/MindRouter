@@ -73,6 +73,20 @@ for _name in _STUB_NAMES:
         _added_stubs.append(_name)
 
 _api_dir = Path(__file__).resolve().parents[2] / "api"
+
+# The API modules import the pure `model_availability` helper (the 404-vs-503
+# decision). It has no heavy dependencies, so register the REAL module — a
+# MagicMock here would make every model look unavailable.
+if "backend.app.api.model_availability" not in sys.modules:
+    _ma_spec = importlib.util.spec_from_file_location(
+        "backend.app.api.model_availability",
+        _api_dir / "model_availability.py",
+        submodule_search_locations=[],
+    )
+    _ma_mod = importlib.util.module_from_spec(_ma_spec)
+    _ma_spec.loader.exec_module(_ma_mod)
+    sys.modules["backend.app.api.model_availability"] = _ma_mod
+
 _spec = importlib.util.spec_from_file_location(
     "responses_api", _api_dir / "responses_api.py",
     submodule_search_locations=[],
@@ -155,6 +169,9 @@ def _make_mock_registry(model_exists=True):
     registry = MagicMock()
     registry.resolve_alias = MagicMock(side_effect=lambda m: (m, None))
     registry.model_exists = AsyncMock(return_value=model_exists)
+    # These fixtures simulate an UNKNOWN model, so the configured check
+    # mirrors it — a configured-but-unhealthy model is a 503, not a 404.
+    registry.model_is_configured = AsyncMock(return_value=model_exists)
     vllm_backend = MagicMock()
     vllm_backend.engine = MagicMock(value="vllm")
     registry.get_backends_with_model = AsyncMock(

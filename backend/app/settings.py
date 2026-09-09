@@ -271,6 +271,16 @@ class Settings(BaseSettings):
     # so the pre-2.9.62 behaviour (retry 3x, breaker trips) can be restored.
     backend_timeout_trips_breaker: bool = False
     backend_retry_on_timeout: bool = False
+    # A 5xx can mean "this backend is sick" OR "this request is fatal to any
+    # backend". Re-dispatching the second kind hunts down healthy replicas and
+    # feeds them the thing that killed the first — on 2026-09-09 a schema with
+    # an empty `enum` killed all five qwen3.8-27b workers in one second that
+    # way. When a request is judged at fault it is not retried elsewhere and
+    # is not charged to the backend's circuit breaker (the backend did not
+    # misbehave). Detection: a known-fatal signature, or the same error twice
+    # on two DIFFERENT backends — two independent GPUs do not fail identically
+    # on the same input by chance. Set false to restore blind 5xx retries.
+    backend_request_fault_detection: bool = True
     structured_output_retry_on_invalid: bool = True
     # Upper bound on the OpenAI `n` parameter (completions per request) —
     # a large n multiplies backend load and cost.

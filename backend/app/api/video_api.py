@@ -31,6 +31,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.model_availability import (
+    AVAILABLE,
+    model_availability,
+    openai_error,
+)
 from backend.app.api.auth import authenticate_request
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
@@ -284,17 +289,10 @@ async def submit_video_job(
     # ── Model validation ─────────────────────────────────────────
     registry = get_registry()
     model, _ = registry.resolve_alias(model)
-    if not await registry.model_exists(model):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": {
-                    "message": f"The model '{model}' does not exist",
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                }
-            },
-        )
+    _availability = await model_availability(registry, model)
+    if _availability != AVAILABLE:
+        _code, _detail, _headers = openai_error(model, _availability)
+        raise HTTPException(status_code=_code, detail=_detail, headers=_headers)
 
     # ── Per-user concurrency (fairness on a one-render-at-a-time GPU) ──
     active = await crud.count_active_video_jobs_for_user(db, user.id)

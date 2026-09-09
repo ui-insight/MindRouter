@@ -1846,6 +1846,32 @@ async def get_backends_with_model(
     return list(result.scalars().all())
 
 
+async def model_is_configured(db: AsyncSession, model_name: str) -> bool:
+    """Is this model known to the fleet at all, regardless of backend health?
+
+    ``get_backends_with_model`` filters on ``BackendStatus.HEALTHY``, so it
+    answers "can I route to this right now" — not "does this model exist".
+    Distinguishing the two is what lets the API return 503 (temporarily
+    unavailable) instead of 404 (no such model) when every replica of a
+    configured model is down at once.
+    """
+    query = (
+        select(Model.id)
+        .join(Backend, Model.backend_id == Backend.id)
+        .where(
+            and_(
+                Model.name == model_name,
+                # Mirror the routable-model filter: DLP engines serve no
+                # inference, so a stale Model row there is not "configured".
+                Backend.engine != BackendEngine.DLP,
+            )
+        )
+        .limit(1)
+    )
+    result = await db.execute(query)
+    return result.scalar_one_or_none() is not None
+
+
 async def upsert_model(
     db: AsyncSession,
     backend_id: int,

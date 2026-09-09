@@ -44,6 +44,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.model_availability import (
+    AVAILABLE,
+    UNAVAILABLE,
+    model_availability,
+    unavailable_message,
+)
 from backend.app.api.auth import authenticate_request
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.core.translators.responses_in import (
@@ -244,12 +250,21 @@ async def responses(
     # Resolve alias for routing; echo the raw client model string.
     registry = get_registry()
     canonical.model, _ = registry.resolve_alias(canonical.model)
-    if not await registry.model_exists(canonical.model):
+    _availability = await model_availability(registry, canonical.model)
+    if _availability != AVAILABLE:
         logger.warning(
-            "responses_model_not_found",
+            "responses_model_unavailable",
             model=canonical.model,
             raw_model=body.get("model"),
+            availability=_availability,
         )
+        if _availability == UNAVAILABLE:
+            return error_json(
+                503,
+                unavailable_message(ctx.model, _availability),
+                err_type="service_unavailable",
+                code="model_unavailable",
+            )
         return error_json(
             404,
             f"The model '{ctx.model}' does not exist or you do not have access to it.",
@@ -504,6 +519,13 @@ async def count_input_tokens(
     canonical.model, _ = registry.resolve_alias(canonical.model)
     backends = await registry.get_backends_with_model(canonical.model)
     if not backends:
+        if await registry.model_is_configured(canonical.model):
+            return error_json(
+                503,
+                unavailable_message(ctx.model, UNAVAILABLE),
+                err_type="service_unavailable",
+                code="model_unavailable",
+            )
         return error_json(
             404,
             f"The model '{ctx.model}' does not exist or you do not have access to it.",

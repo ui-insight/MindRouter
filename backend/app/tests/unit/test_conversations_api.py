@@ -69,6 +69,20 @@ for _name in _STUB_NAMES:
         _added.append(_name)
 
 _api_dir = Path(__file__).resolve().parents[2] / "api"
+
+# The API modules import the pure `model_availability` helper (the 404-vs-503
+# decision). It has no heavy dependencies, so register the REAL module — a
+# MagicMock here would make every model look unavailable.
+if "backend.app.api.model_availability" not in sys.modules:
+    _ma_spec = importlib.util.spec_from_file_location(
+        "backend.app.api.model_availability",
+        _api_dir / "model_availability.py",
+        submodule_search_locations=[],
+    )
+    _ma_mod = importlib.util.module_from_spec(_ma_spec)
+    _ma_spec.loader.exec_module(_ma_mod)
+    sys.modules["backend.app.api.model_availability"] = _ma_mod
+
 _spec = importlib.util.spec_from_file_location(
     "conversations_api", _api_dir / "conversations_api.py",
     submodule_search_locations=[],
