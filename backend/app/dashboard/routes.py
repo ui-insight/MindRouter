@@ -38,6 +38,7 @@ from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.dashboard.azure_auth import azure_router
 from backend.app.dashboard.sso import enabled_providers, sso_router
+from backend.app.core.quota_budget import effective_token_budget
 from backend.app.db import crud, chat_crud
 from backend.app.db.models import ApiKeyStatus, BackendEngine, QuotaRequestStatus, ServiceKeyRequestStatus, UserRole
 from backend.app.db.session import get_async_db, get_async_db_context
@@ -879,8 +880,8 @@ async def user_dashboard(
         else:
             tokens_used_display = quota.tokens_used
 
-    # Calculate quota usage percentage using group budget
-    group_budget = user.group.token_budget if user.group else 0
+    # Effective budget: a per-user override if one was granted, else the group's
+    group_budget = effective_token_budget(user, quota)
     usage_percent = 0
     if quota and group_budget > 0:
         usage_percent = min(100, (tokens_used_display / group_budget) * 100)
@@ -1049,7 +1050,7 @@ async def dashboard_token_usage(
     lifetime_counter = quota.lifetime_tokens_used
     lifetime_tokens = max(lifetime_counter, lifetime_data["total_tokens"])
 
-    group_budget = user.group.token_budget if user.group else 0
+    group_budget = effective_token_budget(user, quota)
     return JSONResponse({
         "tokens_used": tokens_used,
         "budget": group_budget,
@@ -1594,6 +1595,8 @@ async def admin_users(
 @dashboard_router.get("/admin/requests", response_class=HTMLResponse)
 async def admin_requests(
     request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
     db: AsyncSession = Depends(get_async_db),
 ):
     """Admin request management."""
@@ -1617,6 +1620,8 @@ async def admin_requests(
             **masq,
             "requests": pending_requests,
             "service_key_requests": pending_service_key_requests,
+            "success": success,
+            "error": error,
         },
     )
 
@@ -1636,20 +1641,55 @@ async def approve_request(
     if not user or (not user.group or not user.group.is_admin):
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    await crud.review_quota_request(
-        db=db,
-        request_id=request_id,
-        reviewer_id=user_id,
-        status=QuotaRequestStatus.APPROVED,
-    )
+    # Optional granted amount from the form. Blank means "grant what was
+    # asked for", which is what clicking Approve has always implied.
+    form = await request.form()
+    raw_granted = (form.get("granted_tokens") or "").strip()
+    granted: Optional[int] = None
+    if raw_granted:
+        try:
+            granted = int(raw_granted)
+        except ValueError:
+            return RedirectResponse(
+                url="/admin/requests?error=Granted+tokens+must+be+a+number",
+                status_code=302,
+            )
+        if granted < 0:
+            return RedirectResponse(
+                url="/admin/requests?error=Granted+tokens+cannot+be+negative",
+                status_code=302,
+            )
+
+    try:
+        quota_request = await crud.review_quota_request(
+            db=db,
+            request_id=request_id,
+            reviewer_id=user_id,
+            status=QuotaRequestStatus.APPROVED,
+            granted_tokens=granted,
+        )
+    except ValueError as exc:
+        return RedirectResponse(
+            url=f"/admin/requests?error={quote_plus(str(exc))}", status_code=302,
+        )
+    if not quota_request:
+        return RedirectResponse(
+            url="/admin/requests?error=Request+not+found", status_code=302,
+        )
+
     await crud.log_admin_action(
         db, user_id=user_id, action="quota.approve",
         entity_type="quota_request", entity_id=str(request_id),
+        after_value={
+            "granted_tokens": granted if granted is not None
+            else quota_request.requested_tokens,
+            "applied_to": "quotas.token_budget_override",
+        },
         ip_address=get_client_ip(request),
     )
     await db.commit()
 
-    return RedirectResponse(url="/admin/requests", status_code=302)
+    return RedirectResponse(url="/admin/requests?success=quota_granted", status_code=302)
 
 
 @dashboard_router.post("/admin/requests/{request_id}/deny")

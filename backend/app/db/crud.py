@@ -81,6 +81,7 @@ from backend.app.db.models import (
 )
 from backend.app.logging_config import get_logger
 from backend.app.security.scopes import APP_CREDENTIAL_SCOPES, format_scopes
+from backend.app.core.quota_budget import effective_token_budget
 
 logger = get_logger(__name__)
 
@@ -3010,18 +3011,55 @@ async def review_quota_request(
     reviewer_id: int,
     status: QuotaRequestStatus,
     review_notes: Optional[str] = None,
+    granted_tokens: Optional[int] = None,
 ) -> Optional[QuotaRequest]:
-    """Review a quota request."""
+    """Review a quota request, APPLYING the grant in the same transaction.
+
+    Before this applied anything, approving a request only set review metadata
+    and the granted amount was written to the audit log and dropped — the user
+    could spend exactly as much afterwards as before (GitHub issue #11). The
+    grant is now written to ``quotas.token_budget_override`` here, so a caller
+    cannot record an approval without also applying it.
+
+    ``granted_tokens`` semantics:
+      * ``None`` on an approval -> grant the amount the user asked for. An
+        admin approving without naming a figure plainly means "yes, that".
+      * ``n``    -> grant exactly n (overrides the request).
+      * ignored entirely on a denial.
+
+    Replacement, not addition: the override becomes the user's budget. Two
+    approvals of the same request therefore leave the same state as one, and an
+    admin reading "budget = 250000" sees what the user actually gets.
+    """
     result = await db.execute(
         select(QuotaRequest).where(QuotaRequest.id == request_id)
     )
     quota_request = result.scalar_one_or_none()
-    if quota_request:
-        quota_request.status = status
-        quota_request.reviewed_by = reviewer_id
-        quota_request.reviewed_at = datetime.now(timezone.utc)
-        quota_request.review_notes = review_notes
-        await db.flush()
+    if not quota_request:
+        return None
+
+    quota_request.status = status
+    quota_request.reviewed_by = reviewer_id
+    quota_request.reviewed_at = datetime.now(timezone.utc)
+    quota_request.review_notes = review_notes
+
+    if status == QuotaRequestStatus.APPROVED:
+        amount = granted_tokens if granted_tokens is not None else quota_request.requested_tokens
+        # A negative budget is meaningless and 0 would silently mean
+        # "unlimited" — refuse rather than grant something unintended.
+        if amount is None or int(amount) < 0:
+            raise ValueError("granted_tokens must be zero or positive")
+        quota = await get_user_quota(db, quota_request.user_id)
+        if quota is None:
+            # No quota row yet. Create one rather than dropping the grant —
+            # losing it silently is the bug this function exists to fix. RPM
+            # comes from the user's group, matching every other creation site.
+            _u = await get_user_by_id(db, quota_request.user_id)
+            _rpm = _u.group.rpm_limit if (_u and _u.group) else 30
+            quota = await create_quota(db, user_id=quota_request.user_id, rpm_limit=_rpm)
+        quota.token_budget_override = int(amount)
+
+    await db.flush()
     return quota_request
 
 
@@ -5801,7 +5839,7 @@ async def reserve_video_tokens(db: AsyncSession, user: User, cost: int) -> bool:
     then calls incr_quota_redis(user.id, cost)."""
     await reset_quota_if_needed(db, user.id)
     quota = await get_user_quota(db, user.id)
-    budget = user.group.token_budget if user.group else 0
+    budget = effective_token_budget(user, quota)
     used = quota.tokens_used if quota else 0
     if budget > 0 and used + cost > budget:
         return False

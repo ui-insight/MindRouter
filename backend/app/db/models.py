@@ -431,6 +431,11 @@ class Quota(Base, TimestampMixin):
     rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
 
     # Scheduler weight override (null = use role default)
+    # Per-user budget override. NULL inherits the group budget (the norm);
+    # 0 means unlimited, exactly as it does on the group. Set when an admin
+    # approves a quota-increase request — see core/quota_budget.py, which
+    # is the only place this may be resolved.
+    token_budget_override: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     weight_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Archived offsets — accumulated totals from requests deleted by retention.

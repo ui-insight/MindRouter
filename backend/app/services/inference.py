@@ -52,6 +52,7 @@ from backend.app.core.translators import DiffusionOutTranslator, OllamaOutTransl
 from backend.app.core.translators.vllm_out import (
     reasoning_promotion_applies as _reasoning_promotion_applies,
 )
+from backend.app.core.quota_budget import effective_token_budget
 from backend.app.db import crud
 from backend.app.db.models import ApiKey, Backend, BackendEngine, Modality, User
 from backend.app.logging_config import get_logger
@@ -1284,8 +1285,8 @@ class InferenceService:
         await crud.reset_quota_if_needed(self.db, user.id)
 
         quota = await crud.get_user_quota(self.db, user.id)
-        group_budget = user.group.token_budget if user.group else 0
-        if quota and group_budget > 0 and quota.tokens_used >= group_budget:
+        budget = effective_token_budget(user, quota)
+        if quota and budget > 0 and quota.tokens_used >= budget:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Token quota exceeded",

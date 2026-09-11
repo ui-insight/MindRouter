@@ -293,6 +293,8 @@ class TestCheckQuota:
         db = _make_mock_db()
         user = _make_mock_user(tokens_used=500, token_budget=1000000)
         quota = MagicMock()
+        # real column is nullable; a bare MagicMock reads as an override
+        quota.token_budget_override = None
         quota.tokens_used = 500
         quota.rpm_limit = 0  # real column is an int; bare MagicMock breaks `> 0`
 
@@ -306,6 +308,8 @@ class TestCheckQuota:
         db = _make_mock_db()
         user = _make_mock_user(token_budget=1000)
         quota = MagicMock()
+        # real column is nullable; a bare MagicMock reads as an override
+        quota.token_budget_override = None
         quota.tokens_used = 1000
 
         with patch.object(_crud, "reset_quota_if_needed", new_callable=AsyncMock), \
@@ -322,6 +326,8 @@ class TestCheckQuota:
         user.id = 1
         user.group = None
         quota = MagicMock()
+        # real column is nullable; a bare MagicMock reads as an override
+        quota.token_budget_override = None
         quota.tokens_used = 99999
         quota.rpm_limit = 0  # real column is an int; bare MagicMock breaks `> 0`
 

@@ -10,6 +10,20 @@
         <div class="col-md-10 py-3">
             <h1 class="mb-4"><i class="bi bi-inbox"></i> Pending Requests</h1>
 
+            {% if success %}
+            <div class="alert alert-success alert-dismissible fade show" role="alert">
+                {% if success == 'quota_granted' %}Quota approved and applied &mdash; the user&rsquo;s budget now reflects the granted amount.
+                {% else %}{{ success }}{% endif %}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+            {% if error %}
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                Error: {{ error }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endif %}
+
             <!-- Quota / API Key Requests -->
             <h2 class="h4 mb-3"><i class="bi bi-arrow-up-circle me-1"></i> Quota &amp; API Key Requests</h2>
             {% if requests %}
@@ -43,6 +57,19 @@
                         {% if not is_read_only %}
                         <div class="col-md-4 text-end">
                             <form method="POST" action="/admin/requests/{{ req.id }}/approve" class="d-inline">
+                                <div class="mb-2 text-start">
+                                    <label for="granted_tokens_{{ req.id }}" class="form-label small mb-1">
+                                        Grant (tokens)
+                                    </label>
+                                    <input type="number" min="0" step="1" class="form-control form-control-sm"
+                                           id="granted_tokens_{{ req.id }}" name="granted_tokens"
+                                           value="{{ req.requested_tokens }}"
+                                           placeholder="{{ req.requested_tokens }}">
+                                    <div class="form-text">
+                                        Becomes this user&rsquo;s budget, replacing the group default.
+                                        Blank grants the amount requested; 0 means unlimited.
+                                    </div>
+                                </div>
                                 <button type="submit" class="btn btn-success">
                                     <i class="bi bi-check-lg"></i> Approve
                                 </button>

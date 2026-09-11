@@ -31,6 +31,7 @@ from starlette.requests import Request
 from backend.app.api.auth import require_admin, require_admin_or_session, require_admin_read, require_admin_read_or_session
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
+from backend.app.core.quota_budget import effective_token_budget
 from backend.app.db import crud
 from backend.app.db.models import ApiKeyStatus, BackendEngine, BackendStatus, Group, RequestStatus, User, UserRole
 from backend.app.db.session import get_async_db, get_async_db_context
@@ -1347,15 +1348,25 @@ async def review_quota_request(
     """Approve or deny a quota request."""
     from backend.app.db.models import QuotaRequestStatus
 
-    status = QuotaRequestStatus.APPROVED if review.approved else QuotaRequestStatus.DENIED
+    # NB: named new_status, not status — the local previously shadowed
+    # fastapi's `status` module, so the "not found" branch below evaluated
+    # QuotaRequestStatus.APPROVED.HTTP_404_NOT_FOUND and raised AttributeError,
+    # turning a missing request into a 500.
+    new_status = QuotaRequestStatus.APPROVED if review.approved else QuotaRequestStatus.DENIED
 
-    quota_request = await crud.review_quota_request(
-        db=db,
-        request_id=request_id,
-        reviewer_id=admin.id,
-        status=status,
-        review_notes=review.notes,
-    )
+    try:
+        quota_request = await crud.review_quota_request(
+            db=db,
+            request_id=request_id,
+            reviewer_id=admin.id,
+            status=new_status,
+            review_notes=review.notes,
+            granted_tokens=review.granted_tokens,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
 
     if not quota_request:
         raise HTTPException(
@@ -1382,7 +1393,15 @@ async def review_quota_request(
         )
         await audit_db.commit()
 
-    return {"status": "reviewed", "approved": review.approved}
+    return {
+        "status": "reviewed",
+        "approved": review.approved,
+        "granted_tokens": (
+            review.granted_tokens
+            if review.granted_tokens is not None
+            else quota_request.requested_tokens
+        ) if review.approved else None,
+    }
 
 
 # User & API Key Provisioning
@@ -1851,7 +1870,7 @@ async def get_user_detail(
             "api_key_count": stats["api_key_count"],
         },
         "quota": {
-            "token_budget": stats["user"].group.token_budget if stats["user"].group else 0,
+            "token_budget": effective_token_budget(stats["user"], stats["quota"]),
             "tokens_used": stats["quota"].tokens_used,
             "lifetime_tokens_used": stats["quota"].lifetime_tokens_used,
             "rpm_limit": stats["quota"].rpm_limit,
