@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import authenticate_request
+from backend.app.core.quota_budget import effective_token_budget
 from backend.app.db import crud
 from backend.app.db.models import (
     ApiKey,
@@ -84,8 +85,8 @@ async def _check_search_quota(db: AsyncSession, user: User, config: dict):
     """Check if user has sufficient quota for a search request."""
     await crud.reset_quota_if_needed(db, user.id)
     quota = await crud.get_user_quota(db, user.id)
-    group_budget = user.group.token_budget if user.group else 0
-    if quota and group_budget > 0 and quota.tokens_used >= group_budget:
+    budget = effective_token_budget(user, quota)
+    if quota and budget > 0 and quota.tokens_used >= budget:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Token quota exceeded",

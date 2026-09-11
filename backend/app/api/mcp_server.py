@@ -59,6 +59,7 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from backend.app.db.session import get_async_db_context
+from backend.app.core.quota_budget import effective_token_budget
 from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
 
@@ -117,8 +118,8 @@ async def web_search(query: str, max_results: Optional[int] = 5) -> str:
 
         await crud.reset_quota_if_needed(db, user.id)
         quota = await crud.get_user_quota(db, user.id)
-        group_budget = user.group.token_budget if user.group else 0
-        if quota and group_budget > 0 and quota.tokens_used >= group_budget:
+        budget = effective_token_budget(user, quota)
+        if quota and budget > 0 and quota.tokens_used >= budget:
             return "Error: Token quota exceeded."
 
         provider_key = config.get("search.provider", "brave")
