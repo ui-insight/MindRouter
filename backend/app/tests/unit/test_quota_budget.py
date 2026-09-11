@@ -239,7 +239,7 @@ def test_dashboard_path_collects_and_applies_a_grant():
 def test_dashboard_form_exposes_the_grant_field():
     tpl = (_APP / "dashboard" / "templates" / "admin" / "requests.html").read_text()
     assert 'name="granted_tokens"' in tpl
-    assert "{{ req.requested_tokens }}" in tpl      # prefilled with the ask
+    assert "req.requested_tokens if req.requested_tokens is not none" in tpl  # prefilled, null-safe
     assert "{% if error %}" in tpl                  # failures are visible
 
 
@@ -263,3 +263,11 @@ def test_model_column_matches_the_migration():
     block = src[src.index("token_budget_override")]
     assert "BigInteger" in src[src.index("token_budget_override") - 200 :
                                src.index("token_budget_override") + 200]
+
+
+def test_validation_happens_before_any_row_is_mutated():
+    """Review finding: get_async_db() commits on normal completion, and the
+    dashboard turns a ValueError into a redirect, so mutating status before
+    validating would commit an approval with no grant applied."""
+    body = _crud_fn_src(code_only=True)
+    assert body.index("raise ValueError") < body.index("quota_request.status = status")

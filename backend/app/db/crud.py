@@ -3038,17 +3038,26 @@ async def review_quota_request(
     if not quota_request:
         return None
 
+    # Validate BEFORE touching any row. get_async_db() commits on normal
+    # request completion, and the dashboard path turns a ValueError into a
+    # redirect (a normal completion) — so if the status were already set to
+    # APPROVED here, a rejected amount would commit an approval with no grant
+    # applied: the very bug this function exists to fix.
+    amount: Optional[int] = None
+    if status == QuotaRequestStatus.APPROVED:
+        amount = granted_tokens if granted_tokens is not None else quota_request.requested_tokens
+        # Negative is meaningless. 0 IS allowed and means unlimited — the same
+        # semantics groups.token_budget has always had, and what the admin form
+        # says it means.
+        if amount is None or int(amount) < 0:
+            raise ValueError("granted_tokens must be zero or positive")
+
     quota_request.status = status
     quota_request.reviewed_by = reviewer_id
     quota_request.reviewed_at = datetime.now(timezone.utc)
     quota_request.review_notes = review_notes
 
     if status == QuotaRequestStatus.APPROVED:
-        amount = granted_tokens if granted_tokens is not None else quota_request.requested_tokens
-        # A negative budget is meaningless and 0 would silently mean
-        # "unlimited" — refuse rather than grant something unintended.
-        if amount is None or int(amount) < 0:
-            raise ValueError("granted_tokens must be zero or positive")
         quota = await get_user_quota(db, quota_request.user_id)
         if quota is None:
             # No quota row yet. Create one rather than dropping the grant —

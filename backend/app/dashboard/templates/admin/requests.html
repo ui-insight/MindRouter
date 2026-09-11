@@ -63,8 +63,8 @@
                                     </label>
                                     <input type="number" min="0" step="1" class="form-control form-control-sm"
                                            id="granted_tokens_{{ req.id }}" name="granted_tokens"
-                                           value="{{ req.requested_tokens }}"
-                                           placeholder="{{ req.requested_tokens }}">
+                                           value="{{ req.requested_tokens if req.requested_tokens is not none else '' }}"
+                                           placeholder="{{ req.requested_tokens if req.requested_tokens is not none else 'tokens' }}">
                                     <div class="form-text">
                                         Becomes this user&rsquo;s budget, replacing the group default.
                                         Blank grants the amount requested; 0 means unlimited.
