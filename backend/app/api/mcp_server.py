@@ -46,6 +46,7 @@ Legacy clients that cannot speak Streamable HTTP may still use
 """
 
 import contextvars
+import json
 import time
 from typing import Optional
 
@@ -57,6 +58,7 @@ from starlette.routing import Mount, Route
 from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.types import ToolAnnotations
 
 from backend.app.db.session import get_async_db_context
 from backend.app.core.quota_budget import effective_token_budget
@@ -78,7 +80,12 @@ mcp = FastMCP(
 sse_transport = SseServerTransport("/messages/")
 
 
-@mcp.tool()
+@mcp.tool(
+    # Read-only + open-world: clients that gate on annotations (Codex's
+    # default approval mode treats an un-annotated tool as destructive and
+    # stops to ask) can call a search without a confirmation prompt.
+    annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
+)
 async def web_search(query: str, max_results: Optional[int] = 5) -> str:
     """Search the web using MindRouter's search API.
 
@@ -226,6 +233,46 @@ async def _resolve_auth(api_key_str: Optional[str]) -> tuple[Optional[dict], Opt
         return {"user_id": api_key.user.id, "api_key_id": api_key.id}, None
 
 
+def _discover_probe_reply(body: bytes) -> Optional[dict]:
+    """JSON-RPC ``-32601`` reply for a pre-initialize ``server/discover`` probe.
+
+    Rust MCP clients (rmcp 3.x — goose, Codex) open every connection with a
+    ``server/discover`` request carrying a draft ``mcp-protocol-version``
+    header. The Python SDK rejects the header with an HTTP 400 whose JSON-RPC
+    id is the literal ``"server-error"``; rmcp cannot correlate that to its
+    request and aborts the handshake. Answering the probe ourselves — a plain
+    ``application/json`` method-not-found error carrying the client's id — is
+    what rmcp expects from a server without the extension, and it then
+    proceeds to a normal ``initialize`` (verified against goose 1.50.0).
+    Returns None for every other body so it is handed to the SDK untouched.
+    """
+    try:
+        msg = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(msg, dict) or msg.get("method") != "server/discover":
+        return None
+    return {
+        "jsonrpc": "2.0",
+        "id": msg.get("id", 0),
+        "error": {"code": -32601, "message": "Method not found"},
+    }
+
+
+def _replay_body(body: bytes, receive):
+    """ASGI ``receive`` that hands back an already-read body once, then defers."""
+    delivered = False
+
+    async def _receive():
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return _receive
+
+
 class StreamableHTTPEndpoint:
     """ASGI endpoint for the Streamable HTTP transport at ``POST /mcp``.
 
@@ -261,6 +308,17 @@ class StreamableHTTPEndpoint:
             user_id=auth["user_id"],
             method=scope.get("method"),
         )
+
+        if scope.get("method") == "POST":
+            # Read the (small, JSON-RPC) body once so the rmcp discover probe
+            # can be answered here; everything else is replayed to the SDK.
+            body = await request.body()
+            reply = _discover_probe_reply(body)
+            if reply is not None:
+                await JSONResponse(reply)(scope, receive, send)
+                return
+            receive = _replay_body(body, receive)
+
         await self._session_manager.handle_request(scope, receive, send)
 
 

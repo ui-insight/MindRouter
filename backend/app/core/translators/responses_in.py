@@ -30,7 +30,10 @@ absorbs:
 
 Non-function tools (``web_search``, ``custom``, ``mcp``) are stripped,
 never rejected: the Codex agent sends a ``web_search`` tool by default
-and would break out-of-the-box otherwise.
+and would break out-of-the-box otherwise. The exception is Codex's
+``namespace`` tool (how it ships MCP servers): its inner functions are
+flattened to ``<namespace>__<tool>`` for the backend and the call is
+split back into ``namespace`` + ``name`` on the way out.
 """
 
 import time
@@ -63,6 +66,71 @@ def _gen_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
 
+# Codex (0.15x+) sends every MCP server — and its own sub-agent tool set —
+# as a Responses ``namespace`` tool: ``{"type": "namespace", "name": N,
+# "description": ..., "tools": [function, ...]}``, and expects the call
+# back as a ``function_call`` item carrying ``"namespace": N, "name": tool``.
+# Chat backends only know flat function tools, so the namespace is folded
+# into the tool name on the way in and split back out on the way out.
+# The separator is not parseable in reverse (namespaces themselves contain
+# ``__``, e.g. ``mcp__mindrouter``), hence the explicit map.
+_NS_SEP = "__"
+
+
+def _namespace_entries(tools: Optional[List[Dict[str, Any]]]):
+    """Yield ``(namespace, namespace_description, inner_function_tool)``.
+
+    A namespace without a name has nothing to fold in; its tools are
+    treated as plain function tools by the caller.
+    """
+    for tool in tools or []:
+        if not isinstance(tool, dict) or tool.get("type") != "namespace":
+            continue
+        ns = tool.get("name") or ""
+        if not ns:
+            continue
+        for inner in tool.get("tools") or []:
+            if isinstance(inner, dict) and inner.get("type") == "function":
+                yield ns, tool.get("description") or "", inner
+
+
+def namespace_tool_map(tools: Optional[List[Dict[str, Any]]]) -> Dict[str, Tuple[str, str]]:
+    """Outbound-name → ``(namespace, tool)`` for every namespaced tool.
+
+    Besides the flattened ``<ns>__<tool>`` keys, a bare tool name is added
+    as an alias when a model drops the prefix — but only when it is
+    unambiguous: unique across namespaces and not also the name of a
+    top-level function tool (Codex ships its own ``read_file``-style tools
+    next to MCP servers that expose the same names). Resolving that once
+    here keeps the per-frame lookup a single dict get.
+    """
+    flat_names = {
+        t.get("name")
+        for t in tools or []
+        if isinstance(t, dict) and t.get("type") == "function"
+    }
+    ns_map: Dict[str, Tuple[str, str]] = {}
+    bare_seen: Dict[str, int] = {}
+    for ns, _desc, inner in _namespace_entries(tools):
+        name = inner.get("name") or ""
+        ns_map[f"{ns}{_NS_SEP}{name}"] = (ns, name)
+        bare_seen[name] = bare_seen.get(name, 0) + 1
+    for name, count in bare_seen.items():
+        if count == 1 and name not in flat_names and name not in ns_map:
+            ns_map[name] = next(v for v in ns_map.values() if v[1] == name)
+    return ns_map
+
+
+def split_namespaced_call(name: str, ns_map: Optional[Dict[str, Tuple[str, str]]]) -> Dict[str, str]:
+    """Name fields for an outbound ``function_call`` item: a flattened (or
+    unambiguous bare) namespaced name becomes ``{"namespace": N, "name":
+    tool}``; anything else passes through unchanged."""
+    hit = (ns_map or {}).get(name)
+    if hit is None:
+        return {"name": name}
+    return {"namespace": hit[0], "name": hit[1]}
+
+
 @dataclass
 class ResponsesRequestContext:
     """Request parameters echoed back in Response snapshots.
@@ -92,6 +160,8 @@ class ResponsesRequestContext:
     stream: bool = False
     response_id: str = ""
     created_at: int = 0
+    # flat tool name → (namespace, tool) for Codex-style namespace tools
+    namespaced_tools: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     # Stamped by the route (used by the store service)
     user_id: Optional[int] = None
     api_key_id: Optional[int] = None
@@ -126,14 +196,15 @@ class ResponsesRequestContext:
             stream=_or(body.get("stream"), False),
             response_id=_gen_id("resp"),
             created_at=int(time.time()),
+            namespaced_tools=namespace_tool_map(body.get("tools")),
         )
 
     def stripped_tool_types(self) -> List[str]:
-        """Tool types that will be stripped (everything non-function)."""
+        """Tool types that will be stripped (everything but function/namespace)."""
         return [
             str(t.get("type"))
             for t in self.tools
-            if isinstance(t, dict) and t.get("type") != "function"
+            if isinstance(t, dict) and t.get("type") not in ("function", "namespace")
         ]
 
     def to_stored_parameters(self) -> Dict[str, Any]:
@@ -178,6 +249,7 @@ class ResponsesRequestContext:
             prompt_cache_key=params.get("prompt_cache_key"),
             response_id=stored.response_id,
             created_at=params.get("created_at") or int(stored.created_at.timestamp()),
+            namespaced_tools=namespace_tool_map(params.get("tools")),
             user_id=stored.user_id,
             api_key_id=stored.api_key_id,
         )
@@ -231,6 +303,11 @@ class ResponsesInTranslator:
             think=think,
             user=user,
             auto_truncate=data.get("truncation") == "auto",
+            # The terminal Responses snapshot must carry real token counts:
+            # without this the inference service suppresses vLLM's
+            # usage-only chunk and the stream falls back to estimates
+            # (input_tokens: 0), blinding Codex's context meter.
+            include_usage=True,
         )
 
     # ------------------------------------------------------------------
@@ -289,6 +366,11 @@ class ResponsesInTranslator:
 
         if item_type == "function_call":
             call_id = item.get("call_id") or item.get("id") or _gen_id("call")
+            name = item.get("name") or ""
+            # Replayed history of a namespaced call: re-flatten so it
+            # matches the tool name the backend saw when it made the call.
+            if item.get("namespace"):
+                name = f"{item['namespace']}{_NS_SEP}{name}"
             return [
                 CanonicalMessage(
                     role=MessageRole.ASSISTANT,
@@ -298,7 +380,7 @@ class ResponsesInTranslator:
                             id=call_id,
                             type="function",
                             function=CanonicalFunctionCall(
-                                name=item.get("name") or "",
+                                name=name,
                                 arguments=item.get("arguments") or "{}",
                             ),
                         )
@@ -448,23 +530,46 @@ class ResponsesInTranslator:
     def _translate_tools(
         tools: Optional[List[Dict[str, Any]]]
     ) -> Optional[List[CanonicalToolDefinition]]:
-        """Re-nest flat Responses function tools; strip everything else."""
+        """Re-nest flat Responses function tools; flatten ``namespace``
+        tools into ``<namespace>__<tool>`` functions; strip everything else."""
         if not tools:
             return None
         translated = []
-        for tool in tools:
-            if not isinstance(tool, dict) or tool.get("type") != "function":
-                continue  # web_search / custom / mcp / ... — stripped
+
+        def _add(name: str, description: str, parameters: Any) -> None:
             # description is always a string: vLLM's gpt-oss tool parser
             # rejects tools whose description is missing/None.
             function: Dict[str, Any] = {
-                "name": tool.get("name") or "",
-                "description": tool.get("description") or "",
-                "parameters": tool.get("parameters") or {},
+                "name": name or "",
+                "description": description or "",
+                "parameters": parameters or {},
             }
             translated.append(
                 CanonicalToolDefinition(type="function", function=function)
             )
+
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") == "function":
+                _add(tool.get("name"), tool.get("description"), tool.get("parameters"))
+            elif tool.get("type") == "namespace":
+                ns = tool.get("name") or ""
+                if not ns:
+                    # Nameless namespace: nothing to fold in, plain functions.
+                    for inner in tool.get("tools") or []:
+                        if isinstance(inner, dict) and inner.get("type") == "function":
+                            _add(inner.get("name"), inner.get("description"), inner.get("parameters"))
+                    continue
+                for _ns, ns_desc, inner in _namespace_entries([tool]):
+                    # The namespace description is only a fallback: repeating
+                    # it on every tool would bloat the prompt N-fold.
+                    _add(
+                        f"{ns}{_NS_SEP}{inner.get('name') or ''}",
+                        inner.get("description") or ns_desc,
+                        inner.get("parameters"),
+                    )
+            # web_search / custom / mcp / ... — stripped
         return translated or None
 
     @staticmethod
@@ -475,9 +580,12 @@ class ResponsesInTranslator:
             return tool_choice
         if isinstance(tool_choice, dict):
             if tool_choice.get("type") == "function" and tool_choice.get("name"):
+                name = tool_choice["name"]
+                if tool_choice.get("namespace"):
+                    name = f"{tool_choice['namespace']}{_NS_SEP}{name}"
                 return {
                     "type": "function",
-                    "function": {"name": tool_choice["name"]},
+                    "function": {"name": name},
                 }
             # allowed_tools / hosted-tool choices have no chat equivalent.
             return "auto"
@@ -540,7 +648,9 @@ class ResponsesInTranslator:
         message = choices[0].get("message") or {}
         finish_reason = choices[0].get("finish_reason")
 
-        output = ResponsesInTranslator.build_output_items(message)
+        output = ResponsesInTranslator.build_output_items(
+            message, ctx.namespaced_tools
+        )
         status, incomplete_details = ResponsesInTranslator.map_finish_reason(
             finish_reason
         )
@@ -556,8 +666,15 @@ class ResponsesInTranslator:
         )
 
     @staticmethod
-    def build_output_items(message: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Build the Response ``output`` array from a chat message dict."""
+    def build_output_items(
+        message: Dict[str, Any],
+        ns_map: Optional[Dict[str, Tuple[str, str]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build the Response ``output`` array from a chat message dict.
+
+        ``ns_map`` (from the request context) splits flattened namespace
+        tool names back into ``namespace`` + ``name`` on function_call items.
+        """
         output: List[Dict[str, Any]] = []
 
         reasoning_text = message.get("reasoning_content")
@@ -601,7 +718,7 @@ class ResponsesInTranslator:
                     "type": "function_call",
                     "status": "completed",
                     "call_id": tc.get("id") or _gen_id("call"),
-                    "name": function.get("name") or "",
+                    **split_namespaced_call(function.get("name") or "", ns_map),
                     "arguments": function.get("arguments") or "{}",
                 }
             )

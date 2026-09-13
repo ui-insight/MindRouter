@@ -316,6 +316,7 @@ async def stream_with_web_search(
     surfaced as web_search_call items instead.
     """
     st = rs._StreamState()
+    st.ns_map = ctx.namespaced_tools
     for f in rs.prologue_frames(st, ctx):
         yield f
 
@@ -451,7 +452,9 @@ async def run_web_search_loop(
         ]
         message["tool_calls"] = [tc for tc in all_calls if tc not in internal]
 
-        output.extend(ResponsesInTranslator.build_output_items(message))
+        output.extend(
+            ResponsesInTranslator.build_output_items(message, ctx.namespaced_tools)
+        )
 
         if not internal:
             status, incomplete = ResponsesInTranslator.map_finish_reason(

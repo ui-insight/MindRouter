@@ -229,6 +229,29 @@ class TestNonStreamingLoop:
         assert fc and fc[0]["name"] == "get_weather"
         assert fc[0]["call_id"] == "call_c1"
 
+    async def test_namespaced_client_call_is_split_after_a_search_round(self):
+        # Hosted web_search on, plus a Codex-style MCP namespace: the
+        # internal search call is executed, the namespaced call that follows
+        # is surfaced with namespace + name split back out.
+        ns_tools = [{"type": "namespace", "name": "mcp__mindrouter", "tools": [
+            {"type": "function", "name": "lookup", "parameters": {}}]}]
+        ns_call = {"id": "call_n1", "type": "function",
+                   "function": {"name": "mcp__mindrouter__lookup",
+                                "arguments": "{}"}}
+        backend = AsyncMock(side_effect=[
+            _chat_response(tool_calls=[_search_call()], finish="tool_calls"),
+            _chat_response(tool_calls=[ns_call], finish="tool_calls"),
+        ])
+        executor = AsyncMock(return_value=[])
+        result = await _mod.run_web_search_loop(
+            backend, _canonical(), _ctx(stream=False, tools=ns_tools),
+            executor, max_calls=4,
+        )
+        assert backend.await_count == 2 and executor.await_count == 1
+        fc = [i for i in result["output"] if i["type"] == "function_call"]
+        assert fc == [{**fc[0], "namespace": "mcp__mindrouter", "name": "lookup",
+                       "call_id": "call_n1"}]
+
 
 def _sse(obj) -> bytes:
     return f"data: {json.dumps(obj)}\n\n".encode()

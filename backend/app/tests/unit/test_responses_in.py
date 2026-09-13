@@ -38,6 +38,8 @@ from backend.app.core.canonical_schemas import (
 from backend.app.core.translators.responses_in import (
     ResponsesInTranslator,
     ResponsesRequestContext,
+    namespace_tool_map,
+    split_namespaced_call,
 )
 from backend.app.core.translators.vllm_out import VLLMOutTranslator
 
@@ -792,3 +794,209 @@ class TestResponsesRoundTrip:
         assert payload["messages"][3]["tool_call_id"] == "call_ls"
         assert payload["tools"][0]["function"]["name"] == "get_weather"
         assert payload["stream"] is True
+
+
+# ---------------------------------------------------------------------------
+# Codex-style ``namespace`` tools (MCP servers + Codex's own sub-agent tool
+# set arrive as {"type": "namespace", "name": N, "tools": [...]}).
+# ---------------------------------------------------------------------------
+
+NAMESPACE_TOOLS = [
+    {
+        "type": "function",
+        "name": "exec_command",
+        "description": "Run a shell command.",
+        "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+    },
+    {
+        "type": "namespace",
+        "name": "mcp__mindrouter",
+        "description": "MindRouter tools. Use web_search to find current information.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "web_search",
+                "description": "Search the web.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+            {"type": "function", "name": "lookup", "parameters": {}},
+        ],
+    },
+    {"type": "web_search", "external_web_access": False},
+]
+
+
+class TestNamespaceTools:
+    def test_namespace_tools_are_flattened_into_functions(self):
+        req = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi", "tools": NAMESPACE_TOOLS}
+        )
+        names = [t.function["name"] for t in req.tools]
+        assert names == [
+            "exec_command",
+            "mcp__mindrouter__web_search",
+            "mcp__mindrouter__lookup",
+        ]
+        ws = req.tools[1].function
+        assert ws["parameters"]["required"] == ["query"]
+        # the tool's own description wins; the namespace description is only
+        # the fallback for a tool that has none (never duplicated N times)
+        assert ws["description"] == "Search the web."
+        assert req.tools[2].function["description"].startswith("MindRouter tools.")
+
+    def test_namespace_is_not_reported_as_stripped(self):
+        ctx = ResponsesRequestContext.from_body(
+            {"model": "m", "input": "hi", "tools": NAMESPACE_TOOLS}
+        )
+        assert ctx.stripped_tool_types() == ["web_search"]
+        assert ctx.namespaced_tools == {
+            "mcp__mindrouter__web_search": ("mcp__mindrouter", "web_search"),
+            "mcp__mindrouter__lookup": ("mcp__mindrouter", "lookup"),
+            # unambiguous bare names are accepted as aliases (models drop prefixes)
+            "web_search": ("mcp__mindrouter", "web_search"),
+            "lookup": ("mcp__mindrouter", "lookup"),
+        }
+
+    def test_replayed_namespaced_call_is_reflattened(self):
+        # Codex resends the whole transcript each turn, including the
+        # function_call it received with namespace+name split out.
+        req = ResponsesInTranslator.translate_responses_request(
+            {
+                "model": "m",
+                "tools": NAMESPACE_TOOLS,
+                "input": [
+                    {"role": "user", "content": "search"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "namespace": "mcp__mindrouter",
+                        "name": "web_search",
+                        "arguments": '{"query": "idaho"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "results...",
+                    },
+                ],
+            }
+        )
+        assistant = req.messages[1]
+        assert assistant.role == MessageRole.ASSISTANT
+        assert assistant.tool_calls[0].function.name == "mcp__mindrouter__web_search"
+        assert req.messages[2].role == MessageRole.TOOL
+
+    def test_output_call_is_split_back_into_namespace_and_name(self):
+        ctx = ResponsesRequestContext.from_body(
+            {"model": "m", "input": "hi", "tools": NAMESPACE_TOOLS}
+        )
+        chat_response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_x",
+                                "type": "function",
+                                "function": {
+                                    "name": "mcp__mindrouter__web_search",
+                                    "arguments": '{"query": "q"}',
+                                },
+                            },
+                            {
+                                "id": "call_y",
+                                "type": "function",
+                                "function": {"name": "exec_command", "arguments": "{}"},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        out = ResponsesInTranslator.format_response(chat_response, ctx)["output"]
+        assert out[0]["type"] == "function_call"
+        assert out[0]["namespace"] == "mcp__mindrouter"
+        assert out[0]["name"] == "web_search"
+        assert out[0]["call_id"] == "call_x"
+        # plain function tools are untouched and carry no namespace key
+        assert out[1]["name"] == "exec_command"
+        assert "namespace" not in out[1]
+
+    def test_bare_tool_name_maps_back_when_unambiguous(self):
+        # The model dropped the prefix; the name is unique across namespaces
+        # and no top-level function tool claims it.
+        ns_map = namespace_tool_map(NAMESPACE_TOOLS)
+        assert split_namespaced_call("web_search", ns_map) == {
+            "namespace": "mcp__mindrouter",
+            "name": "web_search",
+        }
+        assert split_namespaced_call("exec_command", ns_map) == {"name": "exec_command"}
+        assert split_namespaced_call("exec_command", {}) == {"name": "exec_command"}
+
+    def test_bare_name_alias_is_withheld_when_ambiguous(self):
+        # Same bare name in two namespaces → no alias; flattened keys still work.
+        two = [
+            {"type": "namespace", "name": "mcp__a",
+             "tools": [{"type": "function", "name": "search", "parameters": {}}]},
+            {"type": "namespace", "name": "mcp__b",
+             "tools": [{"type": "function", "name": "search", "parameters": {}}]},
+        ]
+        ns_map = namespace_tool_map(two)
+        assert split_namespaced_call("search", ns_map) == {"name": "search"}
+        assert split_namespaced_call("mcp__b__search", ns_map) == {
+            "namespace": "mcp__b", "name": "search",
+        }
+
+    def test_top_level_function_is_never_hijacked_by_a_namespaced_twin(self):
+        # Codex ships its own read_file next to a filesystem MCP server that
+        # also exposes read_file: a call to the top-level tool must stay flat.
+        tools = [
+            {"type": "function", "name": "read_file", "parameters": {}},
+            {"type": "namespace", "name": "mcp__filesystem",
+             "tools": [{"type": "function", "name": "read_file", "parameters": {}}]},
+        ]
+        ns_map = namespace_tool_map(tools)
+        assert split_namespaced_call("read_file", ns_map) == {"name": "read_file"}
+        assert split_namespaced_call("mcp__filesystem__read_file", ns_map) == {
+            "namespace": "mcp__filesystem", "name": "read_file",
+        }
+
+    def test_nameless_namespace_is_plain_functions(self):
+        tools = [{"type": "namespace", "tools": [
+            {"type": "function", "name": "t", "description": "d", "parameters": {}}]}]
+        req = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi", "tools": tools}
+        )
+        assert [t.function["name"] for t in req.tools] == ["t"]
+        assert namespace_tool_map(tools) == {}
+
+    def test_namespaced_tool_choice_is_flattened(self):
+        req = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi", "tools": NAMESPACE_TOOLS,
+             "tool_choice": {"type": "function", "namespace": "mcp__mindrouter", "name": "web_search"}}
+        )
+        assert req.tool_choice == {
+            "type": "function", "function": {"name": "mcp__mindrouter__web_search"},
+        }
+
+    def test_snapshot_echoes_original_namespace_tools(self):
+        ctx = ResponsesRequestContext.from_body(
+            {"model": "m", "input": "hi", "tools": NAMESPACE_TOOLS}
+        )
+        snap = ResponsesInTranslator.build_snapshot(ctx, status="completed", output=[], usage=None)
+        assert snap["tools"] == NAMESPACE_TOOLS
+
+    def test_request_always_asks_backend_for_usage(self):
+        # The terminal Responses snapshot needs real token counts.
+        req = ResponsesInTranslator.translate_responses_request(
+            {"model": "m", "input": "hi", "stream": True}
+        )
+        assert req.include_usage is True

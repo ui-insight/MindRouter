@@ -357,3 +357,85 @@ def test_streamable_route_is_registered_before_the_legacy_proxy_mount():
         "the /mcp Route must be registered before the legacy proxy Mount, "
         "or the Mount swallows POST /mcp"
     )
+
+
+# --------------------------------------------------------------------------
+# rmcp (goose / Codex) pre-initialize ``server/discover`` probe
+# --------------------------------------------------------------------------
+
+
+async def test_server_discover_probe_gets_correlated_json_error(allow_all):
+    """rmcp 3.x opens with ``server/discover`` + a draft protocol header; the
+    SDK's own 400 carries id "server-error", which rmcp cannot correlate and
+    aborts on. We must answer it ourselves with a plain JSON -32601 that
+    echoes the request id — and the SDK must still see nothing of it."""
+    app = _build_app()
+    async with _client(app) as client:
+        probe = await client.post(
+            "/mcp",
+            headers={**_auth_headers(), "MCP-Protocol-Version": "2026-07-28"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "server/discover",
+                "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}},
+            },
+        )
+        assert probe.status_code == 200, probe.text
+        assert probe.headers["content-type"].startswith("application/json")
+        assert probe.json() == {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+
+        # The real handshake that follows the probe must be unaffected — the
+        # body replay must hand initialize/tools/list to the SDK intact.
+        init = await client.post(
+            "/mcp",
+            headers=_auth_headers(),
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "goose", "version": "1.50.0"},
+                },
+            },
+        )
+        assert init.status_code == 200, init.text
+        listed = await client.post(
+            "/mcp",
+            headers=_auth_headers(),
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        )
+    assert listed.status_code == 200, listed.text
+    tool = next(t for t in listed.json()["result"]["tools"] if t["name"] == "web_search")
+    # Codex's default approval mode prompts for un-annotated tools.
+    assert tool["annotations"]["readOnlyHint"] is True
+
+
+async def test_discover_probe_still_requires_a_valid_key():
+    app = _build_app()
+    async with _client(app) as client:
+        r = await client.post(
+            "/mcp",
+            headers=HEADERS,
+            json={"jsonrpc": "2.0", "id": 0, "method": "server/discover"},
+        )
+    assert r.status_code == 401
+
+
+def test_discover_probe_reply_ignores_everything_else():
+    assert mcp_server._discover_probe_reply(b"not json") is None
+    assert mcp_server._discover_probe_reply(b"[1,2]") is None
+    assert (
+        mcp_server._discover_probe_reply(b'{"jsonrpc":"2.0","id":5,"method":"tools/list"}')
+        is None
+    )
+    reply = mcp_server._discover_probe_reply(
+        b'{"jsonrpc":"2.0","id":"abc","method":"server/discover"}'
+    )
+    assert reply["id"] == "abc" and reply["error"]["code"] == -32601

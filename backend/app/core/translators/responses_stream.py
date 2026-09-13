@@ -51,12 +51,13 @@ single-round composition used for plain requests.
 import asyncio
 import json
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from backend.app.core.translators.responses_in import (
     ResponsesInTranslator,
     ResponsesRequestContext,
     _gen_id,
+    split_namespaced_call,
 )
 
 
@@ -112,6 +113,8 @@ class _StreamState:
         self.pending_error: Optional[Dict[str, Any]] = None
         self.harvested_usage: Optional[Dict[str, Any]] = None
         self.saw_error_frame = False
+        # flat tool name → (namespace, tool); see responses_in.namespace_tool_map
+        self.ns_map: Dict[str, Tuple[str, str]] = {}
 
     def next_seq(self) -> int:
         seq = self.seq
@@ -234,7 +237,7 @@ class _StreamState:
                     "status": "in_progress",
                     "arguments": "",
                     "call_id": self.fc_call_id,
-                    "name": self.fc_name,
+                    **split_namespaced_call(self.fc_name, self.ns_map),
                 },
             )
         ]
@@ -270,12 +273,13 @@ class _StreamState:
         if not self.fc_opened:
             # Name never arrived — open now so the item is well-formed.
             frames.extend(self._open_fc_frames())
+        name_fields = split_namespaced_call(self.fc_name, self.ns_map)
         item = {
             "id": self.item_id,
             "type": "function_call",
             "status": "completed",
             "call_id": self.fc_call_id,
-            "name": self.fc_name,
+            **name_fields,
             "arguments": self.fc_args or "{}",
         }
         frames.extend(
@@ -285,7 +289,7 @@ class _StreamState:
                     "response.function_call_arguments.done",
                     item_id=self.item_id,
                     output_index=self.output_index,
-                    name=self.fc_name,
+                    **name_fields,
                     arguments=self.fc_args or "{}",
                 ),
                 _frame(
@@ -596,6 +600,7 @@ async def stream_responses_events(
     the store=true persistence path reads it from a finally block.
     """
     st = _StreamState()
+    st.ns_map = ctx.namespaced_tools
 
     for f in prologue_frames(st, ctx):
         yield f

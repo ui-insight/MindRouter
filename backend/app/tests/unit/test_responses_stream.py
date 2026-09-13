@@ -422,3 +422,52 @@ class TestDrainContract:
         )
         assert consumed["done"] is True
         assert events[-1][0] == "response.completed"
+
+
+class TestNamespacedToolCallStream:
+    async def test_flattened_call_is_split_in_every_frame(self):
+        ns_tools = [
+            {
+                "type": "namespace",
+                "name": "mcp__mindrouter",
+                "tools": [
+                    {"type": "function", "name": "web_search", "parameters": {}}
+                ],
+            }
+        ]
+        chunks = [
+            _chunk(
+                delta={
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_ns",
+                            "type": "function",
+                            "function": {
+                                "name": "mcp__mindrouter__web_search",
+                                "arguments": '{"query":"q"}',
+                            },
+                        }
+                    ]
+                }
+            ),
+            _chunk(finish_reason="tool_calls", usage=_USAGE),
+            _DONE,
+        ]
+        events = _parse(
+            await _collect_stream(
+                stream_responses_events(_async_iter(chunks), _ctx(tools=ns_tools))
+            )
+        )
+        by_type = {t: p for t, p in events}
+        added = by_type["response.output_item.added"]["item"]
+        done_item = by_type["response.output_item.done"]["item"]
+        args_done = by_type["response.function_call_arguments.done"]
+        for obj in (added, done_item, args_done):
+            assert obj["namespace"] == "mcp__mindrouter"
+            assert obj["name"] == "web_search"
+        # the completed snapshot carries the split item too
+        completed = by_type["response.completed"]["response"]
+        assert completed["output"][0]["namespace"] == "mcp__mindrouter"
+        assert completed["output"][0]["name"] == "web_search"
+        assert completed["output"][0]["call_id"] == "call_ns"
