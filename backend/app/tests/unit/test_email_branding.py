@@ -130,3 +130,123 @@ async def test_send_one_without_logo_is_plain_alternative(monkeypatch):
     msg = captured["msg"]
     assert msg.get_content_type() == "multipart/alternative"
     assert not any(p.get_content_type().startswith("image/") for p in msg.walk())
+
+
+# ---------------------------------------------------------------------------
+# Self-contained blog emails: images shrunk + embedded as CID parts, <details>
+# (web-only expandable notes) dropped from the email copy.
+# ---------------------------------------------------------------------------
+
+
+def _png(width, height, mode="RGB"):
+    from io import BytesIO
+    from PIL import Image
+    buf = BytesIO()
+    Image.new(mode, (width, height), (200, 30, 30) if mode == "RGB" else (200, 30, 30, 128)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_shrink_image_downscales_to_email_width_as_jpeg():
+    from io import BytesIO
+    from PIL import Image
+    data, subtype = es.shrink_image_for_email(_png(2400, 1200))
+    assert subtype == "jpeg"
+    im = Image.open(BytesIO(data))
+    assert im.size == (es._EMAIL_IMAGE_MAX_WIDTH, es._EMAIL_IMAGE_MAX_WIDTH // 2)
+
+
+def test_shrink_image_keeps_alpha_as_png_and_small_images_unscaled():
+    from io import BytesIO
+    from PIL import Image
+    data, subtype = es.shrink_image_for_email(_png(300, 100, "RGBA"))
+    assert subtype == "png"
+    assert Image.open(BytesIO(data)).size == (300, 100)  # already narrower than the cap
+
+
+def test_shrink_image_passes_unreadable_bytes_through():
+    assert es.shrink_image_for_email(b"not an image") == (b"not an image", "png")
+
+
+def test_blog_email_uses_cid_for_embedded_images_and_absolute_urls_otherwise(gold_brand_with_logo):
+    md = (
+        'Hero: <img src="/blog/images/2026/09/13/aa/hero.png" alt="hero" style="width:100%">\n\n'
+        "![shot](/blog/images/2026/09/13/bb/shot.png)\n\n"
+        '<img src="/blog/images/2026/09/13/cc/not-embedded.png">'
+    )
+    inline = {
+        "2026/09/13/aa/hero.png": (b"\x89PNG-hero", "png"),
+        "2026/09/13/bb/shot.png": (b"\xff\xd8-shot", "jpeg"),
+    }
+    html = es._render_blog_email("T", md, "slug", "Admin", "https://x", inline_images=inline)
+    assert 'src="cid:blogimg1"' in html and 'src="cid:blogimg2"' in html
+    # the image past the budget keeps a remote link; imgs without an author
+    # style get an inline size, an existing style attribute is left alone
+    assert 'src="https://x/blog/images/2026/09/13/cc/not-embedded.png"' in html
+    assert html.count("max-width:100%;height:auto;") == 2
+    assert 'style="width:100%"' in html
+    atts = es.blog_inline_attachments(inline)
+    assert atts == {"blogimg1": inline["2026/09/13/aa/hero.png"], "blogimg2": inline["2026/09/13/bb/shot.png"]}
+
+
+def test_blog_email_without_inline_map_keeps_absolute_urls(gold_brand_with_logo):
+    html = es._render_blog_email("T", "![a](/blog/images/x/y.png)", "s", "A", "https://x")
+    assert 'src="https://x/blog/images/x/y.png"' in html and "cid:blogimg" not in html
+    assert es.blog_inline_attachments(None) == {}
+
+
+def test_blog_email_drops_details_blocks(gold_brand_with_logo):
+    md = (
+        "Intro paragraph.\n\n"
+        "<details>\n<summary><strong>Gotchas</strong></summary>\n<ul><li>secret gotcha text</li></ul>\n</details>\n\n"
+        "Closing paragraph."
+    )
+    html = es._render_blog_email("T", md, "s", "A", "https://x")
+    assert "secret gotcha text" not in html and "<details" not in html
+    assert "omitted from the email version" in html
+    assert "Intro paragraph." in html and "Closing paragraph." in html
+
+
+@pytest.mark.asyncio
+async def test_send_one_embeds_blog_images_alongside_logo(gold_brand_with_logo):
+    captured = {}
+
+    class FakeSMTP:
+        async def send_message(self, msg):
+            captured["msg"] = msg
+
+    html = es._wrap_html('<img src="cid:blogimg1"><p>hi</p>', base_url="https://x")
+    await es._send_one(FakeSMTP(), "from@x", "to@y", "Subj", html, {"blogimg1": (b"\xff\xd8jpg", "jpeg")})
+    msg = captured["msg"]
+    assert msg.get_content_type() == "multipart/related"
+    ids = {p.get("Content-ID") for p in msg.walk() if p.get_content_type().startswith("image/")}
+    assert ids == {"<blogimg1>", "<brandlogo>"}
+    jpg = next(p for p in msg.walk() if p.get_content_type() == "image/jpeg")
+    assert "inline" in jpg.get("Content-Disposition", "") and "blogimg1.jpeg" in jpg.get("Content-Disposition", "")
+
+
+@pytest.mark.asyncio
+async def test_load_blog_inline_images_fetches_shrinks_and_respects_budget(monkeypatch):
+    import types
+    big = _png(1600, 800)
+
+    class FakeStorage:
+        async def retrieve(self, path):
+            return None if path.endswith("missing.png") else big
+
+    fake_mod = types.ModuleType("backend.app.storage.artifacts")
+    fake_mod.get_artifact_storage = lambda: FakeStorage()
+    pkg = types.ModuleType("backend.app.storage"); pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "backend.app.storage", pkg)
+    monkeypatch.setitem(sys.modules, "backend.app.storage.artifacts", fake_mod)
+
+    md = ('<img src="/blog/images/a/one.png"> ![b](/blog/images/b/two.png) '
+          '<img src="/blog/images/a/one.png"> <img src="/blog/images/m/missing.png">')
+    images = await es.load_blog_inline_images(md)
+    assert list(images) == ["a/one.png", "b/two.png"]  # de-duplicated, document order, missing skipped
+    from io import BytesIO
+    from PIL import Image
+    assert Image.open(BytesIO(images["a/one.png"][0])).width == es._EMAIL_IMAGE_MAX_WIDTH
+
+    # a tiny budget keeps the first image and drops the rest (they stay remote links)
+    monkeypatch.setattr(es, "_EMAIL_IMAGE_BUDGET_BYTES", len(images["a/one.png"][0]) + 1)
+    assert list(await es.load_blog_inline_images(md)) == ["a/one.png"]

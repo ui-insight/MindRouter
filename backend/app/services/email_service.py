@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiosmtplib
 import markdown
@@ -272,14 +272,123 @@ def _wrap_html(content_html: str, footer_html: str = "", base_url: str = "") -> 
     return _EMAIL_HEAD + header_row + content_row + footer_row + _EMAIL_FOOT
 
 
+# Blog images are embedded in the email as inline (CID) attachments so the
+# message is self-contained — no remote fetch, so it renders even where the
+# client blocks external images. They are shrunk first: email bodies are
+# ~600px wide and a post can carry dozens of retina screenshots.
+_EMAIL_IMAGE_MAX_WIDTH = 640
+_EMAIL_IMAGE_JPEG_QUALITY = 78
+# Total budget for inline images per message; past it the remaining images
+# fall back to remote links so a large post never produces a 20 MB email.
+_EMAIL_IMAGE_BUDGET_BYTES = 6 * 1024 * 1024
+
+_DETAILS_RE = re.compile(r"<details\b.*?</details>", re.IGNORECASE | re.DOTALL)
+_DETAILS_OMITTED_NOTE = (
+    '<p style="color:#999999;font-size:13px;">'
+    "(Expandable troubleshooting notes are omitted from the email version "
+    "— see the post on the web.)</p>"
+)
+_BLOG_IMAGE_SRC_RE = re.compile(r'src="(?:https?://[^"/]+)?/blog/images/([^"]+)"')
+
+
+def _strip_details(content_md: str) -> str:
+    """Drop ``<details>`` blocks (expandable, web-only notes) from email copy.
+
+    Mail clients cannot collapse them, so a long post's gotchas would be
+    dumped inline. Each block is replaced by a one-line pointer to the web.
+    """
+    return _DETAILS_RE.sub(_DETAILS_OMITTED_NOTE, content_md)
+
+
+def shrink_image_for_email(data: bytes, max_width: int = _EMAIL_IMAGE_MAX_WIDTH,
+                           quality: int = _EMAIL_IMAGE_JPEG_QUALITY) -> Tuple[bytes, str]:
+    """Downscale an image for inline email use. Returns ``(bytes, subtype)``.
+
+    Photos and flat screenshots both compress well as JPEG; images with
+    transparency (logos, diagrams on transparent backgrounds) stay PNG so
+    the background is not painted black. Anything Pillow cannot read is
+    returned untouched with a best-effort subtype.
+    """
+    from io import BytesIO
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - Pillow is a hard dependency
+        return data, "png"
+    try:
+        im = Image.open(BytesIO(data))
+        im.load()
+    except Exception:
+        return data, "png"
+    fmt = (im.format or "png").lower()
+    if fmt == "gif":
+        return data, "gif"  # keep animations intact
+    if im.width > max_width:
+        im = im.resize((max_width, max(1, round(im.height * max_width / im.width))), Image.LANCZOS)
+    has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+    out = BytesIO()
+    if has_alpha:
+        im.convert("RGBA").save(out, "PNG", optimize=True)
+        return out.getvalue(), "png"
+    im.convert("RGB").save(out, "JPEG", quality=quality, optimize=True, progressive=True)
+    return out.getvalue(), "jpeg"
+
+
+async def load_blog_inline_images(content_md: str) -> Dict[str, Tuple[bytes, str]]:
+    """Fetch every ``/blog/images/…`` the post references from artifact
+    storage and shrink it for email.
+
+    Returns ``{storage_path: (bytes, subtype)}`` in document order, capped by
+    ``_EMAIL_IMAGE_BUDGET_BYTES`` — images past the budget are left out so
+    ``_render_blog_email`` keeps them as remote links instead.
+    """
+    # Lazy import: the storage module pulls in settings, which the
+    # email-render unit tests stub out.
+    from backend.app.storage.artifacts import get_artifact_storage
+
+    paths: List[str] = []
+    for m in _BLOG_IMAGE_SRC_RE.finditer(content_md):
+        if m.group(1) not in paths:
+            paths.append(m.group(1))
+    for m in re.finditer(r'!\[[^\]]*\]\(/blog/images/([^)\s]+)\)', content_md):
+        if m.group(1) not in paths:
+            paths.append(m.group(1))
+    if not paths:
+        return {}
+
+    storage = get_artifact_storage()
+    images: Dict[str, Tuple[bytes, str]] = {}
+    total = 0
+    for path in paths:
+        data = await storage.retrieve(path)
+        if data is None:
+            continue
+        shrunk = shrink_image_for_email(data)
+        if total + len(shrunk[0]) > _EMAIL_IMAGE_BUDGET_BYTES:
+            logger.warning(
+                "blog_email_image_budget_exceeded: %d images embedded, rest left as links", len(images)
+            )
+            break
+        images[path] = shrunk
+        total += len(shrunk[0])
+    return images
+
+
 def _render_blog_email(
-    title: str, content_md: str, slug: str, author_name: str, base_url: str
+    title: str, content_md: str, slug: str, author_name: str, base_url: str,
+    inline_images: Optional[Dict[str, Tuple[bytes, str]]] = None,
 ) -> str:
-    """Render a blog post as an HTML email body."""
+    """Render a blog post as an HTML email body.
+
+    ``inline_images`` (from :func:`load_blog_inline_images`) maps storage
+    paths to shrunken image bytes; each referenced image becomes
+    ``src="cid:blogimgN"`` and is attached by :func:`_send_one` via
+    :func:`blog_inline_attachments`. Images not in the map keep absolute URLs.
+    """
     # Strip the [TOC] table-of-contents marker: the email renderer has no
     # 'toc' extension (anchor navigation is unreliable in mail clients),
     # so the literal token would otherwise appear as text.
     content_md = re.sub(r"\[TOC\]", "", content_md, flags=re.IGNORECASE)
+    content_md = _strip_details(content_md)
 
     # Convert relative image URLs to absolute so email clients can fetch them
     content_md = re.sub(
@@ -295,6 +404,21 @@ def _render_blog_email(
     content_html = markdown.markdown(
         content_md,
         extensions=["fenced_code", "tables"],
+    )
+    if inline_images:
+        cids = _blog_image_cids(inline_images)
+
+        def _to_cid(m: "re.Match[str]") -> str:
+            path = m.group(1)
+            return f'src="cid:{cids[path]}"' if path in cids else m.group(0)
+
+        content_html = _BLOG_IMAGE_SRC_RE.sub(_to_cid, content_html)
+    # Email clients ignore stylesheets: size every image inline so a wide
+    # screenshot cannot blow out the 600px layout.
+    content_html = re.sub(
+        r"<img\b(?![^>]*\bstyle=)",
+        '<img style="max-width:100%;height:auto;"',
+        content_html,
     )
     post_url = f"{base_url}/blog/{slug}"
     brand = _branding.get_branding()
@@ -314,6 +438,22 @@ def _render_blog_email(
     return _wrap_html(body, _BLOG_FOOTER, base_url)
 
 
+def _blog_image_cids(inline_images: Dict[str, Tuple[bytes, str]]) -> Dict[str, str]:
+    """Stable ``storage_path -> Content-ID`` assignment (document order)."""
+    return {path: f"blogimg{i}" for i, path in enumerate(inline_images, start=1)}
+
+
+def blog_inline_attachments(
+    inline_images: Optional[Dict[str, Tuple[bytes, str]]],
+) -> Dict[str, Tuple[bytes, str]]:
+    """``{cid: (bytes, subtype)}`` for :func:`_send_one`, matching the ids
+    :func:`_render_blog_email` wrote into the HTML."""
+    if not inline_images:
+        return {}
+    cids = _blog_image_cids(inline_images)
+    return {cids[path]: img for path, img in inline_images.items()}
+
+
 # ---------------------------------------------------------------------------
 # Core send functions
 # ---------------------------------------------------------------------------
@@ -325,30 +465,36 @@ async def _send_one(
     recipient: str,
     subject: str,
     html_body: str,
+    inline_attachments: Optional[Dict[str, Tuple[bytes, str]]] = None,
 ) -> None:
     """Send a single HTML email via an open SMTP connection.
 
     When the body references the branding email logo (``cid:brandlogo``), the
     logo is embedded as an inline (CID) attachment so it renders even when the
     client blocks remote images — the structure becomes ``multipart/related``
-    wrapping the ``multipart/alternative`` text+html parts.
+    wrapping the ``multipart/alternative`` text+html parts. ``inline_attachments``
+    (``{cid: (bytes, subtype)}``, e.g. a blog post's images) are embedded the
+    same way.
     """
     # Plain text fallback (strip tags crudely)
     plain = re.sub(r"<[^>]+>", "", html_body)
     plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
 
+    inline: Dict[str, Tuple[bytes, str]] = dict(inline_attachments or {})
     logo = _branding.read_email_logo() if "cid:brandlogo" in html_body else None
     if logo:
-        data, subtype = logo
+        inline["brandlogo"] = logo
+    if inline:
         msg = MIMEMultipart("related")
         alt = MIMEMultipart("alternative")
         alt.attach(MIMEText(plain, "plain", "utf-8"))
         alt.attach(MIMEText(html_body, "html", "utf-8"))
         msg.attach(alt)
-        img = MIMEImage(data, _subtype=subtype)
-        img.add_header("Content-ID", "<brandlogo>")
-        img.add_header("Content-Disposition", "inline", filename=f"logo.{subtype}")
-        msg.attach(img)
+        for cid, (data, subtype) in inline.items():
+            img = MIMEImage(data, _subtype=subtype)
+            img.add_header("Content-ID", f"<{cid}>")
+            img.add_header("Content-Disposition", "inline", filename=f"{cid}.{subtype}")
+            msg.attach(img)
     else:
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText(plain, "plain", "utf-8"))
@@ -460,10 +606,13 @@ async def send_bulk_email(
     recipients: List[Dict[str, str]],
     sender: str,
     config: Dict[str, Any],
+    inline_attachments: Optional[Dict[str, Tuple[bytes, str]]] = None,
 ) -> None:
     """Send personalized emails to a list of recipients (fire-and-forget background task).
 
     recipients: list of dicts with keys: email, username, full_name
+    inline_attachments: ``{cid: (bytes, subtype)}`` embedded in every message
+    (see :func:`blog_inline_attachments`).
     """
     errors = []
     success = 0
@@ -479,7 +628,10 @@ async def send_bulk_email(
                 try:
                     personalized = _personalize(body_html, user)
                     personalized_subject = _personalize(subject, user)
-                    await _send_one(smtp, sender, user["email"], personalized_subject, personalized)
+                    await _send_one(
+                        smtp, sender, user["email"], personalized_subject, personalized,
+                        inline_attachments,
+                    )
                     success += 1
                 except Exception as e:
                     errors.append(f"{user['email']}: {e}")

@@ -122,3 +122,32 @@ def test_render_markdown_normal_content_unchanged(blog):
     assert "<h1" in out
     assert "<strong>bold</strong>" in out
     assert 'href="/x"' in out
+
+
+# ---------------------------------------------------------------------------
+# Inline code spans containing "</" must not be mistaken for raw HTML by the
+# html.parser-based block scanner (which, on current CPython builds, swallows
+# everything after the span).
+# ---------------------------------------------------------------------------
+
+
+def test_code_span_with_closing_tag_shape_renders_as_code(blog):
+    md = (
+        "- **Scripts need `</dev/null`.** When stdin is not a TTY.\n"
+        "- Next item.\n\n## Another heading\n\nMore text after.\n"
+    )
+    out = blog._render_markdown(md)
+    assert "<code>&lt;/dev/null</code>" in out
+    assert 'id="another-heading"' in out and "More text after." in out
+    assert "**Scripts" not in out  # the emphasis around the span still renders
+    assert "<strong>Scripts need <code>&lt;/dev/null</code>.</strong>" in out
+
+
+def test_protect_code_spans_leaves_fenced_blocks_and_plain_spans_alone(blog):
+    md = "Use `ls` then:\n\n```bash\ncodex exec \"hi\" </dev/null\n```\n\nand `a</b` here."
+    protected = blog._protect_code_spans(md)
+    assert "`ls`" in protected                       # no "</" -> untouched
+    assert 'codex exec "hi" </dev/null' in protected  # inside a fence -> untouched
+    assert "<code>a&lt;/b</code>" in protected
+    out = blog._render_markdown(md)
+    assert "&lt;/dev/null" in out and "and <code>a&lt;/b</code> here." in out

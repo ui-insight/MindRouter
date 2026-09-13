@@ -15,6 +15,7 @@
 """Blog routes for MindRouter."""
 
 import asyncio
+import html
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -112,8 +113,34 @@ def _sanitize_html(html: str) -> str:
     return html
 
 
+# Python-Markdown's raw-HTML scanner is built on CPython's html.parser. On
+# current CPython builds (3.14, and Ubuntu 24.04's security-patched 3.12) a
+# closing-tag-looking sequence such as `</dev/null` inside an INLINE code span
+# is parsed as raw HTML and swallows the rest of the post: a 145 KB post was
+# silently rendered up to that span and nothing after it (2026-09-13, Markdown
+# 3.10.3). Fenced blocks are stashed before that scanner runs and are safe.
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})[^\n]*\n.*?^\1[ \t]*$", re.MULTILINE | re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"(?<!`)`([^`\n]*</[^`\n]*)`(?!`)")
+
+
+def _protect_code_spans(text: str) -> str:
+    """Turn inline code spans that contain ``</`` into explicit
+    ``<code>&lt;/…</code>`` HTML so the raw-HTML scanner never sees a tag."""
+    def _span(m: re.Match) -> str:
+        return "<code>" + html.escape(m.group(1), quote=False) + "</code>"
+
+    out, pos = [], 0
+    for fence in _FENCE_RE.finditer(text):
+        out.append(_CODE_SPAN_RE.sub(_span, text[pos:fence.start()]))
+        out.append(fence.group(0))
+        pos = fence.end()
+    out.append(_CODE_SPAN_RE.sub(_span, text[pos:]))
+    return "".join(out)
+
+
 def _render_markdown(text: str) -> str:
     """Render markdown to HTML with syntax highlighting (sanitized for the public page)."""
+    text = _protect_code_spans(text)
     rendered = markdown.markdown(
         text,
         extensions=["fenced_code", "codehilite", "tables", "toc"],
@@ -573,10 +600,15 @@ async def admin_blog_send_email(
     base_url = await email_service.get_base_url(db)
 
     subject = f"MindRouter Blog: {post.title}"
+    # Images travel inside the message (shrunk, CID-referenced) so the email
+    # is self-contained; expandable <details> notes are web-only.
+    inline_images = await email_service.load_blog_inline_images(post.content)
     html_body = email_service._render_blog_email(
         post.title, post.content, post.slug,
         user.full_name or user.username, base_url,
+        inline_images=inline_images,
     )
+    attachments = email_service.blog_inline_attachments(inline_images)
 
     sender = smtp_config.get("blog_sender") or smtp_config.get("default_sender")
 
@@ -595,6 +627,7 @@ async def admin_blog_send_email(
     asyncio.create_task(
         email_service.send_bulk_email(
             log.id, subject, html_body, recipient_list, sender, smtp_config,
+            inline_attachments=attachments,
         )
     )
 
@@ -629,10 +662,13 @@ async def admin_blog_send_test_email(
     base_url = await email_service.get_base_url(db)
 
     subject = f"[TEST] MindRouter Blog: {post.title}"
+    inline_images = await email_service.load_blog_inline_images(post.content)
     html_body = email_service._render_blog_email(
         post.title, post.content, post.slug,
         user.full_name or user.username, base_url,
+        inline_images=inline_images,
     )
+    attachments = email_service.blog_inline_attachments(inline_images)
     sender = smtp_config.get("blog_sender") or smtp_config.get("default_sender")
 
     test_user = {"email": test_addr, "username": "testuser", "full_name": "Test User"}
@@ -641,7 +677,9 @@ async def admin_blog_send_test_email(
     try:
         smtp = await email_service._open_smtp(smtp_config)
         try:
-            await email_service._send_one(smtp, sender, test_addr, subject, personalized)
+            await email_service._send_one(
+                smtp, sender, test_addr, subject, personalized, attachments,
+            )
         finally:
             await smtp.quit()
         return JSONResponse({"ok": True, "message": f"Test sent to {test_addr}"})
