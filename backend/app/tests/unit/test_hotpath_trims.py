@@ -394,7 +394,9 @@ def _make_stream_service(monkeypatch, chunks, error, ollama=False):
     )
     svc._check_quota = AsyncMock()
     svc._create_request_record = AsyncMock(
-        return_value=SimpleNamespace(request_uuid="req-uuid-1", id=1)
+        return_value=SimpleNamespace(
+            request_uuid="req-uuid-1", id=1, user_id=1, api_key_id=1,
+        )
     )
     svc._scheduler = MagicMock()
     job = SimpleNamespace(request_id=None)

@@ -18,7 +18,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Dict, NamedTuple, Optional, Set, Tuple
 
 import httpx
 import orjson
@@ -199,6 +199,60 @@ async def _get_enforce_num_ctx() -> bool:
         value = bool(await crud.get_config_json(cfg_db, "ollama.enforce_num_ctx", True))
     _enforce_num_ctx_cache = (value, now)
     return value
+
+
+class _RequestIds(NamedTuple):
+    """Scalar identity of a request audit row, for writes detached from the request.
+
+    The streaming generators capture this synchronously right after
+    _create_request_record commits, and the post-[DONE] completion write and
+    the streaming failure write use ONLY these scalars. Those writes run in
+    shielded tasks that outlive the generator when the client disconnects,
+    while FastAPI's get_async_db teardown commits / rolls back / closes the
+    request-scoped session — a rollback expires the ORM instance, and two
+    coroutines on the session's single aiomysql connection raise
+    "readexactly() called while another coroutine is already waiting"
+    (MySQL 2013/2014, lost accounting). So each detached attempt opens its own
+    isolated session (_isolated_db_session) and never touches self.db or the
+    ORM db_request.
+
+    LOCK INVARIANT: the isolated session UPDATEs the requests, quotas and
+    api_keys rows. That is only safe because self.db holds no row lock and no
+    uncommitted write by then: _create_request_record commits every pre-stream
+    write (quota reset, the request INSERT, and anything a dialect wrapper
+    wrote on the shared session — e.g. the Responses web-search executor
+    between rounds), and after that commit the streaming path runs only
+    non-locking reads on self.db (crud.get_user_quota in _route_request_inner,
+    a plain SELECT under InnoDB REPEATABLE READ). A write or a locking read
+    (with_for_update) on self.db anywhere between that commit and the detached
+    write would make EVERY stream wait out innodb_lock_wait_timeout against
+    itself. _proxy_stream_with_retry also ends that read transaction after
+    every routing attempt (_release_request_session), so self.db holds no
+    pooled connection while streaming or while a detached write waits for its
+    own. Guarded structurally by test_streaming_session_isolation.py
+    (TestLockInvariant).
+    """
+
+    id: int
+    user_id: int
+    api_key_id: int
+
+    @classmethod
+    def of(cls, db_request) -> "_RequestIds":
+        return cls(db_request.id, db_request.user_id, db_request.api_key_id)
+
+
+def _isolated_db_session():
+    """Open a short-lived, independent write session.
+
+    Lazy-import wrapper around db.session.isolated_async_session (same pattern
+    as _get_enforce_num_ctx, keeping the engine chain out of module import).
+    The caller commits explicitly; rollback-on-error and the shielded close
+    are handled by the context manager.
+    """
+    from backend.app.db.session import isolated_async_session
+
+    return isolated_async_session()
 
 
 class InferenceService:
@@ -699,6 +753,11 @@ class InferenceService:
             request, user, api_key, http_request, endpoint,
             extra_parameters=extra_parameters,
         )
+        # Scalar ids for the detached completion/failure writes, captured
+        # synchronously while the row is freshly committed. Past this line the
+        # detached path never touches the ORM instance or self.db — see
+        # _RequestIds (the race, and the lock invariant it relies on).
+        request_ids = _RequestIds.of(db_request)
 
         # Propagate request UUID so translators can use it as chunk ID
         request.request_id = db_request.request_uuid
@@ -802,10 +861,11 @@ class InferenceService:
                 # Once the shielded completion starts, _fail_request must not
                 # run: cancellation of THIS generator leaves the shielded task
                 # finishing in the background, and a concurrent _fail_request
-                # would use the same session mid-transaction.
+                # would flip the completed row back to failed and release the
+                # scheduler slot twice.
                 completion_started = True
                 await asyncio.shield(self._complete_streaming_request(
-                    db_request, routed_backend.id, full_content, chunk_count, job,
+                    request_ids, routed_backend.id, full_content, chunk_count, job,
                     finish_reason=last_finish_reason,
                     usage=real_usage,
                 ))
@@ -817,9 +877,9 @@ class InferenceService:
             # clean error message instead of a truncated chunked response.
             backend_id = routed_backend.id if routed_backend else None
             try:
-                await asyncio.shield(
-                    self._fail_request(db_request, backend_id, str(e.detail), job)
-                )
+                await asyncio.shield(self._fail_request(
+                    None, backend_id, str(e.detail), job, request_ids=request_ids,
+                ))
             except BaseException:
                 pass
             # Drain coalesced events so they precede the error event
@@ -835,9 +895,9 @@ class InferenceService:
             backend_id = routed_backend.id if routed_backend else None
             if not completion_started:
                 try:
-                    await asyncio.shield(
-                        self._fail_request(db_request, backend_id, str(e), job)
-                    )
+                    await asyncio.shield(self._fail_request(
+                        None, backend_id, str(e), job, request_ids=request_ids,
+                    ))
                 except BaseException:
                     pass
             # Mid-stream backend failure: drain token events the backend
@@ -1095,6 +1155,8 @@ class InferenceService:
         db_request = await self._create_request_record(
             request, user, api_key, http_request, "/api/chat"
         )
+        # Scalar ids for the detached writes — see stream_chat_completion.
+        request_ids = _RequestIds.of(db_request)
 
         job = self._scheduler.create_job_from_chat_request(
             request, user.id, api_key.id
@@ -1167,18 +1229,18 @@ class InferenceService:
 
             if routed_backend:
                 # Once the shielded completion starts, _fail_request must not
-                # run concurrently on the same session (see stream_chat_completion).
+                # race it (see stream_chat_completion).
                 completion_started = True
                 await asyncio.shield(self._complete_streaming_request(
-                    db_request, routed_backend.id, full_content, chunk_count, job,
+                    request_ids, routed_backend.id, full_content, chunk_count, job,
                     finish_reason=last_finish_reason,
                 ))
         except HTTPException as e:
             backend_id = routed_backend.id if routed_backend else None
             try:
-                await asyncio.shield(
-                    self._fail_request(db_request, backend_id, str(e.detail), job)
-                )
+                await asyncio.shield(self._fail_request(
+                    None, backend_id, str(e.detail), job, request_ids=request_ids,
+                ))
             except BaseException:
                 pass
             # Drain coalesced events so they precede the error line
@@ -1193,9 +1255,9 @@ class InferenceService:
             backend_id = routed_backend.id if routed_backend else None
             if not completion_started:
                 try:
-                    await asyncio.shield(
-                        self._fail_request(db_request, backend_id, str(e), job)
-                    )
+                    await asyncio.shield(self._fail_request(
+                        None, backend_id, str(e), job, request_ids=request_ids,
+                    ))
                 except BaseException:
                     pass
             # Mid-stream backend failure: drain token events the backend
@@ -1573,6 +1635,11 @@ class InferenceService:
         user_weight = 1.0
         if hasattr(user, 'group') and user.group:
             user_weight = float(user.group.scheduler_weight)
+        # Plain non-locking SELECT on the request session. Streaming requests
+        # reach here after _create_request_record committed, and
+        # _proxy_stream_with_retry ends this read transaction right after
+        # routing; read the LOCK INVARIANT on _RequestIds before adding any
+        # write or locking read.
         sched_quota = await crud.get_user_quota(self.db, user.id)
         if sched_quota and sched_quota.weight_override:
             user_weight = float(sched_quota.weight_override)
@@ -2098,6 +2165,38 @@ class InferenceService:
             detail=f"All {max_attempts} backend attempts failed. Last error: {last_desc}",
         )
 
+    async def _release_request_session(self) -> None:
+        """End self.db's read-only routing transaction (streaming path only).
+
+        _route_request_inner's crud.get_user_quota autobegins a transaction on
+        the request session, which would otherwise keep its pooled connection
+        checked out for the whole stream AND the detached completion / failure
+        write — and those writes need a connection of their own
+        (_isolated_db_session). A worker whose pool is full of such streams
+        then deadlocks on itself: every write waits pool_timeout, fails with a
+        non-retryable TimeoutError, and the accounting is lost. Committing here
+        returns the connection; nothing is pending (LOCK INVARIANT on
+        _RequestIds), expire_on_commit=False keeps loaded attributes, and it
+        runs in the generator's own task before any detached write exists, so
+        it cannot race get_async_db's teardown.
+
+        Not shielded: a shielded commit could outlive a cancelled generator and
+        collide with that teardown. Skipped while this task is being cancelled
+        (the client is gone; the teardown releases the connection, whereas a
+        commit started now would be interrupted and the connection discarded).
+        Best effort: the stream never needs self.db.
+        """
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            return
+        try:
+            await self.db.commit()
+        except Exception:
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+
     async def _proxy_stream_with_retry(
         self,
         request,
@@ -2151,6 +2250,11 @@ class InferenceService:
                         break
                 else:
                     raise
+            finally:
+                # Routing read the quota on self.db; hand that connection back
+                # before streaming, or before the caller's failure write when
+                # routing failed (see _release_request_session).
+                await self._release_request_session()
 
             # Cap max_tokens (same logic as non-streaming path).
             cap_context_length = None
@@ -2945,7 +3049,9 @@ class InferenceService:
     # durable fix is atomic increments in update_quota_usage/update_api_key_usage).
     _COMPLETION_DB_ATTEMPTS = 5
 
-    async def _run_completion_db(self, request_id: int, write_once, path: str) -> None:
+    async def _run_completion_db(
+        self, request_id: int, write_once, path: str, isolated: bool = False,
+    ) -> None:
         """Run a completion DB transaction; retry deadlocks; never raise.
 
         The whole completion write (status flip, response row, quota and key
@@ -2959,6 +3065,13 @@ class InferenceService:
         ORM objects, and touching an expired attribute on an async session
         raises MissingGreenlet. write_once must likewise close over scalars
         captured before the first attempt.
+
+        ``isolated=True`` (the streaming path): write_once opens its own
+        session per attempt, which its context manager rolls back and closes
+        on failure, so self.db — owned by the request lifecycle and possibly
+        mid-teardown on another task — is never touched here. With the default
+        (the non-streaming path) write_once runs on self.db, which is rolled
+        back before a retry as before.
         """
         for attempt in range(1, self._COMPLETION_DB_ATTEMPTS + 1):
             try:
@@ -2982,10 +3095,11 @@ class InferenceService:
                     pass
                 raise
             except Exception as e:
-                try:
-                    await self.db.rollback()
-                except Exception:
-                    pass
+                if not isolated:
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
                 code = getattr(getattr(e, "orig", None), "args", (None,))[0]
                 # Deadlocks (1213) fail fast and retry cheaply. Lock-wait
                 # timeouts (1205) pin a pooled connection for the whole wait —
@@ -3064,7 +3178,7 @@ class InferenceService:
 
     async def _complete_streaming_request(
         self,
-        db_request,
+        request_ids: _RequestIds,
         backend_id: int,
         content: str,
         chunk_count: int,
@@ -3072,7 +3186,12 @@ class InferenceService:
         finish_reason: Optional[str] = None,
         usage=None,
     ) -> None:
-        """Complete a streaming request."""
+        """Complete a streaming request.
+
+        Takes the pre-captured scalar ids, not the ORM row: this runs shielded
+        and can outlive the generator — and the request-scoped session — when
+        the client disconnects after [DONE] (see _RequestIds).
+        """
         if usage is not None:
             # Real token counts harvested from vLLM's include_usage chunk.
             prompt_tokens = usage.prompt_tokens
@@ -3103,49 +3222,51 @@ class InferenceService:
             pass
 
         await asyncio.shield(self._do_complete_streaming_db(
-            db_request, backend_id, content, chunk_count,
+            request_ids, backend_id, content, chunk_count,
             prompt_tokens, completion_tokens, total_tokens,
             finish_reason=finish_reason or "stop",
         ))
 
     async def _do_complete_streaming_db(
-        self, db_request, backend_id, content, chunk_count,
+        self, request_ids, backend_id, content, chunk_count,
         prompt_tokens, completion_tokens, total_tokens,
         finish_reason: str = "stop",
     ) -> None:
-        """DB writes for streaming completion (run inside asyncio.shield)."""
-        # Scalars only past this point: a retry's rollback expires the ORM
-        # instance and touching it afterwards raises MissingGreenlet.
-        request_id = db_request.id
-        user_id = db_request.user_id
-        api_key_id = db_request.api_key_id
+        """DB writes for streaming completion (run inside asyncio.shield).
+
+        Detached from the request: every attempt runs on its own isolated
+        session using only the pre-captured scalars — never self.db (FastAPI
+        may be tearing it down concurrently) and never the ORM db_request.
+        """
+        request_id, user_id, api_key_id = request_ids
 
         async def write_once():
             stored_content = content
-            await crud.update_request_completed(
-                self.db, request_id,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                tokens_estimated=True,
-                backend_id=backend_id,
-            )
+            async with _isolated_db_session() as wdb:
+                await crud.update_request_completed(
+                    wdb, request_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    tokens_estimated=True,
+                    backend_id=backend_id,
+                )
 
-            if not (
-                self._settings.audit_log_enabled
-                and self._settings.audit_log_responses
-            ):
-                stored_content = None
-            await crud.create_response(
-                self.db, request_id,
-                content=stored_content,
-                chunk_count=chunk_count,
-                finish_reason=finish_reason,
-            )
+                if not (
+                    self._settings.audit_log_enabled
+                    and self._settings.audit_log_responses
+                ):
+                    stored_content = None
+                await crud.create_response(
+                    wdb, request_id,
+                    content=stored_content,
+                    chunk_count=chunk_count,
+                    finish_reason=finish_reason,
+                )
 
-            await crud.update_quota_usage(self.db, user_id, total_tokens)
-            await crud.update_api_key_usage(self.db, api_key_id)
+                await crud.update_quota_usage(wdb, user_id, total_tokens)
+                await crud.update_api_key_usage(wdb, api_key_id)
 
-            await self.db.commit()
+                await wdb.commit()
             # Increment Redis quota only after DB commit succeeds to prevent drift
             await crud.incr_quota_redis(user_id, total_tokens)
             # Enqueue for DLP scanning (best-effort, never affects inference)
@@ -3155,7 +3276,9 @@ class InferenceService:
             except Exception:
                 pass
 
-        await self._run_completion_db(request_id, write_once, "complete_streaming")
+        await self._run_completion_db(
+            request_id, write_once, "complete_streaming", isolated=True,
+        )
 
     async def _fail_request(
         self,
@@ -3163,6 +3286,7 @@ class InferenceService:
         backend_id: Optional[int],
         error_message: str,
         job: Job,
+        request_ids: Optional[_RequestIds] = None,
     ) -> None:
         """Record a failed request.
 
@@ -3171,6 +3295,12 @@ class InferenceService:
         set by ``route_job()`` when the slot is acquired.  This prevents slot
         leaks when exceptions occur after routing but before the caller has
         captured the backend reference.
+
+        The streaming generators pass ``request_ids`` (with ``db_request=None``):
+        the write then runs on an isolated session from those scalars alone,
+        because this shielded task can outlive the generator while FastAPI tears
+        down the request-scoped session (see _RequestIds). Every other caller
+        passes the ORM ``db_request`` and the write runs on self.db as before.
         """
         # Resolve backend_id from job if not provided
         effective_backend_id = backend_id or getattr(job, "assigned_backend_id", None)
@@ -3182,32 +3312,55 @@ class InferenceService:
             # Job was never routed — just remove from queue
             await self._scheduler.cancel_job(job.request_id)
 
-        await asyncio.shield(self._do_fail_db(db_request, error_message))
+        await asyncio.shield(
+            self._do_fail_db(db_request, error_message, request_ids=request_ids)
+        )
 
-    async def _do_fail_db(self, db_request, error_message: str) -> None:
-        """DB writes for failed request (run inside asyncio.shield)."""
-        # Scalars up front: if any earlier rollback expired this ORM instance,
-        # touching its attributes mid-transaction raises MissingGreenlet.
-        try:
-            request_id = db_request.id
-            api_key_id = db_request.api_key_id
-        except Exception:
-            logger.error("request_fail_db_skipped", error="expired_orm_instance")
-            return
-        try:
+    async def _do_fail_db(
+        self, db_request, error_message: str,
+        request_ids: Optional[_RequestIds] = None,
+    ) -> None:
+        """DB writes for failed request (run inside asyncio.shield).
+
+        With ``request_ids`` the write runs on an isolated session from the
+        scalars alone (streaming path); otherwise on self.db (see _fail_request).
+        """
+        isolated = request_ids is not None
+        if isolated:
+            request_id, api_key_id = request_ids.id, request_ids.api_key_id
+        else:
+            # Scalars up front: if any earlier rollback expired this ORM
+            # instance, touching its attributes mid-transaction raises
+            # MissingGreenlet.
+            try:
+                request_id = db_request.id
+                api_key_id = db_request.api_key_id
+            except Exception:
+                logger.error("request_fail_db_skipped", error="expired_orm_instance")
+                return
+
+        async def write(session) -> None:
             await crud.update_request_failed(
-                self.db, request_id,
+                session, request_id,
                 error_message=error_message,
             )
 
-            await crud.update_api_key_usage(self.db, api_key_id)
+            await crud.update_api_key_usage(session, api_key_id)
 
-            await self.db.commit()
+            await session.commit()
+
+        try:
+            if isolated:
+                async with _isolated_db_session() as wdb:
+                    await write(wdb)
+            else:
+                await write(self.db)
         except Exception as e:
-            try:
-                await self.db.rollback()
-            except Exception:
-                pass
+            if not isolated:
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
             logger.error(
                 "request_fail_db_failed",
                 request_id=request_id,

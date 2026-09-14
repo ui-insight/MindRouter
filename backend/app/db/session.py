@@ -141,6 +141,78 @@ async def get_async_db_context() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
+async def _finish_isolated_session(session: AsyncSession, rollback: bool) -> None:
+    """Roll back (when the body failed) and close an isolated session.
+
+    One coroutine, run as one task, so rollback and close happen strictly in
+    sequence: even if the task waiting on it is cancelled mid-cleanup they can
+    never overlap on the connection (two coroutines on one aiomysql connection
+    is exactly the readexactly() failure isolated sessions exist to prevent).
+    Every failure is swallowed — cleanup must never replace the exception the
+    caller is classifying.
+    """
+    if rollback:
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+    try:
+        await session.close()
+    except Exception:
+        # Last resort: invalidate so the pool discards the connection rather
+        # than handing a corrupted one to the next checkout.
+        try:
+            await session.invalidate()
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def isolated_async_session() -> AsyncGenerator[AsyncSession, None]:
+    """Short-lived, independent write session for work detached from a request.
+
+    For writes that can outlive the request that scheduled them — e.g. the
+    shielded post-[DONE] accounting write of a streaming response, which keeps
+    running after a client disconnect while FastAPI tears down the
+    request-scoped ``get_async_db`` session. Such writes must never share that
+    session: concurrent use of its single aiomysql connection raises
+    "readexactly() called while another coroutine is already waiting" (MySQL
+    2013/2014) and loses the write.
+
+    - Yields a fresh ``AsyncSessionLocal()`` session (its own pooled connection).
+    - Does NOT commit: callers commit explicitly.
+    - On any exception from the body, CancelledError included, rolls back under
+      ``asyncio.shield``. A failing rollback is swallowed, so the ORIGINAL
+      exception always propagates (callers classify ``e.orig.args[0]`` to
+      decide on retries).
+    - Always closes under ``asyncio.shield``, invalidating the connection if
+      close fails.
+
+    If the waiting task is cancelled during cleanup, the shielded cleanup still
+    runs to completion in the background; that cancellation is re-raised only
+    when it would not mask an exception from the body.
+
+    ``get_async_db`` / ``get_async_db_context`` are unchanged; use those for
+    request-scoped work.
+    """
+    session = AsyncSessionLocal()
+    failed = False
+    try:
+        yield session
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        cleanup = asyncio.ensure_future(
+            _finish_isolated_session(session, rollback=failed)
+        )
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            if not failed:
+                raise
+
+
 # ------------------------------------------------------------------
 # Archive database (lazy-init, only when archive_database_url is set)
 # ------------------------------------------------------------------
