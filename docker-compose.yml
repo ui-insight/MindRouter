@@ -17,6 +17,20 @@ services:
       context: .
       dockerfile: Dockerfile
     network_mode: host
+    # Resolve through the host's local unbound cache first, then fall back to
+    # the campus resolvers if unbound is down (a refused connection on loopback
+    # fails instantly, so the fallback costs no latency). This service shares
+    # the host network namespace, so 127.0.0.1 IS the host's loopback.
+    #
+    # Docker snapshots a container's /etc/resolv.conf at CREATION and never
+    # updates it, so this list only takes effect on container recreation — and
+    # a host-level resolver change does NOT reach a running container. Keeping
+    # it here makes that explicit and version-controlled.
+    # See /etc/unbound/conf.d/mindrouter-cache.conf on the gateway host.
+    dns:
+      - 127.0.0.1
+      - 129.101.254.174
+      - 129.101.254.173
     # Worker count is deployment-tunable (Dockerfile default: 2). With
     # Redis-shared admission (mr:adm:* counters), backends.max_concurrent is a
     # FLEET-WIDE cap independent of worker count. Size DATABASE_POOL_SIZE so
