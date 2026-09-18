@@ -14,6 +14,7 @@
 
 """Client for the GPU sidecar agent running on inference nodes."""
 
+import asyncio
 from typing import Optional
 
 import httpx
@@ -61,35 +62,53 @@ class SidecarClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def get_gpu_info(self) -> Optional[SidecarResponse]:
+    async def get_gpu_info(self, attempts: int = 2) -> Optional[SidecarResponse]:
         """
         Fetch GPU info from the sidecar agent.
+
+        Retries transport failures once by default. A single dropped packet or
+        momentary DNS hiccup was enough to count against a node, and this poll
+        runs every 30s, so one retry costs at most `timeout` seconds on the
+        slowest path and removes the cheapest class of false failure.
+
+        A non-200 response is NOT retried: the sidecar answered, so the problem
+        is the sidecar's, and asking again just doubles the load on a struggling
+        agent.
 
         Returns:
             SidecarResponse with per-GPU details, or None if unavailable
         """
-        try:
-            client = await self._get_client()
-            response = await client.get("/gpu-info")
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                await asyncio.sleep(0.5 * attempt)
+            try:
+                client = await self._get_client()
+                response = await client.get("/gpu-info")
 
-            if response.status_code != 200:
+                if response.status_code != 200:
+                    logger.warning(
+                        "sidecar_bad_status",
+                        url=self.base_url,
+                        status=response.status_code,
+                        body=response.text[:200],
+                    )
+                    return None
+
+                data = response.json()
+                return self._parse_response(data)
+
+            except httpx.TimeoutException:
                 logger.warning(
-                    "sidecar_bad_status",
-                    url=self.base_url,
-                    status=response.status_code,
-                    body=response.text[:200],
+                    "sidecar_timeout", url=self.base_url, attempt=attempt + 1
                 )
-                return None
-
-            data = response.json()
-            return self._parse_response(data)
-
-        except httpx.TimeoutException:
-            logger.warning("sidecar_timeout", url=self.base_url)
-            return None
-        except Exception as e:
-            logger.warning("sidecar_error", url=self.base_url, error=str(e))
-            return None
+            except Exception as e:
+                logger.warning(
+                    "sidecar_error",
+                    url=self.base_url,
+                    error=str(e),
+                    attempt=attempt + 1,
+                )
+        return None
 
     async def health_check(self) -> bool:
         """Check if the sidecar agent is reachable."""

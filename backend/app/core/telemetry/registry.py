@@ -27,6 +27,7 @@ from backend.app.core.telemetry.adapters.sidecar_client import SidecarClient
 from backend.app.core.telemetry.adapters.vllm import VLLMAdapter
 from backend.app.core.telemetry.latency_tracker import LatencyTracker
 from backend.app.core.telemetry.models import (
+    LOCAL_FAULT_KINDS,
     BackendCapabilities,
     BackendHealth,
     CircuitBreakerState,
@@ -87,6 +88,19 @@ class BackendRegistry:
 
         # Fast-poll set: backend_id -> fast_poll_until timestamp
         self._fast_poll_backends: Dict[int, datetime] = {}
+
+        # Consecutive failed sidecar polls per node. A node is only marked
+        # OFFLINE after node_unhealthy_threshold of them; a single failure used
+        # to flip every node at once, which on 2026-09-18 reported a 14-node
+        # fleet failure while every node was healthy and serving.
+        self._node_failures: Dict[int, int] = {}
+
+        # Backends whose most recent health check failed for a LOCAL reason
+        # (DNS/network on this host). Collected per sweep so _poll_all_backends
+        # can report ONE fleet-level event instead of N identical per-backend
+        # ones: 59 simultaneous failures with the same local cause are one
+        # fault, not 59.
+        self._sweep_local_faults: set = set()
 
         # Cross-worker registry version (for detecting mutations by other workers)
         self._registry_version: int = 0
@@ -1082,6 +1096,26 @@ class BackendRegistry:
 
         await self._gather_bounded(all_tasks)
 
+        # Most of the fleet failing for the same LOCAL reason in one sweep is a
+        # single fault on this host, not N independent backend failures. Report
+        # it once, with the detail an operator needs to look in the right place
+        # — during the 2026-09-18 DNS outage the logs said 59 backends and 14
+        # nodes were down, which sent the investigation to the cluster instead
+        # of to the gateway's own resolver.
+        if backend_ids and self._sweep_local_faults:
+            affected = len(self._sweep_local_faults)
+            if affected / len(backend_ids) >= 0.5:
+                logger.error(
+                    "fleet_local_fault",
+                    affected=affected,
+                    total=len(backend_ids),
+                    detail=(
+                        "health checks failed for a local reason (DNS or "
+                        "network) across most of the fleet — suspect this "
+                        "host's connectivity, not the backends"
+                    ),
+                )
+
     async def _check_backend_health(self, backend_id: int) -> None:
         """Check health of a single backend."""
         adapter = self._adapters.get(backend_id)
@@ -1090,6 +1124,30 @@ class BackendRegistry:
 
         try:
             health = await adapter.health_check()
+
+            # A failure this host caused — name resolution, local network — is
+            # not the backend's fault and must not be charged as a strike.
+            # On 2026-09-18 a campus DNS outage made every health check fail;
+            # each backend took three strikes (burned in ~30s, because live
+            # request failures arm adaptive fast-poll) and all 59 were marked
+            # UNHEALTHY, so every request got model_unavailable while every GPU
+            # node was healthy and serving the whole time. Leave status alone
+            # and let the live circuit breaker catch genuinely sick backends.
+            if (
+                not health.is_healthy
+                and health.error_kind in LOCAL_FAULT_KINDS
+                and not self._settings.backend_local_fault_trips_health
+            ):
+                self._sweep_local_faults.add(backend_id)
+                logger.warning(
+                    "backend_health_local_fault",
+                    backend_id=backend_id,
+                    error_kind=health.error_kind,
+                    error=health.error_message,
+                )
+                return
+
+            self._sweep_local_faults.discard(backend_id)
 
             # Update database
             async with get_async_db_context() as db:
@@ -1288,6 +1346,42 @@ class BackendRegistry:
                 error=str(e),
             )
 
+    async def _record_node_poll_failure(self, node_id: int, reason: str) -> None:
+        """Count a failed sidecar poll; mark the node OFFLINE only at threshold.
+
+        A single failed poll used to flip a node OFFLINE immediately, so one
+        blip marked all 14 nodes down at once (2026-09-18). Node status does
+        not affect routing — get_healthy_backends filters on backend status
+        alone — but it drives the admin UI and alerting, and reporting a
+        fleet-wide hardware failure that is not happening sends an operator to
+        the wrong place during an incident.
+        """
+        failures = self._node_failures.get(node_id, 0) + 1
+        self._node_failures[node_id] = failures
+        threshold = max(1, getattr(self._settings, "node_unhealthy_threshold", 3))
+
+        if failures < threshold:
+            logger.debug(
+                "node_poll_failed",
+                node_id=node_id,
+                reason=reason,
+                failures=failures,
+                threshold=threshold,
+            )
+            return
+
+        logger.warning(
+            "node_marked_offline",
+            node_id=node_id,
+            reason=reason,
+            failures=failures,
+        )
+        try:
+            async with get_async_db_context() as db:
+                await crud.update_node_status(db, node_id, NodeStatus.OFFLINE)
+        except Exception:
+            pass
+
     async def _collect_node_telemetry(self, node_id: int) -> None:
         """Phase A: Poll sidecar once per node, upsert GPU devices, store telemetry."""
         sidecar_client = self._sidecar_clients.get(node_id)
@@ -1299,12 +1393,7 @@ class BackendRegistry:
             sidecar_data = await sidecar_client.get_gpu_info()
         except Exception as e:
             logger.debug("sidecar_collect_error", node_id=node_id, error=str(e))
-            # Mark node offline
-            try:
-                async with get_async_db_context() as db:
-                    await crud.update_node_status(db, node_id, NodeStatus.OFFLINE)
-            except Exception:
-                pass
+            await self._record_node_poll_failure(node_id, "exception")
             self._node_sidecar_data[node_id] = None
             return
 
@@ -1313,12 +1402,11 @@ class BackendRegistry:
 
         if not sidecar_data:
             logger.warning("sidecar_no_response", node_id=node_id)
-            try:
-                async with get_async_db_context() as db:
-                    await crud.update_node_status(db, node_id, NodeStatus.OFFLINE)
-            except Exception:
-                pass
+            await self._record_node_poll_failure(node_id, "no_response")
             return
+
+        # A successful poll clears the streak.
+        self._node_failures.pop(node_id, None)
 
         if not sidecar_data.gpus:
             logger.warning("sidecar_no_gpus", node_id=node_id, gpu_count=sidecar_data.gpu_count)

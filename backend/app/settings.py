@@ -244,6 +244,23 @@ class Settings(BaseSettings):
     backend_circuit_breaker_recovery_seconds: int = 30
     backend_adaptive_poll_fast_interval: int = 10
     backend_adaptive_poll_fast_duration: int = 120
+    # A health check that fails because THIS host could not resolve or reach
+    # the network (DNS failure, local link down) says nothing about the remote
+    # backend, so by default it is not charged as a strike against it. On
+    # 2026-09-18 an 11-minute campus DNS outage marked all 59 backends
+    # UNHEALTHY — three strikes each, burned in ~30s because live-request
+    # failures arm adaptive fast-poll — and every request got
+    # model_unavailable, while every GPU node was healthy and serving the
+    # whole time. Same reasoning as backend_timeout_trips_breaker and
+    # backend_request_fault_detection below: the backend did not misbehave.
+    # Set true to restore the old behaviour where any failure counts.
+    backend_local_fault_trips_health: bool = False
+    # Consecutive failed sidecar polls before a node is marked OFFLINE. This
+    # was effectively 1, so one blip flipped all 14 nodes at once and reported
+    # a fleet-wide outage that did not exist. Node status does NOT affect
+    # routing (get_healthy_backends filters on backend status alone), so this
+    # is about not lying to the admin UI and to alerting during an incident.
+    node_unhealthy_threshold: int = 3
     # Max backend health checks run concurrently per poll sweep. Each check
     # opens a DB session, so an unbounded gather over every backend opens a
     # connection per backend at once — and with N uvicorn workers each polling,

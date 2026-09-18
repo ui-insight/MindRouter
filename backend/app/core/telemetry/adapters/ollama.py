@@ -21,11 +21,13 @@ import time
 import httpx
 
 from backend.app.core.telemetry.models import (
+    ERROR_KIND_TIMEOUT,
     BackendCapabilities,
     BackendHealth,
     GPUInfo,
     ModelInfo,
     TelemetrySnapshot,
+    classify_transport_error,
 )
 from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
@@ -98,6 +100,7 @@ class OllamaAdapter:
                 is_healthy=False,
                 latency_ms=latency_ms,
                 error_message="Connection timeout",
+                error_kind=ERROR_KIND_TIMEOUT,
             )
         except Exception as e:
             latency_ms = (time.monotonic() - start_time) * 1000
@@ -105,6 +108,7 @@ class OllamaAdapter:
                 is_healthy=False,
                 latency_ms=latency_ms,
                 error_message=str(e),
+                error_kind=classify_transport_error(e),
             )
 
     async def discover_capabilities(self) -> BackendCapabilities:

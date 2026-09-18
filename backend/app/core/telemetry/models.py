@@ -14,6 +14,7 @@
 
 """Telemetry data models."""
 
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -147,6 +148,67 @@ class SidecarResponse:
     server_power: Optional[ServerPowerSnapshot] = None
 
 
+# Failure classes for a health check or telemetry poll. A "local" fault is one
+# THIS host caused — name resolution failed, the local network is unreachable —
+# and says nothing about the remote backend, so callers must not charge it
+# against that backend.
+ERROR_KIND_DNS = "dns"
+ERROR_KIND_CONNECT = "connect"
+ERROR_KIND_TIMEOUT = "timeout"
+ERROR_KIND_HTTP = "http"
+
+# Kinds that are this host's problem rather than the backend's.
+LOCAL_FAULT_KINDS = frozenset({ERROR_KIND_DNS})
+
+_TIMEOUT_TYPE_NAMES = frozenset(
+    {"TimeoutException", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout"}
+)
+
+# Text of a resolver failure when the cause chain has been flattened and the
+# original socket.gaierror is no longer attached (glibc, macOS wordings).
+_DNS_MESSAGE_MARKERS = (
+    "temporary failure in name resolution",
+    "name or service not known",
+    "nodename nor servname provided",
+    "no address associated with hostname",
+)
+
+
+def classify_transport_error(exc: BaseException) -> Optional[str]:
+    """Classify a transport exception raised while contacting a backend.
+
+    Returns one of the ERROR_KIND_* values, or None when unrecognised.
+
+    None is deliberate and load-bearing: callers treat an unclassified failure
+    as the backend's own fault, so anything this function does not positively
+    recognise still counts against the backend. Misclassifying a genuinely sick
+    backend as a local fault would keep routing traffic to it, which is far
+    worse than the reverse, so this errs toward blaming the backend.
+
+    Duck-typed on class name rather than importing httpx: this module holds
+    plain data structures and must not take a dependency on the HTTP client.
+    """
+    seen = 0
+    current: Optional[BaseException] = exc
+    while current is not None and seen < 5:
+        if isinstance(current, socket.gaierror):
+            return ERROR_KIND_DNS
+
+        name = type(current).__name__
+        if name in _TIMEOUT_TYPE_NAMES:
+            return ERROR_KIND_TIMEOUT
+        if name == "ConnectError":
+            text = str(current).lower()
+            if any(marker in text for marker in _DNS_MESSAGE_MARKERS):
+                return ERROR_KIND_DNS
+            return ERROR_KIND_CONNECT
+
+        current = current.__cause__ or current.__context__
+        seen += 1
+
+    return None
+
+
 @dataclass
 class BackendHealth:
     """Health check result for a backend."""
@@ -155,6 +217,9 @@ class BackendHealth:
     status_code: Optional[int] = None
     latency_ms: float = 0.0
     error_message: Optional[str] = None
+    # Failure class (see classify_transport_error). None means unclassified,
+    # which callers treat as the backend's own fault.
+    error_kind: Optional[str] = None
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
