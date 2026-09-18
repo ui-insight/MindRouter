@@ -28,14 +28,17 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 
 from backend.app.core import redis_client
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db.models import BackendEngine, Request as DBRequest, RequestStatus
 from backend.app.db.session import AsyncSessionLocal
+from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["health"])
 
@@ -100,20 +103,27 @@ async def readiness_probe() -> Dict[str, Any]:
     }
 
     # Check database
+    #
+    # The statement MUST be wrapped in text(): SQLAlchemy 2.0 rejects a bare
+    # string with ArgumentError. Paired with the old `except Exception: pass`,
+    # that made this check report False on EVERY request from the 2.0 migration
+    # onward, so anything watching /readyz was dead weight — an 11-minute
+    # production outage on 2026-09-18 went unnoticed. A failed check now says
+    # why instead of discarding the reason.
     try:
         async with AsyncSessionLocal() as db:
-            await db.execute("SELECT 1")
+            await db.execute(text("SELECT 1"))
             checks["database"] = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("readyz_database_check_failed", error=str(e))
 
     # Check backends
     try:
         registry = get_registry()
         backends = await registry.get_healthy_backends()
         checks["backends"] = len(backends) > 0
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("readyz_backends_check_failed", error=str(e))
 
     all_ready = all(checks.values())
 
