@@ -114,6 +114,9 @@ def test_budget_source_is_reported_for_audit_clarity():
 _SITES = [
     "db/crud.py", "dashboard/routes.py", "api/admin_api.py", "api/voice_api.py",
     "api/search_api.py", "api/mcp_server.py", "services/inference.py",
+    # GET /v1/me/limits REPORTS the budget to a pacing client; a number that
+    # disagrees with enforcement is worse than none, so it is held to the rule.
+    "api/me_api.py",
 ]
 
 
@@ -140,7 +143,7 @@ def test_every_site_imports_the_helper(rel):
 def test_enforcement_sites_pass_the_quota_row():
     """Passing only the user silently ignores a grant — the original bug."""
     for rel in ("services/inference.py", "api/voice_api.py", "api/search_api.py",
-                "api/mcp_server.py", "db/crud.py"):
+                "api/mcp_server.py", "db/crud.py", "api/me_api.py"):
         src = (_APP / rel).read_text()
         assert "effective_token_budget(user, quota)" in src, rel
 

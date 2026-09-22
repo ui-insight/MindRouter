@@ -304,6 +304,7 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | POST | `/v1/ocr` | API Key | OCR images/PDFs/Office docs to markdown or JSON (multipart upload) |
 | POST | `/v1/ocrmd` | API Key | Same OCR pipeline as `/v1/ocr`, returns raw `text/markdown` |
 | POST | `/v1/search` | API Key | Web search via the configured provider (also served at `/api/search`); `"extra_snippets": true` asks Brave for up to five further excerpts per result, returned as `extra_snippets` on each item |
+| GET | `/v1/me/limits` | API Key | The calling key's own rate limit (requests per minute) and token budget, as enforced — so a long-running client can pace itself instead of learning the limits from a 429 |
 | POST | `/v1/images/generations` | API Key | Image generation (FLUX; requires per-account enablement) |
 | POST | `/v1/images/edits` | API Key | Reference-image edit / img2img (multipart upload) |
 | POST | `/v1/videos` | API Key | Submit an async video generation job (202 Accepted) |
