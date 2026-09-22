@@ -29,6 +29,7 @@ from backend.app.api.search_api import router as search_router
 from backend.app.api.voice_api import router as voice_router
 from backend.app.api.video_api import router as video_router
 from backend.app.api.apps_api import router as apps_router
+from backend.app.api.me_api import router as me_router
 
 # Create main API router
 api_router = APIRouter()
@@ -47,5 +48,6 @@ api_router.include_router(search_router)
 api_router.include_router(voice_router)
 api_router.include_router(video_router)
 api_router.include_router(apps_router)
+api_router.include_router(me_router)
 
 __all__ = ["api_router"]
