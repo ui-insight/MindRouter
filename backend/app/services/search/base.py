@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import abc
+import inspect
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -119,6 +120,24 @@ def exchange_from_exception(exc: BaseException) -> Optional["SearchExchange"]:
     return getattr(exc, _EXCHANGE_ATTR, None)
 
 
+def accepts_kwarg(fn, name: str) -> bool:
+    """Whether ``fn(..., name=...)`` can be called at all.
+
+    A provider written before a keyword existed — the pre-audit-log case the
+    default ``search_exchange`` exists for, or a third-party one — must keep
+    working when a caller asks for a feature it never heard of: the feature
+    is simply not honoured. Forwarding the keyword regardless turns "ignored"
+    into TypeError at every call site.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 class SearchProvider(abc.ABC):
     """Interface that every search provider must implement."""
 
@@ -170,9 +189,12 @@ class SearchProvider(abc.ABC):
         audit row with no HTTP detail. The two first-party providers override
         this with the real implementation and delegate ``search()`` to it.
         """
-        results = await self.search(
-            query, max_results=max_results, config=config, extra_snippets=extra_snippets
-        )
+        kwargs: dict = {"max_results": max_results, "config": config}
+        # Only a provider whose search() knows the keyword receives it; an
+        # older one is called exactly as before and the request is ignored.
+        if extra_snippets and accepts_kwarg(self.search, "extra_snippets"):
+            kwargs["extra_snippets"] = True
+        results = await self.search(query, **kwargs)
         return SearchExchange(results=results)
 
     @abc.abstractmethod
