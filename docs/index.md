@@ -19,12 +19,13 @@ MindRouter is a production-ready **LLM inference load balancer and translation l
 9. [Translation Layer](#translation-layer)
 10. [Telemetry & Monitoring](#telemetry--monitoring)
 11. [Chat System](#chat-system)
-12. [Voice API](#voice-api)
-13. [Blog System](#blog-system)
-14. [Configuration Reference](#configuration-reference)
-15. [Implementation Notes](#implementation-notes)
-16. [Deployment](#deployment)
-17. [Testing](#testing)
+12. [Deep Research (VandalChat)](#deep-research-vandalchat)
+13. [Voice API](#voice-api)
+14. [Blog System](#blog-system)
+15. [Configuration Reference](#configuration-reference)
+16. [Implementation Notes](#implementation-notes)
+17. [Deployment](#deployment)
+18. [Testing](#testing)
 
 ### Generative Media API references
 
