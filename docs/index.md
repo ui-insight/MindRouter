@@ -1745,6 +1745,29 @@ These controls only appear when the selected model supports thinking.
 
 ---
 
+## Deep Research (VandalChat)
+
+VandalChat's **Deep Research** is a client of this gateway, not a feature of it: a chat user asks a research question and VandalChat's own worker runs a multi-agent pipeline — plan, search, read and verify sources, write, edit, review every citation, typeset a 10–50-page PDF — entirely through MindRouter's public API. It is documented here because of what it asks of the gateway and what an operator will see.
+
+**What it uses.**
+
+| Endpoint | Role in a run |
+|---|---|
+| `POST /v1/chat/completions` | planner, auditors, writers, editor, reviewer, topic guard (streaming, JSON-mode prompts) |
+| `POST /v1/embeddings`, `POST /v1/rerank` | choosing which pages to read and which quotes support which section |
+| `POST /v1/search` | every planned query (typically 30–60 per run, up to 20 results each); with `"extra_snippets": true` when the VandalChat admin allows snippet-only sources and asks for extra excerpts |
+| `GET /v1/me/limits` | the caller's `rpm_limit` (and token budget), read once at launch to pace the run |
+
+Page fetching is VandalChat's own (pinned-IP fetcher, robots.txt, public reader APIs such as NCBI E-utilities and Crossref); MindRouter never fetches web pages for it.
+
+**Whose key.** Every call runs on the **launching user's own per-user API key** (the key VandalChat provisions at SSO sign-in), so a run's tokens, searches and rate-limit windows are the user's, appear under their account in telemetry and count against their quota. Local VandalChat accounts without a per-user key use VandalChat's service key. A run typically costs 200k–1M tokens and 200–600 model calls.
+
+**Pacing.** VandalChat never intends to hit a 429: it learns the user's `rpm_limit` from `/v1/me/limits` (falling back to parsing the 429 detail string, then to an assumed default) and runs a sliding-window pacer at a fraction (default 50 %) of it, with concurrency derived from the ceiling — a low-RPM user's run simply takes longer. Several runs by one user share one pacer. A 429 that does arrive slows the pacer further; a token-budget 429 pauses the run for hours; a 401 (revoked or expired key, e.g. after a new key is minted at sign-in) pauses it until the user signs in again.
+
+**What an operator sees.** Bursts of `/v1/search` from one user (tens per minute at the pacer's ceiling), long-running streamed completions with `[research/<role>]`-tagged system prompts, and per-user token usage in the hundreds of thousands per run. The web-search audit log records every query with `source=search_api`. Nothing about a run is stored on the gateway beyond the ordinary request records.
+
+**Gateway options that affect it.** `search.max_results` caps results per query (VandalChat asks for 20); Brave `extra_snippets` needs a plan that offers them; DLP screening of search queries applies (a blocked query is skipped, and a run whose queries are mostly blocked fails); `search.quota_tokens_per_request` charges each search to the user's token budget.
+
 ## Voice API
 
 MindRouter provides public TTS and STT endpoints that proxy to self-hosted voice services. These are OpenAI-compatible and separate from the chat UI's voice features.
