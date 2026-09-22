@@ -48,10 +48,11 @@ class BraveSearchProvider(SearchProvider):
         *,
         max_results: int = 5,
         config: dict | None = None,
+        extra_snippets: bool = False,
     ) -> list[SearchResult]:
         """Parsed results only — see search_exchange for the full round-trip."""
         exchange = await self.search_exchange(
-            query, max_results=max_results, config=config
+            query, max_results=max_results, config=config, extra_snippets=extra_snippets
         )
         return exchange.results
 
@@ -61,12 +62,18 @@ class BraveSearchProvider(SearchProvider):
         *,
         max_results: int = 5,
         config: dict | None = None,
+        extra_snippets: bool = False,
     ) -> SearchExchange:
         config = config or {}
         api_key = config.get("search.brave.api_key", "")
         endpoint = config.get("search.brave.endpoint", BRAVE_SEARCH_URL)
 
-        params = {"q": query, "count": max_results}
+        params: dict = {"q": query, "count": max_results}
+        if extra_snippets:
+            # Up to five further excerpts per result; Brave serves them only
+            # on plans that include the feature and otherwise leaves the
+            # field out, so the request is harmless elsewhere.
+            params["extra_snippets"] = "true"
         # The subscription token is deliberately included: the audit layer
         # redacts it centrally, so no provider has to remember which of its
         # own headers are secret.
@@ -101,12 +108,17 @@ class BraveSearchProvider(SearchProvider):
 
         results: list[SearchResult] = []
         for item in data.get("web", {}).get("results", [])[:max_results]:
+            extra: dict = {}
+            more = item.get("extra_snippets")
+            if isinstance(more, list) and more:
+                extra["extra_snippets"] = [str(x) for x in more if isinstance(x, str) and x.strip()][:5]
             results.append(
                 SearchResult(
                     title=item.get("title", ""),
                     url=item.get("url", ""),
                     snippet=item.get("description", ""),
                     published=item.get("page_age", None),
+                    extra=extra,
                 )
             )
         exchange.results = results

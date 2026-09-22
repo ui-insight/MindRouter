@@ -56,6 +56,14 @@ class SearchRequest(BaseModel):
     max_results: Optional[int] = Field(
         None, description="Maximum results to return (default from config)", ge=1, le=50
     )
+    extra_snippets: bool = Field(
+        False,
+        description=(
+            "Ask the provider for additional excerpts per result (Brave: up to five "
+            "extra_snippets; needs a plan that offers them). Providers without the "
+            "feature ignore it."
+        ),
+    )
 
 
 class SearchResultItem(BaseModel):
@@ -65,6 +73,7 @@ class SearchResultItem(BaseModel):
     url: str
     snippet: str
     published: Optional[str] = None
+    extra_snippets: list[str] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):
@@ -176,6 +185,7 @@ async def _do_search(
             max_results=max_results,
             config=config,
             provider=provider,
+            extra_snippets=body.extra_snippets,
             user_id=user.id,
             api_key_id=getattr(api_key, "id", None),
             client_ip=get_client_ip(request),
@@ -222,6 +232,7 @@ async def _do_search(
                 url=r.url,
                 snippet=r.snippet,
                 published=r.published,
+                extra_snippets=list((r.extra or {}).get("extra_snippets") or []),
             )
             for r in results
         ],

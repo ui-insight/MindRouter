@@ -138,6 +138,7 @@ class SearchProvider(abc.ABC):
         *,
         max_results: int = 5,
         config: dict | None = None,
+        extra_snippets: bool = False,
     ) -> list[SearchResult]:
         """Execute a search and return results.
 
@@ -145,6 +146,9 @@ class SearchProvider(abc.ABC):
             query: The search query string.
             max_results: Maximum number of results to return.
             config: Provider-specific config values from AppConfig.
+            extra_snippets: Ask for additional excerpts per result where the
+                provider offers them (Brave); others ignore it. They land in
+                ``SearchResult.extra["extra_snippets"]``.
 
         Returns:
             List of SearchResult objects.
@@ -157,6 +161,7 @@ class SearchProvider(abc.ABC):
         *,
         max_results: int = 5,
         config: dict | None = None,
+        extra_snippets: bool = False,
     ) -> "SearchExchange":
         """Execute a search and report the full round-trip.
 
@@ -165,7 +170,9 @@ class SearchProvider(abc.ABC):
         audit row with no HTTP detail. The two first-party providers override
         this with the real implementation and delegate ``search()`` to it.
         """
-        results = await self.search(query, max_results=max_results, config=config)
+        results = await self.search(
+            query, max_results=max_results, config=config, extra_snippets=extra_snippets
+        )
         return SearchExchange(results=results)
 
     @abc.abstractmethod

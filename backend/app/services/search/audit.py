@@ -303,6 +303,7 @@ async def run_logged_search(
     max_results: Optional[int] = None,
     config: Optional[dict] = None,
     provider: Any = None,
+    extra_snippets: bool = False,
     user_id: Optional[int] = None,
     api_key_id: Optional[int] = None,
     request_id: Optional[int] = None,
@@ -381,7 +382,7 @@ async def run_logged_search(
     started = time.monotonic()
     try:
         exchange = await provider.search_exchange(
-            query, max_results=max_results, config=config
+            query, max_results=max_results, config=config, extra_snippets=extra_snippets
         )
     except Exception as e:
         elapsed = int((time.monotonic() - started) * 1000)
