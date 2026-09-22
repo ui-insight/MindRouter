@@ -48,6 +48,7 @@ from typing import Any, Optional
 
 from backend.app.logging_config import get_logger
 from backend.app.services.search.base import (
+    accepts_kwarg,
     SearchExchange,
     SearchResult,
     exchange_from_exception,
@@ -303,6 +304,7 @@ async def run_logged_search(
     max_results: Optional[int] = None,
     config: Optional[dict] = None,
     provider: Any = None,
+    extra_snippets: bool = False,
     user_id: Optional[int] = None,
     api_key_id: Optional[int] = None,
     request_id: Optional[int] = None,
@@ -380,9 +382,14 @@ async def run_logged_search(
 
     started = time.monotonic()
     try:
-        exchange = await provider.search_exchange(
-            query, max_results=max_results, config=config
-        )
+        kwargs: dict = {"max_results": max_results, "config": config}
+        # Forwarded only when asked for AND the provider's search_exchange
+        # takes it: this is the one door every surface uses, so a keyword an
+        # older provider's signature lacks would break that provider for
+        # every caller, not just the one that set the flag.
+        if extra_snippets and accepts_kwarg(provider.search_exchange, "extra_snippets"):
+            kwargs["extra_snippets"] = True
+        exchange = await provider.search_exchange(query, **kwargs)
     except Exception as e:
         elapsed = int((time.monotonic() - started) * 1000)
         await record_search(

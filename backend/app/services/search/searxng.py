@@ -49,6 +49,7 @@ class SearXNGSearchProvider(SearchProvider):
         *,
         max_results: int = 5,
         config: dict | None = None,
+        extra_snippets: bool = False,
     ) -> list[SearchResult]:
         """Parsed results only — see search_exchange for the full round-trip."""
         exchange = await self.search_exchange(
@@ -62,6 +63,7 @@ class SearXNGSearchProvider(SearchProvider):
         *,
         max_results: int = 5,
         config: dict | None = None,
+        extra_snippets: bool = False,  # SearXNG has no such feature; accepted for the shared signature
     ) -> SearchExchange:
         config = config or {}
         endpoint = config.get("search.searxng.endpoint", "")
