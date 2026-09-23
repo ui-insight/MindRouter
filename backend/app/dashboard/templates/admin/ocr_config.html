@@ -46,7 +46,7 @@
                                     <label for="default_model" class="form-label">Default Model</label>
                                     <select class="form-select" id="default_model" name="default_model">
                                         {% for m in multimodal_models %}
-                                        <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                                        <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}{% if m in multimodal_aliases %} (alias for {{ multimodal_aliases[m] }}){% endif %}</option>
                                         {% endfor %}
                                         {% if default_model and default_model not in multimodal_models %}
                                         <option value="{{ default_model }}" selected>{{ default_model }} (not currently available)</option>
@@ -58,7 +58,13 @@
                                 <div class="mb-3">
                                     <label for="max_tokens" class="form-label">Max Tokens (per chunk)</label>
                                     <input type="number" class="form-control" id="max_tokens" name="max_tokens" value="{{ max_tokens }}" min="1024" max="65536">
-                                    <div class="form-text">Maximum output tokens per chunk request.</div>
+                                    <div class="form-text">Absolute ceiling on output tokens for one chunk request.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_tokens_per_page" class="form-label">Max Tokens (per page)</label>
+                                    <input type="number" class="form-control" id="max_tokens_per_page" name="max_tokens_per_page" value="{{ max_tokens_per_page }}" min="256" max="65536">
+                                    <div class="form-text">Budget per page in a request (times the pages in the chunk, capped by the ceiling above). Bounds a model that loops instead of stopping; a collapsed runaway is returned flagged <code>degraded</code>.</div>
                                 </div>
 
                                 <div class="mb-3">
@@ -142,14 +148,10 @@
                                 <p class="text-muted small">Prompt sent to the vision model for each chunk. Use <code>{num_pages}</code> to insert the page count. Leave blank to use the built-in default.</p>
 
                                 <div class="mb-3">
-                                    <label for="prompt_ocrmd" class="form-label"><code>/v1/ocrmd</code> Prompt (Markdown output)</label>
+                                    <label for="prompt_ocrmd" class="form-label">Transcription prompt (<code>/v1/ocr</code> and <code>/v1/ocrmd</code>)</label>
                                     <textarea class="form-control font-monospace" id="prompt_ocrmd" name="prompt_ocrmd" rows="4" style="font-size: 0.85rem;">{{ prompt_ocrmd }}</textarea>
                                 </div>
 
-                                <div class="mb-3">
-                                    <label for="prompt_ocr" class="form-label"><code>/v1/ocr</code> Prompt (JSON output)</label>
-                                    <textarea class="form-control font-monospace" id="prompt_ocr" name="prompt_ocr" rows="4" style="font-size: 0.85rem;">{{ prompt_ocr }}</textarea>
-                                </div>
                             </div>
                         </div>
                     </div>

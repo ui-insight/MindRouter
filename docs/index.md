@@ -301,8 +301,8 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | POST | `/v1/rerank` | API Key | Rerank documents against a query |
 | POST | `/v1/score` | API Key | Score similarity between text pairs |
 | POST | `/v1/tokenize` | API Key | Count input tokens for a chat request (exact for vLLM, tiktoken estimate for Ollama) |
-| POST | `/v1/ocr` | API Key | OCR images/PDFs/Office docs to markdown or JSON (multipart upload) |
-| POST | `/v1/ocrmd` | API Key | Same OCR pipeline as `/v1/ocr`, returns raw `text/markdown` |
+| POST | `/v1/ocr` | API Key | OCR images/PDFs/Office docs (multipart upload). `output_format=markdown` (default) or `json`; in JSON mode `content` is a JSON string `{"pages":[{"page_number","content"}]}` assembled by the gateway from one request per page — the model only transcribes. `degraded: true` marks a result whose generation hit its per-page token budget looping and was collapsed to one copy |
+| POST | `/v1/ocrmd` | API Key | Same OCR pipeline as `/v1/ocr`, returns raw `text/markdown` (header `X-OCR-Degraded: true` when a runaway generation was collapsed) |
 | POST | `/v1/search` | API Key | Web search via the configured provider (also served at `/api/search`); `"extra_snippets": true` asks Brave for up to five further excerpts per result, returned as `extra_snippets` on each item |
 | GET | `/v1/me/limits` | API Key | The calling key's own rate limit (requests per minute) and token budget, as enforced — so a long-running client can pace itself instead of learning the limits from a 429 |
 | POST | `/v1/images/generations` | API Key | Image generation (FLUX; requires per-account enablement) |

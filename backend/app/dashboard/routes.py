@@ -5110,6 +5110,14 @@ async def admin_voice_config_post(
 
 
 @dashboard_router.get("/admin/ocr-config")
+def _ocr_model_choices(all_models, aliases):
+    """Names offered as the OCR default: every multimodal model, plus each
+    alias whose target is one. Returns (sorted names, {alias: target})."""
+    names = {m.name for m in all_models if getattr(m, "supports_multimodal", False)}
+    alias_map = {a.alias_name: a.target_model for a in aliases if a.target_model in names}
+    return sorted(names | set(alias_map)), alias_map
+
+
 async def admin_ocr_config(
     request: Request,
     success: Optional[str] = None,
@@ -5125,12 +5133,12 @@ async def admin_ocr_config(
     if not user or (not user.group or not user.group.has_admin_read):
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    # Get multimodal model names for the dropdown
+    # Multimodal models for the dropdown, plus aliases that point at one. The
+    # saved default is an alias (default-ocr -> dots.MOCR) and rendered as
+    # "not currently available" because aliases were never in the list.
     all_models = await crud.get_all_models_with_backends(db)
-    multimodal_models = sorted({
-        m.name for m in all_models
-        if m.supports_multimodal
-    })
+    aliases = await crud.get_all_model_aliases(db)
+    multimodal_models, multimodal_aliases = _ocr_model_choices(all_models, aliases)
 
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
@@ -5140,6 +5148,7 @@ async def admin_ocr_config(
             "user": user,
             **masq,
             "multimodal_models": multimodal_models,
+            "multimodal_aliases": multimodal_aliases,
             "enabled": await crud.get_config_json(db, "ocr.enabled", True),
             "default_model": await crud.get_config_json(db, "ocr.default_model", "qwen/qwen3.5-122b"),
             "chunk_size": await crud.get_config_json(db, "ocr.chunk_size", 6),
@@ -5151,8 +5160,8 @@ async def admin_ocr_config(
             "min_chars_per_page": await crud.get_config_json(db, "ocr.min_chars_per_page", 400),
             "max_retries": await crud.get_config_json(db, "ocr.max_retries", 2),
             "max_tokens": await crud.get_config_json(db, "ocr.max_tokens", 16384),
+            "max_tokens_per_page": await crud.get_config_json(db, "ocr.max_tokens_per_page", 4096),
             "temperature": await crud.get_config_json(db, "ocr.temperature", 0.1),
-            "prompt_ocr": await crud.get_config_json(db, "ocr.prompt_ocr", ""),
             "prompt_ocrmd": await crud.get_config_json(db, "ocr.prompt_ocrmd", ""),
             "success": success,
             "error": error,
@@ -5190,6 +5199,7 @@ async def admin_ocr_config_post(
         "ocr.min_chars_per_page": ("min_chars_per_page", 400, 0, 2000),
         "ocr.max_retries": ("max_retries", 2, 0, 5),
         "ocr.max_tokens": ("max_tokens", 16384, 1024, 65536),
+        "ocr.max_tokens_per_page": ("max_tokens_per_page", 4096, 256, 65536),
     }
     for key, (field, default, lo, hi) in int_configs.items():
         try:
@@ -5208,7 +5218,7 @@ async def admin_ocr_config_post(
     await crud.set_config(db, "ocr.temperature", temp)
 
     # Prompt templates (stored as JSON strings)
-    for key, field in [("ocr.prompt_ocr", "prompt_ocr"), ("ocr.prompt_ocrmd", "prompt_ocrmd")]:
+    for key, field in [("ocr.prompt_ocrmd", "prompt_ocrmd")]:
         val = form.get(field, "").strip()
         if val:
             await crud.set_config(db, key, val)

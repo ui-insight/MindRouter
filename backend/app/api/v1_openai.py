@@ -556,7 +556,6 @@ async def ocr(
             user=user,
             api_key=api_key,
             http_request=request,
-            prompt_template=ocr_config["prompt_ocr"],
         )
     except ValueError as e:
         raise HTTPException(
@@ -579,6 +578,9 @@ async def ocr(
         "pages": result["pages"],
         "chunks_processed": result["chunks_processed"],
         "usage": result["usage"],
+        # True when a page's generation hit its token budget looping and was
+        # collapsed to one copy; the text is usable but worth a second look.
+        "degraded": result.get("degraded", False),
     }
 
 
@@ -661,14 +663,14 @@ async def ocrmd(
             user=user,
             api_key=api_key,
             http_request=request,
-            prompt_template=ocr_config["prompt_ocrmd"],
         )
     except ValueError as e:
         return PlainTextResponse(str(e), status_code=400)
     except RuntimeError as e:
         return PlainTextResponse(str(e), status_code=501)
 
-    return PlainTextResponse(result["content"], media_type="text/markdown")
+    headers = {"X-OCR-Degraded": "true"} if result.get("degraded") else None
+    return PlainTextResponse(result["content"], media_type="text/markdown", headers=headers)
 
 
 async def _prepare_image_canonical(

@@ -26,6 +26,7 @@ import asyncio
 import base64
 import difflib
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -91,6 +92,9 @@ async def get_ocr_config(db) -> dict:
         "max_retries": await crud.get_config_json(db, "ocr.max_retries", 2),
         "enabled": await crud.get_config_json(db, "ocr.enabled", True),
         "max_tokens": await crud.get_config_json(db, "ocr.max_tokens", 16384),
+        # Per-request budget scales with the pages in the request; max_tokens
+        # stays the absolute ceiling. Bounds a runaway generation by page count.
+        "max_tokens_per_page": await crud.get_config_json(db, "ocr.max_tokens_per_page", 4096),
         "temperature": await crud.get_config_json(db, "ocr.temperature", 0.1),
         "prompt_ocr": await crud.get_config_json(db, "ocr.prompt_ocr", _DEFAULT_PROMPT_OCR),
         "prompt_ocrmd": await crud.get_config_json(db, "ocr.prompt_ocrmd", _DEFAULT_PROMPT_OCRMD),
@@ -322,6 +326,99 @@ def _strip_fences(text: str) -> str:
     return text
 
 
+def _effective_max_tokens(ocr_config: dict, num_pages: int) -> int:
+    """Completion budget for one request: the per-page allowance times the
+    pages it carries, never above the absolute ceiling. A model that loops is
+    then bounded by the page count rather than by a document-wide ceiling."""
+    ceiling = int(ocr_config.get("max_tokens", 16384) or 16384)
+    per_page = int(ocr_config.get("max_tokens_per_page", 0) or 0)
+    if per_page <= 0:
+        return ceiling
+    return max(1, min(ceiling, per_page * max(1, num_pages)))
+
+
+# A looping generation is recognised by a periodic tail: the last chars recur
+# exactly one period earlier, that period tiles the tail at least this many
+# times, and the run covers at least this fraction of the text.
+_RUNAWAY_MIN_UNIT = 40
+_RUNAWAY_MIN_REPEATS = 3
+_RUNAWAY_MIN_FRACTION = 0.5
+
+
+def collapse_runaway_repetition(text: str) -> Tuple[str, bool]:
+    """Collapse a generation that looped on itself to one copy of the loop.
+
+    Meant for a completion that hit its token cap: an OCR specialist handed
+    a prompt shape it was not trained on can re-emit the same block until the
+    budget runs out (dots.MOCR did this 349 times on a three-line page). The
+    period is found from the tail, then extended backwards as far as the text
+    stays periodic; everything before the run is kept, plus one full period.
+
+    Ordinary content is untouched: a real document with repeated table rows
+    neither tiles half its length with exact copies nor, being called only
+    on capped completions, reaches here in the first place.
+
+    The seam between the real content and the loop is ambiguous when both end
+    in the same character (a newline, say): the cut may land one such
+    character earlier. The kept text is always a prefix of the original.
+    """
+    n = len(text)
+    if n < _RUNAWAY_MIN_UNIT * _RUNAWAY_MIN_REPEATS:
+        return text, False
+    tail = text[-_RUNAWAY_MIN_UNIT:]
+    # Search up to the last character so an occurrence that OVERLAPS the tail
+    # counts: for a loop unit shorter than the tail, the nearest earlier copy
+    # ends inside the tail, and bounding the search at the tail's start would
+    # skip it and report a doubled period (two copies kept instead of one).
+    prev = text.rfind(tail, 0, n - 1)
+    if prev < 0:
+        return text, False
+    period = (n - _RUNAWAY_MIN_UNIT) - prev
+    if period <= 0:
+        return text, False
+    # Walk back while the text stays periodic with that period.
+    start = n - period
+    while start > 0 and text[start - 1] == text[start - 1 + period]:
+        start -= 1
+    run = n - start
+    if run < _RUNAWAY_MIN_REPEATS * period or run < _RUNAWAY_MIN_FRACTION * n:
+        return text, False
+    return text[:start + period], True
+
+
+def _pages_json(page_texts: List[str]) -> str:
+    """The /v1/ocr JSON body, built by the pipeline rather than by the model.
+
+    Asking the model to author this structure is what broke dots.MOCR; the
+    pipeline already knows which page each transcription came from.
+    """
+    return json.dumps(
+        {"pages": [{"page_number": i + 1, "content": t} for i, t in enumerate(page_texts)]},
+        ensure_ascii=False,
+    )
+
+
+def _guard_runaway(text: str, result: dict, budget: int, *, model: str,
+                   chunk: Optional[int] = None) -> Tuple[str, bool]:
+    """Collapse a looping generation, but only one that hit its budget."""
+    choice = (result.get("choices") or [{}])[0]
+    completion = (result.get("usage") or {}).get("completion_tokens", 0) or 0
+    hit_cap = choice.get("finish_reason") == "length" or completion >= budget
+    if not hit_cap:
+        return text, False
+    kept, collapsed = collapse_runaway_repetition(text)
+    if collapsed:
+        logger.warning(
+            "ocr_runaway_collapsed",
+            model=model,
+            chunk=chunk,
+            budget=budget,
+            chars_before=len(text),
+            chars_after=len(kept),
+        )
+    return kept, collapsed
+
+
 def _build_ocr_prompt(
     num_pages: int,
     prompt_template: str,
@@ -361,11 +458,14 @@ def _is_image_limit_error(e: Exception) -> bool:
 async def _ocr_pages_individually(
     service, page_images: List[bytes], prompt_template: str, model: str,
     ocr_config: dict, user, api_key, http_request,
-) -> Tuple[str, Dict[str, int]]:
+) -> Tuple[str, Dict[str, int], bool]:
     """Fallback OCR: one page per request, concatenated. Used when a backend
-    cannot accept multiple images in a single request."""
+    cannot accept multiple images in a single request. The bool says whether
+    any page's generation had to be collapsed as a runaway."""
     parts: List[str] = []
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    degraded = False
+    budget = _effective_max_tokens(ocr_config, 1)
     for img_bytes in page_images:
         b64 = base64.b64encode(img_bytes).decode()
         canonical = CanonicalChatRequest(
@@ -375,7 +475,7 @@ async def _ocr_pages_individually(
                 ImageUrlContent(image_url={"url": f"data:image/png;base64,{b64}"}),
             ])],
             temperature=ocr_config["temperature"],
-            max_tokens=ocr_config["max_tokens"],
+            max_tokens=budget,
             stream=False,
             think=False,
         )
@@ -383,10 +483,13 @@ async def _ocr_pages_individually(
         u = result.get("usage", {})
         for k in usage:
             usage[k] += u.get(k, 0)
-        parts.append(_strip_fences(
+        text = _strip_fences(
             result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        ))
-    return "\n\n".join(parts), usage
+        )
+        text, collapsed = _guard_runaway(text, result, budget, model=model)
+        degraded = degraded or collapsed
+        parts.append(text)
+    return "\n\n".join(parts), usage, degraded
 
 
 async def ocr_chunk(
@@ -402,20 +505,23 @@ async def ocr_chunk(
     user: "User",
     api_key: "ApiKey",
     http_request: "Request",
-) -> Tuple[int, str, Dict[str, int]]:
+) -> Tuple[int, str, Dict[str, int], bool]:
     """
     Send a chunk of page images to the LLM and return OCR text.
 
     Each chunk gets its own DB session and InferenceService to avoid
     session state conflicts when multiple chunks run concurrently.
 
-    Returns (chunk_idx, text, usage_dict).
+    Returns (chunk_idx, text, usage_dict, degraded) — degraded is True when
+    the generation hit its token budget looping and was collapsed.
     """
     from backend.app.db.session import AsyncSessionLocal
     from backend.app.services.inference import InferenceService
 
     num_pages = end_page - start_page
     max_retries = ocr_config["max_retries"]
+
+    budget = _effective_max_tokens(ocr_config, num_pages)
 
     # Build content blocks: prompt + images
     prompt = _build_ocr_prompt(num_pages, prompt_template)
@@ -430,7 +536,7 @@ async def ocr_chunk(
         model=model,
         messages=[CanonicalMessage(role="user", content=content_blocks)],
         temperature=ocr_config["temperature"],
-        max_tokens=ocr_config["max_tokens"],
+        max_tokens=budget,
         stream=False,
         think=False,
     )
@@ -463,13 +569,13 @@ async def ocr_chunk(
                         chunk=chunk_idx, pages=num_pages,
                     )
                     await chunk_db.rollback()
-                    text, deg_usage = await _ocr_pages_individually(
+                    text, deg_usage, degraded = await _ocr_pages_individually(
                         service, page_images, prompt_template, model,
                         ocr_config, user, api_key, http_request,
                     )
                     for k in total_usage:
                         total_usage[k] += deg_usage.get(k, 0)
-                    return chunk_idx, text, total_usage
+                    return chunk_idx, text, total_usage, degraded
                 if attempt == max_retries:
                     raise
                 # Reset session state for retry
@@ -483,6 +589,9 @@ async def ocr_chunk(
 
             text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             text = _strip_fences(text)
+            text, collapsed = _guard_runaway(
+                text, result, budget, model=model, chunk=chunk_idx + 1,
+            )
 
             logger.info(
                 "ocr_chunk_result",
@@ -493,8 +602,10 @@ async def ocr_chunk(
                 attempt=attempt + 1,
             )
 
-            if len(text) >= expected_min_chars or attempt == max_retries:
-                return chunk_idx, text, total_usage
+            # A collapsed runaway is never retried: the "you stopped early"
+            # prompt would only make a looping model loop again at full cost.
+            if collapsed or len(text) >= expected_min_chars or attempt == max_retries:
+                return chunk_idx, text, total_usage, collapsed
 
             # Retry with stronger prompt
             logger.info(
@@ -510,7 +621,7 @@ async def ocr_chunk(
             canonical.messages[0].content = content_blocks
 
     # Unreachable, but satisfy type checker
-    return chunk_idx, "", total_usage
+    return chunk_idx, "", total_usage, False
 
 
 # ---------------------------------------------------------------------------
@@ -682,12 +793,17 @@ async def perform_ocr(
         is_pdf = True
         logger.info("ocr_office_convert", ms=round((_time.monotonic() - t0) * 1000))
 
-    # Resolve prompt template: explicit parameter > config > built-in default
+    # The model only ever transcribes; the pipeline owns the structure. JSON
+    # output used to be requested FROM the model with a page/table schema,
+    # which an OCR specialist trained on a few fixed prompts cannot follow —
+    # dots.MOCR re-emitted the page block until the token budget ran out. Now
+    # both formats use the transcription prompt, and JSON mode runs one page
+    # per request so each transcription is attributed to its page exactly,
+    # with no overlap merge to reconcile.
+    if output_format == "json":
+        chunk_size, overlap = 1, 0
     if prompt_template is None:
-        if output_format == "json":
-            prompt_template = ocr_config.get("prompt_ocr", _DEFAULT_PROMPT_OCR)
-        else:
-            prompt_template = ocr_config.get("prompt_ocrmd", _DEFAULT_PROMPT_OCRMD)
+        prompt_template = ocr_config.get("prompt_ocrmd", _DEFAULT_PROMPT_OCRMD)
 
     # For PDFs with multiple pages, use pipelined conversion + inference
     if is_pdf:
@@ -786,14 +902,17 @@ async def _perform_ocr_pipelined(
     # Sort by chunk index and extract text + usage
     results = sorted(results, key=lambda r: r[0])
     chunk_texts = [r[1] for r in results]
+    degraded = any(r[3] for r in results)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    for _, _, usage in results:
+    for _, _, usage, _ in results:
         for k in total_usage:
             total_usage[k] += usage.get(k, 0)
 
     # Merge chunks
     t0 = _time.monotonic()
-    if total_chunks == 1:
+    if output_format == "json":
+        content = _pages_json(chunk_texts)  # one chunk per page in this mode
+    elif total_chunks == 1:
         content = chunk_texts[0]
     else:
         content = await asyncio.to_thread(merge_chunks, chunk_texts)
@@ -818,6 +937,7 @@ async def _perform_ocr_pipelined(
         "pages": total_pages,
         "chunks_processed": total_chunks,
         "usage": total_usage,
+        "degraded": degraded,
     }
 
 
@@ -883,13 +1003,16 @@ async def _perform_ocr_simple(
 
     results = sorted(results, key=lambda r: r[0])
     chunk_texts = [r[1] for r in results]
+    degraded = any(r[3] for r in results)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    for _, _, usage in results:
+    for _, _, usage, _ in results:
         for k in total_usage:
             total_usage[k] += usage.get(k, 0)
 
     t0 = _time.monotonic()
-    if total_chunks == 1:
+    if output_format == "json":
+        content = _pages_json(chunk_texts)  # one chunk per page in this mode
+    elif total_chunks == 1:
         content = chunk_texts[0]
     else:
         content = await asyncio.to_thread(merge_chunks, chunk_texts)
@@ -915,4 +1038,5 @@ async def _perform_ocr_simple(
         "pages": total_pages,
         "chunks_processed": total_chunks,
         "usage": total_usage,
+        "degraded": degraded,
     }
