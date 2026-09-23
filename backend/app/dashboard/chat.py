@@ -766,7 +766,6 @@ async def chat_upload(
                     )
                     try:
                         from backend.app.services.ocr import get_ocr_config, perform_ocr
-                        from backend.app.db.session import get_async_db_context
                         async with get_async_db_context() as ocr_db:
                             ocr_config = await get_ocr_config(ocr_db)
                         if ocr_config.get("enabled", True):

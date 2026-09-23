@@ -5965,7 +5965,6 @@ async def admin_settings_post(
                 await smtp.quit()
             return RedirectResponse(url=f"/admin/settings?success=test_email_sent", status_code=302)
         except Exception as e:
-            from urllib.parse import quote_plus
             return RedirectResponse(url=f"/admin/settings?error={quote_plus(str(e))}", status_code=302)
 
     return RedirectResponse(url="/admin/settings?error=Unknown+action", status_code=302)
@@ -6332,7 +6331,6 @@ async def admin_retention_post(
         )
 
     elif action == "run_now":
-        import asyncio
         from backend.app.services.retention import (
             is_retention_running,
             try_run_retention_with_lock,
@@ -6371,7 +6369,6 @@ async def admin_retention_post(
         )
 
     elif action == "purge":
-        import asyncio
         from backend.app.services.retention import (
             PURGE_CATEGORIES,
             is_retention_running,

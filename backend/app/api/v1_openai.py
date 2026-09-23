@@ -155,7 +155,6 @@ async def completions(
 
     # Translate to canonical completion request
     try:
-        from backend.app.core.translators.openai_in import OpenAIInTranslator
         completion_req = OpenAIInTranslator.translate_completion_request(body)
         completion_req.request_id = request_id
         completion_req.user_id = user.id
@@ -517,7 +516,6 @@ async def ocr(
     # Resolve content type from file extension if generic
     content_type = file.content_type or "application/octet-stream"
     if content_type == "application/octet-stream" and file.filename:
-        import os
         ext = os.path.splitext(file.filename)[1].lower()
         content_type = _OCR_EXT_MAP.get(ext, content_type)
 
@@ -626,7 +624,6 @@ async def ocrmd(
 
     content_type = file.content_type or "application/octet-stream"
     if content_type == "application/octet-stream" and file.filename:
-        import os
         ext = os.path.splitext(file.filename)[1].lower()
         content_type = _OCR_EXT_MAP.get(ext, content_type)
 
