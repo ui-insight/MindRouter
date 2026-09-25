@@ -107,6 +107,48 @@ def test_budget_source_is_reported_for_audit_clarity():
 
 
 # --------------------------------------------------------------------------
+# Admin user-edit override field (2.9.75)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, None), ("", None), ("   ", None),          # inherit the group budget
+    ("0", 0), (" 0 ", 0),                              # unlimited, group semantics
+    ("250000", 250_000), ("1,000,000", 1_000_000), ("1_000_000", 1_000_000),
+])
+def test_parse_budget_override_accepts_blank_zero_and_integers(raw, expected):
+    assert qb.parse_budget_override(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["-1", "abc", "1e6", "10 tokens"])
+def test_parse_budget_override_rejects_garbage_loudly(raw):
+    """A silent fallback here would recreate the quota-request bug: an admin
+    must never be told a value was saved when it was not."""
+    with pytest.raises(ValueError):
+        qb.parse_budget_override(raw)
+
+
+def test_user_edit_page_exposes_the_override():
+    """Why this exists: approving a student's quota request for the 10 tokens
+    they had typed replaced an unlimited group budget with a 10-token one,
+    and the only UI that writes the override lists pending requests only —
+    there was no way to see or clear it without touching the database."""
+    routes = (_APP / "dashboard" / "routes.py").read_text()
+    edit = routes[routes.index("async def edit_user("):]
+    edit = edit[:edit.index("\n@dashboard_router.")]
+    assert "token_budget_override: Optional[str] = Form(None)" in edit
+    assert "parse_budget_override(" in edit
+    assert "quota.token_budget_override = " in edit
+    assert "quota_budget import" in routes
+    tpl = (_APP / "dashboard" / "templates" / "admin" / "user_detail.html").read_text()
+    assert 'name="token_budget_override"' in tpl
+    # The usage card must show the EFFECTIVE budget, not the group's — it was
+    # rendering "unlimited" for a user capped at 10 by an override.
+    assert "effective_budget" in tpl
+    assert "detail_user.group.token_budget" not in tpl
+
+
+# --------------------------------------------------------------------------
 # THE ANTI-RECURRENCE GUARD — the reason the bug survived six months
 # --------------------------------------------------------------------------
 

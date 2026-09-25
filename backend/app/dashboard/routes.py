@@ -38,7 +38,11 @@ from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.dashboard.azure_auth import azure_router
 from backend.app.dashboard.sso import enabled_providers, sso_router
-from backend.app.core.quota_budget import effective_token_budget
+from backend.app.core.quota_budget import (
+    budget_source,
+    effective_token_budget,
+    parse_budget_override,
+)
 from backend.app.db import crud, chat_crud
 from backend.app.db.models import ApiKeyStatus, BackendEngine, QuotaRequestStatus, ServiceKeyRequestStatus, UserRole
 from backend.app.db.session import get_async_db, get_async_db_context
@@ -4019,6 +4023,12 @@ async def admin_user_detail(
             **masq,
             "detail_user": stats["user"],
             "stats": stats,
+            # The budget the user actually gets (override, else group) and
+            # where it comes from — the card used to read the group budget
+            # straight off the template and showed "Unlimited" for a user
+            # whose override had capped them at 10 tokens.
+            "effective_budget": effective_token_budget(stats["user"], stats.get("quota")),
+            "budget_source": budget_source(stats["user"], stats.get("quota")),
             "monthly_usage": monthly_usage,
             "groups": groups,
             "recent_ips": recent_ips,
@@ -4039,6 +4049,7 @@ async def edit_user(
     intended_use: Optional[str] = Form(None),
     rpm_limit: Optional[int] = Form(None),
     weight_override: Optional[str] = Form(None),
+    token_budget_override: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Edit user profile and quota."""
@@ -4063,16 +4074,25 @@ async def edit_user(
 
         # Update quota if provided
         quota = await crud.get_user_quota(db, user_id)
+        previous_override = quota.token_budget_override if quota else None
         if quota:
             if rpm_limit is not None:
                 quota.rpm_limit = rpm_limit
             quota.weight_override = int(weight_override) if weight_override and weight_override.strip() else None
+            # Blank inherits the group budget (NULL), 0 is unlimited, else the
+            # budget in tokens. Validated loudly: a bad value redirects with
+            # the message rather than saving something else.
+            quota.token_budget_override = parse_budget_override(token_budget_override)
             await db.flush()
 
         await crud.log_admin_action(
             db, user_id=session_user_id, action="user.edit",
             entity_type="user", entity_id=str(user_id),
-            after_value={"group_id": group_id, "full_name": full_name},
+            before_value={"token_budget_override": previous_override},
+            after_value={
+                "group_id": group_id, "full_name": full_name,
+                "token_budget_override": quota.token_budget_override if quota else None,
+            },
             ip_address=get_client_ip(request),
         )
         await db.commit()

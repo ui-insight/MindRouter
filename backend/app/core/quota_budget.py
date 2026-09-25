@@ -98,3 +98,30 @@ def budget_source(user: Any, quota: Optional[Any] = None) -> str:
     if getattr(user, "group", None) is not None:
         return "group"
     return "none"
+
+
+def parse_budget_override(raw: Optional[str]) -> Optional[int]:
+    """Turn an admin form field into a ``token_budget_override`` value.
+
+    Blank means "no override — inherit the group budget" (stored NULL);
+    ``0`` means unlimited, exactly as it does on the group; any other
+    non-negative integer is the budget. Thousands separators are tolerated
+    because an admin will type ``1,000,000``. Anything else is a ValueError
+    with a message fit to show back on the form — a silent fallback here
+    would be the quota-request bug in a new place.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip().replace(",", "").replace("_", "").replace(" ", "")
+    if text == "":
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        raise ValueError(
+            f"Token budget override must be a whole number of tokens, blank to inherit the group budget, or 0 for unlimited (got {raw!r})"
+        )
+    if value < 0:
+        raise ValueError("Token budget override cannot be negative (0 means unlimited)")
+    return value
+

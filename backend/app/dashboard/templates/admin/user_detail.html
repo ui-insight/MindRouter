@@ -135,6 +135,20 @@
                                             <input type="number" class="form-control" id="weight_override" name="weight_override" value="{{ stats.quota.weight_override or '' }}" placeholder="Leave blank for group default">
                                         </div>
                                     </div>
+                                    <div class="mb-3">
+                                        <label for="token_budget_override" class="form-label">Token Budget Override <span class="text-muted">(per {{ stats.quota.budget_period_days }} days)</span></label>
+                                        <input type="number" class="form-control" id="token_budget_override" name="token_budget_override" min="0" step="1"
+                                               value="{{ stats.quota.token_budget_override if stats.quota.token_budget_override is not none else '' }}"
+                                               placeholder="blank = inherit group budget">
+                                        <div class="form-text">
+                                            Blank inherits the group&rsquo;s budget
+                                            ({% if detail_user.group and detail_user.group.token_budget %}{{ "{:,}".format(detail_user.group.token_budget) }}{% else %}unlimited{% endif %});
+                                            <code>0</code> means unlimited. Currently in effect:
+                                            <strong>{% if effective_budget == 0 %}unlimited{% else %}{{ "{:,}".format(effective_budget) }}{% endif %}</strong>
+                                            ({{ "per-user override" if budget_source == "user_override" else "group" }}).
+                                            Approving a quota request also sets this value.
+                                        </div>
+                                    </div>
                                     {% endif %}
                                     <button type="submit" class="btn btn-primary">Save Changes</button>
                                 </form>
@@ -177,12 +191,11 @@
                                 <div class="card-body">
                                     <h2 class="card-subtitle h6 mb-2 text-muted">Quota Token Usage</h2>
                                     {% if stats.quota %}
-                                    {% set grp_budget = detail_user.group.token_budget if detail_user.group else 0 %}
-                                    {% if grp_budget == 0 %}
+                                    {% if effective_budget == 0 %}
                                     <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / Unlimited</p>
                                     {% else %}
-                                    {% set usage_pct = (stats.quota.tokens_used / grp_budget * 100) if grp_budget > 0 else 0 %}
-                                    <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / {{ "{:,}".format(grp_budget) }}</p>
+                                    {% set usage_pct = (stats.quota.tokens_used / effective_budget * 100) if effective_budget > 0 else 0 %}
+                                    <p class="card-title h3 mb-1">{{ "{:,}".format(stats.quota.tokens_used) }} / {{ "{:,}".format(effective_budget) }}{% if budget_source == "user_override" %} <span class="badge bg-warning text-dark align-middle" title="Per-user override is in effect">override</span>{% endif %}</p>
                                     <div class="progress" style="height: 6px;">
                                         <div class="progress-bar {% if usage_pct >= 90 %}bg-danger{% elif usage_pct >= 70 %}bg-warning{% else %}bg-success{% endif %}" role="progressbar" style="width: {{ usage_pct }}%" aria-valuenow="{{ usage_pct }}" aria-valuemin="0" aria-valuemax="100" aria-label="Quota usage"></div>
                                     </div>
