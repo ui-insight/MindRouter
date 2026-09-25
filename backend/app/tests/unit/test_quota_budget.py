@@ -143,9 +143,14 @@ def test_user_edit_page_exposes_the_override():
     tpl = (_APP / "dashboard" / "templates" / "admin" / "user_detail.html").read_text()
     assert 'name="token_budget_override"' in tpl
     # The usage card must show the EFFECTIVE budget, not the group's — it was
-    # rendering "unlimited" for a user capped at 10 by an override.
+    # rendering "unlimited" for a user capped at 10 by an override. (The
+    # field's help text legitimately names the group budget as the value a
+    # blank inherits; the guard is against the card resolving it inline.)
     assert "effective_budget" in tpl
-    assert "detail_user.group.token_budget" not in tpl
+    assert "set grp_budget" not in tpl
+    card = tpl[tpl.index("Quota Token Usage"):]
+    card = card[:card.index("No quota")]
+    assert "group.token_budget" not in card
 
 
 # --------------------------------------------------------------------------
