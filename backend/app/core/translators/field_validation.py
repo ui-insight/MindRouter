@@ -41,8 +41,9 @@ CHAT_ACCEPTED: Set[str] = {
     "presence_penalty", "frequency_penalty", "seed", "top_k",
     "repetition_penalty", "min_p", "tools", "tool_choice", "response_format",
     "n", "user", "reasoning_effort",
-    # thinking control (resolved together)
-    "think", "thinking", "chat_template_kwargs",
+    # thinking control (resolved together): think / thinking / reasoning
+    # objects and vLLM's chat_template_kwargs all fold into think + effort
+    "think", "thinking", "reasoning", "chat_template_kwargs",
 }
 
 # Standard OpenAI chat fields MindRouter does not act on but that are safe to

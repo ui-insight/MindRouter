@@ -370,31 +370,50 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 **Thinking/Reasoning Mode:**
 
-> **Reasoning is OFF by default -- this is a gateway policy, not the model's own default.** When a request omits every thinking control, MindRouter forces thinking off on the outbound backend call, so a thinking-capable model such as `qwen/qwen3.6-35b` returns no `reasoning_content` unless you opt in. The policy is the `THINKING_OFF_BY_DEFAULT` setting (default `true`), applied in the inference service on both the streaming and non-streaming paths; it emits `chat_template_kwargs: {"enable_thinking": false}` to vLLM backends and `think: false` to Ollama backends. Models whose name contains `gpt-oss` are exempt -- they use `reasoning_effort` and are left untouched. Set `THINKING_OFF_BY_DEFAULT=false` to restore each backend's per-model launch default. (Ollama models that do not advertise thinking support have the field stripped entirely.)
+Reasoning is one setting with two parts: a **switch** (`think: true/false`) and a **level** (`reasoning_effort`). MindRouter accepts every common spelling of both and translates them per model family, so you never need to know a model's own level names.
 
-MindRouter supports multiple formats for controlling thinking/reasoning on models that support it (qwen3.5, qwen3, gpt-oss):
+> **Reasoning is OFF by default -- this is a gateway policy, not the model's own default.** When a request says nothing about reasoning, MindRouter switches thinking off on the outbound call (`chat_template_kwargs: {"enable_thinking": false}` to vLLM, `think: false` to Ollama), so a thinking-capable model returns no `reasoning_content` unless you opt in. **Any explicit control is an opt-in**: `think: true`, `thinking: {type: "enabled"}`, or a level on its own (`reasoning_effort: "low"`) all turn thinking on. `think: false` (or `reasoning_effort: "none"`) always wins over a level. The policy is `THINKING_OFF_BY_DEFAULT` (default `true`); models without a switch (gpt-oss) are left to their own default when nothing is said.
+
+**Levels.** The gateway vocabulary is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. It is translated to what the model understands:
+
+| Gateway level | Qwen3.8 (`low`/`medium`/`xhigh`) | gpt-oss (`low`/`medium`/`high`) | Qwen3.5/3.6, Gemma 4, Nemotron (switch only) |
+|---|---|---|---|
+| `none` | thinking off | `low` (cannot switch off) | thinking off |
+| `minimal`, `low` | `low` | `low` | on, level ignored |
+| `medium` | `medium` | `medium` | on, level ignored |
+| `high`, `xhigh` | `xhigh` | `high` | on, level ignored |
+
+A level outside the vocabulary is rejected with a 400 that names the accepted values. A level a family cannot express is accepted and dropped, never rejected. **When thinking is on and no level is given**, the admin setting `reasoning.default_effort` (Admin -> Settings, default `medium`) is sent on models that have levels; set it blank to fall back to each model's own default (Qwen3.8's is `xhigh`, its most expensive). Each model's switch, native levels and default are published on `/v1/models` under `reasoning` (see below).
 
 ```json
-// gpt-oss: control reasoning depth via reasoning_effort
+// A level alone opts in, in any model's terms
 {
-  "model": "openai/gpt-oss-120b",
+  "model": "qwen/qwen3.8-27b",
   "messages": [{"role": "user", "content": "Solve this step by step"}],
-  "reasoning_effort": "high",
+  "reasoning_effort": "high",          // becomes xhigh on Qwen3.8, high on gpt-oss
   "max_completion_tokens": 16384
 }
 
-// Qwen-style: toggle thinking on/off
+// Switch on, gateway default level (reasoning.default_effort)
 {
-  "model": "qwen/qwen3.5-400b",
+  "model": "qwen/qwen3.8-27b",
   "messages": [{"role": "user", "content": "Explain quantum computing"}],
-  "chat_template_kwargs": {"enable_thinking": true},
+  "think": true,
   "max_completion_tokens": 16384
 }
 
-// Also accepted: thinking object (OpenAI/Anthropic style)
+// vLLM-native spelling, also accepted; unknown template kwargs
+// (preserve_thinking, ...) pass through to vLLM unchanged
 {
-  "model": "qwen/qwen3.5-400b",
-  "thinking": {"type": "disabled"},
+  "model": "qwen/qwen3.8-27b",
+  "messages": [...],
+  "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "low", "preserve_thinking": false}
+}
+
+// thinking object (OpenAI/Anthropic style); a budget buckets into a level
+{
+  "model": "qwen/qwen3.8-27b",
+  "thinking": {"type": "enabled", "budget_tokens": 4096},   // -> medium
   "messages": [...]
 }
 ```
@@ -721,7 +740,7 @@ message = client.messages.create(
 - System prompts (string or content block array)
 - Multimodal inputs (base64 and URL images)
 - Tool calling -- `tools` with `input_schema`, `tool_choice` (`auto`/`any`/`tool`), `tool_use`/`tool_result` content blocks, streaming tool use with `input_json_delta`. Anthropic `tool_choice` values are mapped: `auto` to `auto`, `any` to `required`, `tool` (with name) to `{"type": "function", "function": {"name": "..."}}`.
-- Thinking/reasoning mode (`thinking.type`: `enabled`, `adaptive`, `disabled`; set `budget_tokens` to control reasoning token allocation)
+- Thinking/reasoning mode (`thinking.type`: `enabled`, `adaptive`, `disabled`; `budget_tokens` is bucketed into a gateway reasoning level -- under 2,048 is `low`, under 8,192 `medium`, under 32,768 `high`, else `xhigh` -- and `output_config.effort` (`low`/`medium`/`high`/`max`) sets the level directly; see Thinking/Reasoning Mode for the per-family translation)
 - Structured output via `output_config.format` with `type: "json_schema"`
 - Parameters: `max_tokens` (required), `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream`
 - `metadata.user_id` mapping
@@ -1523,7 +1542,7 @@ The canonical internal representation (`backend/app/core/canonical_schemas.py`) 
 | Tool choice | `tool_choice` | -- | `tool_choice` (`auto`/`any`/`tool`) | `tool_choice` |
 | Tool calls | `tool_calls` (JSON string args) | `tool_calls` (dict args) | `tool_use` content blocks | `CanonicalToolCall` (JSON string args) |
 | Tool results | `role: "tool"` + `tool_call_id` | -- | `tool_result` content blocks | `CanonicalMessage(role=TOOL, tool_call_id)` |
-| Thinking mode | `think` (bool), `thinking.type`, `chat_template_kwargs`, `reasoning_effort` | `think` (bool or `"low"`/`"medium"`/`"high"`) | `thinking.type` (enabled/adaptive/disabled) | `think` (`Union[bool, str]`) |
+| Thinking mode | `think`, `thinking.type`/`budget_tokens`, `reasoning_effort`, `reasoning.effort`, `chat_template_kwargs` | `think` (bool, or a level string) | `thinking.type`/`budget_tokens`, `output_config.effort` | `think` (bool) + `reasoning_effort` (gateway level) |
 | User ID | `user` | -- | `metadata.user_id` | `user` |
 | Structured output | `response_format` | `format` | `output_config` | `response_format` |
 | Stream format | SSE (`data: {...}`) | NDJSON | SSE (Anthropic events) | `CanonicalStreamChunk` |
@@ -1540,10 +1559,13 @@ The canonical internal representation (`backend/app/core/canonical_schemas.py`) 
 
 All translators use static methods -- no instantiation needed.
 
-### vLLM Thinking Translations
+### Reasoning Translations
 
-- When `think` is a **boolean** (Qwen-style), it translates to `chat_template_kwargs: {enable_thinking: bool}` for vLLM.
-- When `think` is a **string** like `"low"`/`"medium"`/`"high"` (GPT-OSS style), it translates to `reasoning_effort` for vLLM.
+The canonical pair is `think` (bool) + `reasoning_effort` (gateway level). A legacy string `think` (`"low"`) is folded into the pair by the canonical model. After routing, `apply_reasoning_policy` in the inference service resolves the pair for the target model's family (`backend/app/core/reasoning.py`: switch or not, native level names, model default) and rewrites the request with backend-facing values:
+
+- vLLM: the switch becomes `chat_template_kwargs: {enable_thinking: bool}` (plus any passthrough template kwargs), the level becomes top-level `reasoning_effort` in the family's own name.
+- Ollama: a family with a switch gets `think: bool`; gpt-oss gets its level as `think: "low"|"medium"|"high"`.
+- The client's original `think`/`reasoning_effort` are recorded in the audit row's `parameters`.
 
 ### Model-Specific Behaviors
 
@@ -1722,10 +1744,10 @@ Admins can configure the chat interface defaults at `/admin/chat-config`:
 
 **Advanced models toggle** -- When core models are configured (via admin Chat Config), the model dropdown shows only core models by default. An "Advanced" checkbox reveals the full model list. This preference persists in browser localStorage.
 
-**Per-request thinking controls** -- For thinking-capable models, the chat UI shows inline controls:
+**Per-request thinking controls** -- For thinking-capable models, the chat UI shows inline controls built from the model's `reasoning` descriptor:
 
-- A checkbox to enable/disable thinking mode (Qwen-style boolean)
-- A dropdown to select reasoning effort level (low/medium/high for GPT-OSS-style models)
+- A checkbox to enable/disable thinking, shown when the family has a switch (Qwen, Gemma 4, Nemotron; not gpt-oss)
+- A dropdown of the model's own levels, shown when the family has levels (Qwen3.8: Low/Medium/Extra high; gpt-oss: Low/Medium/High), preselecting the model's default
 
 These controls only appear when the selected model supports thinking.
 
@@ -2154,7 +2176,7 @@ Colors, organization name, and logo selections are `branding.*` rows in `app_con
 | `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds) |
 | `BACKEND_RETRY_MAX_ATTEMPTS` | int | `3` | Max total retry attempts |
 | `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | Intended to retry on a different backend when a response fails structured-output JSON validation |
-| `THINKING_OFF_BY_DEFAULT` | bool | `true` | Gateway policy: reasoning/thinking is forced **off** unless the client explicitly opts in (`think: true`, `thinking: {type: "enabled"}`, or `reasoning_effort`). Applies to `enable_thinking`-style models (Qwen, Gemma, Nemotron); gpt-oss uses `reasoning_effort` and is left untouched. Set `false` to restore per-model launch defaults |
+| `THINKING_OFF_BY_DEFAULT` | bool | `true` | Gateway policy: reasoning/thinking is forced **off** unless the client opts in with a switch (`think: true`, `thinking: {type: "enabled"}`) or a level (`reasoning_effort`, `reasoning.effort`, `chat_template_kwargs.reasoning_effort`, `thinking.budget_tokens`). Applies to families with a switch (Qwen, Gemma 4, Nemotron); gpt-oss has none and is left to its default. Set `false` to restore per-model launch defaults |
 | `FIELD_VALIDATION` | str | `log` | Handling of unknown or vLLM-dialect request fields that would otherwise be silently dropped: `off`, `log` (record and continue), or `enforce` (reject with `400`). Deploy at `log` to observe real traffic, then flip to `enforce` |
 
 > *Note: `STRUCTURED_OUTPUT_RETRY_ON_INVALID` is defined but not read anywhere in the inference pipeline. Setting it has no effect today; it is reserved for future use.*
@@ -2283,7 +2305,8 @@ In addition to the environment variables above, MindRouter stores runtime config
 | `chat.system_prompt` | string | (none) | Global system prompt override for chat |
 | `chat.max_tokens` | integer | `16384` | Default max_tokens for chat requests |
 | `chat.temperature` | float | (none) | Default temperature override |
-| `chat.think` | bool/string | (none) | Default thinking mode (`true`/`false`/`"low"`/`"medium"`/`"high"`) |
+| `chat.think` | bool/string | (none) | Default thinking mode for the built-in chat UI (`true`/`false`/`"low"`/`"medium"`/`"high"`) |
+| `reasoning.default_effort` | string | `"medium"` | Gateway level sent when thinking is on and no level was given, on models that have levels; blank = each model's own default (Admin -> Settings) |
 | `voice.tts_enabled` | boolean | `false` | Enable TTS "Read Aloud" in chat UI |
 | `voice.tts_provider` | string | `"kokoro"` | Chat TTS provider (`kokoro` or `openedai`) |
 | `voice.tts_voice` | string | `"af_heart"` | Default voice for chat TTS |
@@ -2334,12 +2357,7 @@ The `backend_options` dict in requests allows passing Ollama-specific options (e
 
 ### Thinking Input Format Priority
 
-The system accepts four input formats for thinking/reasoning mode, resolved in priority order:
-
-1. `think` field (bool or string) -- canonical format
-2. `thinking: {type: "enabled"/"disabled"}` -- OpenAI/Anthropic style
-3. `chat_template_kwargs: {enable_thinking: bool}` -- vLLM-specific
-4. Ollama top-level `think` field
+The switch is resolved from, in priority order: the `think` field (bool, or a legacy level string), `thinking: {type: "enabled"/"disabled"}`, then `chat_template_kwargs: {enable_thinking: bool}`. The level is resolved from: `reasoning_effort`, then `reasoning: {effort}`, then `chat_template_kwargs: {reasoning_effort}`, then `thinking.budget_tokens` (bucketed). Ollama's top-level `think` carries either. A level on its own turns the switch on; `think: false` wins over any level.
 
 ### Response Format Normalization
 

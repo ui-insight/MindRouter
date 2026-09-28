@@ -600,19 +600,23 @@ class TestResponsesReasoning:
         )
         assert result.think is False
 
-    def test_effort_string_becomes_think(self):
+    def test_effort_string_becomes_think_on_plus_level(self):
+        # A level is an opt-in: the canonical pair is (switch on, level).
+        # The per-family name ("xhigh" on Qwen3.8, "high" on gpt-oss) is
+        # chosen later by the inference policy, not here.
         result = ResponsesInTranslator.translate_responses_request(
             {"model": "m", "input": "hi", "reasoning": {"effort": "high"}}
         )
-        assert result.think == "high"
-        assert result.reasoning_effort is None
+        assert result.think is True
+        assert result.reasoning_effort == "high"
 
-    def test_effort_clamping(self):
-        for effort, expected in (("minimal", "low"), ("xhigh", "high")):
+    def test_effort_extremes_are_kept_not_clamped(self):
+        for effort in ("minimal", "xhigh"):
             result = ResponsesInTranslator.translate_responses_request(
                 {"model": "m", "input": "hi", "reasoning": {"effort": effort}}
             )
-            assert result.think == expected
+            assert result.think is True
+            assert result.reasoning_effort == effort
 
     def test_absent_reasoning_leaves_backend_default(self):
         result = ResponsesInTranslator.translate_responses_request(

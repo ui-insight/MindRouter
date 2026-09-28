@@ -17,6 +17,7 @@
                 {% if success == 'site_url_updated' %}Site URL updated.
                 {% elif success == 'timezone_updated' %}Timezone updated.
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
+                {% elif success == 'default_effort_updated' %}Default reasoning level updated.
                 {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
                 {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
                 {% elif success == 'agreement_updated' %}Use agreement text saved.
@@ -107,6 +108,32 @@
                             </form>
                             {% else %}
                             <p class="mb-0">Enforce context length: <span class="badge {% if enforce_num_ctx %}bg-success">Enabled{% else %}bg-secondary">Disabled{% endif %}</span></p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Default reasoning level -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Default Reasoning Level</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Sent when a client turns thinking on without choosing a level, on a model that has levels (Qwen3.8: low / medium / xhigh; gpt-oss: low / medium / high). Levels are translated per model family, so a gateway level always maps to one the model accepts. Leave blank to use each model's own default (Qwen3.8 defaults to <code>xhigh</code>, its most expensive level).</p>
+                            {% if not is_read_only %}
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_default_effort">
+                                <div class="mb-3">
+                                    <select class="form-select" name="default_effort">
+                                        <option value="" {% if not default_effort %}selected{% endif %}>(model default)</option>
+                                        {% for lvl in reasoning_levels %}
+                                        <option value="{{ lvl }}" {% if lvl == default_effort %}selected{% endif %}>{{ lvl }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                            {% else %}
+                            <p class="mb-0">Default reasoning level: <code>{{ default_effort or '(model default)' }}</code></p>
                             {% endif %}
                         </div>
                     </div>

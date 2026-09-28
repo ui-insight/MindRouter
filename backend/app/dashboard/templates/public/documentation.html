@@ -396,25 +396,42 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
   -d '{"model": "llama3.2", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'</code></pre>
 
                 <p><strong>Thinking/Reasoning Mode:</strong></p>
-                <p>MindRouter supports multiple formats for controlling thinking/reasoning on models that support it (qwen3.5, qwen3, gpt-oss):</p>
-                <pre><code>// gpt-oss: control reasoning depth
+                <p>Reasoning is one setting with two parts: a <strong>switch</strong> (<code>think: true/false</code>) and a <strong>level</strong> (<code>reasoning_effort</code>). MindRouter accepts every common spelling of both and translates them per model family, so you never need to know a model's own level names.</p>
+                <pre><code>// A level alone opts in, in any model's terms
 {
-  "model": "openai/gpt-oss-120b",
+  "model": "qwen/qwen3.8-27b",
   "messages": [{"role": "user", "content": "Solve this step by step"}],
-  "reasoning_effort": "high",
+  "reasoning_effort": "high",          // becomes xhigh on Qwen3.8, high on gpt-oss
   "max_completion_tokens": 16384
 }
 
-// Qwen-style: toggle thinking on/off
+// Switch on, gateway default level (Admin -> Settings -> Default Reasoning Level)
 {
-  "model": "qwen/qwen3.5-400b",
+  "model": "qwen/qwen3.8-27b",
   "messages": [{"role": "user", "content": "Explain quantum computing"}],
-  "chat_template_kwargs": {"enable_thinking": true},
+  "think": true,
   "max_completion_tokens": 16384
+}
+
+// vLLM-native spelling, also accepted; other template kwargs pass through
+{
+  "model": "qwen/qwen3.8-27b",
+  "messages": [...],
+  "chat_template_kwargs": {"enable_thinking": true, "reasoning_effort": "low", "preserve_thinking": false}
 }</code></pre>
-                <p>When thinking is enabled, the response includes <code>reasoning_content</code> alongside <code>content</code>.</p>
+                <p><strong>Levels.</strong> The gateway vocabulary is <code>none</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, translated to what the model understands:</p>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Gateway level</th><th>Qwen3.8 (<code>low</code>/<code>medium</code>/<code>xhigh</code>)</th><th>gpt-oss (<code>low</code>/<code>medium</code>/<code>high</code>)</th><th>Qwen3.5/3.6, Gemma 4, Nemotron (switch only)</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>none</code></td><td>thinking off</td><td><code>low</code> (cannot switch off)</td><td>thinking off</td></tr>
+                        <tr><td><code>minimal</code>, <code>low</code></td><td><code>low</code></td><td><code>low</code></td><td>on, level ignored</td></tr>
+                        <tr><td><code>medium</code></td><td><code>medium</code></td><td><code>medium</code></td><td>on, level ignored</td></tr>
+                        <tr><td><code>high</code>, <code>xhigh</code></td><td><code>xhigh</code></td><td><code>high</code></td><td>on, level ignored</td></tr>
+                    </tbody>
+                </table>
+                <p>A level outside the vocabulary is rejected with a 400 naming the accepted values; a level a family cannot express is accepted and dropped. Each model's switch, native levels and default are published on <code>/v1/models</code> under <code>reasoning</code>. When thinking is enabled, the response includes <code>reasoning_content</code> alongside <code>content</code>.</p>
                 <div class="alert alert-info">
-                    <strong>Reasoning is OFF by default &mdash; this is a gateway policy, not the model's own default.</strong> When a request omits every thinking control, the inference service sets <code>think = false</code> on the outbound backend call (<code>chat_template_kwargs: {"enable_thinking": false}</code> to vLLM, <code>think: false</code> to Ollama), so a thinking-capable model returns no <code>reasoning_content</code> unless you opt in. The policy is the <code>THINKING_OFF_BY_DEFAULT</code> setting (default <code>true</code>) and it applies on both the streaming and non-streaming paths. Models whose name contains <code>gpt-oss</code> are exempt &mdash; they use <code>reasoning_effort</code> and are left untouched.
+                    <strong>Reasoning is OFF by default &mdash; this is a gateway policy, not the model's own default.</strong> When a request says nothing about reasoning, the inference service switches thinking off on the outbound call (<code>chat_template_kwargs: {"enable_thinking": false}</code> to vLLM, <code>think: false</code> to Ollama), so a thinking-capable model returns no <code>reasoning_content</code> unless you opt in. <strong>Any explicit control is an opt-in</strong>: <code>think: true</code>, <code>thinking: {type: "enabled"}</code>, or a level on its own. <code>think: false</code> always wins over a level. The policy is <code>THINKING_OFF_BY_DEFAULT</code> (default <code>true</code>); gpt-oss has no switch and is left to its default. When thinking is on and no level is given, the admin setting <code>reasoning.default_effort</code> (default <code>medium</code>) is sent on models that have levels; blank means each model's own default (Qwen3.8's is <code>xhigh</code>, its most expensive).
                 </div>
                 <div class="alert alert-warning">
                     <strong>Important:</strong> Thinking models can consume large numbers of output tokens for reasoning. Use <code>max_completion_tokens</code> (or <code>max_tokens</code>) to set an adequate budget &mdash; 16384 is recommended for qwen3.5-400b with thinking enabled.
@@ -887,7 +904,7 @@ message = client.messages.create(
                     <li>System prompts (string or content block array)</li>
                     <li>Multimodal inputs (base64 and URL images)</li>
                     <li>Tool calling &mdash; <code>tools</code> with <code>input_schema</code>, <code>tool_choice</code> (<code>auto</code>/<code>any</code>/<code>tool</code>), <code>tool_use</code>/<code>tool_result</code> content blocks, streaming tool use with <code>input_json_delta</code></li>
-                    <li>Thinking/reasoning mode (<code>thinking.type</code>: <code>enabled</code>, <code>adaptive</code>, <code>disabled</code>)</li>
+                    <li>Thinking/reasoning mode (<code>thinking.type</code>: <code>enabled</code>, <code>adaptive</code>, <code>disabled</code>; <code>budget_tokens</code> buckets into a gateway reasoning level; <code>output_config.effort</code> sets it directly)</li>
                     <li>Structured output via <code>output_config.format</code> with <code>type: "json_schema"</code></li>
                     <li>Parameters: <code>max_tokens</code>, <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>stop_sequences</code>, <code>stream</code></li>
                     <li><code>metadata.user_id</code> mapping</li>
@@ -1022,7 +1039,7 @@ client.conversations.delete(conv.id)               # delete state anytime</code>
                     <li><code>input</code> as a string or item array (<code>message</code>, <code>function_call</code>, <code>function_call_output</code>, <code>reasoning</code> items); <code>instructions</code>; <code>developer</code> role</li>
                     <li>Function tools (flat Responses shape) with streaming <code>response.function_call_arguments.delta</code> events; tool round trips via <code>call_id</code></li>
                     <li><strong>Hosted <code>web_search</code> tool</strong> &mdash; executed server-side (see below)</li>
-                    <li>Reasoning models &mdash; <code>reasoning.effort</code> mapped to backend thinking modes; reasoning output items</li>
+                    <li>Reasoning models &mdash; <code>reasoning.effort</code> turns thinking on at that gateway level (translated per model family); reasoning output items</li>
                     <li>Structured output via <code>text.format</code> (<code>json_object</code> / <code>json_schema</code>)</li>
                     <li>Vision input via <code>input_image</code> parts (data URIs and https URLs)</li>
                     <li><code>truncation: "auto"</code> &mdash; on context overflow, the oldest conversation turns are dropped server-side (tool-call pairs kept intact; system messages and the newest turn always preserved) instead of failing with a context-length error</li>
@@ -1508,7 +1525,7 @@ client.conversations.delete(conv.id)               # delete state anytime</code>
                     <li>Conversation renaming and deletion (individual messages cannot be edited or deleted)</li>
                     <li>Dark mode toggle (stored in browser localStorage)</li>
                     <li>Advanced models toggle &mdash; show or hide non-core models in the model selector</li>
-                    <li>Per-request thinking controls &mdash; enable/disable thinking mode and set reasoning effort for supported models</li>
+                    <li>Per-request thinking controls &mdash; a switch for families that have one and a menu of the model's own levels (Qwen3.8: Low/Medium/Extra high; gpt-oss: Low/Medium/High), built from the model's <code>reasoning</code> descriptor</li>
                     <li>Collapsible thinking blocks in assistant responses</li>
                     <li>Keyboard shortcuts &mdash; Shift+Enter for newline, Enter to send</li>
                     <li>Sidebar collapse for a wider chat area</li>
@@ -2369,7 +2386,7 @@ Anthropic Request --&gt; AnthropicInTranslator --&gt; CanonicalChatRequest
                         <tr><td>Tool choice</td><td><code>tool_choice</code></td><td>&mdash;</td><td><code>tool_choice</code> (<code>auto</code>/<code>any</code>/<code>tool</code>)</td><td><code>tool_choice</code></td></tr>
                         <tr><td>Tool calls</td><td><code>tool_calls</code> (JSON string args)</td><td><code>tool_calls</code> (dict args)</td><td><code>tool_use</code> content blocks</td><td><code>CanonicalToolCall</code> (JSON string args)</td></tr>
                         <tr><td>Tool results</td><td><code>role: "tool"</code> + <code>tool_call_id</code></td><td>&mdash;</td><td><code>tool_result</code> content blocks</td><td><code>CanonicalMessage(role=TOOL, tool_call_id)</code></td></tr>
-                        <tr><td>Thinking mode</td><td><code>think</code>, <code>thinking.type</code>, <code>chat_template_kwargs</code>, <code>reasoning_effort</code></td><td><code>think</code> (bool or <code>"low"</code>/<code>"medium"</code>/<code>"high"</code>)</td><td><code>thinking.type</code> (enabled/disabled)</td><td><code>think</code> (bool or string)</td></tr>
+                        <tr><td>Thinking mode</td><td><code>think</code>, <code>thinking.type</code>/<code>budget_tokens</code>, <code>reasoning_effort</code>, <code>reasoning.effort</code>, <code>chat_template_kwargs</code></td><td><code>think</code> (bool, or a level string)</td><td><code>thinking.type</code>/<code>budget_tokens</code>, <code>output_config.effort</code></td><td><code>think</code> (bool) + <code>reasoning_effort</code> (gateway level)</td></tr>
                         <tr><td>User ID</td><td><code>user</code></td><td>&mdash;</td><td><code>metadata.user_id</code></td><td><code>user</code></td></tr>
                         <tr><td>Stream format</td><td>SSE (<code>data: {...}</code>)</td><td>NDJSON</td><td>SSE (Anthropic events)</td><td><code>CanonicalStreamChunk</code></td></tr>
                     </tbody>
@@ -3097,6 +3114,7 @@ Hello from MindRouter!</code></pre>
                         <tr><td><code>chat.max_tokens</code></td><td>int</td><td><code>16384</code></td><td>Default max tokens for chat requests (range: 256&ndash;131072)</td><td>Chat Configuration</td></tr>
                         <tr><td><code>chat.temperature</code></td><td>float</td><td><code>null</code></td><td>Default temperature for chat requests (range: 0.0&ndash;2.0). Null means use model default.</td><td>Chat Configuration</td></tr>
                         <tr><td><code>chat.think</code></td><td>bool/string</td><td><code>null</code></td><td>Default thinking mode for chat: <code>true</code>, <code>false</code>, <code>"low"</code>, <code>"medium"</code>, <code>"high"</code>, or null (no default)</td><td>Chat Configuration</td></tr>
+                        <tr><td><code>reasoning.default_effort</code></td><td>string</td><td><code>"medium"</code></td><td>Gateway reasoning level sent when thinking is on and no level was given, on models that have levels; blank = each model's own default (Admin &rarr; Settings)</td></tr>
                         <tr><td><code>catalog.auto_enrich</code></td><td>bool</td><td><code>false</code></td><td>Enable automatic model description enrichment</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.enrich_model</code></td><td>string</td><td><code>""</code></td><td>Model name used for LLM enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.enrich_api_key</code></td><td>string</td><td><code>""</code></td><td>API key for internal MindRouter enrichment calls</td><td>Site Settings</td></tr>
@@ -3460,7 +3478,7 @@ Hello from MindRouter!</code></pre>
                     </thead>
                     <tbody>
                         <tr><td><code>RESPONSES_API_ENABLED</code></td><td>bool</td><td><code>true</code></td><td>Master switch for <a href="#responses-api"><code>/v1/responses</code></a> <strong>and the entire <code>/v1/conversations</code> surface</strong> &mdash; every route in both routers checks it and returns <code>404</code> when false</td></tr>
-                        <tr><td><code>THINKING_OFF_BY_DEFAULT</code></td><td>bool</td><td><code>true</code></td><td>Gateway policy: reasoning/thinking is forced <strong>off</strong> unless the client explicitly opts in (<code>think: true</code>, <code>thinking: {type: "enabled"}</code>, or <code>chat_template_kwargs.enable_thinking</code>). Models whose name contains <code>gpt-oss</code> are exempt. Set <code>false</code> to restore per-model launch defaults. Not currently forwarded by <code>docker-compose.yml</code>, so it runs at this default under that stack.</td></tr>
+                        <tr><td><code>THINKING_OFF_BY_DEFAULT</code></td><td>bool</td><td><code>true</code></td><td>Gateway policy: reasoning/thinking is forced <strong>off</strong> unless the client opts in with a switch (<code>think: true</code>, <code>thinking: {type: "enabled"}</code>) or a level (<code>reasoning_effort</code>, <code>reasoning.effort</code>, <code>chat_template_kwargs.reasoning_effort</code>, <code>thinking.budget_tokens</code>). Applies to families with a switch (Qwen, Gemma 4, Nemotron); gpt-oss has none and is left to its default. Set <code>false</code> to restore per-model launch defaults</td></tr>
                     </tbody>
                 </table>
 

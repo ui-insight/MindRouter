@@ -112,8 +112,12 @@ class AnthropicInTranslator:
                     },
                 )
 
-        # Handle thinking mode
+        # Handle thinking mode: the type is the on/off switch, the budget
+        # (Anthropic's "how hard") buckets into a gateway reasoning level.
+        # output_config.effort (low/medium/high/max) is the newer spelling of
+        # the same intent and wins over a budget when both are present.
         think = None
+        reasoning_effort = None
         thinking = data.get("thinking")
         if thinking:
             thinking_type = thinking.get("type")
@@ -121,6 +125,13 @@ class AnthropicInTranslator:
                 think = True
             elif thinking_type == "disabled":
                 think = False
+            if think is True and thinking.get("budget_tokens") is not None:
+                from backend.app.core.reasoning import budget_to_level
+
+                reasoning_effort = budget_to_level(thinking["budget_tokens"])
+        if output_config and output_config.get("effort") is not None:
+            effort = str(output_config["effort"]).lower()
+            reasoning_effort = "xhigh" if effort == "max" else effort
 
         # Map stop_sequences to stop
         stop = data.get("stop_sequences")
@@ -141,6 +152,7 @@ class AnthropicInTranslator:
             stream=data.get("stream", False),
             stop=stop,
             think=think,
+            reasoning_effort=reasoning_effort,
             tools=tools,
             tool_choice=tool_choice,
             response_format=response_format,

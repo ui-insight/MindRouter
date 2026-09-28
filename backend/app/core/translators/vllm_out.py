@@ -198,16 +198,24 @@ class VLLMOutTranslator:
             payload["repetition_penalty"] = canonical.repeat_penalty  # vLLM name
         if canonical.min_p is not None:
             payload["min_p"] = canonical.min_p
-        # Reasoning/thinking support for vLLM
+        # Reasoning/thinking support for vLLM.  By the time a request reaches
+        # here the inference policy has resolved think/reasoning_effort to
+        # the target family's own switch and level name (core/reasoning.py);
+        # this translator just spells them the way vLLM reads them.  Client
+        # chat_template_kwargs we do not model (Qwen's preserve_thinking, …)
+        # pass through beside the switch.
+        template_kwargs: Dict[str, Any] = dict(canonical.chat_template_kwargs or {})
         if canonical.reasoning_effort is not None:
             payload["reasoning_effort"] = canonical.reasoning_effort
         if canonical.think is not None:
             if isinstance(canonical.think, str):
-                # GPT-OSS string effort ("low"/"medium"/"high") → vLLM reasoning_effort
+                # Legacy string effort that bypassed the canonical validator
                 payload["reasoning_effort"] = canonical.think
             else:
                 # Qwen-style boolean → vLLM chat_template_kwargs
-                payload["chat_template_kwargs"] = {"enable_thinking": canonical.think}
+                template_kwargs["enable_thinking"] = canonical.think
+        if template_kwargs:
+            payload["chat_template_kwargs"] = template_kwargs
         if canonical.n != 1:
             payload["n"] = canonical.n
         if canonical.user:
