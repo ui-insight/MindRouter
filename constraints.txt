@@ -1,0 +1,184 @@
+# Dependency lock for the MindRouter image (app + mcp share it).
+#
+# Every pin here is a version that has RUN in production. pyproject.toml
+# declares floors ("fastapi>=0.109"); this file turns them into exact
+# versions so a build made next month installs the same packages as the
+# build made today. The Dockerfile sets PIP_CONSTRAINT to this file, so pip
+# may only choose versions listed here (a package absent from this file is
+# still resolved freely; the test suite checks that every declared
+# dependency is present).
+#
+# Why: on 2026-09-29 a routine rebuild resolved SQLAlchemy 2.1.1, released
+# the week before, which no longer installs greenlet; the async engine could
+# not import and alembic failed on the new image. Nothing in the repo had
+# changed. See docs/index.md "Dependency lock".
+#
+# To upgrade a package: raise or change its floor in pyproject.toml if
+# needed, then run `make lock` (builds the image, freezes the venv, rewrites
+# this file) and commit the diff with the release that carries it.
+#
+# Provenance of each revision is in its commit message (image id, date,
+# Python version); the first revision froze the mindrouter-app 2.9.77 venv.
+pip==26.2.1
+aiofiles==25.1.0
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiomysql==0.3.2
+aiosignal==1.4.0
+aiosmtplib==5.1.3
+alembic==1.20.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+antlr4-python3-runtime==4.9.3
+anyio==4.15.1
+argon2-cffi-bindings==26.1.0
+argon2-cffi==25.1.0
+asgiref==3.12.1
+attrs==26.1.0
+Authlib==1.8.0
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+cryptography==50.0.1
+cuda-bindings==13.4.3
+cuda-pathfinder==1.8.2
+cuda-toolkit==13.0.3.0
+ecdsa==0.19.2
+einops==0.8.2
+et_xmlfile==2.0.0
+fastapi==0.141.1
+filelock==4.0.6
+frozenlist==1.8.0
+fsspec==2026.9.0
+gliner==0.2.29
+googleapis-common-protos==1.75.4
+greenlet==3.5.6
+grpcio==1.84.0
+h11==0.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx-sse==0.4.3
+httpx==0.28.1
+huggingface_hub==1.33.0
+idna==3.20
+isodate==0.7.2
+itsdangerous==2.2.0
+Jinja2==3.1.6
+joserfc==1.7.5
+jsonschema-specifications==2025.9.1
+jsonschema==4.26.0
+lightning-utilities==0.15.3
+lightning==2.6.6
+lxml==6.1.3
+Mako==1.4.3
+markdown-it-py==4.2.0
+Markdown==3.11
+MarkupSafe==3.0.3
+mcp==1.30.0
+mdurl==0.1.2
+mpmath==1.3.0
+multidict==6.9.1
+networkx==3.7
+numpy==2.5.3
+nvidia-cublas==13.1.1.3
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvrtc==13.0.88
+nvidia-cuda-runtime==13.0.96
+nvidia-cudnn-cu13==9.24.0.43
+nvidia-cufft==12.0.0.61
+nvidia-cufile==1.15.1.6
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-cusparselt-cu13==0.8.1
+nvidia-nccl-cu13==2.30.7
+nvidia-nvjitlink==13.4.92
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+omegaconf==2.3.1
+openpyxl==3.1.5
+opentelemetry-api==1.45.0
+opentelemetry-exporter-otlp-common==0.66b0
+opentelemetry-exporter-otlp-proto-common==1.45.0
+opentelemetry-exporter-otlp-proto-grpc==1.45.0
+opentelemetry-instrumentation-asgi==0.66b0
+opentelemetry-instrumentation-fastapi==0.66b0
+opentelemetry-instrumentation-httpx==0.66b0
+opentelemetry-instrumentation-redis==0.66b0
+opentelemetry-instrumentation-sqlalchemy==0.66b0
+opentelemetry-instrumentation==0.66b0
+opentelemetry-proto==1.45.0
+opentelemetry-sdk==1.45.0
+opentelemetry-semantic-conventions==0.66b0
+opentelemetry-util-http==0.66b0
+orjson==3.12.0
+packaging==26.3
+passlib==1.7.4
+pdf2image==1.17.0
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.3.0
+prometheus_client==0.26.0
+propcache==0.5.4
+protobuf==7.36.2
+pyasn1==0.6.4
+pycparser==3.0
+pydantic-settings==2.15.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+PyJWT==2.15.1
+PyMySQL==1.2.3
+pypdfium2==5.13.0
+python-docx==1.2.0
+python-dotenv==1.2.3
+python-jose==3.5.0
+python-multipart==0.0.32
+python-pptx==1.0.2
+python3-saml==1.16.0
+pytorch-lightning==2.6.6
+PyYAML==6.0.3
+redis==8.1.0
+referencing==0.37.0
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
+rpds-py==2026.6.3
+rsa==4.9.1
+safetensors==0.8.0
+sentencepiece==0.2.2
+setuptools==84.0.0
+shellingham==1.5.4
+six==1.17.0
+soupsieve==2.10
+SQLAlchemy==2.0.54
+sse-starlette==3.5.0
+starlette-session==0.4.3
+starlette==0.52.1
+structlog==26.1.0
+sympy==1.14.0
+tiktoken==0.14.0
+tokenizers==0.23.2
+torch==2.14.0
+torchmetrics==1.9.0
+torchvision==0.29.0
+tqdm==4.70.1
+transformers==5.16.1
+triton==3.8.0
+trustmark==0.9.1
+typer==0.27.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.54.0
+uvloop==0.22.1
+watchfiles==1.3.0
+websockets==17.1
+wheel==0.48.0
+wrapt==2.5.0
+xlsxwriter==3.2.9
+xmlsec==1.3.17
+yarl==1.25.1

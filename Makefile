@@ -174,6 +174,16 @@ docker-down:
 docker-build:
 	docker compose build
 
+# Regenerate constraints.txt from a fresh image build: the venv is frozen
+# after pip resolved against the current pyproject floors, so this is how a
+# deliberate upgrade lands. Review the diff before committing it.
+lock:
+	docker compose build app
+	@{ sed -n '1,/^pip==/p' constraints.txt | sed '$$d'; \
+	   docker compose run --rm --no-deps -T app sh -c 'pip --version | cut -d" " -f2 | sed "s/^/pip==/"; pip freeze --exclude-editable | grep -v "^mindrouter" | sort -f'; } > constraints.txt.new \
+	   && mv constraints.txt.new constraints.txt
+	@echo "constraints.txt regenerated; review with: git diff constraints.txt"
+
 docker-logs:
 	docker compose logs -f
 
