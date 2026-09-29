@@ -23,7 +23,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Permitted characters in a model name. Deliberately broad enough for
 # HuggingFace-style ids ("black-forest-labs/FLUX.2-dev") and served-model
@@ -174,9 +174,18 @@ class CanonicalChatRequest(BaseModel):
     repeat_penalty: Optional[float] = None  # vLLM calls this "repetition_penalty"
     min_p: Optional[float] = Field(default=None, ge=0, le=1)
 
-    # Reasoning mode
-    think: Optional[Union[bool, str]] = None  # bool for Qwen; "low"/"medium"/"high" for GPT-OSS
-    reasoning_effort: Optional[str] = None  # "low", "medium", "high" (GPT-OSS)
+    # Reasoning mode: the on/off switch and the level, as one setting.
+    # `think` is the switch; `reasoning_effort` is a gateway level
+    # (core/reasoning.py GATEWAY_LEVELS) that the inference policy translates
+    # to the target family's own name. A string `think` is the legacy form
+    # ("low" meant gpt-oss effort) and is folded into the pair by the
+    # validator below, so translators downstream only ever see a bool here.
+    think: Optional[Union[bool, str]] = None
+    reasoning_effort: Optional[str] = None
+
+    # vLLM chat_template_kwargs the gateway does not model (e.g. Qwen's
+    # preserve_thinking); forwarded unchanged to vLLM backends.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # Opaque backend-specific options (e.g. Ollama mirostat, tfs_z, num_ctx)
     backend_options: Optional[Dict[str, Any]] = None
@@ -218,6 +227,24 @@ class CanonicalChatRequest(BaseModel):
         # been added (concurrent settings work); default matches the contract.
         max_n = getattr(get_settings(), "max_completions_n", 8)
         return min(v, max_n)
+
+    @model_validator(mode="after")
+    def _normalize_reasoning(self) -> "CanonicalChatRequest":
+        """Fold legacy string `think` into the (switch, level) pair and
+        validate the level against the gateway vocabulary.
+
+        An unknown level raises here, which every inbound route already
+        turns into a 400 naming the accepted values, instead of a vLLM
+        template exception surfacing from the backend.
+        """
+        from backend.app.core.reasoning import normalize_level, split_legacy_think
+
+        think, effort = split_legacy_think(self.think, self.reasoning_effort)
+        if effort is not None:
+            effort = normalize_level(effort)
+        self.think = think
+        self.reasoning_effort = effort
+        return self
 
     def requires_multimodal(self) -> bool:
         """Check if request requires multimodal capabilities."""
@@ -268,8 +295,10 @@ class CanonicalCompletionRequest(BaseModel):
     # Structured output
     response_format: Optional[ResponseFormat] = None
 
-    # Thinking mode
-    think: Optional[Union[bool, str]] = None  # bool for Qwen; "low"/"medium"/"high" for GPT-OSS
+    # Thinking mode (same contract as CanonicalChatRequest)
+    think: Optional[Union[bool, str]] = None
+    reasoning_effort: Optional[str] = None
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # MindRouter metadata
     request_id: Optional[str] = None
@@ -296,6 +325,8 @@ class CanonicalCompletionRequest(BaseModel):
             backend_options=self.backend_options,
             response_format=self.response_format,
             think=self.think,
+            reasoning_effort=self.reasoning_effort,
+            chat_template_kwargs=self.chat_template_kwargs,
             n=self.n,
             request_id=self.request_id,
             user_id=self.user_id,
@@ -528,6 +559,10 @@ class CanonicalModelInfo(BaseModel):
     parameter_count: Optional[str] = None  # e.g. "7B", "70B"
     quantization: Optional[str] = None  # e.g. "Q4_K_M", "FP16"
     family: Optional[str] = None  # e.g. "llama", "qwen2"
+
+    # Reasoning controls this model understands (core/reasoning.py
+    # ReasoningProfile.describe): toggleable, native levels, default level.
+    reasoning: Optional[Dict[str, Any]] = None
 
     # Alias info
     is_alias: Optional[bool] = None

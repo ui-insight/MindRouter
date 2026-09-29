@@ -158,6 +158,15 @@ async def list_models(
             if model.family and not model_data[model.name]["family"]:
                 model_data[model.name]["family"] = model.family
 
+    # Reasoning controls per model (switch + levels), from the family table
+    # in core/reasoning.py, so clients can pick a level the model accepts.
+    from backend.app.core.reasoning import profile_for
+
+    for name, data in model_data.items():
+        data["reasoning"] = profile_for(
+            name, family=data["family"], supports_thinking=data["capabilities"]["thinking"]
+        ).describe()
+
     # Append model aliases (inherit target model's metadata)
     alias_map = registry.get_alias_cache()
     for alias_name, target_model in alias_map.items():
@@ -184,6 +193,7 @@ async def list_models(
                 parameter_count=data["parameter_count"],
                 quantization=data["quantization"],
                 family=data["family"],
+                reasoning=data.get("reasoning"),
                 is_alias=data.get("is_alias"),
                 alias_target=data.get("alias_target"),
             )

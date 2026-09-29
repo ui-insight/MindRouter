@@ -468,11 +468,18 @@ async def chat_list_models(
     core_models = await crud.get_config_json(db, "chat.core_models", [])
     default_model = await crud.get_config_json(db, "chat.default_model", None)
 
+    from backend.app.core.reasoning import profile_for
+
     models = []
     for name, data in sorted(model_data.items()):
         # Skip embedding-only models
         if data["capabilities"]["embeddings"] and not data["capabilities"]["multimodal"]:
             continue
+        # The chat UI builds its thinking controls from this descriptor:
+        # a switch when the family has one, a level menu when it has levels.
+        data["capabilities"]["reasoning"] = profile_for(
+            name, supports_thinking=data["capabilities"]["thinking"]
+        ).describe()
         models.append({
             "id": name,
             "capabilities": data["capabilities"],

@@ -777,10 +777,8 @@
                     <input class="form-check-input" type="checkbox" id="thinkingToggle">
                     <label class="form-check-label ms-1 small" for="thinkingToggle">Thinking</label>
                 </div>
-                <select class="form-select form-select-sm" id="reasoningEffort" style="display:none; width:auto;">
-                    <option value="low">Low</option>
-                    <option value="medium" selected>Medium</option>
-                    <option value="high">High</option>
+                <select class="form-select form-select-sm" id="reasoningEffort" style="display:none; width:auto;" aria-label="Reasoning level">
+                    <!-- options are filled per model from capabilities.reasoning.levels -->
                 </select>
             </div>
         </div>
@@ -1881,22 +1879,48 @@ document.addEventListener('mr-theme-changed', function(e) {
         return caps && caps.multimodal;
     }
 
+    // Level names as the model itself spells them, with readable labels.
+    const REASONING_LEVEL_LABELS = {
+        minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high',
+    };
+
     function updateThinkingControls() {
         const caps = modelCapabilities[modelSelect.value];
         const controls = document.getElementById('thinkingControls');
         const effortSelect = document.getElementById('reasoningEffort');
         const toggleWrap = document.getElementById('thinkingToggleWrap');
+        const toggle = document.getElementById('thinkingToggle');
+        // capabilities.reasoning describes what THIS model understands:
+        // a switch (toggleable) and/or a list of its own level names.
+        const rp = caps && caps.reasoning ? caps.reasoning : null;
+        const hasSwitch = !!(rp && rp.toggleable);
+        const levels = rp && Array.isArray(rp.levels) ? rp.levels : [];
 
-        if (caps && caps.thinking) {
+        if (caps && caps.thinking && (hasSwitch || levels.length)) {
             controls.style.display = '';
-            const isGptOss = modelSelect.value.toLowerCase().includes('gpt-oss');
-            effortSelect.style.display = isGptOss ? '' : 'none';
-            // GPT-OSS: always thinking, show effort only; Qwen: toggle on/off
-            toggleWrap.style.display = isGptOss ? 'none' : '';
+            toggleWrap.style.display = hasSwitch ? '' : 'none';
+            if (levels.length) {
+                const previous = effortSelect.value;
+                effortSelect.innerHTML = '';
+                for (const lvl of levels) {
+                    const opt = document.createElement('option');
+                    opt.value = lvl;
+                    opt.textContent = REASONING_LEVEL_LABELS[lvl] || lvl;
+                    effortSelect.appendChild(opt);
+                }
+                // Keep the user's pick when the new model has it; otherwise
+                // the model's own default, else the middle of its range.
+                const wanted = levels.includes(previous) ? previous
+                    : (levels.includes(rp.default_level) ? rp.default_level : levels[Math.floor(levels.length / 2)]);
+                effortSelect.value = wanted;
+            }
+            // A level only matters while thinking is on.
+            effortSelect.style.display = (levels.length && (!hasSwitch || toggle.checked)) ? '' : 'none';
         } else {
             controls.style.display = 'none';
         }
     }
+    document.getElementById('thinkingToggle').addEventListener('change', updateThinkingControls);
 
     modelSelect.addEventListener('change', () => {
         localStorage.setItem('mindrouter_last_model', modelSelect.value);
@@ -2176,14 +2200,16 @@ document.addEventListener('mr-theme-changed', function(e) {
                 stream: true,
             };
 
-            // Include thinking/reasoning params when applicable
+            // Include thinking/reasoning params when applicable: the switch
+            // for models that have one, the level (in the model's own
+            // vocabulary) whenever thinking will be on.
             const caps = modelCapabilities[modelSelect.value];
-            if (caps && caps.thinking) {
-                const isGptOss = modelSelect.value.toLowerCase().includes('gpt-oss');
-                if (isGptOss) {
+            const rp = caps && caps.reasoning ? caps.reasoning : null;
+            if (caps && caps.thinking && rp) {
+                const on = rp.toggleable ? document.getElementById('thinkingToggle').checked : true;
+                if (rp.toggleable) bodyData.think = on;
+                if (on && Array.isArray(rp.levels) && rp.levels.length) {
                     bodyData.reasoning_effort = document.getElementById('reasoningEffort').value;
-                } else {
-                    bodyData.think = document.getElementById('thinkingToggle').checked;
                 }
             }
 

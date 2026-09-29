@@ -16,7 +16,7 @@
 
 import json
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
@@ -90,10 +90,28 @@ class OllamaOutTranslator:
             payload["tools"] = [t.model_dump() for t in canonical.tools]
 
         # Thinking mode goes at top level, NOT inside options
-        if canonical.think is not None:
-            payload["think"] = canonical.think
+        think = OllamaOutTranslator._ollama_think(canonical)
+        if think is not None:
+            payload["think"] = think
 
         return payload
+
+    @staticmethod
+    def _ollama_think(canonical) -> Optional[Union[bool, str]]:
+        """Ollama's ``think`` carries both the switch and, for gpt-oss, the
+        level (``think: "low"``).  A family with an on/off switch gets the
+        boolean; one whose thinking cannot be switched off gets the level
+        name (already the family's own, resolved by the inference policy).
+        """
+        from backend.app.core.reasoning import profile_for
+
+        effort = getattr(canonical, "reasoning_effort", None)
+        think = canonical.think
+        if effort is not None and not profile_for(canonical.model).toggleable:
+            return effort
+        if isinstance(think, str):
+            return think  # legacy string effort that bypassed the validator
+        return think
 
     @staticmethod
     def translate_generate_request(
@@ -121,8 +139,9 @@ class OllamaOutTranslator:
             payload["options"] = options
 
         # Thinking mode goes at top level, NOT inside options
-        if canonical.think is not None:
-            payload["think"] = canonical.think
+        think = OllamaOutTranslator._ollama_think(canonical)
+        if think is not None:
+            payload["think"] = think
 
         return payload
 

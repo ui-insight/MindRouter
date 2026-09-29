@@ -98,7 +98,8 @@ class OpenAIInTranslator:
             n=data.get("n", 1),
             user=data.get("user"),
             think=OpenAIInTranslator._resolve_think(data),
-            reasoning_effort=data.get("reasoning_effort"),
+            reasoning_effort=OpenAIInTranslator._resolve_effort(data),
+            chat_template_kwargs=OpenAIInTranslator._passthrough_template_kwargs(data),
             include_usage=bool((data.get("stream_options") or {}).get("include_usage", False)),
         )
 
@@ -303,6 +304,10 @@ class OpenAIInTranslator:
         - think: true/false/"low"/"medium"/"high" (Ollama/MindRouter native)
         - thinking: {"type": "enabled"/"disabled"} (OpenAI/Anthropic style)
         - chat_template_kwargs: {"enable_thinking": true/false} (vLLM native)
+
+        A level given without a switch (``reasoning_effort`` alone) is an
+        opt-in too; that is resolved later from the canonical pair, so this
+        function only answers "did the client say on or off explicitly".
         """
         # Direct think field takes priority
         if "think" in data:
@@ -323,3 +328,54 @@ class OpenAIInTranslator:
             return ctk["enable_thinking"]
 
         return None
+
+    @staticmethod
+    def _resolve_effort(data: Dict[str, Any]) -> Optional[str]:
+        """Resolve the reasoning level from every spelling clients use.
+
+        Priority: top-level ``reasoning_effort`` (OpenAI chat), then
+        ``reasoning.effort`` (Responses-style object some SDKs send on chat),
+        then ``chat_template_kwargs.reasoning_effort`` (vLLM native, the form
+        the Qwen3.8 model card documents), then an Anthropic-style
+        ``thinking.budget_tokens`` bucketed into a level.  The value is a
+        gateway level; validation and per-family translation happen in the
+        canonical model and the inference policy.
+        """
+        effort = data.get("reasoning_effort")
+        if effort is not None:
+            return effort
+        reasoning = data.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning.get("effort") is not None:
+            return reasoning["effort"]
+        ctk = data.get("chat_template_kwargs")
+        if isinstance(ctk, dict) and ctk.get("reasoning_effort") is not None:
+            return ctk["reasoning_effort"]
+        thinking = data.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("budget_tokens") is not None:
+            from backend.app.core.reasoning import budget_to_level
+
+            return budget_to_level(thinking["budget_tokens"])
+        return None
+
+    # Keys of chat_template_kwargs the gateway owns and rebuilds itself.
+    _OWNED_TEMPLATE_KWARGS = frozenset({"enable_thinking", "reasoning_effort"})
+
+    @staticmethod
+    def _passthrough_template_kwargs(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Keep the chat_template_kwargs keys we do not model (e.g. Qwen's
+        ``preserve_thinking``) so they reach a vLLM backend unchanged.
+
+        Only scalar values pass; the keys the gateway derives itself
+        (``enable_thinking``, ``reasoning_effort``) are dropped here and
+        re-emitted from the canonical fields by the outbound translator.
+        """
+        ctk = data.get("chat_template_kwargs")
+        if not isinstance(ctk, dict):
+            return None
+        kept = {
+            k: v
+            for k, v in ctk.items()
+            if k not in OpenAIInTranslator._OWNED_TEMPLATE_KWARGS
+            and isinstance(v, (bool, int, float, str))
+        }
+        return kept or None

@@ -201,6 +201,85 @@ async def _get_enforce_num_ctx() -> bool:
     return value
 
 
+# reasoning.default_effort: the level sent when a client turns thinking on
+# without choosing one, on a family that has levels. Cached like
+# ollama.enforce_num_ctx; read only when a request actually needs it.
+_DEFAULT_EFFORT_TTL_S = 30.0
+_default_effort_cache: Optional[Tuple[Optional[str], float]] = None
+
+
+async def _get_default_effort() -> Optional[str]:
+    """Read reasoning.default_effort (a gateway level) with a 30s TTL cache."""
+    global _default_effort_cache
+    from backend.app.core.reasoning import FALLBACK_DEFAULT_EFFORT, normalize_level
+
+    cached = _default_effort_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[1] < _DEFAULT_EFFORT_TTL_S:
+        return cached[0]
+    value: Optional[str] = FALLBACK_DEFAULT_EFFORT
+    try:
+        from backend.app.db.session import get_async_db_context
+        async with get_async_db_context() as cfg_db:
+            raw = await crud.get_config_json(cfg_db, "reasoning.default_effort", FALLBACK_DEFAULT_EFFORT)
+        value = normalize_level(raw) if raw else None
+    except Exception as exc:  # config unreadable → the built-in fallback
+        logger.warning("reasoning_default_effort_unreadable", error=str(exc))
+    _default_effort_cache = (value, now)
+    return value
+
+
+async def apply_reasoning_policy(request, model_name: str, model_row, settings) -> None:
+    """Resolve the request's think/reasoning_effort for the model it will hit.
+
+    Runs once per attempt, after routing, on both the streaming and the
+    non-streaming path.  Implements the gateway rules in core/reasoning.py:
+    any explicit level is an opt-in, `think: false` wins, nothing said means
+    off on a model with a switch (THINKING_OFF_BY_DEFAULT), and a level is
+    translated to the family's own name or dropped when the family has none.
+    After this the request carries the backend-facing values only.
+    """
+    if not hasattr(request, "think"):
+        return
+    from backend.app.core.reasoning import (
+        InvalidReasoningLevel, profile_for, resolve_reasoning,
+    )
+
+    profile = profile_for(
+        model_name,
+        family=getattr(model_row, "family", None),
+        supports_thinking=getattr(model_row, "supports_thinking", None),
+    )
+    think = request.think
+    effort = getattr(request, "reasoning_effort", None)
+    default_effort = None
+    if profile.has_levels and effort is None and (think is True or isinstance(think, str)):
+        default_effort = await _get_default_effort()
+    try:
+        resolved = resolve_reasoning(
+            think, effort, profile,
+            off_by_default=bool(getattr(settings, "thinking_off_by_default", True)),
+            default_effort=default_effort,
+        )
+    except InvalidReasoningLevel as exc:
+        # Admin config (chat.think) is the only path that bypasses the
+        # canonical validator; treat a bad stored value as "unspecified".
+        logger.warning("reasoning_level_invalid", model=model_name, error=str(exc))
+        resolved = resolve_reasoning(
+            think if isinstance(think, bool) else None, None, profile,
+            off_by_default=bool(getattr(settings, "thinking_off_by_default", True)),
+            default_effort=None,
+        )
+    request.think = resolved.enabled
+    if hasattr(request, "reasoning_effort"):
+        request.reasoning_effort = resolved.effort
+    if resolved.ignored_effort:
+        logger.info(
+            "reasoning_level_ignored", model=model_name, family=profile.family,
+            level=resolved.ignored_effort,
+        )
+
+
 class _RequestIds(NamedTuple):
     """Scalar identity of a request audit row, for writes detached from the request.
 
@@ -1416,6 +1495,11 @@ class InferenceService:
         for param in ["n", "size", "num_inference_steps", "guidance_scale", "seed"]:
             if hasattr(request, param) and getattr(request, param) is not None:
                 parameters[param] = getattr(request, param)
+        # Reasoning controls as the client sent them (the per-model
+        # translation happens after routing; see apply_reasoning_policy).
+        for param in ["think", "reasoning_effort"]:
+            if hasattr(request, param) and getattr(request, param) is not None:
+                parameters[param] = getattr(request, param)
         if hasattr(request, "policy_verdict") and request.policy_verdict:
             parameters["policy_verdict"] = request.policy_verdict
         # Dialect-supplied extras (e.g. the public resp_* id of a
@@ -1960,20 +2044,16 @@ class InferenceService:
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
-            # Gateway policy: reasoning/thinking is OFF by default unless the
-            # client opts in. Applies to all engines except gpt-oss (which uses
-            # reasoning_effort and ignores enable_thinking; leaving think None
-            # preserves its reasoning-promotion handling). For Ollama, think:false
-            # is accepted by both thinking and non-thinking models (verified), and
-            # the Ollama-only strip above still guards think:true on non-thinking
-            # models.
-            if (
-                self._settings.thinking_off_by_default
-                and hasattr(request, 'think')
-                and request.think is None
-                and "gpt-oss" not in (job.model or "").lower()
-            ):
-                request.think = False
+            # Gateway reasoning policy (core/reasoning.py): off by default
+            # unless the client opts in with a switch OR a level; the level is
+            # translated to this model family's own name (gpt-oss: low/medium/
+            # high, Qwen3.8: low/medium/xhigh) or dropped when the family has
+            # none. gpt-oss has no switch, so it is left to its own default
+            # when nothing is said (preserves its reasoning-promotion handling).
+            _policy_target = (
+                next((m for m in models if m.name == job.model), models[0]) if models else None
+            )
+            await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -2272,15 +2352,11 @@ class InferenceService:
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
-            # Gateway policy: reasoning/thinking is OFF by default unless the
-            # client opts in (see non-streaming path). All engines except gpt-oss.
-            if (
-                self._settings.thinking_off_by_default
-                and hasattr(request, 'think')
-                and request.think is None
-                and "gpt-oss" not in (job.model or "").lower()
-            ):
-                request.think = False
+            # Gateway reasoning policy (see the non-streaming path).
+            _policy_target = (
+                next((m for m in _models if m.name == job.model), _models[0]) if _models else None
+            )
+            await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and _models and hasattr(request, 'backend_options'):

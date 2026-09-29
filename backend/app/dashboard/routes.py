@@ -5775,6 +5775,8 @@ async def admin_settings(
     site_url = await crud.get_config_json(db, "app.base_url", get_settings().app_base_url)
     current_tz = await crud.get_config_json(db, "app.timezone", "America/Los_Angeles")
     enforce_num_ctx = await crud.get_config_json(db, "ollama.enforce_num_ctx", True)
+    from backend.app.core.reasoning import FALLBACK_DEFAULT_EFFORT, GATEWAY_LEVELS
+    default_effort = await crud.get_config_json(db, "reasoning.default_effort", FALLBACK_DEFAULT_EFFORT)
 
     # Model auto-enrichment config
     auto_enrich = await crud.get_config_json(db, "catalog.auto_enrich", False)
@@ -5810,6 +5812,8 @@ async def admin_settings(
             "timezone_choices": _TIMEZONE_CHOICES,
             "now_in_tz": now_in_tz,
             "enforce_num_ctx": enforce_num_ctx,
+            "default_effort": default_effort,
+            "reasoning_levels": [lvl for lvl in GATEWAY_LEVELS if lvl != "none"],
             "auto_enrich": auto_enrich,
             "enrich_model": enrich_model,
             "enrich_api_key": enrich_api_key,
@@ -5895,6 +5899,31 @@ async def admin_settings_post(
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=enforce_num_ctx_updated", status_code=302)
+
+    elif action == "set_default_effort":
+        from backend.app.core.reasoning import InvalidReasoningLevel, normalize_level
+        raw = form.get("default_effort", "").strip()
+        try:
+            # Blank = no gateway default: the model's own default applies
+            # (xhigh on Qwen3.8, medium on gpt-oss).
+            val = normalize_level(raw) if raw else None
+        except InvalidReasoningLevel:
+            return RedirectResponse(url="/admin/settings?error=Invalid+reasoning+level", status_code=302)
+        if val == "none":
+            return RedirectResponse(
+                url="/admin/settings?error=The+default+level+applies+when+thinking+is+on%2C+so+it+cannot+be+%27none%27",
+                status_code=302,
+            )
+        await crud.set_config(
+            db, "reasoning.default_effort", val,
+            description="Reasoning level sent when a client turns thinking on without choosing one (gateway level; blank = model default)"
+        )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_default_effort",
+            entity_type="config", detail=f"default_effort={val}", ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=default_effort_updated", status_code=302)
 
     elif action == "set_auto_enrich":
         val = form.get("auto_enrich") == "on"

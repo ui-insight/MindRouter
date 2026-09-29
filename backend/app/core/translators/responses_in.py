@@ -58,7 +58,6 @@ from backend.app.core.canonical_schemas import (
 
 # reasoning.effort values outside the vLLM/Ollama-supported set are
 # clamped to the nearest supported effort.
-_EFFORT_CLAMP = {"minimal": "low", "xhigh": "high"}
 
 
 def _gen_id(prefix: str) -> str:
@@ -620,11 +619,13 @@ class ResponsesInTranslator:
     def _resolve_reasoning(
         reasoning: Optional[Dict[str, Any]]
     ) -> Optional[Union[bool, str]]:
-        """Map reasoning.effort onto canonical ``think``.
+        """Map reasoning.effort onto the canonical pair.
 
-        String think is the proven cross-engine path: vllm_out converts
-        it to reasoning_effort for gpt-oss, ollama_out forwards the
-        string; bool False disables thinking on qwen-style models.
+        Returns the effort string (a gateway level) or ``False`` for
+        ``none``; the canonical model turns a string into ``think=True`` plus
+        ``reasoning_effort``, and the inference policy translates the level
+        to the target family's own name (``xhigh`` on Qwen3.8, ``high`` on
+        gpt-oss), so no clamping happens here any more.
         """
         if not isinstance(reasoning, dict):
             return None
@@ -633,7 +634,7 @@ class ResponsesInTranslator:
             return None
         if effort == "none":
             return False
-        return _EFFORT_CLAMP.get(effort, effort)
+        return effort
 
     # ------------------------------------------------------------------
     # Response formatting (non-streaming) and snapshots
