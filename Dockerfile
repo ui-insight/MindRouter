@@ -64,6 +64,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Dependency lock: pip may only pick versions listed in constraints.txt
+# (exact pins that have run in production; regenerate with `make lock`).
+# PIP_CONSTRAINT is read by every pip invocation below, including the
+# pip/setuptools/wheel upgrade, so the whole venv is reproducible.
+COPY constraints.txt ./
+ENV PIP_CONSTRAINT=/app/constraints.txt
+
 # PEP 668: all Python packages go into this venv, never the distro python
 RUN python3.12 -m venv /opt/venv && \
     pip install --upgrade pip setuptools wheel
