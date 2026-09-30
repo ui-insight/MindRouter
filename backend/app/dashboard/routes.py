@@ -5777,6 +5777,9 @@ async def admin_settings(
     enforce_num_ctx = await crud.get_config_json(db, "ollama.enforce_num_ctx", True)
     from backend.app.core.reasoning import FALLBACK_DEFAULT_EFFORT, GATEWAY_LEVELS
     default_effort = await crud.get_config_json(db, "reasoning.default_effort", FALLBACK_DEFAULT_EFFORT)
+    from backend.app.core.sampling_policy import CONFIG_KEY as _SAMPLING_KEY
+    _sampling_raw = await crud.get_config_json(db, _SAMPLING_KEY, {}) or {}
+    sampling_policies_json = json.dumps(_sampling_raw, indent=2) if _sampling_raw else ""
 
     # Model auto-enrichment config
     auto_enrich = await crud.get_config_json(db, "catalog.auto_enrich", False)
@@ -5814,6 +5817,7 @@ async def admin_settings(
             "enforce_num_ctx": enforce_num_ctx,
             "default_effort": default_effort,
             "reasoning_levels": [lvl for lvl in GATEWAY_LEVELS if lvl != "none"],
+            "sampling_policies_json": sampling_policies_json,
             "auto_enrich": auto_enrich,
             "enrich_model": enrich_model,
             "enrich_api_key": enrich_api_key,
@@ -5924,6 +5928,31 @@ async def admin_settings_post(
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=default_effort_updated", status_code=302)
+
+    elif action == "set_sampling_policies":
+        from backend.app.core.sampling_policy import CONFIG_KEY as _SAMPLING_KEY
+        from backend.app.core.sampling_policy import validate_policies
+        raw = form.get("sampling_policies", "")
+        policies, errors = validate_policies(raw)
+        if errors:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus("Sampling policy: " + "; ".join(errors)[:300]),
+                status_code=302,
+            )
+        value = {
+            name: {k: v for k, v in (("min_temperature", pol.min_temperature), ("max_tokens", pol.max_tokens)) if v is not None}
+            for name, pol in policies.items()
+        }
+        await crud.set_config(
+            db, _SAMPLING_KEY, value,
+            description="Per-model sampling floor (min_temperature) and max_tokens cap applied at the gateway",
+        )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_sampling_policies",
+            entity_type="config", detail=f"{len(value)} model(s)", ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=sampling_policies_updated", status_code=302)
 
     elif action == "set_auto_enrich":
         val = form.get("auto_enrich") == "on"

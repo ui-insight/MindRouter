@@ -767,6 +767,26 @@ class TestResponsesFormatResponse:
 
 
 class TestResponsesRoundTrip:
+    def test_compaction_request_without_tools_drops_tool_choice(self):
+        """Codex compaction: tools:[] with tool_choice:"auto" (its constant).
+        vLLM 400s on tool_choice without tools, so neither may be forwarded."""
+        canonical = ResponsesInTranslator.translate_responses_request(
+            {
+                "model": "qwen/qwen3.8-27b",
+                "instructions": "Summarize the conversation so far.",
+                "input": [{"role": "user", "content": "summarize"}],
+                "tools": [],
+                "tool_choice": "auto",
+                "stream": True,
+                "store": False,
+            }
+        )
+        assert canonical.tools is None
+        assert canonical.tool_choice == "auto"  # still recorded canonically
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert "tool_choice" not in payload
+        assert "tools" not in payload
+
     def test_through_vllm_out(self):
         canonical = ResponsesInTranslator.translate_responses_request(
             {

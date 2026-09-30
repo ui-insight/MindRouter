@@ -18,6 +18,7 @@
                 {% elif success == 'timezone_updated' %}Timezone updated.
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
                 {% elif success == 'default_effort_updated' %}Default reasoning level updated.
+                {% elif success == 'sampling_policies_updated' %}Sampling policies updated.
                 {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
                 {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
                 {% elif success == 'agreement_updated' %}Use agreement text saved.
@@ -134,6 +135,28 @@
                             </form>
                             {% else %}
                             <p class="mb-0">Default reasoning level: <code>{{ default_effort or '(model default)' }}</code></p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Per-model sampling floor / token cap -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Sampling Guard Rails</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Per-model floor on <code>temperature</code> and cap on <code>max_tokens</code>, applied to every request after routing. Some RL-trained models (GLM 5.3, MiMo 2.6) loop until the token limit under greedy decoding; their vendors publish <code>temperature 1.0 / top_p 0.95</code>. A JSON object keyed by catalog model name, or <code>"*"</code> for all models: <code>{"zai-org/glm-5.3-flash": {"min_temperature": 0.7, "max_tokens": 32768}}</code>. Clamped requests are logged as <code>sampling_policy_applied</code>, never rejected. Leave empty to disable.</p>
+                            {% if not is_read_only %}
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_sampling_policies">
+                                <div class="mb-3">
+                                    <label for="sampling_policies" class="form-label">Policies (JSON)</label>
+                                    <textarea class="form-control font-monospace" id="sampling_policies" name="sampling_policies" rows="6" spellcheck="false">{{ sampling_policies_json }}</textarea>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                            {% else %}
+                            <pre class="mb-0 small">{{ sampling_policies_json or '(none)' }}</pre>
                             {% endif %}
                         </div>
                     </div>

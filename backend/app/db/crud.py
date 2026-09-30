@@ -1733,9 +1733,12 @@ async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
         delete(SchedulerDecision).where(SchedulerDecision.selected_backend_id == backend_id)
     )
 
-    # Null out nullable FK references (preserve request history)
+    # Null out nullable FK references (preserve request / video history)
     await db.execute(
         update(Request).where(Request.backend_id == backend_id).values(backend_id=None)
+    )
+    await db.execute(
+        update(VideoShot).where(VideoShot.backend_id == backend_id).values(backend_id=None)
     )
 
     # Delete the backend

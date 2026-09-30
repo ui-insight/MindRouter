@@ -76,6 +76,27 @@ class TestProfiles:
         generic = R.profile_for("some/new-model", supports_thinking=True)
         assert generic.toggleable and not generic.has_levels
 
+    def test_glm53_and_mimo_families(self):
+        # GLM-5.3: no switch, three native levels, model default is the deepest.
+        glm = R.profile_for("zai-org/glm-5.3-flash")
+        assert glm.family == "glm-5.3" and not glm.toggleable
+        assert glm.levels == ("low", "high", "max") and glm.default_level == "max"
+        assert R.profile_for("RedHatAI/GLM-5.3-Flash-NVFP4").family == "glm-5.3"
+        assert R.profile_for("zai-org/GLM5-Air").family == "glm-5.3"
+        # MiMo-V2.6: an enable_thinking switch and nothing else.
+        mimo = R.profile_for("xiaomimimo/mimo-v2.6-flash")
+        assert mimo.family == "mimo" and mimo.toggleable and not mimo.has_levels
+        assert R.profile_for("XiaomiMiMo/MiMo-V2.6-Flash-MOPD").family == "mimo"
+
+    def test_glm53_never_forwards_a_level_its_template_would_misread(self):
+        # The GLM template treats any name outside low/high/max as max, so
+        # every gateway level must land on one of the three.
+        glm = R.profile_for("zai-org/glm-5.3-flash")
+        for lvl in R.GATEWAY_LEVELS:
+            assert glm.native_level(lvl) in glm.levels, lvl
+        assert glm.native_level("medium") == "high"
+        assert glm.native_level("xhigh") == "max"
+
     def test_family_hint_is_consulted(self):
         assert R.profile_for("alias-name", family="gpt-oss").family == "gpt-oss"
 
@@ -181,6 +202,28 @@ class TestResolve:
 
     def test_gpt_oss_never_gets_the_switch(self):
         assert R.resolve_reasoning(True, "high", GPT) == R.ResolvedReasoning(enabled=None, effort="high")
+
+    def test_glm53_off_is_low_and_on_translates(self):
+        glm = R.profile_for("zai-org/glm-5.3-flash")
+        # Nothing said: left to the server (the unit's default kwargs choose low).
+        assert R.resolve_reasoning(None, None, glm) == R.ResolvedReasoning(enabled=None)
+        # Off requests become the cheapest level; there is no switch to send.
+        assert R.resolve_reasoning(False, None, glm) == R.ResolvedReasoning(enabled=None, effort="low")
+        assert R.resolve_reasoning(None, "none", glm) == R.ResolvedReasoning(enabled=None, effort="low")
+        # On with the gateway default (medium) is GLM's "high"; xhigh is "max".
+        assert R.resolve_reasoning(True, None, glm, default_effort="medium") == R.ResolvedReasoning(enabled=None, effort="high")
+        assert R.resolve_reasoning(None, "xhigh", glm) == R.ResolvedReasoning(enabled=None, effort="max")
+        assert R.resolve_reasoning(None, "high", glm).effort == "high"
+        assert R.resolve_reasoning(None, "low", glm).effort == "low"
+        # A native name round-trips.
+        assert R.resolve_reasoning(None, "xhigh", glm).effort == "max"
+
+    def test_mimo_is_a_plain_switch(self):
+        mimo = R.profile_for("xiaomimimo/mimo-v2.6-flash")
+        assert R.resolve_reasoning(None, None, mimo) == R.ResolvedReasoning(enabled=False)
+        assert R.resolve_reasoning(True, None, mimo) == R.ResolvedReasoning(enabled=True)
+        assert R.resolve_reasoning(None, "high", mimo) == R.ResolvedReasoning(enabled=True, effort=None, ignored_effort="high")
+        assert R.resolve_reasoning(False, "high", mimo) == R.ResolvedReasoning(enabled=False)
 
     def test_families_without_levels_ignore_but_record_the_level(self):
         r = R.resolve_reasoning(None, "high", Q35)
@@ -437,6 +480,8 @@ class TestCatalogDescriptor:
             ("qwen/qwen3.8-27b", True, ["low", "medium", "xhigh"]),
             ("openai/gpt-oss-120b", False, ["low", "medium", "high"]),
             ("qwen/qwen3.6-35b", True, []),
+            ("zai-org/glm-5.3-flash", False, ["low", "high", "max"]),
+            ("xiaomimimo/mimo-v2.6-flash", True, []),
         ):
             d = R.profile_for(name).describe()
             assert (d["toggleable"], d["levels"]) == (switch, levels), name

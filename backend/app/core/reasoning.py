@@ -9,8 +9,9 @@ must actually be told.
 Why a translation table exists at all: the models do not agree on names.
 gpt-oss takes ``low``/``medium``/``high`` and cannot switch thinking off;
 Qwen3.8 takes ``low``/``medium``/``xhigh`` and defaults to ``xhigh``, the most
-expensive level, when thinking is on and no level is given; Qwen3.5/3.6, Gemma
-4 and Nemotron have an on/off switch and no levels.  Forwarding a client's
+expensive level, when thinking is on and no level is given; GLM-5.3 takes
+``low``/``high``/``max`` and, like gpt-oss, cannot switch off; Qwen3.5/3.6,
+Gemma 4, Nemotron and MiMo have an on/off switch and no levels.  Forwarding a client's
 level name verbatim therefore produced a vLLM 400 whenever the client and the
 model disagreed (``high`` on Qwen3.8, ``xhigh`` on gpt-oss), and a bare
 ``think: true`` silently bought the priciest reasoning Qwen3.8 has.
@@ -154,6 +155,29 @@ _QWEN38 = ReasoningProfile(
 )
 
 
+# GLM-5.3 (zai-org): its chat template has NO off switch — the generation
+# prompt always opens a think block — and takes ``reasoning_effort`` in
+# ``low``/``high``/``max``, defaulting to ``max`` (the deepest, priciest) when
+# nothing is sent.  An unknown level name is silently treated as ``max`` by the
+# template, so the gateway must never forward ``medium``.  "Off" is its lowest
+# level, like gpt-oss.  (Discovered 2026-09-29 on GLM-5.3-Flash NVFP4; the
+# level reaches the template through vLLM's top-level ``reasoning_effort``.)
+_GLM5 = ReasoningProfile(
+    family="glm-5.3",
+    toggleable=False,
+    levels=("low", "high", "max"),
+    default_level="max",
+    level_map={
+        "none": "low",
+        "minimal": "low",
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "xhigh": "max",
+    },
+)
+
+
 def _toggle_only(family: str) -> ReasoningProfile:
     return ReasoningProfile(family=family, toggleable=True)
 
@@ -171,6 +195,10 @@ _NAME_RULES: Tuple[Tuple[str, ReasoningProfile], ...] = (
     ("gemma4", _toggle_only("gemma4")),
     ("nemotron", _toggle_only("nemotron")),
     ("magistral", _toggle_only("magistral")),
+    ("glm-5", _GLM5),
+    ("glm5", _GLM5),
+    # MiMo-V2.6 (Xiaomi): ChatML-style ``enable_thinking`` switch, no levels.
+    ("mimo", _toggle_only("mimo")),
 )
 
 
