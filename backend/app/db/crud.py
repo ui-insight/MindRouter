@@ -1381,6 +1381,15 @@ async def reset_quota_if_needed(db: AsyncSession, user_id: int) -> Optional[Quot
             quota.budget_period_start = datetime.now(timezone.utc)
             quota.tokens_used = 0
             await db.flush()
+            # Commit the rollover HERE, in its own short transaction (an
+            # explicit exception to the caller-commits convention). Every
+            # caller goes on to INSERT a requests / web_search_logs row in the
+            # same session, and that INSERT takes FK S locks on api_keys —
+            # while the completion writers take api_keys BEFORE quotas (see
+            # InferenceService._run_completion_db). Holding X(quotas) into the
+            # INSERT would be the opposite order and a (rare, once-per-period)
+            # deadlock with an in-flight completion for the same user.
+            await db.commit()
             # Also reset Redis counter if available
             from backend.app.core.redis_client import reset_tokens, is_available
             if is_available():

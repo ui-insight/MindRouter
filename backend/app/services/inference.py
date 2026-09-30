@@ -3175,8 +3175,32 @@ class InferenceService:
 
     async def _run_completion_db(
         self, request_id: int, write_once, path: str, isolated: bool = False,
+        fallback=None,
     ) -> None:
         """Run a completion DB transaction; retry deadlocks; never raise.
+
+        LOCK ORDER (the reason every writer bumps api_keys FIRST): the
+        completion UPDATE on ``requests`` rewrites secondary indexes that
+        start with the ``api_key_id`` / ``user_id`` foreign-key columns
+        (``ix_requests_apikey_tokens_covering`` and friends), and InnoDB
+        re-validates the foreign key for every such rewrite by taking a
+        SHARED lock on the parent ``api_keys`` / ``users`` row. With the
+        old order (requests → responses → quotas → api_keys) two
+        completions from the same key both held that S lock, one took X on
+        quotas, then needed X on api_keys — blocked by the other's S lock —
+        while the other waited for quotas: MariaDB 1213 every time the same
+        key completed twice within a few ms (~1,400/day on prod, 2026-09-30;
+        the 5-attempt retry lost ~170/day, which the orphan janitor then
+        mislabelled "Orphaned: queued request not tracked by scheduler"
+        although the client had its 200). Taking our own X lock on api_keys
+        as the FIRST statement subsumes the FK S lock, so same-key
+        transactions queue on that row and never form a cycle.
+
+        ``fallback`` (optional coroutine factory): if the transaction still
+        loses every retry to a lock error (1213/1205), run it once so the
+        request row at least leaves ``queued``. It must be a single-statement
+        write on its own session (see _completion_fallback), which cannot
+        take part in a deadlock cycle.
 
         The whole completion write (status flip, response row, quota and key
         usage) is one transaction. A quotas hot-row deadlock aborts it, and
@@ -3247,7 +3271,53 @@ class InferenceService:
                     await enqueue_for_dlp(request_id)
                 except Exception:
                     pass
+                if fallback is not None and code in (1213, 1205):
+                    await self._run_completion_fallback(request_id, path, fallback)
                 return
+
+    @staticmethod
+    def _completion_fallback(
+        request_id: int, backend_id, prompt_tokens, completion_tokens,
+        tokens_estimated: bool,
+    ):
+        """Build the last-resort writer for _run_completion_db.
+
+        One UPDATE on the request row, on a fresh isolated session, nothing
+        else: it holds no other row while it waits, so it cannot deadlock —
+        at worst it queues behind a live transaction's lock and then runs.
+        Response row, quota and key accounting are NOT written here (they
+        were the statements that lost); the loud request_completion_db_failed
+        log above is the signal that accounting for this request is missing.
+        """
+        async def run() -> None:
+            async with _isolated_db_session() as fdb:
+                await crud.update_request_completed(
+                    fdb, request_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    tokens_estimated=tokens_estimated,
+                    backend_id=backend_id,
+                )
+                await fdb.commit()
+        return run
+
+    async def _run_completion_fallback(self, request_id: int, path: str, fallback) -> None:
+        try:
+            await fallback()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            code = getattr(getattr(e, "orig", None), "args", (None,))[0]
+            logger.error(
+                "request_completion_fallback_failed",
+                request_id=request_id, path=path,
+                error=type(e).__name__, db_error_code=code,
+            )
+            return
+        logger.warning(
+            "request_completion_fallback_written",
+            request_id=request_id, path=path,
+        )
 
     async def _do_complete_db(
         self, db_request, backend_id, response, prompt_tokens,
@@ -3261,6 +3331,11 @@ class InferenceService:
         api_key_id = db_request.api_key_id
 
         async def write_once():
+            # api_keys FIRST (see _run_completion_db: the requests UPDATE
+            # takes an implicit S lock on this row; taking our X lock before
+            # it makes same-key completions serialize instead of deadlock).
+            await crud.update_api_key_usage(self.db, api_key_id)
+
             await crud.update_request_completed(
                 self.db, request_id,
                 prompt_tokens=prompt_tokens,
@@ -3286,7 +3361,6 @@ class InferenceService:
             )
 
             await crud.update_quota_usage(self.db, user_id, total_tokens)
-            await crud.update_api_key_usage(self.db, api_key_id)
 
             await self.db.commit()
             # Increment Redis quota only after DB commit succeeds to prevent drift
@@ -3298,7 +3372,13 @@ class InferenceService:
             except Exception:
                 pass
 
-        await self._run_completion_db(request_id, write_once, "complete")
+        await self._run_completion_db(
+            request_id, write_once, "complete",
+            fallback=self._completion_fallback(
+                request_id, backend_id, prompt_tokens, completion_tokens,
+                tokens_estimated,
+            ),
+        )
 
     async def _complete_streaming_request(
         self,
@@ -3367,6 +3447,9 @@ class InferenceService:
         async def write_once():
             stored_content = content
             async with _isolated_db_session() as wdb:
+                # api_keys FIRST — same lock-order rule as _do_complete_db.
+                await crud.update_api_key_usage(wdb, api_key_id)
+
                 await crud.update_request_completed(
                     wdb, request_id,
                     prompt_tokens=prompt_tokens,
@@ -3388,7 +3471,6 @@ class InferenceService:
                 )
 
                 await crud.update_quota_usage(wdb, user_id, total_tokens)
-                await crud.update_api_key_usage(wdb, api_key_id)
 
                 await wdb.commit()
             # Increment Redis quota only after DB commit succeeds to prevent drift
@@ -3402,6 +3484,9 @@ class InferenceService:
 
         await self._run_completion_db(
             request_id, write_once, "complete_streaming", isolated=True,
+            fallback=self._completion_fallback(
+                request_id, backend_id, prompt_tokens, completion_tokens, True,
+            ),
         )
 
     async def _fail_request(
@@ -3464,12 +3549,13 @@ class InferenceService:
                 return
 
         async def write(session) -> None:
+            # api_keys FIRST — same lock-order rule as _do_complete_db.
+            await crud.update_api_key_usage(session, api_key_id)
+
             await crud.update_request_failed(
                 session, request_id,
                 error_message=error_message,
             )
-
-            await crud.update_api_key_usage(session, api_key_id)
 
             await session.commit()
 
