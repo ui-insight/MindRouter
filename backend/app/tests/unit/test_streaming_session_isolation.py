@@ -1296,6 +1296,25 @@ class TestLockOrderInvariant:
         assert "_isolated_db_session()" in src and ".commit()" in src
         assert "self.db" not in src
 
+    def test_quota_rollover_commits_before_any_insert(self):
+        """crud.reset_quota_if_needed writes quotas (X lock) and every caller
+        then INSERTs a row whose FK takes S(api_keys) — the opposite order to
+        the completion writers. The rollover must therefore commit itself."""
+        fns = {
+            n.name: n for n in ast.parse(_CRUD_PATH.read_text()).body
+            if isinstance(n, ast.AsyncFunctionDef)
+        }
+        fn = fns["reset_quota_if_needed"]
+        reset_if = next(
+            node for node in ast.walk(fn)
+            if isinstance(node, ast.If) and "tokens_used = 0" in ast.unparse(node)
+        )
+        body_src = ast.unparse(reset_if)
+        assert "await db.flush()" in body_src
+        assert body_src.index("await db.commit()") > body_src.index("await db.flush()")
+        # and nothing outside the rollover branch commits
+        assert ast.unparse(fn).count("await db.commit()") == 1
+
     def test_every_writer_passes_a_fallback(self, methods):
         for name in ("_do_complete_db", "_do_complete_streaming_db"):
             src = ast.unparse(methods[name])
