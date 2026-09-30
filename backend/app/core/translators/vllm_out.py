@@ -221,11 +221,19 @@ class VLLMOutTranslator:
         if canonical.user:
             payload["user"] = canonical.user
 
-        # Handle tool calling
+        # Handle tool calling. `tool_choice` is only emitted alongside `tools`:
+        # vLLM rejects the field when no tools are set (400 "When using
+        # `tool_choice`, `tools` must be set"), whereas OpenAI tolerates the
+        # pair — and Codex sends `tools: []` + `tool_choice: "auto"` on every
+        # context compaction, which wedged agent sessions on 2026-09-28 (the
+        # failed compaction is retried before each later turn). This is the
+        # one place every inbound dialect converges, so dropping it here
+        # covers chat, Responses and Anthropic alike. An empty tools list is
+        # likewise never forwarded (vLLM rejects `tools: []` too).
         if canonical.tools:
             payload["tools"] = [t.model_dump() for t in canonical.tools]
-        if canonical.tool_choice is not None:
-            payload["tool_choice"] = canonical.tool_choice
+            if canonical.tool_choice is not None:
+                payload["tool_choice"] = canonical.tool_choice
 
         # Handle structured output
         if canonical.response_format:

@@ -598,6 +598,44 @@ class TestVLLMOutToolCalling:
         assert "tools" not in payload
         assert "tool_choice" not in payload
 
+    # vLLM rejects `tool_choice` without `tools` (400 "When using
+    # `tool_choice`, `tools` must be set") and `tools: []`; OpenAI accepts
+    # both. Codex sends tools:[] + tool_choice:"auto" on every context
+    # compaction, so forwarding the field wedged agent sessions (2.9.79).
+    @pytest.mark.parametrize("tool_choice", [
+        "auto",
+        "none",
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ])
+    def test_tool_choice_dropped_without_tools(self, tool_choice):
+        canonical = CanonicalChatRequest(
+            model="llama3",
+            messages=[CanonicalMessage(role=MessageRole.USER, content="hi")],
+            tool_choice=tool_choice,
+        )
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert "tool_choice" not in payload
+        assert "tools" not in payload
+
+    def test_tool_choice_dropped_with_empty_tools_list(self):
+        canonical = CanonicalChatRequest(
+            model="llama3",
+            messages=[CanonicalMessage(role=MessageRole.USER, content="hi")],
+            tools=[],
+            tool_choice="auto",
+        )
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert "tool_choice" not in payload
+        assert "tools" not in payload
+
+    def test_tool_choice_kept_with_tools(self):
+        canonical = self._make_canonical_with_tools()
+        canonical.tool_choice = {"type": "function", "function": {"name": "get_weather"}}
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert payload["tool_choice"] == {"type": "function", "function": {"name": "get_weather"}}
+        assert len(payload["tools"]) == 1
+
 
 # ── Phase 3b: Ollama Out ─────────────────────────────────
 
@@ -680,6 +718,58 @@ class TestOllamaOutToolCalling:
 
 class TestToolCallingRoundTrips:
     """End-to-end round-trip tests for tool calling."""
+
+    # The Codex compaction shape (tools:[] + tool_choice:"auto") and its
+    # equivalents in every inbound dialect must reach vLLM with NEITHER field.
+    def test_codex_compaction_shape_responses_to_vllm(self):
+        from backend.app.core.translators.responses_in import ResponsesInTranslator
+        canonical = ResponsesInTranslator.translate_responses_request({
+            "model": "qwen/qwen3.8-27b",
+            "instructions": "You are Codex.",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "summarize"}]}],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "stream": True,
+            "store": False,
+        })
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert "tool_choice" not in payload
+        assert "tools" not in payload
+        assert payload["stream"] is True
+
+    def test_openai_empty_tools_with_tool_choice_to_vllm(self):
+        canonical = OpenAIInTranslator.translate_chat_request({
+            "model": "qwen/qwen3.8-27b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+            "tool_choice": "auto",
+        })
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert "tool_choice" not in payload
+        assert "tools" not in payload
+
+    def test_anthropic_tool_choice_without_tools_to_vllm(self):
+        canonical = AnthropicInTranslator.translate_messages_request({
+            "model": "claude",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "auto"},
+        })
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert "tool_choice" not in payload
+        assert "tools" not in payload
+
+    def test_tool_choice_still_forwarded_when_tools_present(self):
+        canonical = OpenAIInTranslator.translate_chat_request({
+            "model": "qwen/qwen3.8-27b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {}}}}],
+            "tool_choice": "required",
+        })
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert payload["tool_choice"] == "required"
+        assert payload["tools"][0]["function"]["name"] == "f"
 
     def test_openai_to_vllm_roundtrip(self):
         """OpenAI request → canonical → vLLM payload."""

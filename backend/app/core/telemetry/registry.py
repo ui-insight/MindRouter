@@ -43,6 +43,29 @@ from backend.app.settings import get_settings
 logger = get_logger(__name__)
 
 
+# Statuses an admin set on purpose. Health polling, circuit breakers and
+# live-request outcomes must never overwrite them: a DISABLED backend that
+# went down and came back was being flipped UNHEALTHY → HEALTHY by the poller
+# and quietly put back into rotation (found 2026-09-30 on backend 76).
+ADMIN_SET_STATUSES = (BackendStatus.DISABLED, BackendStatus.DRAINING)
+
+
+def health_status_transition(
+    current: Optional[BackendStatus], is_healthy: bool, failures: int, threshold: int
+) -> Optional[BackendStatus]:
+    """The status a health-check outcome should write, or None to leave it.
+
+    ``failures`` is the consecutive failure count INCLUDING this one.
+    """
+    if current in ADMIN_SET_STATUSES:
+        return None
+    if is_healthy:
+        return BackendStatus.HEALTHY
+    if failures >= threshold:
+        return BackendStatus.UNHEALTHY
+    return None
+
+
 class BackendRegistry:
     """
     Central registry for backend management.
@@ -794,14 +817,16 @@ class BackendRegistry:
             recovery = self._settings.backend_circuit_breaker_recovery_seconds
             cb.circuit_open_until = datetime.now(timezone.utc) + timedelta(seconds=recovery)
 
-            # Mark UNHEALTHY in DB immediately
+            # Mark UNHEALTHY in DB immediately (never over an admin-set status)
             try:
                 async with get_async_db_context() as db:
-                    await crud.update_backend_status(
-                        db=db,
-                        backend_id=backend_id,
-                        status=BackendStatus.UNHEALTHY,
-                    )
+                    current = await crud.get_backend_by_id(db, backend_id)
+                    if current is None or current.status not in ADMIN_SET_STATUSES:
+                        await crud.update_backend_status(
+                            db=db,
+                            backend_id=backend_id,
+                            status=BackendStatus.UNHEALTHY,
+                        )
                     await crud.update_backend_circuit_breaker(
                         db=db,
                         backend_id=backend_id,
@@ -840,14 +865,17 @@ class BackendRegistry:
         cb.last_failure_time = None
 
         if was_half_open:
-            # Circuit recovered — mark healthy
+            # Circuit recovered — mark healthy, unless an admin has since
+            # disabled or drained it.
             try:
                 async with get_async_db_context() as db:
-                    await crud.update_backend_status(
-                        db=db,
-                        backend_id=backend_id,
-                        status=BackendStatus.HEALTHY,
-                    )
+                    current = await crud.get_backend_by_id(db, backend_id)
+                    if current is None or current.status not in ADMIN_SET_STATUSES:
+                        await crud.update_backend_status(
+                            db=db,
+                            backend_id=backend_id,
+                            status=BackendStatus.HEALTHY,
+                        )
                     await crud.update_backend_circuit_breaker(
                         db=db,
                         backend_id=backend_id,
@@ -1154,14 +1182,15 @@ class BackendRegistry:
                 if health.is_healthy:
                     # Don't overwrite admin-set statuses (DISABLED, DRAINING)
                     current = await crud.get_backend_by_id(db, backend_id)
-                    if current and current.status not in (
-                        BackendStatus.DISABLED,
-                        BackendStatus.DRAINING,
-                    ):
+                    next_status = health_status_transition(
+                        current.status if current else None, True, 0,
+                        self._settings.backend_unhealthy_threshold,
+                    )
+                    if next_status is not None:
                         await crud.update_backend_status(
                             db=db,
                             backend_id=backend_id,
-                            status=BackendStatus.HEALTHY,
+                            status=next_status,
                         )
 
                     # If circuit was open/half-open, close it on successful health check
@@ -1183,13 +1212,17 @@ class BackendRegistry:
                     backend = await crud.get_backend_by_id(db, backend_id)
                     if backend:
                         failures = backend.consecutive_failures + 1
-                        if failures >= self._settings.backend_unhealthy_threshold:
+                        next_status = health_status_transition(
+                            backend.status, False, failures,
+                            self._settings.backend_unhealthy_threshold,
+                        )
+                        if next_status is not None:
                             await crud.update_backend_status(
                                 db=db,
                                 backend_id=backend_id,
-                                status=BackendStatus.UNHEALTHY,
+                                status=next_status,
                             )
-                        else:
+                        elif backend.status not in ADMIN_SET_STATUSES:
                             # Increment failure count but don't mark unhealthy yet
                             backend.consecutive_failures = failures
                             await db.flush()

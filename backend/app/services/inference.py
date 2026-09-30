@@ -229,6 +229,52 @@ async def _get_default_effort() -> Optional[str]:
     return value
 
 
+# Per-model sampling floor / token cap (core/sampling_policy.py), read from
+# app_config "sampling.policies" with the same 30 s TTL cache as the default
+# reasoning level. Empty by default: the admin opts models in.
+_SAMPLING_POLICY_TTL_S = 30.0
+_sampling_policy_cache: Optional[Tuple[dict, float]] = None
+
+
+async def _get_sampling_policies() -> dict:
+    """Read sampling.policies (model → SamplingPolicy) with a 30s TTL cache."""
+    global _sampling_policy_cache
+    from backend.app.core.sampling_policy import CONFIG_KEY, parse_policies
+    cached = _sampling_policy_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[1] < _SAMPLING_POLICY_TTL_S:
+        return cached[0]
+    policies: dict = {}
+    try:
+        from backend.app.db.session import get_async_db_context
+        async with get_async_db_context() as cfg_db:
+            raw = await crud.get_config_json(cfg_db, CONFIG_KEY, None)
+        policies = parse_policies(raw)
+    except Exception as exc:  # config unreadable → no clamping this time
+        logger.warning("sampling_policies_unreadable", error=str(exc))
+    _sampling_policy_cache = (policies, now)
+    return policies
+
+
+async def apply_sampling_policy(request, model_name: str) -> None:
+    """Clamp temperature / max_tokens to the model's admin policy, if any.
+
+    Runs right after apply_reasoning_policy on every attempt, so it covers
+    chat, completions, Responses and Anthropic requests alike. Logged, never
+    rejected: the client gets its answer at the clamped values.
+    """
+    from backend.app.core.sampling_policy import apply_policy, policy_for
+    policies = await _get_sampling_policies()
+    if not policies:
+        return
+    changes = apply_policy(request, policy_for(policies, model_name))
+    if changes:
+        logger.info(
+            "sampling_policy_applied", model=model_name,
+            **{k: {"from": v[0], "to": v[1]} for k, v in changes.items()},
+        )
+
+
 async def apply_reasoning_policy(request, model_name: str, model_row, settings) -> None:
     """Resolve the request's think/reasoning_effort for the model it will hit.
 
@@ -2054,6 +2100,7 @@ class InferenceService:
                 next((m for m in models if m.name == job.model), models[0]) if models else None
             )
             await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
+            await apply_sampling_policy(request, job.model)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
@@ -2357,6 +2404,7 @@ class InferenceService:
                 next((m for m in _models if m.name == job.model), _models[0]) if _models else None
             )
             await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
+            await apply_sampling_policy(request, job.model)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and _models and hasattr(request, 'backend_options'):

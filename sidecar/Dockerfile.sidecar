@@ -13,8 +13,11 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 COPY VERSION .
 COPY gpu_agent.py .
 
-# Run as a non-root user. The agent binds 8007 (>1024, no privilege needed) and
-# reads GPU/IPMI devices that are granted to the container regardless of uid.
+# Run as a non-root user. The agent binds 8007 (>1024, no privilege needed).
+# GPU access via --gpus works regardless of uid, but /dev/ipmi0 is root:root
+# 0600 on the hosts, so deploy_sidecars.sh must pass --group-add <gid of a host
+# group that owns the device> or server-power readings silently fall back to
+# the GPU sum.
 RUN useradd --create-home --shell /bin/bash --uid 1000 appuser && \
     chown -R appuser:appuser /app
 USER appuser
