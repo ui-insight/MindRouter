@@ -8,7 +8,8 @@
 #   - Docker on 10.200.0.0/24 network
 #   - Reverse proxy on :8007 → container :18007 (nginx or Apache)
 #   - Per-node sidecar keys (from MindRouter DB)
-#   - /dev/ipmi0 for server power monitoring
+#   - /dev/ipmi0 for server power monitoring (host `ipmi` group + --group-add,
+#     because the container runs as non-root appuser)
 #
 # Usage:
 #   ./sidecar/deploy_sidecars.sh              # full deploy
@@ -27,14 +28,14 @@ SSH_USER="sheneman"
 # Identity for the aspen jump; override if your key lives elsewhere.
 ASPEN_KEY="${ASPEN_KEY:-$HOME/.ssh/id_aspen}"
 
-ALL_NODES="aspen1 aspen2 aspen3 aspen4 aspen5 marten lynx calvin eunice webbyg1 webbyg2 neuromancer wintermute"
+ALL_NODES="aspen1 aspen2 aspen3 aspen4 aspen5 aspen300 marten lynx calvin eunice webbyg1 webbyg2 neuromancer wintermute"
 
 # SSH target. Most nodes resolve by bare hostname from the operator's
 # ~/.ssh/config; wintermute does not, and is only reachable through the
 # gateway, so it carries its FQDN and a ProxyJump below.
 node_host() {
     case "$1" in
-        aspen[1-5]) echo "$1.hpc.uidaho.edu" ;;
+        aspen[1-5]|aspen300) echo "$1.hpc.uidaho.edu" ;;
         wintermute) echo "wintermute.nkn.uidaho.edu" ;;
         *)          echo "$1" ;;
     esac
@@ -47,7 +48,7 @@ node_host() {
 # MindRouter with a perfectly healthy container running.
 sidecar_port() {
     case "$1" in
-        aspen[1-5]) echo "18207" ;;
+        aspen[1-5]|aspen300) echo "18207" ;;
         *)          echo "18007" ;;
     esac
 }
@@ -57,7 +58,7 @@ sidecar_port() {
 # verification even when the proxy is healthy — which reads as an outage.
 node_fqdn() {
     case "$1" in
-        aspen[1-5]|marten|lynx|webbyg1|webbyg2) echo "$1.hpc.uidaho.edu" ;;
+        aspen[1-5]|aspen300|marten|lynx|webbyg1|webbyg2) echo "$1.hpc.uidaho.edu" ;;
         calvin|eunice|aurora|neuromancer|wintermute) echo "$1.nkn.uidaho.edu" ;;
         *) echo "$1" ;;
     esac
@@ -71,7 +72,7 @@ ssh_opts() {
         # The aspens do not accept SSH from outside the cluster (port 22 times
         # out), so a bare `ssh sheneman@aspenN` — what this script used to do —
         # reports every one of them as an unreachable, dead sidecar.
-        aspen[1-5]) echo "-o ProxyJump=$SSH_USER@lynx.hpc.uidaho.edu -i $ASPEN_KEY" ;;
+        aspen[1-5]|aspen300) echo "-o ProxyJump=$SSH_USER@lynx.hpc.uidaho.edu -i $ASPEN_KEY" ;;
         wintermute) echo "-o ProxyJump=mindrouter@mindrouter.uidaho.edu" ;;
         *)          echo "" ;;
     esac
@@ -217,9 +218,28 @@ deploy_node() {
     nssh "$node" "sudo docker rm -f gpu-sidecar 2>/dev/null || true"
 
     # 5. Start new container
+    #    The image runs as non-root appuser (uid 1000) since the 2.9.19 hardening
+    #    pass, and /dev/ipmi0 is root:root 0600 on every node, so mapping the
+    #    device in is NOT enough: ipmitool inside the container fails with
+    #    "Could not open device" and the registry silently falls back to the
+    #    GPU-power sum (that is how the aspens under-reported chassis power by
+    #    ~2x from June to August 2026). Give the host an `ipmi` group that owns
+    #    the device — via a udev rule so it survives reboots, plus an immediate
+    #    chgrp/chmod — and add that gid to the container process.
     local ipmi_flag=""
     if nssh "$node" "test -c /dev/ipmi0" 2>/dev/null; then
-        ipmi_flag="--device /dev/ipmi0:/dev/ipmi0"
+        nssh "$node" "getent group ipmi >/dev/null || sudo groupadd -r ipmi; \
+            echo 'KERNEL==\"ipmi[0-9]*\", GROUP=\"ipmi\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-mindrouter-ipmi.rules >/dev/null && \
+            sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=ipmi; \
+            sudo chgrp ipmi /dev/ipmi0 && sudo chmod 0660 /dev/ipmi0"
+        local ipmi_gid
+        ipmi_gid=$(nssh "$node" "getent group ipmi | cut -d: -f3")
+        if [ -n "$ipmi_gid" ]; then
+            ipmi_flag="--device /dev/ipmi0:/dev/ipmi0 --group-add $ipmi_gid"
+        else
+            echo "  [$node] WARNING: could not create/read the ipmi group; mapping device without group (power will fall back to GPU sum)"
+            ipmi_flag="--device /dev/ipmi0:/dev/ipmi0"
+        fi
     else
         echo "  [$node] WARNING: /dev/ipmi0 not found, skipping IPMI"
     fi
