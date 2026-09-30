@@ -88,6 +88,20 @@ class TestProfiles:
         assert mimo.family == "mimo" and mimo.toggleable and not mimo.has_levels
         assert R.profile_for("XiaomiMiMo/MiMo-V2.6-Flash-MOPD").family == "mimo"
 
+    def test_native_max_is_accepted_everywhere(self):
+        # The chat page sends GLM's native "max" back; it must validate and
+        # mean the top gateway level on every family (2.9.82 hotfix).
+        assert R.normalize_level("max") == "xhigh" and R.normalize_level(" MAX ") == "xhigh"
+        glm = R.profile_for("zai-org/glm-5.3-flash")
+        assert R.resolve_reasoning(None, "max", glm).effort == "max"
+        assert R.resolve_reasoning(None, "max", Q38).effort == "xhigh"
+        assert R.resolve_reasoning(None, "max", GPT).effort == "high"
+        assert "max" in glm.describe()["accepts"]
+        req = CanonicalChatRequest(model="zai-org/glm-5.3-flash", messages=[CanonicalMessage(role=MessageRole.USER, content="hi")], reasoning_effort="max")
+        assert req.reasoning_effort == "xhigh"
+        with pytest.raises(R.InvalidReasoningLevel):
+            R.normalize_level("ultra")
+
     def test_glm53_never_forwards_a_level_its_template_would_misread(self):
         # The GLM template treats any name outside low/high/max as max, so
         # every gateway level must land on one of the three.
@@ -107,7 +121,7 @@ class TestProfiles:
             "toggleable": True,
             "levels": ["low", "medium", "xhigh"],
             "default_level": "xhigh",
-            "accepts": list(R.GATEWAY_LEVELS),
+            "accepts": list(R.GATEWAY_LEVELS) + ["max"],  # native aliases follow the vocabulary
         }
 
     def test_every_gateway_level_maps_for_families_with_levels(self):
