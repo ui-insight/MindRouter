@@ -45,6 +45,14 @@ _BUDGET_TIERS: Tuple[Tuple[int, str], ...] = (
 )
 
 
+# Native level names that fall OUTSIDE the gateway vocabulary, and the
+# gateway level they mean. The catalog publishes each family's native names
+# and the chat page sends them back verbatim, so every native name must be
+# accepted here. Qwen3.8's and gpt-oss's names all coincide with gateway
+# names; GLM-5.3's top level is ``max``.
+LEVEL_ALIASES: dict[str, str] = {"max": "xhigh"}
+
+
 class InvalidReasoningLevel(ValueError):
     """A reasoning level outside :data:`GATEWAY_LEVELS`."""
 
@@ -53,7 +61,7 @@ class InvalidReasoningLevel(ValueError):
         super().__init__(
             f"Unknown reasoning level {value!r}. Accepted values: "
             + ", ".join(GATEWAY_LEVELS)
-            + "."
+            + " (also " + ", ".join(sorted(LEVEL_ALIASES)) + ")."
         )
 
 
@@ -62,6 +70,7 @@ def normalize_level(value: object) -> str:
     if not isinstance(value, str):
         raise InvalidReasoningLevel(value)
     level = value.strip().lower()
+    level = LEVEL_ALIASES.get(level, level)
     if level not in GATEWAY_LEVELS:
         raise InvalidReasoningLevel(value)
     return level
@@ -119,7 +128,7 @@ class ReasoningProfile:
             "toggleable": self.toggleable,
             "levels": list(self.levels),
             "default_level": self.default_level,
-            "accepts": list(GATEWAY_LEVELS),
+            "accepts": list(GATEWAY_LEVELS) + sorted(LEVEL_ALIASES),
         }
 
 
