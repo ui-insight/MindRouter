@@ -36,6 +36,7 @@ the in-app [`/documentation`](#api-reference) page):
 - [Video generation](video-api.md) — `/v1/videos`, keyframe assets, async job model
 - [Voice (TTS / STT)](voice-api.md) — `/v1/audio/speech`, `/v1/audio/transcriptions`
 - [Media studio integration guide](media-studio-integration.md) — end-to-end recipe: images → video keyframes → clips → stitch → narration (for building a storyboarding / ad-mockup app)
+- [Decisions API / System One (experimental)](decisions-api.md) — `/v1/systemone` (alias `/v1/decisions`): TypeSafe's System One wire format (Jev) for typed `noul` / `choice` / `score` decisions with probabilities; `model` selects letter scoring on a vLLM model or an upstream decision server such as Laya
 
 ### Operator / admin guides
 
@@ -304,6 +305,7 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | POST | `/v1/ocr` | API Key | OCR images/PDFs/Office docs (multipart upload). `output_format=markdown` (default) or `json`; in JSON mode `content` is a JSON string `{"pages":[{"page_number","content"}]}` assembled by the gateway from one request per page — the model only transcribes. `degraded: true` marks a result whose generation hit its per-page token budget looping and was collapsed to one copy |
 | POST | `/v1/ocrmd` | API Key | Same OCR pipeline as `/v1/ocr`, returns raw `text/markdown` (header `X-OCR-Degraded: true` when a runaway generation was collapsed) |
 | POST | `/v1/search` | API Key | Web search via the configured provider (also served at `/api/search`); `"extra_snippets": true` asks Brave for up to five further excerpts per result, returned as `extra_snippets` on each item |
+| POST | `/v1/systemone` | API Key | **Experimental.** TypeSafe System One wire format (Jev-compatible; TypeSafe's SDK works with `TYPESAFE_BASE_URL` pointed here): one `state` plus a map of typed `noul` / `choice` / `score` questions in, one typed answer with probabilities and confidence per question out; no text generated. `model` picks the engine: a vLLM model scored by one-token letter likelihood, an upstream decision server (e.g. `laya`), or `jev-latest` for the admin's default. Also served at `/v1/decisions`. Off unless `decisions.enabled`. See [decisions-api.md](decisions-api.md) |
 | GET | `/v1/me/limits` | API Key | The calling key's own rate limit (requests per minute) and token budget, as enforced — so a long-running client can pace itself instead of learning the limits from a 429 |
 | POST | `/v1/images/generations` | API Key | Image generation (FLUX; requires per-account enablement) |
 | POST | `/v1/images/edits` | API Key | Reference-image edit / img2img (multipart upload) |
@@ -2307,6 +2309,13 @@ In addition to the environment variables above, MindRouter stores runtime config
 |-----|------|---------|-------------|
 | `chat.core_models` | JSON array | `[]` | Models pinned to chat dropdown |
 | `sampling.policies` | JSON object | `{}` | Per-model `min_temperature` floor and `max_tokens` cap applied at the gateway (`"*"` = every model); see "Sampling guard rails" |
+| `decisions.enabled` | boolean | `false` | **Experimental** System One API (`/v1/systemone`) master switch |
+| `decisions.default_model` | string | `qwen3.8-27b` | What `jev-latest` / a missing `model` resolves to: a vLLM model or an upstream name |
+| `decisions.allowed_models` | JSON array | `["qwen3.8-27b"]` | vLLM chat models that may be letter-scored |
+| `decisions.upstreams` | JSON object | `{}` | Model names served by their own System One server (e.g. Laya): `name -> {url, api_key, model, timeout}` |
+| `decisions.max_state_chars` | int | `32000` | Ceiling on `state` length (hard cap 64000) |
+| `decisions.fanout` | int | `8` | Concurrent scoring calls per decisions request |
+| `decisions.backend_concurrency` | int | `4` | Concurrent decision calls to one backend or upstream, per app worker process |
 | `chat.default_model` | string | (none) | Default model for new conversations |
 | `chat.system_prompt` | string | (none) | Global system prompt override for chat |
 | `chat.max_tokens` | integer | `16384` | Default max_tokens for chat requests |

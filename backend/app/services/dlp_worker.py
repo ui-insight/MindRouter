@@ -498,8 +498,6 @@ async def _internal_chat(model: str, messages: list) -> str:
     Trade-off: no scheduler admission, no retry/failover.  Scans are post-hoc
     and best-effort, so a failed dispatch costs one scan, not a request.
     """
-    import random
-
     import httpx
 
     from backend.app.core.telemetry.registry import get_registry
@@ -508,20 +506,10 @@ async def _internal_chat(model: str, messages: list) -> str:
     registry = get_registry()
     resolved, _ = registry.resolve_alias(model)
 
-    # get_backends_with_model already filters to HEALTHY in SQL.
-    backends = await registry.get_backends_with_model(resolved)
-    available = []
-    for b in backends:
-        try:
-            if await registry.is_backend_available(b.id):
-                available.append(b)
-        except Exception:
-            continue
-    if not available:
+    backend = await registry.pick_available_backend(resolved)
+    if backend is None:
         logger.warning("dlp_llm_no_backend", model=model, resolved=resolved)
         raise RuntimeError(f"no healthy backend serving DLP model {resolved!r}")
-
-    backend = random.choice(available)
 
     payload = {
         "model": resolved,
