@@ -72,6 +72,18 @@ def softmax(scores: Sequence[float]) -> list[float]:
     return [e / z for e in exps]
 
 
+def apply_temperature(probs: Sequence[float], temperature: float) -> list[float]:
+    """Sharpen (T < 1) or soften (T > 1) a label distribution: p_i ** (1/T),
+    renormalized. This is the usual temperature scaling applied to the
+    distribution itself, so it also works on one averaged over option orders.
+    The ranking never changes; only how confident the numbers are."""
+    if temperature == 1.0 or len(probs) < 2:
+        return [float(p) for p in probs]
+    powered = [p ** (1.0 / temperature) if p > 0 else 0.0 for p in probs]
+    z = sum(powered)
+    return [p / z for p in powered] if z > 0 else [float(p) for p in probs]
+
+
 @dataclass
 class LabelReadout:
     """What one scoring call returned for one presented option order.

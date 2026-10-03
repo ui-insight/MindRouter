@@ -42,7 +42,8 @@ What is NOT the same (a model is not Jev just because the wire is):
     response's ``model`` names the model that actually answered.
 
 Extensions (ignored by Jev clients): optional request field ``permutations``
-(1 or 2), and response fields ``id`` and ``metadata``.
+(1 or 2; omitted = the server's per-type defaults), and response fields ``id``
+and ``metadata``.
 """
 from __future__ import annotations
 
@@ -52,6 +53,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .scoring import apply_temperature
 from .schema import (
     MAX_OPTION_CHARS,
     MAX_OPTIONS,
@@ -72,6 +74,59 @@ JEV_MODEL_ALIASES = ("jev-latest", "jev-preview")
 
 # TypeSafe caps a Score at 10 levels.
 MAX_SCORE_LEVELS = 10
+
+# Defaults for letter scoring on a vLLM chat model, per question type. Both are
+# admin settings (decisions.permutations, decisions.temperature); these values
+# were chosen on the training split of the LocalLLaMA/typed-decisions benchmark
+# with qwen3.8-27b and checked once on its test split (accuracy 0.687 -> 0.710,
+# calibration error 0.090 -> 0.022). See docs/decisions-api.md "Benchmarks".
+#
+# permutations: how many option orders are scored and averaged. Reversing a
+# choice's options and averaging cancels position bias and is where the
+# accuracy gain is (0.643 -> 0.718); it does not help yes/no or score questions,
+# so they stay at one call.
+DEFAULT_PERMUTATIONS = {"noul": 1, "choice": 2, "score": 1}
+# temperature: softens the model's overconfident label distribution (> 1).
+# It never changes which answer is chosen, only the probabilities reported.
+DEFAULT_TEMPERATURE = {"noul": 1.35, "choice": 1.05, "score": 1.45}
+QUESTION_TYPES = ("noul", "choice", "score")
+MIN_TEMPERATURE, MAX_TEMPERATURE = 0.2, 5.0
+
+
+def parse_permutations(raw: Any) -> tuple[dict[str, int], list[str]]:
+    """decisions.permutations -> {type: 1..MAX_PERMUTATIONS}; unset types keep their default."""
+    out, problems = dict(DEFAULT_PERMUTATIONS), []
+    if raw in (None, "", {}):
+        return out, problems
+    if not isinstance(raw, dict):
+        return out, ["permutations must be a JSON object such as {\"choice\": 2}"]
+    for key, value in raw.items():
+        if key not in QUESTION_TYPES:
+            problems.append(f"permutations: unknown question type {key!r} (use noul, choice, score)")
+        elif isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_PERMUTATIONS:
+            problems.append(f"permutations.{key} must be a whole number from 1 to {MAX_PERMUTATIONS}")
+        else:
+            out[key] = value
+    return out, problems
+
+
+def parse_temperature(raw: Any) -> tuple[dict[str, float], list[str]]:
+    """decisions.temperature -> {type: float}; unset types keep their default."""
+    out, problems = dict(DEFAULT_TEMPERATURE), []
+    if raw in (None, "", {}):
+        return out, problems
+    if not isinstance(raw, dict):
+        return out, ["temperature must be a JSON object such as {\"noul\": 1.35}"]
+    for key, value in raw.items():
+        if key not in QUESTION_TYPES:
+            problems.append(f"temperature: unknown question type {key!r} (use noul, choice, score)")
+        elif isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not MIN_TEMPERATURE <= value <= MAX_TEMPERATURE:
+            problems.append(f"temperature.{key} must be a number from {MIN_TEMPERATURE} to {MAX_TEMPERATURE}")
+        else:
+            out[key] = float(value)
+    return out, problems
+
 
 # Ceiling on the questions block forwarded to an upstream server, as JSON
 # characters. Letter scoring bounds each question and option separately; an
@@ -131,7 +186,9 @@ class SystemOneRequestIn(_Wire):
     # Required by Jev; tolerated when missing here (the default model answers).
     model: str | None = None
     questions: dict[str, QuestionIn] = Field(min_length=1, max_length=MAX_QUESTIONS)
-    permutations: int = Field(default=1, ge=1, le=MAX_PERMUTATIONS)  # extension
+    # Extension. Omitted: the server's per-type defaults (decisions.permutations).
+    # Given: that many option orders for every question in the request.
+    permutations: int | None = Field(default=None, ge=1, le=MAX_PERMUTATIONS)
 
     model_config = ConfigDict(extra="ignore")
 
@@ -172,6 +229,7 @@ class PlannedQuestion:
     kind: Literal["noul", "choice", "score"]
     internal_id: str | None            # None: answered without the model (one option)
     keys: list[str] = field(default_factory=list)       # answer keys in option order
+    permutations: int = 1                               # option orders scored for this question
     options: list[str] = field(default_factory=list)    # option texts shown, same order
     legend: dict[str, Any] | None = None                # score only: "0" -> level as sent
 
@@ -215,17 +273,20 @@ def _from_pydantic(e: ValidationError, prefix: tuple = ()) -> SystemOneValidatio
     ])
 
 
-def parse_request(body: Any) -> Plan:
+def parse_request(body: Any, permutations: dict[str, int] | None = None) -> Plan:
     """validate_wire + compile_plan."""
-    return compile_plan(validate_wire(body))
+    return compile_plan(validate_wire(body), permutations)
 
 
-def compile_plan(wire: SystemOneRequestIn) -> Plan:
+def compile_plan(wire: SystemOneRequestIn, permutations: dict[str, int] | None = None) -> Plan:
     """Compile a validated request for one-token letter scoring on a chat
-    model. Raises SystemOneValidationError (422) for what that method cannot
-    express (more than MAX_OPTIONS choices, duplicate or oversized options)."""
+    model. ``permutations`` is the per-type default (decisions.permutations);
+    a request that names ``permutations`` itself overrides it for every
+    question. Raises SystemOneValidationError (422) for what letter scoring
+    cannot express (more than MAX_OPTIONS choices, duplicate or oversized
+    options)."""
     try:
-        return _compile_plan(wire)
+        return _compile_plan(wire, permutations or DEFAULT_PERMUTATIONS)
     except ValidationError as e:
         # The internal models have limits of their own (lengths, option rules).
         # Anything they refuse is a 422, never an unhandled error whose text
@@ -233,7 +294,7 @@ def compile_plan(wire: SystemOneRequestIn) -> Plan:
         raise _from_pydantic(e) from None
 
 
-def _compile_plan(wire: SystemOneRequestIn) -> Plan:
+def _compile_plan(wire: SystemOneRequestIn, default_permutations: dict[str, int]) -> Plan:
     state = render(wire.state)
     planned: list[PlannedQuestion] = []
     internal: list[BooleanQuestion | ChoiceQuestion] = []
@@ -244,6 +305,7 @@ def _compile_plan(wire: SystemOneRequestIn) -> Plan:
         if not instructions.strip():
             raise _err([*loc, "instructions"], "instructions must not be empty")
         internal_id = f"q{len(internal)}"
+        perms = wire.permutations if wire.permutations is not None else default_permutations.get(q.type, 1)
 
         if isinstance(q, NoulQuestionIn):
             question = instructions
@@ -253,9 +315,9 @@ def _compile_plan(wire: SystemOneRequestIn) -> Plan:
                 if q.criteria.false is not None:
                     question += f"\nNo means: {render(q.criteria.false)}"
             _check_len(question, [*loc, "instructions"])
-            internal.append(BooleanQuestion(id=internal_id, type="boolean", question=question))
+            internal.append(BooleanQuestion(id=internal_id, type="boolean", question=question, permutations=perms))
             planned.append(PlannedQuestion(jev_id, "noul", internal_id, keys=["true", "false"],
-                                           options=["yes", "no"]))
+                                           options=["yes", "no"], permutations=perms))
             continue
 
         if isinstance(q, ChoiceQuestionIn):
@@ -289,11 +351,13 @@ def _compile_plan(wire: SystemOneRequestIn) -> Plan:
             planned.append(PlannedQuestion(jev_id, q.type, None, keys=keys, options=options, legend=legend))
             continue
         _check_len(instructions, [*loc, "instructions"])
-        internal.append(ChoiceQuestion(id=internal_id, type="choice", question=instructions, options=options))
-        planned.append(PlannedQuestion(jev_id, q.type, internal_id, keys=keys, options=options, legend=legend))
+        internal.append(ChoiceQuestion(id=internal_id, type="choice", question=instructions, options=options,
+                                       permutations=perms))
+        planned.append(PlannedQuestion(jev_id, q.type, internal_id, keys=keys, options=options, legend=legend,
+                                       permutations=perms))
 
     request = (
-        DecisionRequest(model=wire.model, state=state, questions=internal, permutations=wire.permutations)
+        DecisionRequest(model=wire.model, state=state, questions=internal)  # permutations are per question
         if internal else None
     )
     return Plan(model_requested=wire.model, state=state, questions=planned, decision_request=request)
@@ -375,17 +439,26 @@ def format_response(
     model: str,
     request_id: str,
     backend_name: str,
+    temperature: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    """``temperature`` is the per-type setting (decisions.temperature); None
+    reports the model's label distribution as scored."""
     by_id = {r.id: r for r in results}
     answers: dict[str, Any] = {}
     quality: dict[str, Any] = {}
+    applied: dict[str, float] = {}
     for pq in plan.questions:
         if pq.internal_id is None:
             probs = [1.0]
         else:
             r = by_id[pq.internal_id]
             probs = [float(r.likelihoods[o]) for o in pq.options]
-            quality[pq.jev_id] = {"complete": r.complete, "label_mass": r.label_mass}
+            if temperature:
+                t = float(temperature.get(pq.kind, 1.0))
+                probs = apply_temperature(probs, t)
+                applied[pq.kind] = t
+            quality[pq.jev_id] = {"complete": r.complete, "label_mass": r.label_mass,
+                                  "permutations": pq.permutations}
 
         if pq.kind == "noul":
             answers[pq.jev_id] = {"type": "noul", "noul": probs[0]}  # options are ("yes", "no")
@@ -427,6 +500,8 @@ def format_response(
             "backend_calls": usage.backend_calls if usage else 0,
             "prompt_tokens": prompt,
             "cached_tokens": usage.cached_tokens if usage else None,
+            # Temperature applied to each question type's probabilities (absent: none).
+            "temperature": applied,
             "questions": quality,
         },
     }

@@ -4,10 +4,10 @@
 > (`decisions.enabled`). The wire format is TypeSafe's System One API, the one
 > their Jev model is served through, so it is stable in the sense that it is
 > someone else's published contract; which models answer, how well, and the
-> MindRouter-specific `metadata` block may change. Not yet benchmarked on our
-> hardware (see [Benchmarks](#benchmarks)).
+> MindRouter-specific `metadata` block may change. Measured on our fleet in
+> [Benchmarks](#benchmarks).
 
-Last updated: 2026-10-03 (release 2.9.83)
+Last updated: 2026-10-03 (release 2.9.84)
 
 ## What it is
 
@@ -49,7 +49,7 @@ The `model` field decides how an answer is produced.
 
 | `model` | Answered by | Configured in |
 |---|---|---|
-| a vLLM model name, e.g. `qwen3.8-27b` | One-token letter scoring on a chat model MindRouter already serves. No dedicated model, no extra GPU. | `decisions.allowed_models` |
+| a vLLM model's catalog name, e.g. `qwen/qwen3.8-27b` | One-token letter scoring on a chat model MindRouter already serves. No dedicated model, no extra GPU. | `decisions.allowed_models` |
 | an upstream name, e.g. `laya` | A purpose-built decision model running as its own System One server (Laya's `laya-serve`, Open-Jev). MindRouter forwards the state and each question's `type`, `instructions` and `criteria` (nothing else), and checks the reply against what was asked. | `decisions.upstreams` |
 | `jev-latest`, `jev-preview`, or omitted | Whichever of the above the admin set as the default. `jev-latest` is what TypeSafe's SDK sends unless told otherwise. | `decisions.default_model` |
 
@@ -61,9 +61,9 @@ normal OpenAI model list).
 
 How the two kinds differ:
 
-| | vLLM letter scoring (`qwen3.8-27b`) | Upstream server (`laya`) |
+| | vLLM letter scoring (`qwen/qwen3.8-27b`) | Upstream server (`laya`) |
 |---|---|---|
-| What the number is | The chat model's next-token likelihood over option letters, renormalized (`metadata.score_semantics = normalized_label_likelihood`). Not calibrated. | Whatever that model reports (`upstream_model_probability`). Laya's are temperature-calibrated on its own data. |
+| What the number is | The chat model's next-token likelihood over option letters, renormalized, then softened by a per-type temperature fitted on one public benchmark (`metadata.score_semantics = normalized_label_likelihood`, `metadata.temperature`). Calibrated on that benchmark, not on your data. | Whatever that model reports (`upstream_model_probability`); MindRouter does not adjust it. |
 | Choice options | At most **20** (one single-token letter each); more is a 422 | The upstream's own limit (Laya: 100) |
 | State size | `decisions.max_state_chars`, then the model's context (large) | `decisions.max_state_chars`, then the upstream's (Laya: 512–1,024 tokens by default) |
 | Cost | One 1-token forward pass per question on a 27B model; state prefix-cached after the first | One small encoder pass |
@@ -100,16 +100,19 @@ How the two kinds differ:
     a level's position is its value, starting at 0.
   * `instructions`, option descriptions and score levels may each be a string,
     an object or an array.
-* `permutations` *(MindRouter extension, vLLM models only)* — `1` (default) or
-  `2`. With `2` each question is also scored with its options reversed and the
-  two distributions averaged, which cancels most position bias at twice the
-  cost.
+* `permutations` *(MindRouter extension, vLLM models only)* — how many option
+  orders are scored. With `2` a question is also scored with its options
+  reversed and the two distributions averaged, which cancels most position
+  bias at twice the calls. **Omit it** to get the server's per-type defaults
+  (`decisions.permutations`: `choice` 2, `noul` 1, `score` 1, which is where
+  the measured gain is). Send `1` or `2` to force that for every question in
+  the request.
 
 ## Response
 
 ```json
 {
-  "model": "qwen3.8-27b",
+  "model": "qwen/qwen3.8-27b",
   "answers": {
     "is_urgent":  {"type": "noul", "noul": 0.95},
     "department": {"type": "choice", "choice": "billing",
@@ -124,7 +127,8 @@ How the two kinds differ:
   "id": "dec-4f1c…",
   "metadata": {"score_semantics": "normalized_label_likelihood", "backend": "vllm_logprobs",
                "backend_calls": 3, "prompt_tokens": 890, "cached_tokens": 594,
-               "questions": {"department": {"complete": true, "label_mass": 0.97}}}
+               "temperature": {"noul": 1.35, "choice": 1.05, "score": 1.45},
+               "questions": {"department": {"complete": true, "label_mass": 0.97, "permutations": 2}}}
 }
 ```
 
@@ -146,8 +150,11 @@ How the two kinds differ:
 fields. The response header `x-typesafe-request-id` carries the same `id`.
 For vLLM models, `metadata.questions[id]` reports `label_mass` (how much of
 the model's next-token probability fell on any option letter at all; low
-means the model did not want to answer with a letter) and `complete` (false
-when a label's probability had to be estimated). For an upstream,
+means the model did not want to answer with a letter), `complete` (false
+when a label's probability had to be estimated) and `permutations` (how many
+option orders were scored), and `metadata.temperature` lists the temperature
+applied to each question type's probabilities. Temperature changes how
+confident the numbers are, never which answer is chosen. For an upstream,
 `metadata.upstream_model` and, for Laya, `metadata.routing` say which
 checkpoint answered.
 
@@ -198,8 +205,10 @@ Admin → Settings → "Decisions API (System One)", or `app_config`:
 | Key | Default | Meaning |
 |---|---|---|
 | `decisions.enabled` | `false` | Master switch (404 when off) |
-| `decisions.default_model` | `qwen3.8-27b` | What `jev-latest`, `jev-preview` and a missing `model` resolve to. A vLLM model or an upstream name. |
-| `decisions.allowed_models` | `["qwen3.8-27b"]` | vLLM chat models that may be letter-scored |
+| `decisions.default_model` | `qwen/qwen3.8-27b` | What `jev-latest`, `jev-preview` and a missing `model` resolve to. A vLLM model or an upstream name. |
+| `decisions.allowed_models` | `["qwen/qwen3.8-27b"]` | vLLM chat models that may be letter-scored. Use the catalog name exactly as `/v1/models` lists it. |
+| `decisions.permutations` | `{"noul": 1, "choice": 2, "score": 1}` | Option orders scored and averaged per question type on vLLM models (1 or 2). A request's own `permutations` overrides it. |
+| `decisions.temperature` | `{"noul": 1.35, "choice": 1.05, "score": 1.45}` | Temperature applied to each question type's probabilities on vLLM models (0.2–5; `1` is off; above 1 softens). Fitted on Qwen3.8-27B; refit if you change the model. |
 | `decisions.upstreams` | `{}` | Upstream System One servers: `{"laya": {"url": "https://host:8010", "api_key": "…", "model": null, "timeout": 30}}`. `model` is the name sent upstream; `null` omits it (Laya then picks a checkpoint by language). |
 | `decisions.max_state_chars` | `32000` | Ceiling on the rendered state (hard cap 64,000) |
 | `decisions.fanout` | `8` | Concurrent scoring calls per request (vLLM models) |
@@ -250,9 +259,14 @@ fine-tuned on that benchmark; measure before relying on it
 
 * **Not Jev.** Same request and response shape; different model, different
   numbers. Re-tune thresholds.
-* **vLLM likelihoods are not calibrated.** They are the model's own
-  next-token distribution. Do not present them as probabilities of being
-  correct without measuring on your data.
+* **vLLM probabilities are calibrated on one benchmark, not yours.** They are
+  the model's next-token distribution, softened by a temperature that made
+  them well calibrated on `typed-decisions` (below). On a different workload
+  they may be over- or under-confident; measure before setting thresholds.
+* **The model leans cautious.** On the benchmark Qwen3.8-27B over-picks the
+  conservative option (`human_review`, `escalate_to_human`, `hold`) relative
+  to the reference labels; in 70% of its errors the reference answer was its
+  second choice.
 * **20 choice options** on vLLM models. TypeSafe allows 255.
 * **No scheduler slot.** Scoring calls go straight to a replica and do not
   count against `max_concurrent`; `decisions.backend_concurrency` and the
@@ -264,7 +278,9 @@ fine-tuned on that benchmark; measure before relying on it
 * **No retry within a request.** One failing call fails the request; clients
   should retry (TypeSafe's SDK does).
 * **Position bias** on vLLM models: letter readouts favour positions.
-  `permutations: 2` cancels most of it.
+  Averaging over reversed options cancels most of it and is on by default for
+  `choice` questions only, where it raised accuracy from 0.643 to 0.718; it
+  made no measurable difference for `score` and slightly hurt `noul`.
 * **Template drift.** A future chat template that changes the thinking-off
   suffix would show up as `label_mass` collapsing; watch it after model
   upgrades.
@@ -282,18 +298,69 @@ so the same script compares a vLLM model with an upstream:
 
 ```bash
 MINDROUTER_API_KEY=mr2_… python tests/decisions_bench.py \
-    --base-url https://mindrouter.uidaho.edu --model qwen3.8-27b \
+    --base-url https://mindrouter.uidaho.edu --model qwen/qwen3.8-27b \
     --only latency,cache,concurrency,stability,order,ambiguous
 
 # accuracy + reliability on LocalLLaMA/typed-decisions (2,000 decisions; pip install datasets)
-MINDROUTER_API_KEY=mr2_… python tests/decisions_bench.py --model qwen3.8-27b --only calibration --calib-cases 400
+MINDROUTER_API_KEY=mr2_… python tests/decisions_bench.py --model qwen/qwen3.8-27b --only calibration --calib-cases 400
 ```
 
-**Results on our fleet: not yet collected.** Published reference points on
-`typed-decisions`: TypeSafe Jev 1.13.0 0.727 accuracy; the benchmark's teacher
-self-agreement ceiling 0.735; open-alternative-jev reports 0.737 for
-Qwen3.6-27B with this same letter-scoring method. Qwen3.8-27B through
-MindRouter has not been measured.
+### Results (2026-10-03, through production MindRouter)
+
+`LocalLLaMA/typed-decisions`, config `all`, test split: 400 cases, 2,000
+decisions, four workflows. Accuracy is the share of decisions whose top answer
+matches the reference label. No request failed in any run.
+
+| | Accuracy | noul | choice | score | Calibration error (ECE) | Score MAE |
+|---|---|---|---|---|---|---|
+| Qwen3.8-27B, 2.9.83 (one option order, no temperature) | 0.687 | 0.770 | 0.643 | 0.657 | 0.090 | 0.403 |
+| **Qwen3.8-27B, 2.9.84 defaults** | **0.710** | 0.770 | 0.718 | 0.657 | **0.022** | **0.377** |
+| Qwen3.8-27B, `permutations: 2` for every type | 0.707 | 0.752 | 0.718 | 0.664 | 0.063 | 0.382 |
+| Laya (base checkpoints, zero-shot) | 0.361 | 0.487 | 0.287 | 0.323 | 0.175 | — |
+| *TypeSafe Jev 1.13.0 (published, not measured here)* | *0.727* | | | | *0.144* | *0.391* |
+| *random / majority class / teacher self-agreement ceiling* | *0.318 / 0.461 / 0.735* | | | | | |
+
+How the 2.9.84 defaults were chosen: the per-type option-order setting and the
+temperatures were fitted on a 400-case sample of the benchmark's **training**
+split and then scored once on the test split; the 2.9.84 row is that result
+(computed from per-question answers collected through production at one and
+two option orders). With those defaults, answers reported at 0.9 confidence or
+higher were correct 94.7% of the time (89.8% before).
+
+Things the numbers say:
+
+* **Much of the remaining gap is label noise.** On the 1,188 decisions where
+  the benchmark's teacher labels agree with themselves, Qwen3.8-27B scores
+  0.80; where the teacher is split, 0.52. That is why the ceiling is 0.735.
+* **Laya's base checkpoints are near chance here**, which matches its own
+  model card (0.362). Its published 0.766 is a separate checkpoint fine-tuned
+  on this benchmark's workflows.
+* **More is available with per-question statistics.** Dividing a yes/no
+  answer by the model's own average answer to that same question (no labels
+  needed) raised `noul` from 0.770 to about 0.81, and a recipe chosen on the
+  training split reached 0.723 overall. With labeled examples of a workflow, a
+  per-question bias fit reached 0.75–0.76. Neither is built in: both need a
+  history of the same question.
+
+Latency from a client outside the cluster, one request at a time (p50):
+
+| Questions sharing one state | Qwen3.8-27B (one option order) | Laya |
+|---|---|---|
+| 1 | 183 ms | 128 ms |
+| 4 | 424 ms | 135 ms |
+| 16 | 715 ms | 162 ms |
+| 16, 24,000-character state | 3.2 s | 0.43 s (state cut to its 512-token context) |
+
+A second option order doubles the calls for that question: a five-question
+request took 394 ms at one order and 606 ms at two for every type. Jev's
+published single-question p50 is 236–276 ms (third-party measurements).
+Under parallel load: Qwen3.8-27B 32 decisions/s from 6 clients; Laya
+49 decisions/s from 8 clients (its single inference thread is the limit).
+
+Known gap: vLLM does not report prefix-cache hits unless started with
+`--enable-prompt-tokens-details`, which our units do not set, so
+`metadata.cached_tokens` is null and a multi-question request is charged the
+state once per scoring call rather than once.
 
 ## Compatibility evidence
 

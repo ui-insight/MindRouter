@@ -184,7 +184,18 @@
                                 <div class="mb-3">
                                     <label for="decisions_allowed_models" class="form-label">vLLM models (comma-separated)</label>
                                     <input type="text" class="form-control" id="decisions_allowed_models" name="decisions_allowed_models" value="{{ decisions_allowed_models }}">
-                                    <div class="form-text">Only models this scoring method has been validated on (Qwen3.8-27B). At most 20 options per choice.</div>
+                                    <div class="form-text">Catalog names exactly as <code>/v1/models</code> lists them (for example <code>qwen/qwen3.8-27b</code>). Only models this scoring method has been validated on. At most 20 options per choice.</div>
+                                </div>
+                                <div class="row g-2 mb-3">
+                                    <div class="col-md-6">
+                                        <label for="decisions_permutations" class="form-label">Option orders averaged (JSON)</label>
+                                        <input type="text" class="form-control font-monospace" id="decisions_permutations" name="decisions_permutations" value="{{ decisions_permutations_json }}">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label for="decisions_temperature" class="form-label">Temperature (JSON)</label>
+                                        <input type="text" class="form-control font-monospace" id="decisions_temperature" name="decisions_temperature" value="{{ decisions_temperature_json }}">
+                                    </div>
+                                    <div class="form-text">vLLM models only, per question type. <strong>Option orders</strong>: <code>2</code> also scores the options reversed and averages, which removes position bias at twice the calls (worth it for <code>choice</code>; no gain measured for <code>noul</code> or <code>score</code>). <strong>Temperature</strong> above 1 softens overconfident probabilities; it never changes which answer is chosen. <code>1</code> turns either off. Defaults were fitted on Qwen3.8-27B.</div>
                                 </div>
                                 <div class="mb-3">
                                     <label for="decisions_upstreams" class="form-label">Upstream System One servers (JSON)</label>

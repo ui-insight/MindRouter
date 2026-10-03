@@ -52,6 +52,8 @@ class BooleanQuestion(BaseModel):
     id: str
     type: Literal["boolean"]
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    # Option orders scored for THIS question; None uses the request's value.
+    permutations: int | None = Field(default=None, ge=1, le=MAX_PERMUTATIONS)
 
     @property
     def options(self) -> tuple[str, ...]:
@@ -63,6 +65,7 @@ class ChoiceQuestion(BaseModel):
     type: Literal["choice"]
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     options: list[str] = Field(min_length=2, max_length=MAX_OPTIONS)
+    permutations: int | None = Field(default=None, ge=1, le=MAX_PERMUTATIONS)
 
     @field_validator("options")
     @classmethod
@@ -88,6 +91,7 @@ class ScaleQuestion(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     min: int
     max: int
+    permutations: int | None = Field(default=None, ge=1, le=MAX_PERMUTATIONS)
 
     @model_validator(mode="after")
     def _range_ok(self) -> ScaleQuestion:
