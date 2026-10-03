@@ -110,7 +110,7 @@ class VLLMLogprobsBackend:
                 # One "view" per (question, option order).
                 views: list[tuple[int, list[int]]] = []
                 for qi, q in enumerate(request.questions):
-                    for order in option_orders(len(q.options), request.permutations):
+                    for order in option_orders(len(q.options), q.permutations or request.permutations):
                         views.append((qi, order))
 
                 request_gate = asyncio.Semaphore(max(1, fanout))

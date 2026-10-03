@@ -5829,6 +5829,8 @@ async def admin_settings(
             "decisions_allowed_models": ", ".join(decisions_cfg["allowed_models"]),
             "decisions_upstreams_json": decisions_upstreams_json,
             "decisions_upstream_names": sorted(decisions_cfg["upstreams"]),
+            "decisions_permutations_json": json.dumps(decisions_cfg["permutations"]),
+            "decisions_temperature_json": json.dumps(decisions_cfg["temperature"]),
             "auto_enrich": auto_enrich,
             "enrich_model": enrich_model,
             "enrich_api_key": enrich_api_key,
@@ -5967,6 +5969,7 @@ async def admin_settings_post(
 
     elif action == "set_decisions":
         # EXPERIMENTAL System One API (services/decisions). Off by default.
+        from backend.app.services.decisions.systemone import parse_permutations, parse_temperature
         from backend.app.services.decisions.upstream import parse_upstreams, restore_keys
 
         enabled = form.get("decisions_enabled") == "on"
@@ -5991,6 +5994,24 @@ async def admin_settings_post(
                 url="/admin/settings?error=" + quote_plus("Decisions upstreams: " + "; ".join(problems)[:300]),
                 status_code=302,
             )
+        # Letter-scoring tuning: option orders averaged and temperature, per question type.
+        tuning = {}
+        for field_name, parse in (("permutations", parse_permutations), ("temperature", parse_temperature)):
+            raw_value = form.get(f"decisions_{field_name}", "").strip()
+            try:
+                submitted = json.loads(raw_value) if raw_value else {}
+            except ValueError:
+                return RedirectResponse(
+                    url="/admin/settings?error=" + quote_plus(f"Decisions: {field_name} must be valid JSON"),
+                    status_code=302,
+                )
+            value, tuning_problems = parse(submitted)
+            if tuning_problems:
+                return RedirectResponse(
+                    url="/admin/settings?error=" + quote_plus("Decisions " + "; ".join(tuning_problems)[:300]),
+                    status_code=302,
+                )
+            tuning[field_name] = value
         clash = sorted(set(allowed) & set(upstreams))
         if clash:
             return RedirectResponse(
@@ -6017,10 +6038,19 @@ async def admin_settings_post(
             db, "decisions.upstreams", upstreams_value,
             description="Model names served by their own System One server (e.g. Laya): name -> {url, api_key, model}",
         )
+        await crud.set_config(
+            db, "decisions.permutations", tuning["permutations"],
+            description="Option orders scored and averaged per question type (letter scoring on vLLM models)",
+        )
+        await crud.set_config(
+            db, "decisions.temperature", tuning["temperature"],
+            description="Temperature applied to each question type's probabilities (letter scoring on vLLM models)",
+        )
         await crud.log_admin_action(
             db, user_id=user_id, action="settings.set_decisions", entity_type="config",
             # Names only: an upstream entry carries a credential.
-            detail=f"enabled={enabled} default={default_model} vllm={allowed} upstreams={sorted(upstreams)}",
+            detail=(f"enabled={enabled} default={default_model} vllm={allowed} upstreams={sorted(upstreams)} "
+                    f"permutations={tuning['permutations']} temperature={tuning['temperature']}"),
             ip_address=_ip,
         )
         await db.commit()

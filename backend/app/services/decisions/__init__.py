@@ -37,8 +37,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .schema import MAX_STATE_CHARS, DecisionRequest, DecisionResult, DecisionUsage
+from .systemone import parse_permutations, parse_temperature
 
-DEFAULT_MODEL = "qwen3.8-27b"
+# The catalog name, exactly as GET /v1/models lists it. (2.9.83 shipped the
+# short name "qwen3.8-27b", which no backend serves: jev-latest answered 404.)
+DEFAULT_MODEL = "qwen/qwen3.8-27b"
 
 
 @dataclass
@@ -117,7 +120,21 @@ async def get_decisions_config(db) -> dict:
         # Model names served by a System One server of their own (Laya,
         # Open-Jev) instead of by letter scoring on vLLM: name -> Upstream.
         "upstreams": _upstreams(get("upstreams", {})),
+        # Letter scoring only (never an upstream): option orders averaged and
+        # temperature applied, per question type. See systemone.DEFAULT_*.
+        "permutations": _checked_setting("permutations", parse_permutations(get("permutations", {}))),
+        "temperature": _checked_setting("temperature", parse_temperature(get("temperature", {}))),
     }
+
+
+def _checked_setting(name: str, parsed: tuple) -> dict:
+    value, problems = parsed
+    if problems:
+        # Only reachable with a hand-edited app_config row; bad entries keep their default.
+        from backend.app.logging_config import get_logger
+
+        get_logger(__name__).warning("decisions_setting_invalid", setting=name, problems=problems)
+    return value
 
 
 def _upstreams(raw) -> dict:

@@ -2310,8 +2310,10 @@ In addition to the environment variables above, MindRouter stores runtime config
 | `chat.core_models` | JSON array | `[]` | Models pinned to chat dropdown |
 | `sampling.policies` | JSON object | `{}` | Per-model `min_temperature` floor and `max_tokens` cap applied at the gateway (`"*"` = every model); see "Sampling guard rails" |
 | `decisions.enabled` | boolean | `false` | **Experimental** System One API (`/v1/systemone`) master switch |
-| `decisions.default_model` | string | `qwen3.8-27b` | What `jev-latest` / a missing `model` resolves to: a vLLM model or an upstream name |
-| `decisions.allowed_models` | JSON array | `["qwen3.8-27b"]` | vLLM chat models that may be letter-scored |
+| `decisions.default_model` | string | `qwen/qwen3.8-27b` | What `jev-latest` / a missing `model` resolves to: a vLLM model or an upstream name |
+| `decisions.allowed_models` | JSON array | `["qwen/qwen3.8-27b"]` | vLLM chat models that may be letter-scored (catalog names) |
+| `decisions.permutations` | JSON object | `{"noul": 1, "choice": 2, "score": 1}` | Option orders scored and averaged per question type on vLLM models |
+| `decisions.temperature` | JSON object | `{"noul": 1.35, "choice": 1.05, "score": 1.45}` | Temperature applied to each question type's probabilities on vLLM models (`1` = off) |
 | `decisions.upstreams` | JSON object | `{}` | Model names served by their own System One server (e.g. Laya): `name -> {url, api_key, model, timeout}` |
 | `decisions.max_state_chars` | int | `32000` | Ceiling on `state` length (hard cap 64000) |
 | `decisions.fanout` | int | `8` | Concurrent scoring calls per decisions request |

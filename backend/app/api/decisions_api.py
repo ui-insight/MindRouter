@@ -158,7 +158,7 @@ async def systemone(
                 f"model '{str(requested)[:100]}' is not available for decisions here; use one of: {', '.join(offered)}",
             )
         try:
-            plan = compile_plan(wire)
+            plan = compile_plan(wire, cfg["permutations"])
         except SystemOneValidationError as e:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.detail) from None
         availability = await model_availability(registry, model)
@@ -183,7 +183,8 @@ async def systemone(
         parameters={
             "backend": backend.name,
             "questions": len(wire.questions),
-            "permutations": wire.permutations,
+            # A number when the caller named it; otherwise the server's per-type defaults applied.
+            "permutations": wire.permutations if wire.permutations is not None else "default",
             "types": sorted({q.type for q in wire.questions.values()}),
             "state_chars": len(state_text),
             "model_requested": requested,
@@ -249,7 +250,7 @@ async def systemone(
     try:
         payload, token_cost, counts = await _complete(
             db, db_request.id, user.id, plan, outcome, answered,
-            model=model, request_id=request_id, backend_name=backend.name,
+            model=model, request_id=request_id, backend_name=backend.name, temperature=cfg["temperature"],
         )
     except Exception as e:
         # The model answered but the result could not be formatted or recorded.
@@ -286,7 +287,7 @@ async def systemone(
     return payload
 
 
-async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, request_id, backend_name):
+async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, request_id, backend_name, temperature):
     """Build the response and record the completed request + quota in one
     transaction. Returns (payload, tokens charged, counts for metrics)."""
     if answered is not None:
@@ -318,6 +319,7 @@ async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, requ
         incomplete = sum(1 for r in outcome.results if not r.complete)
         payload = format_response(
             plan, outcome.results, usage, model=model, request_id=request_id, backend_name=backend_name,
+            temperature=temperature,
         )
     token_cost = max(0, prompt_tokens - cached_tokens) + scoring_tokens
 

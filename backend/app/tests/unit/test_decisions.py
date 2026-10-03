@@ -602,7 +602,7 @@ class TestSystemOneWire:
         # usage: billable input (prompt minus prefix-cached) and scoring tokens, both ints
         assert r["usage"] == {"input_tokens": 180, "output_tokens": 3}
         assert r["id"] == "dec-1" and r["metadata"]["score_semantics"] == SCORE_SEMANTICS
-        assert r["metadata"]["questions"]["department"] == {"complete": True, "label_mass": 0.9}
+        assert r["metadata"]["questions"]["department"] == {"complete": True, "label_mass": 0.9, "permutations": 2}
 
     def test_confidence_follows_typesafes_formulas(self):
         # choice: (n * max - 1) / (n - 1); docs.typesafe.ai/confidence.md
@@ -700,8 +700,10 @@ def _auth():
 
 _BODY = {"state": "secret ticket text", "model": "jev-latest",
          "questions": {"escalate": {"type": "noul", "instructions": "Escalate?"}}}
+_NEUTRAL = {"permutations": {"noul": 1, "choice": 1, "score": 1},
+            "temperature": {"noul": 1.0, "choice": 1.0, "score": 1.0}}
 _CFG = {"enabled": True, "default_model": "qwen3.8-27b", "allowed_models": ["qwen3.8-27b"],
-        "max_state_chars": 1000, "fanout": 4, "backend_concurrency": 4, "upstreams": {}}
+        "max_state_chars": 1000, "fanout": 4, "backend_concurrency": 4, "upstreams": {}, **_NEUTRAL}
 
 
 def _outcome():
@@ -779,6 +781,7 @@ class TestRoute:
         assert "secret" not in json.dumps(kw["parameters"]) and "Escalate" not in json.dumps(kw["parameters"])
         assert kw["parameters"]["questions"] == 1 and kw["parameters"]["state_chars"] == len("secret ticket text")
         assert kw["parameters"]["types"] == ["noul"] and kw["parameters"]["model_requested"] == "jev-latest"
+        assert kw["parameters"]["permutations"] == "default"   # the caller did not name it
 
     async def test_decisions_path_is_an_alias_with_the_same_shape(self):
         result, _, crud, _, _, _ = await _call(_BODY, path="/v1/decisions")
@@ -1154,8 +1157,10 @@ class TestSettings:
 
     async def test_defaults_when_nothing_is_configured(self):
         cfg, db = await self._cfg([])
-        assert cfg == {"enabled": False, "default_model": "qwen3.8-27b", "allowed_models": ["qwen3.8-27b"],
-                       "max_state_chars": 32_000, "fanout": 8, "backend_concurrency": 4, "upstreams": {}}
+        assert cfg == {"enabled": False, "default_model": "qwen/qwen3.8-27b", "allowed_models": ["qwen/qwen3.8-27b"],
+                       "max_state_chars": 32_000, "fanout": 8, "backend_concurrency": 4, "upstreams": {},
+                       "permutations": {"noul": 1, "choice": 2, "score": 1},
+                       "temperature": {"noul": 1.35, "choice": 1.05, "score": 1.45}}
         db.execute.assert_awaited_once()   # one query for every decisions.* key, not one per key
 
     async def test_rows_are_json_decoded_and_upstreams_parsed(self):
@@ -1353,3 +1358,155 @@ class TestUpstreamKeysAreNotRenderedBack:
         assert problems == [] and value["laya"]["api_key"] == "rotated"
         value, problems = up.restore_keys({"new": {"url": "https://n", "api_key": up.KEY_PLACEHOLDER}}, self._stored)
         assert value == {} and problems and "new" in problems[0]
+
+
+# --------------------------------------------------------------------------
+# 10. letter-scoring tuning (2.9.84): option-order averaging per question
+#     type, and temperature
+# --------------------------------------------------------------------------
+
+from backend.app.services.decisions.scoring import apply_temperature  # noqa: E402
+
+_THREE = {"state": "s", "model": "jev-latest", "questions": {
+    "yn": {"type": "noul", "instructions": "?"},
+    "ch": {"type": "choice", "instructions": "?", "criteria": {"a": None, "b": None, "c": None}},
+    "sc": {"type": "score", "instructions": "?", "criteria": ["low", "mid", "high"]},
+}}
+
+
+class TestDefaultModelName:
+    def test_default_is_the_catalog_name(self):
+        # 2.9.83 shipped "qwen3.8-27b"; the catalog lists "qwen/qwen3.8-27b", so
+        # jev-latest answered 404 "model does not exist" in production.
+        assert pkg.DEFAULT_MODEL == "qwen/qwen3.8-27b"
+
+
+class TestOptionOrderDefaults:
+    def test_only_choice_is_averaged_over_two_orders_by_default(self):
+        plan = so.parse_request(_THREE)
+        assert {q.jev_id: q.permutations for q in plan.questions} == {"yn": 1, "ch": 2, "sc": 1}
+        assert [q.permutations for q in plan.decision_request.questions] == [1, 2, 1]
+
+    @pytest.mark.parametrize("n", [1, 2])
+    def test_a_request_that_names_permutations_overrides_every_type(self, n):
+        plan = so.parse_request({**_THREE, "permutations": n})
+        assert {q.permutations for q in plan.questions} == {n}
+
+    def test_admin_setting_replaces_the_defaults(self):
+        plan = so.parse_request(_THREE, {"noul": 2, "choice": 1, "score": 2})
+        assert {q.jev_id: q.permutations for q in plan.questions} == {"yn": 2, "ch": 1, "sc": 2}
+
+    async def test_adapter_scores_each_question_with_its_own_number_of_orders(self, fake_http):
+        plan = so.parse_request(_THREE)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+            out = await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        chat = [b for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        assert len(chat) == 4 and out.usage.backend_calls == 4          # 1 (noul) + 2 (choice) + 1 (score)
+        texts = [b["messages"][0]["content"] for b in chat]
+        assert sum(t.endswith("A. a\nB. b\nC. c") for t in texts) == 1
+        assert sum(t.endswith("A. c\nB. b\nC. a") for t in texts) == 1   # the reversed view of the choice
+        assert sum(t.endswith("A. low\nB. mid\nC. high") for t in texts) == 1
+
+    async def test_route_scores_with_the_admins_per_type_setting(self):
+        # What reaches the scoring backend carries the configured number of orders.
+        _, backend, _, _, _, _ = await _call(_THREE, cfg={"permutations": {"noul": 2, "choice": 1, "score": 2}},
+                                             outcome=DecisionOutcome(results=[
+                                                 DecisionResult(id="q0", type="boolean", answer=True, likelihoods={"yes": 0.6, "no": 0.4}, logprobs={"yes": -0.5, "no": -0.9}, label_mass=1.0),
+                                                 DecisionResult(id="q1", type="choice", answer="a", likelihoods={"a": 0.6, "b": 0.3, "c": 0.1}, logprobs={"a": -0.5, "b": -1.2, "c": -2.3}, label_mass=1.0),
+                                                 DecisionResult(id="q2", type="choice", answer="low", likelihoods={"low": 0.6, "mid": 0.3, "high": 0.1}, logprobs={"low": -0.5, "mid": -1.2, "high": -2.3}, label_mass=1.0)],
+                                                 usage=DecisionUsage(prompt_tokens=90, scoring_tokens=5, total_tokens=95, backend_calls=5), backend_id=7, backend_name="b7"))
+        sent = backend.decide.call_args.args[0]
+        assert [q.permutations for q in sent.questions] == [2, 1, 2]
+
+    async def test_named_permutations_are_recorded_in_the_audit_shape(self):
+        _, _, crud, _, _, _ = await _call({**_BODY, "permutations": 2})
+        assert crud.create_request.call_args.kwargs["parameters"]["permutations"] == 2
+
+
+class TestTemperature:
+    def test_softens_without_changing_the_ranking(self):
+        p = [0.90, 0.07, 0.03]
+        q = apply_temperature(p, 1.45)
+        assert sum(q) == pytest.approx(1.0) and q[0] < p[0] and q[0] > q[1] > q[2]
+        assert apply_temperature(p, 1.0) == p                      # 1 is "off"
+        sharp = apply_temperature(p, 0.5)
+        assert sharp[0] > p[0]                                     # below 1 sharpens
+        assert apply_temperature([1.0, 0.0], 1.35) == [1.0, 0.0]   # certainty stays certain
+        assert apply_temperature([1.0], 2.0) == [1.0]
+
+    def test_matches_scaling_the_logits(self):
+        logits = [2.0, 0.5, -1.0]
+        t = 1.35
+        z = [math.exp(v / t) for v in logits]
+        expect = [v / sum(z) for v in z]
+        assert apply_temperature(softmax(logits), t) == pytest.approx(expect)
+
+    def _answers(self, temperature):
+        plan = so.parse_request(_THREE)
+        results = _results_for(plan, {"q0": [0.9, 0.1], "q1": [0.8, 0.15, 0.05], "q2": [0.05, 0.15, 0.8]})
+        return so.format_response(plan, results, None, model="m", request_id="x", backend_name="b",
+                                  temperature=temperature)
+
+    def test_response_reports_softened_probabilities_and_the_same_answers(self):
+        raw = self._answers(None)
+        cal = self._answers({"noul": 1.35, "choice": 1.05, "score": 1.45})
+        assert raw["answers"]["yn"]["noul"] == pytest.approx(0.9)
+        assert 0.5 < cal["answers"]["yn"]["noul"] < 0.9
+        assert cal["answers"]["ch"]["choice"] == raw["answers"]["ch"]["choice"] == "a"
+        assert cal["answers"]["ch"]["probabilities"]["a"] < 0.8
+        assert sum(cal["answers"]["ch"]["probabilities"].values()) == pytest.approx(1.0)
+        assert cal["answers"]["ch"]["confidence"] < raw["answers"]["ch"]["confidence"]
+        # a softer distribution pulls the expected score toward the middle
+        assert raw["answers"]["sc"]["score"] == pytest.approx(1.75) and cal["answers"]["sc"]["score"] < 1.75
+        assert cal["metadata"]["temperature"] == {"noul": 1.35, "choice": 1.05, "score": 1.45}
+        assert raw["metadata"]["temperature"] == {}
+
+    def test_single_option_answers_stay_certain(self):
+        plan = so.parse_request({"state": "s", "model": "jev-latest", "questions": {
+            "only": {"type": "choice", "instructions": "?", "criteria": {"x": None}}}})
+        r = so.format_response(plan, [], None, model="m", request_id="x", backend_name="b",
+                               temperature={"noul": 3.0, "choice": 3.0, "score": 3.0})
+        assert r["answers"]["only"]["probabilities"] == {"x": 1.0} and r["metadata"]["temperature"] == {}
+
+    async def test_route_applies_the_configured_temperature(self):
+        result, _, _, _, _, _ = await _call(_BODY, cfg={"temperature": {"noul": 1.35, "choice": 1.05, "score": 1.45}})
+        assert 0.5 < result["answers"]["escalate"]["noul"] < 0.8          # scored 0.8, softened
+        assert result["metadata"]["temperature"] == {"noul": 1.35}
+
+    async def test_temperature_is_never_applied_to_an_upstream_models_answers(self):
+        ub = _upstream_backend()
+        result, _, _, _, _, _ = await _call({**_SDK_BODY, "model": "laya"}, upstream_backend=ub, cfg={
+            "upstreams": {"laya": _LAYA}, "temperature": {"noul": 3.0, "choice": 3.0, "score": 3.0}})
+        assert result["answers"]["churn_risk"]["noul"] == 0.97
+        assert "temperature" not in result["metadata"]
+
+
+class TestTuningSettings:
+    def test_empty_means_the_fitted_defaults(self):
+        assert so.parse_permutations(None) == ({"noul": 1, "choice": 2, "score": 1}, [])
+        assert so.parse_temperature({}) == ({"noul": 1.35, "choice": 1.05, "score": 1.45}, [])
+
+    def test_partial_settings_keep_the_other_defaults(self):
+        assert so.parse_permutations({"choice": 1}) == ({"noul": 1, "choice": 1, "score": 1}, [])
+        value, problems = so.parse_temperature({"noul": 1})
+        assert problems == [] and value == {"noul": 1.0, "choice": 1.05, "score": 1.45}
+
+    @pytest.mark.parametrize("raw", [{"choice": 3}, {"choice": 0}, {"choice": 1.5}, {"choice": True},
+                                     {"essay": 2}, [2], "2"])
+    def test_bad_permutations_are_reported_and_ignored(self, raw):
+        value, problems = so.parse_permutations(raw)
+        assert problems and value == so.DEFAULT_PERMUTATIONS
+
+    @pytest.mark.parametrize("raw", [{"noul": 0}, {"noul": 9}, {"noul": "hot"}, {"noul": True}, {"essay": 1.2}, 1.3])
+    def test_bad_temperatures_are_reported_and_ignored(self, raw):
+        value, problems = so.parse_temperature(raw)
+        assert problems and value == so.DEFAULT_TEMPERATURE
+
+    async def test_settings_are_loaded_with_the_rest(self):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_Rows([
+            ("decisions.permutations", '{"choice": 1}'), ("decisions.temperature", '{"score": 2}')]))
+        cfg = await pkg.get_decisions_config(db)
+        assert cfg["permutations"] == {"noul": 1, "choice": 1, "score": 1}
+        assert cfg["temperature"] == {"noul": 1.35, "choice": 1.05, "score": 2.0}
