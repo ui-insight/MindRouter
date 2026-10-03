@@ -540,6 +540,33 @@ class BackendRegistry:
                 modality=modality,
             )
 
+    async def pick_available_backend(
+        self,
+        model_name: str,
+        *,
+        engine: Optional[BackendEngine] = None,
+    ) -> Optional[Backend]:
+        """A random healthy, circuit-closed backend serving ``model_name``.
+
+        For callers that dispatch straight to a backend without a scheduler
+        slot (DLP's LLM scanner, /v1/decisions). ``get_backends_with_model``
+        already filters on HEALTHY in SQL; this adds the circuit breaker and
+        an optional engine filter, then spreads load uniformly. Returns None
+        when nothing qualifies, so each caller keeps its own error wording.
+        """
+        import random
+
+        available: List[Backend] = []
+        for b in await self.get_backends_with_model(model_name):
+            if engine is not None and b.engine != engine:
+                continue
+            try:
+                if await self.is_backend_available(b.id):
+                    available.append(b)
+            except Exception:
+                continue
+        return random.choice(available) if available else None
+
     async def model_exists(self, model_name: str) -> bool:
         """Check if a model is available on any healthy backend."""
         backends = await self.get_backends_with_model(model_name)

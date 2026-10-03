@@ -5780,6 +5780,10 @@ async def admin_settings(
     from backend.app.core.sampling_policy import CONFIG_KEY as _SAMPLING_KEY
     _sampling_raw = await crud.get_config_json(db, _SAMPLING_KEY, {}) or {}
     sampling_policies_json = json.dumps(_sampling_raw, indent=2) if _sampling_raw else ""
+    from backend.app.services.decisions import get_decisions_config
+    decisions_cfg = await get_decisions_config(db)
+    _dec_up_raw = await crud.get_config_json(db, "decisions.upstreams", {}) or {}
+    decisions_upstreams_json = json.dumps(_dec_up_raw, indent=2) if _dec_up_raw else ""
 
     # Model auto-enrichment config
     auto_enrich = await crud.get_config_json(db, "catalog.auto_enrich", False)
@@ -5818,6 +5822,11 @@ async def admin_settings(
             "default_effort": default_effort,
             "reasoning_levels": [lvl for lvl in GATEWAY_LEVELS if lvl != "none"],
             "sampling_policies_json": sampling_policies_json,
+            "decisions_enabled": decisions_cfg["enabled"],
+            "decisions_default_model": decisions_cfg["default_model"],
+            "decisions_allowed_models": ", ".join(decisions_cfg["allowed_models"]),
+            "decisions_upstreams_json": decisions_upstreams_json,
+            "decisions_upstream_names": sorted(decisions_cfg["upstreams"]),
             "auto_enrich": auto_enrich,
             "enrich_model": enrich_model,
             "enrich_api_key": enrich_api_key,
@@ -5953,6 +5962,62 @@ async def admin_settings_post(
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=sampling_policies_updated", status_code=302)
+
+    elif action == "set_decisions":
+        # EXPERIMENTAL System One API (services/decisions). Off by default.
+        from backend.app.services.decisions.upstream import parse_upstreams
+
+        enabled = form.get("decisions_enabled") == "on"
+        default_model = form.get("decisions_default_model", "").strip()
+        allowed = [m.strip() for m in form.get("decisions_allowed_models", "").split(",") if m.strip()]
+        raw_upstreams = form.get("decisions_upstreams", "").strip()
+        try:
+            upstreams_value = json.loads(raw_upstreams) if raw_upstreams else {}
+        except ValueError:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus("Decisions: upstream servers must be valid JSON"),
+                status_code=302,
+            )
+        upstreams, problems = parse_upstreams(upstreams_value)
+        if problems:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus("Decisions upstreams: " + "; ".join(problems)[:300]),
+                status_code=302,
+            )
+        clash = sorted(set(allowed) & set(upstreams))
+        if clash:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus(
+                    f"Decisions: {', '.join(clash)} cannot be both a vLLM model and an upstream server"),
+                status_code=302,
+            )
+        if not default_model or default_model not in [*allowed, *upstreams]:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus(
+                    "Decisions default model must be one of the vLLM models or upstream servers"),
+                status_code=302,
+            )
+        await crud.set_config(db, "decisions.enabled", enabled, description="EXPERIMENTAL System One API on/off")
+        await crud.set_config(
+            db, "decisions.default_model", default_model,
+            description="Model a System One request gets for jev-latest or no model",
+        )
+        await crud.set_config(
+            db, "decisions.allowed_models", allowed,
+            description="vLLM chat models scored by one-token letter likelihood",
+        )
+        await crud.set_config(
+            db, "decisions.upstreams", upstreams_value,
+            description="Model names served by their own System One server (e.g. Laya): name -> {url, api_key, model}",
+        )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_decisions", entity_type="config",
+            # Names only: an upstream entry carries a credential.
+            detail=f"enabled={enabled} default={default_model} vllm={allowed} upstreams={sorted(upstreams)}",
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=decisions_updated", status_code=302)
 
     elif action == "set_auto_enrich":
         val = form.get("auto_enrich") == "on"

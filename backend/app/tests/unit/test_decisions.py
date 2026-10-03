@@ -1,0 +1,1125 @@
+############################################################
+#
+# mindrouter - unit tests for the EXPERIMENTAL /v1/decisions
+# capability (services/decisions + api/decisions_api)
+#
+# The capability is a transitional Jev-style "System One" layer: typed
+# questions scored by one-token constrained sampling on an existing vLLM
+# server. These tests pin (1) the request contract and its hard limits,
+# (2) the prompt layout and order-averaging arithmetic borrowed from
+# open-alternative-jev, (3) the exact vLLM HTTP fields the adapter sends
+# and how it reads the reply, (4) TypeSafe's System One wire format (Jev's
+# POST /v1/systemone) in and out, and (5) the route's gating/metering. No
+# network, no model.
+#
+############################################################
+
+"""Unit tests for the decisions capability."""
+
+import json
+import math
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+
+import backend.app.api.decisions_api as api
+from backend.app.services import decisions as pkg
+from backend.app.services.decisions import DecisionBackendError, DecisionOutcome
+from backend.app.services.decisions import systemone as so
+from backend.app.services.decisions import upstream as up
+from backend.app.services.decisions import vllm_logprobs as vl
+from backend.app.services.decisions.schema import (
+    MAX_OPTIONS,
+    MAX_QUESTIONS,
+    MAX_STATE_CHARS,
+    SCORE_SEMANTICS,
+    DecisionRequest,
+    DecisionResult,
+    DecisionUsage,
+)
+from backend.app.services.decisions.scoring import (
+    INSTRUCTION,
+    LabelReadout,
+    combine,
+    option_orders,
+    render_turn,
+    softmax,
+)
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+def _req(**over):
+    body = {
+        "model": "qwen3.8-27b",
+        "state": "Ticket: export button does nothing since the release.",
+        "questions": [
+            {"id": "escalate", "type": "boolean", "question": "Escalate?"},
+            {"id": "cat", "type": "choice", "question": "Category?", "options": ["bug", "billing", "question"]},
+        ],
+    }
+    body.update(over)
+    return DecisionRequest.model_validate(body)
+
+
+def _chat_reply(label_ids, logprobs, sampled_idx, *, as_ids=True, prompt_tokens=100, cached=None, drop=()):
+    """A vLLM chat completion carrying label logprobs like 0.29 returns them."""
+    def tok(i):
+        return f"token_id:{label_ids[i]}" if as_ids else "ABCDEFGHIJKLMNOPQRST"[i]
+
+    top = [
+        {"token": tok(i), "logprob": lp, "bytes": None}
+        for i, lp in enumerate(logprobs)
+        if i not in drop
+    ]
+    usage = {"prompt_tokens": prompt_tokens, "completion_tokens": 1, "total_tokens": prompt_tokens + 1}
+    if cached is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached}
+    return {
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "A"},
+            "logprobs": {"content": [{
+                "token": tok(sampled_idx), "logprob": logprobs[sampled_idx], "bytes": None, "top_logprobs": top,
+            }]},
+            "finish_reason": "length",
+        }],
+        "usage": usage,
+    }
+
+
+class _FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+            raise httpx.HTTPStatusError("boom", request=MagicMock(), response=self)
+
+
+class _FakeClient:
+    """Stands in for httpx.AsyncClient; `handler(url, json)` returns a payload."""
+
+    calls: list = []
+    handler = None
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None):
+        _FakeClient.calls.append((url, json))
+        return _FakeClient.handler(url, json)
+
+
+def _label_ids(n=26):
+    return [32 + i for i in range(n)]  # Qwen byte-level BPE: 'A' == 32
+
+
+def _default_handler(scores_by_n=None):
+    """Tokenize → single ids; chat → logprobs by option count (A best)."""
+    ids = _label_ids()
+
+    def handler(url, body):
+        if url.endswith("/tokenize"):
+            letter = body["prompt"]
+            return _FakeResponse({"count": 1, "max_model_len": 32768, "tokens": [ids["ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(letter)]]})
+        n = len(body["allowed_token_ids"])
+        scores = (scores_by_n or {}).get(n) or [-0.2 - i for i in range(n)]
+        best = max(range(n), key=scores.__getitem__)
+        return _FakeResponse(_chat_reply(ids[:n], scores, best, cached=64))
+
+    return handler
+
+
+def _fake_registry(backends, aliases=None, open_circuits=()):
+    """Registry stub. ``get_backends_with_model`` drops unhealthy backends
+    like the SQL does; ``pick_available_backend`` is the REAL method run
+    against these stubs, so the selection rules are tested, not mocked."""
+    from backend.app.core.telemetry.registry import BackendRegistry
+
+    reg = MagicMock()
+    reg.get_backends_with_model = AsyncMock(
+        return_value=[b for b in backends if getattr(b.status, "value", b.status) == "healthy"])
+    reg.is_backend_available = AsyncMock(side_effect=lambda bid: bid not in open_circuits)
+    reg.resolve_alias = MagicMock(side_effect=lambda m: ((aliases or {}).get(m, m), None))
+
+    async def _pick(model_name, *, engine=None):
+        return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine)
+
+    reg.pick_available_backend = _pick
+    return reg
+
+
+def _vllm_backend(id=7, name="aspen5-gpu2-qwen3.8-27b", healthy=True, engine=None):
+    from backend.app.db.models import BackendEngine
+    b = MagicMock()
+    b.id, b.name, b.url = id, name, f"https://node{id}:8002"
+    b.engine = engine or BackendEngine.VLLM
+    b.status = MagicMock(value="healthy" if healthy else "unhealthy")
+    return b
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    _FakeClient.calls = []
+    _FakeClient.handler = _default_handler()
+    monkeypatch.setattr(vl.httpx, "AsyncClient", _FakeClient)
+    return _FakeClient
+
+
+# --------------------------------------------------------------------------
+# 1. request contract
+# --------------------------------------------------------------------------
+
+class TestSchema:
+    def test_three_question_types_parse(self):
+        r = _req(questions=[
+            {"id": "b", "type": "boolean", "question": "Yes?"},
+            {"id": "c", "type": "choice", "question": "Which?", "options": [" x ", "y"]},
+            {"id": "s", "type": "scale", "question": "Severity?", "min": 1, "max": 5},
+        ])
+        assert r.questions[0].options == ("yes", "no")
+        assert r.questions[1].options == ["x", "y"]  # stripped
+        assert r.questions[2].options == ("1", "2", "3", "4", "5")
+        assert r.permutations == 1 and r.model == "qwen3.8-27b"
+
+    def test_model_and_state_optional(self):
+        r = DecisionRequest.model_validate({"questions": [{"id": "q", "type": "boolean", "question": "?"}]})
+        assert r.model is None and r.state is None
+
+    @pytest.mark.parametrize("bad", [
+        {"questions": []},
+        {"questions": [{"id": "q", "type": "boolean", "question": ""}]},
+        {"questions": [{"id": "bad id", "type": "boolean", "question": "?"}]},
+        {"questions": [{"id": "q", "type": "boolean", "question": "?"}] * 2},          # duplicate id
+        {"questions": [{"id": "q", "type": "choice", "question": "?", "options": ["a"]}]},
+        {"questions": [{"id": "q", "type": "choice", "question": "?", "options": ["a", "a"]}]},
+        {"questions": [{"id": "q", "type": "choice", "question": "?", "options": ["a", ""]}]},
+        {"questions": [{"id": "q", "type": "choice", "question": "?", "options": ["a", "b\nc"]}]},
+        {"questions": [{"id": "q", "type": "choice", "question": "?", "options": [str(i) for i in range(MAX_OPTIONS + 1)]}]},
+        {"questions": [{"id": "q", "type": "scale", "question": "?", "min": 3, "max": 3}]},
+        {"questions": [{"id": "q", "type": "scale", "question": "?", "min": 0, "max": MAX_OPTIONS}]},
+        {"questions": [{"id": "q", "type": "essay", "question": "?"}]},
+        {"questions": [{"id": "q", "type": "boolean", "question": "?", "options": ["a", "b"]}], "permutations": 3},
+        {"questions": [{"id": f"q{i}", "type": "boolean", "question": "?"} for i in range(MAX_QUESTIONS + 1)]},
+        {"state": "x" * (MAX_STATE_CHARS + 1), "questions": [{"id": "q", "type": "boolean", "question": "?"}]},
+    ])
+    def test_hard_limits_reject(self, bad):
+        with pytest.raises(ValidationError):
+            DecisionRequest.model_validate(bad)
+
+    def test_response_semantics_marker_is_fixed(self):
+        assert SCORE_SEMANTICS == "normalized_label_likelihood"
+
+
+# --------------------------------------------------------------------------
+# 2. prompt layout + arithmetic (kept identical to open-alternative-jev)
+# --------------------------------------------------------------------------
+
+class TestScoring:
+    def test_render_turn_matches_so1_layout(self):
+        text = render_turn("Urgency?", ["low", "high"], "The site is down.")
+        assert text == (
+            "Choose the correct option. Reply with only its letter.\n"
+            "\nContext:\nThe site is down.\n"
+            "\nQuestion: Urgency?\nA. low\nB. high"
+        )
+        assert INSTRUCTION == "Choose the correct option. Reply with only its letter."
+
+    def test_render_turn_without_state(self):
+        assert render_turn("Q?", ["a", "b"], None) == f"{INSTRUCTION}\n\nQuestion: Q?\nA. a\nB. b"
+
+    def test_state_is_a_shared_prefix_across_questions(self):
+        s = "long shared state " * 50
+        a = render_turn("first?", ["a", "b"], s)
+        b = render_turn("second?", ["x", "y", "z"], s)
+        prefix = f"{INSTRUCTION}\n\nContext:\n{s}\n\nQuestion: "
+        assert a.startswith(prefix) and b.startswith(prefix)
+
+    def test_option_orders(self):
+        assert option_orders(3, 1) == [[0, 1, 2]]
+        assert option_orders(3, 2) == [[0, 1, 2], [2, 1, 0]]
+        assert option_orders(4, 3) == [[0, 1, 2, 3], [3, 2, 1, 0], [1, 2, 3, 0]]
+        assert option_orders(2, 3) == [[0, 1], [1, 0]]  # only 2 distinct orders exist
+
+    def test_softmax(self):
+        p = softmax([0.0, math.log(3.0)])
+        assert p == pytest.approx([0.25, 0.75])
+
+    def test_combine_single_view_uses_sampled_label(self):
+        # Floored second label makes the distribution approximate, but the
+        # sampler's pick (position 1) is still the exact answer.
+        c = combine(2, [[0, 1]], [LabelReadout([-0.5, -1.5], sampled=1, complete=False)])
+        assert c.answer_index == 1 and c.complete is False
+        assert c.likelihoods == pytest.approx(softmax([-0.5, -1.5]))
+        assert c.logprobs == [-0.5, -1.5]
+        assert c.label_mass == pytest.approx(math.exp(-0.5) + math.exp(-1.5))
+
+    def test_combine_reversed_view_maps_back_and_averages(self):
+        # View 1 shows [x, y]; view 2 shows [y, x]. Both prefer "y".
+        r1 = LabelReadout([math.log(0.2), math.log(0.8)], sampled=1)
+        r2 = LabelReadout([math.log(0.6), math.log(0.4)], sampled=0)
+        c = combine(2, [[0, 1], [1, 0]], [r1, r2])
+        assert c.likelihoods == pytest.approx([(0.2 + 0.4) / 2, (0.8 + 0.6) / 2])
+        assert c.answer_index == 1
+        assert c.logprobs == pytest.approx([math.log(0.2), math.log(0.8)])  # first view only
+
+    def test_combine_label_mass_capped_at_one(self):
+        c = combine(2, [[0, 1]], [LabelReadout([0.0, 0.0], sampled=0)])
+        assert c.label_mass == 1.0
+
+
+# --------------------------------------------------------------------------
+# 3. reading vLLM's reply
+# --------------------------------------------------------------------------
+
+class TestParseReadout:
+    def test_token_id_form(self):
+        ids = _label_ids(3)
+        r = vl.parse_readout(_chat_reply(ids, [-0.1, -2.0, -3.0], 0), ids)
+        assert r.logprobs == [-0.1, -2.0, -3.0] and r.sampled == 0 and r.complete
+
+    def test_bare_letter_form(self):
+        ids = _label_ids(2)
+        r = vl.parse_readout(_chat_reply(ids, [-1.0, -0.4], 1, as_ids=False), ids)
+        assert r.logprobs == [-1.0, -0.4] and r.sampled == 1
+
+    def test_missing_label_is_floored_and_flagged(self):
+        ids = _label_ids(3)
+        r = vl.parse_readout(_chat_reply(ids, [-0.1, -2.0, -9.0], 0, drop=(2,)), ids)
+        assert r.complete is False
+        assert r.logprobs[2] == pytest.approx(min(-0.1, -2.0) - 1.0)
+
+    def test_no_logprobs_is_a_backend_error(self):
+        with pytest.raises(DecisionBackendError) as e:
+            vl.parse_readout({"choices": [{"message": {"content": "A"}}]}, _label_ids(2))
+        assert e.value.status_code == 502
+
+
+# --------------------------------------------------------------------------
+# 4. the adapter against a fake vLLM HTTP server
+# --------------------------------------------------------------------------
+
+class TestVLLMLogprobsBackend:
+    async def _decide(self, req, backends=None, fanout=8):
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry(backends or [_vllm_backend()])):
+            return backend, await backend.decide(req, "qwen3.8-27b", fanout=fanout)
+
+    async def test_sends_one_token_constrained_scoring_calls(self, fake_http):
+        _, out = await self._decide(_req())
+        chat = [(u, b) for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        assert len(chat) == 2 and out.usage.backend_calls == 2
+        url, body = chat[1]
+        assert url == "https://node7:8002/v1/chat/completions"
+        assert body["max_tokens"] == 1 and body["temperature"] == 0.0 and body["stream"] is False
+        assert body["logprobs"] is True and body["top_logprobs"] == 3
+        assert body["allowed_token_ids"] == _label_ids(3) == body["logprob_token_ids"]
+        assert body["return_tokens_as_token_ids"] is True
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert body["messages"] == [{"role": "user", "content": render_turn(
+            "Category?", ["bug", "billing", "question"], "Ticket: export button does nothing since the release.")}]
+
+    async def test_results_usage_and_backend_attribution(self, fake_http):
+        _, out = await self._decide(_req())
+        assert out.backend_id == 7 and out.backend_name == "aspen5-gpu2-qwen3.8-27b"
+        esc, cat = out.results
+        assert esc.type == "boolean" and esc.answer is True and esc.likelihood_true == esc.likelihoods["yes"]
+        assert cat.type == "choice" and cat.answer == "bug" and cat.likelihood == cat.likelihoods["bug"]
+        assert set(cat.likelihoods) == {"bug", "billing", "question"} and sum(cat.likelihoods.values()) == pytest.approx(1.0)
+        assert cat.logprobs["bug"] == -0.2 and cat.complete
+        assert out.usage.prompt_tokens == 200 and out.usage.scoring_tokens == 2 and out.usage.total_tokens == 202
+        assert out.usage.cached_tokens == 128
+
+    async def test_scale_question_reports_expected_value(self, fake_http):
+        fake_http.handler = _default_handler({3: [math.log(0.2), math.log(0.3), math.log(0.5)]})
+        _, out = await self._decide(_req(questions=[{"id": "sev", "type": "scale", "question": "Severity?", "min": 1, "max": 3}]))
+        (sev,) = out.results
+        assert sev.answer == 3 and sev.expected_value == pytest.approx(0.2 * 1 + 0.3 * 2 + 0.5 * 3)
+
+    async def test_permutations_two_reverses_options_and_averages(self, fake_http):
+        # The fake always scores the FIRST presented option highest, so the
+        # reversed view votes for the other option; averaging must still be
+        # reported in the caller's option order and sum to 1.
+        _, out = await self._decide(_req(permutations=2, questions=[
+            {"id": "c", "type": "choice", "question": "?", "options": ["p", "q"]}]))
+        chat = [b for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        assert len(chat) == 2
+        assert chat[0]["messages"][0]["content"].endswith("A. p\nB. q")
+        assert chat[1]["messages"][0]["content"].endswith("A. q\nB. p")
+        (c,) = out.results
+        assert list(c.likelihoods) == ["p", "q"]
+        assert sum(c.likelihoods.values()) == pytest.approx(1.0)
+        assert c.likelihoods["p"] == pytest.approx(c.likelihoods["q"])  # symmetric fake → tie
+        assert out.usage.backend_calls == 2
+
+    async def test_label_ids_are_tokenized_once_per_backend(self, fake_http):
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+            await backend.decide(_req(), "qwen3.8-27b", fanout=4)
+            n1 = sum(1 for u, _ in fake_http.calls if u.endswith("/tokenize"))
+            await backend.decide(_req(), "qwen3.8-27b", fanout=4)
+            n2 = sum(1 for u, _ in fake_http.calls if u.endswith("/tokenize"))
+        assert n1 == 3 and n2 == 3  # max(2 boolean, 3 choice) letters, cached after
+
+    async def test_multi_token_label_is_rejected_400(self, fake_http):
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return _FakeResponse({"tokens": [1, 2]})
+            raise AssertionError("must not score")
+        fake_http.handler = handler
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req())
+        assert e.value.status_code == 400
+
+    async def test_no_vllm_backend_is_503(self, fake_http):
+        from backend.app.db.models import BackendEngine
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(), backends=[_vllm_backend(engine=BackendEngine.OLLAMA), _vllm_backend(healthy=False)])
+        assert e.value.status_code == 503
+
+    async def test_backend_http_failure_is_502(self, fake_http):
+        good = _default_handler()
+
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return good(url, body)
+            return _FakeResponse({"error": "cuda"}, status_code=500)
+        fake_http.handler = handler
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req())
+        assert e.value.status_code == 502
+
+    async def test_fanout_bounds_concurrent_scoring_calls(self, monkeypatch, fake_http):
+        import asyncio
+        inflight, peak = 0, 0
+        base = _default_handler()
+
+        class _SlowClient(_FakeClient):
+            async def post(self, url, json=None):
+                nonlocal inflight, peak
+                if url.endswith("/tokenize"):
+                    return base(url, json)
+                inflight += 1
+                peak = max(peak, inflight)
+                await asyncio.sleep(0.005)
+                inflight -= 1
+                return base(url, json)
+        monkeypatch.setattr(vl.httpx, "AsyncClient", _SlowClient)
+        qs = [{"id": f"q{i}", "type": "boolean", "question": "?"} for i in range(12)]
+        await self._decide(_req(questions=qs), fanout=3)
+        assert peak <= 3
+
+    async def test_backend_gate_bounds_calls_across_concurrent_requests(self, monkeypatch, fake_http):
+        # Review fix 4: fanout is per request; the per-backend gate must hold
+        # across requests, or several keys together saturate one replica.
+        import asyncio
+        inflight, peak = 0, 0
+        base = _default_handler()
+
+        class _SlowClient(_FakeClient):
+            async def post(self, url, json=None):
+                nonlocal inflight, peak
+                if url.endswith("/tokenize"):
+                    return base(url, json)
+                inflight += 1
+                peak = max(peak, inflight)
+                await asyncio.sleep(0.005)
+                inflight -= 1
+                return base(url, json)
+        monkeypatch.setattr(vl.httpx, "AsyncClient", _SlowClient)
+        backend = vl.VLLMLogprobsBackend()
+        qs = [{"id": f"q{i}", "type": "boolean", "question": "?"} for i in range(6)]
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+            await asyncio.gather(*(
+                backend.decide(_req(questions=qs), "qwen3.8-27b", fanout=8, backend_concurrency=2)
+                for _ in range(4)
+            ))
+        assert peak <= 2
+
+    async def test_first_view_warms_the_prefix_cache_before_the_rest(self, monkeypatch, fake_http):
+        # Review fix 5: with a state, view 1 must finish before views 2..n start,
+        # so they hit the prefix cache instead of all prefilling the state.
+        import asyncio
+        events = []
+        base = _default_handler()
+
+        class _Client(_FakeClient):
+            async def post(self, url, json=None):
+                if url.endswith("/tokenize"):
+                    return base(url, json)
+                q = json["messages"][0]["content"].split("Question: ")[1].split("\n")[0]
+                events.append(("start", q))
+                await asyncio.sleep(0.002)
+                events.append(("end", q))
+                return base(url, json)
+        monkeypatch.setattr(vl.httpx, "AsyncClient", _Client)
+        qs = [{"id": f"q{i}", "type": "boolean", "question": f"Q{i}?"} for i in range(4)]
+        await self._decide(_req(questions=qs), fanout=8)
+        assert events[0] == ("start", "Q0?") and events[1] == ("end", "Q0?")
+        assert {e for e in events[2:] if e[0] == "start"} == {("start", f"Q{i}?") for i in (1, 2, 3)}
+
+    async def test_failed_view_cancels_its_siblings(self, monkeypatch, fake_http):
+        # Review fix 8: the first failure must cancel the in-flight siblings,
+        # not leave them running against a closed client.
+        import asyncio
+        finished = []
+        base = _default_handler()
+
+        class _Client(_FakeClient):
+            async def post(self, url, json=None):
+                if url.endswith("/tokenize"):
+                    return base(url, json)
+                q = json["messages"][0]["content"].split("Question: ")[1].split("\n")[0]
+                if q == "bad?":
+                    await asyncio.sleep(0.001)
+                    return _FakeResponse({"error": "cuda"}, status_code=500)
+                await asyncio.sleep(0.05)
+                finished.append(q)
+                return base(url, json)
+        monkeypatch.setattr(vl.httpx, "AsyncClient", _Client)
+        qs = [{"id": "bad", "type": "boolean", "question": "bad?"}] + [
+            {"id": f"s{i}", "type": "boolean", "question": f"slow{i}?"} for i in range(4)]
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(state=None, questions=qs), fanout=8)
+        assert e.value.status_code == 502
+        await asyncio.sleep(0.08)
+        assert finished == []
+
+    async def test_non_json_reply_is_502_not_500(self, fake_http):
+        # Review fix 6: a proxy error page (resp.json() ValueError) is a backend error.
+        good = _default_handler()
+
+        class _HtmlResponse(_FakeResponse):
+            def json(self):
+                raise ValueError("Expecting value: line 1 column 1")
+
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return good(url, body)
+            return _HtmlResponse({})
+        fake_http.handler = handler
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req())
+        assert e.value.status_code == 502
+
+    async def test_open_circuit_backend_is_never_picked(self, fake_http):
+        # Review fix 9: selection goes through registry.pick_available_backend.
+        reg = _fake_registry([_vllm_backend(id=7), _vllm_backend(id=8)], open_circuits={7})
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=reg):
+            for _ in range(10):
+                out = await backend.decide(_req(), "qwen3.8-27b", fanout=4)
+                assert out.backend_id == 8
+
+
+# --------------------------------------------------------------------------
+# 5. the System One wire format (TypeSafe Jev's POST /v1/systemone)
+# --------------------------------------------------------------------------
+
+# The exact body TypeSafe's Python SDK (typesafe-sdk 0.7.2) sent for
+# client.system_one(state, questions), captured from its HTTP transport. If
+# parse_request stops accepting this, a Jev client stops working.
+_SDK_BODY = json.loads(
+    '{"state": "Hi, we were billed twice for March. Please refund the duplicate today or we will cancel.",'
+    ' "model": "jev-latest", "questions": {'
+    '"department": {"type": "choice", "instructions": "Which team should handle this?",'
+    ' "criteria": {"billing": "Payments, invoicing, refunds", "technical": "Bugs, outages", "sales": null}},'
+    ' "urgency": {"type": "score", "instructions": "How urgent is this?",'
+    ' "criteria": ["Can wait", "Needs attention this week", {"level": "today", "note": "blocking"}]},'
+    ' "churn_risk": {"type": "noul", "instructions": "Does the user threaten to leave?",'
+    ' "criteria": {"true": "Explicit threat to cancel", "false": "No such threat"}}}}'
+)
+
+
+def _results_for(plan, weights=None):
+    """Synthetic scoring results: first option most likely unless told otherwise."""
+    out = []
+    for q in plan.decision_request.questions:
+        n = len(q.options)
+        raw = (weights or {}).get(q.id) or [math.exp(-0.3 * i) for i in range(n)]
+        z = sum(raw)
+        lk = {o: v / z for o, v in zip(q.options, raw)}
+        out.append(DecisionResult(id=q.id, type=q.type, answer=q.options[0], likelihoods=lk,
+                                  logprobs={o: math.log(v) for o, v in lk.items()}, label_mass=0.9))
+    return out
+
+
+class TestSystemOneWire:
+    def test_sdk_request_compiles_to_the_decisions_pipeline(self):
+        plan = so.parse_request(_SDK_BODY)
+        assert plan.model_requested == "jev-latest" and plan.state.startswith("Hi, we were billed twice")
+        assert [(q.jev_id, q.kind) for q in plan.questions] == [
+            ("department", "choice"), ("urgency", "score"), ("churn_risk", "noul")]
+        dept, urg, churn = plan.decision_request.questions
+        # choice: "name: description", a null description leaves the bare name
+        assert dept.type == "choice" and dept.options == [
+            "billing: Payments, invoicing, refunds", "technical: Bugs, outages", "sales"]
+        # score: levels in order; a structured level is shown as JSON
+        assert urg.options == ["Can wait", "Needs attention this week", '{"level": "today", "note": "blocking"}']
+        # noul: a yes/no question with both criteria spelled out
+        assert churn.type == "boolean" and churn.question == (
+            "Does the user threaten to leave?\nYes means: Explicit threat to cancel\nNo means: No such threat")
+
+    def test_response_has_jevs_answer_shapes(self):
+        plan = so.parse_request(_SDK_BODY)
+        usage = DecisionUsage(prompt_tokens=300, scoring_tokens=3, total_tokens=303, cached_tokens=120, backend_calls=3)
+        r = so.format_response(plan, _results_for(plan), usage, model="qwen3.8-27b", request_id="dec-1",
+                               backend_name="vllm_logprobs")
+        assert r["model"] == "qwen3.8-27b" and set(r["answers"]) == {"department", "urgency", "churn_risk"}
+        dept, urg, churn = (r["answers"][k] for k in ("department", "urgency", "churn_risk"))
+        assert set(dept) == {"type", "choice", "probabilities", "confidence"} and dept["choice"] == "billing"
+        assert list(dept["probabilities"]) == ["billing", "technical", "sales"]
+        assert sum(dept["probabilities"].values()) == pytest.approx(1.0)
+        assert set(urg) == {"type", "score", "legend", "probabilities", "confidence"}
+        assert urg["legend"] == {"0": "Can wait", "1": "Needs attention this week",
+                                 "2": {"level": "today", "note": "blocking"}}  # levels echoed as sent
+        assert list(urg["probabilities"]) == ["0", "1", "2"]
+        assert urg["score"] == pytest.approx(sum(i * p for i, p in enumerate(urg["probabilities"].values())))
+        assert churn == {"type": "noul", "noul": pytest.approx(1 / (1 + math.exp(-0.3)))}  # P(yes)
+        # usage: billable input (prompt minus prefix-cached) and scoring tokens, both ints
+        assert r["usage"] == {"input_tokens": 180, "output_tokens": 3}
+        assert r["id"] == "dec-1" and r["metadata"]["score_semantics"] == SCORE_SEMANTICS
+        assert r["metadata"]["questions"]["department"] == {"complete": True, "label_mass": 0.9}
+
+    def test_confidence_follows_typesafes_formulas(self):
+        # choice: (n * max - 1) / (n - 1); docs.typesafe.ai/confidence.md
+        assert so.choice_confidence([0.88, 0.12, 0.0]) == pytest.approx((3 * 0.88 - 1) / 2)
+        assert so.choice_confidence([1 / 3] * 3) == pytest.approx(0.0) and so.choice_confidence([1.0]) == 1.0
+        # score: 1 - E|level - mode| / (same for a uniform spread), clamped to [0, 1]
+        assert so.score_confidence([0.0, 0.95, 0.05]) == pytest.approx(1 - 0.05 / (2 / 3))
+        assert so.score_confidence([0.44, 0.32, 0.24]) == 0.0
+        assert so.score_confidence([0, 0, 1, 0, 0]) == 1.0
+
+    def test_choice_reports_the_highest_probability_option(self):
+        plan = so.parse_request({"state": "s", "model": "jev-latest", "questions": {
+            "c": {"type": "choice", "instructions": "?", "criteria": {"a": None, "b": None, "c": None}}}})
+        r = so.format_response(plan, _results_for(plan, {"q0": [0.1, 0.7, 0.2]}), None, model="m",
+                               request_id="x", backend_name="b")
+        assert r["answers"]["c"]["choice"] == "b" and r["answers"]["c"]["confidence"] == pytest.approx((3 * 0.7 - 1) / 2)
+
+    def test_structured_state_and_instructions_are_rendered_as_json(self):
+        plan = so.parse_request({"state": {"body": "Login fails", "n": 2}, "model": "jev-latest", "questions": {
+            "u": {"type": "noul", "instructions": {"question": "Does `body` need action?"}}}})
+        assert plan.state == '{"body": "Login fails", "n": 2}'
+        assert plan.decision_request.questions[0].question == '{"question": "Does `body` need action?"}'
+
+    def test_missing_instructions_are_allowed_like_typesafes_schema(self):
+        plan = so.parse_request({"state": "s", "model": "jev-latest", "questions": {"u": {"type": "noul"}}})
+        assert plan.decision_request.questions[0].question
+
+    def test_single_option_needs_no_model_call(self):
+        plan = so.parse_request({"state": "s", "model": "jev-latest", "questions": {
+            "only": {"type": "choice", "instructions": "?", "criteria": {"x": "the only one"}},
+            "lvl": {"type": "score", "instructions": "?", "criteria": ["just this"]}}})
+        assert plan.decision_request is None
+        r = so.format_response(plan, [], None, model="m", request_id="x", backend_name="b")
+        assert r["answers"]["only"] == {"type": "choice", "choice": "x", "probabilities": {"x": 1.0}, "confidence": 1.0}
+        assert r["answers"]["lvl"]["score"] == 0.0 and r["answers"]["lvl"]["confidence"] == 1.0
+        assert r["usage"] == {"input_tokens": 0, "output_tokens": 0}
+
+    @pytest.mark.parametrize("body,loc_tail", [
+        ({"model": "jev-latest", "questions": {"q": {"type": "noul"}}}, ["state"]),
+        ({"state": "s", "model": "jev-latest"}, ["questions"]),
+        ({"state": "s", "model": "jev-latest", "questions": {}}, ["questions"]),
+        ({"state": "s", "model": "jev-latest", "questions": {"q": {"type": "essay"}}}, ["questions", "q"]),
+        ({"state": "s", "model": "jev-latest", "questions": {"q": {"type": "choice", "criteria": {}}}},
+         ["questions", "q", "choice", "criteria"]),
+        ({"state": "s", "model": "jev-latest", "questions": {
+            "q": {"type": "choice", "criteria": {f"o{i}": None for i in range(MAX_OPTIONS + 1)}}}},
+         ["questions", "q", "criteria"]),
+        ({"state": "s", "model": "jev-latest", "questions": {"q": {"type": "score", "criteria": ["a"] * 11}}},
+         ["questions", "q", "criteria"]),
+        ({"state": "s", "model": "jev-latest", "questions": {"q": {"type": "score", "criteria": ["same", "same"]}}},
+         ["questions", "q", "criteria"]),
+    ])
+    def test_invalid_requests_are_422_details_under_body(self, body, loc_tail):
+        with pytest.raises(so.SystemOneValidationError) as e:
+            so.parse_request(body)
+        first = e.value.detail[0]
+        assert first["loc"][0] == "body" and first["loc"][1:1 + len(loc_tail)] == loc_tail
+        assert isinstance(first["msg"], str) and isinstance(first["type"], str)
+
+    def test_too_many_questions_is_422(self):
+        qs = {f"q{i}": {"type": "noul", "instructions": "?"} for i in range(MAX_QUESTIONS + 1)}
+        with pytest.raises(so.SystemOneValidationError):
+            so.parse_request({"state": "s", "model": "jev-latest", "questions": qs})
+
+    def test_typesafe_model_list_shape(self):
+        cfg = {"enabled": True, "default_model": "qwen3.8-27b", "allowed_models": ["qwen3.8-27b"]}
+        models = so.typesafe_model_list(cfg)["models"]
+        assert [m["name"] for m in models] == ["jev-latest", "jev-preview", "qwen3.8-27b"]
+        assert all(set(m) == {"name", "description", "release_date"} for m in models)
+        assert so.typesafe_model_list({**cfg, "enabled": False}) == {"models": []}
+
+
+# --------------------------------------------------------------------------
+# 6. the route: gating, metering, never storing the state
+# --------------------------------------------------------------------------
+
+class _FakeRequest:
+    client = MagicMock(host="10.0.0.1")
+    headers = {"user-agent": "typesafe-sdk/0.7.2"}
+
+    def __init__(self, body, path="/v1/systemone"):
+        self._body = body
+        self.url = MagicMock(path=path)
+
+    async def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def _auth():
+    u, k = MagicMock(id=1), MagicMock(id=2)
+    return u, k
+
+
+_BODY = {"state": "secret ticket text", "model": "jev-latest",
+         "questions": {"escalate": {"type": "noul", "instructions": "Escalate?"}}}
+_CFG = {"enabled": True, "default_model": "qwen3.8-27b", "allowed_models": ["qwen3.8-27b"],
+        "max_state_chars": 1000, "fanout": 4, "backend_concurrency": 4, "upstreams": {}}
+
+
+def _outcome():
+    return DecisionOutcome(
+        results=[DecisionResult(id="q0", type="boolean", answer=True, likelihoods={"yes": 0.8, "no": 0.2},
+                                logprobs={"yes": -0.3, "no": -1.7}, label_mass=0.9, likelihood_true=0.8)],
+        usage=DecisionUsage(prompt_tokens=120, scoring_tokens=1, total_tokens=121, cached_tokens=64, backend_calls=1),
+        backend_id=7, backend_name="b7",
+    )
+
+
+def _crud():
+    crud = MagicMock()
+    crud.create_request = AsyncMock(return_value=MagicMock(id=55))
+    for n in ("update_request_started", "update_request_completed", "update_request_failed",
+              "update_quota_usage", "incr_quota_redis"):
+        setattr(crud, n, AsyncMock())
+    return crud
+
+
+async def _call(body, cfg=None, availability="available", outcome=None, registry=None, path="/v1/systemone",
+                crud=None, db=None, decide=None, upstream_backend=None):
+    backend = MagicMock(name="vllm_logprobs")
+    backend.name = "vllm_logprobs"
+    if decide is not None:
+        backend.decide = AsyncMock(side_effect=decide)
+    elif isinstance(outcome, Exception):
+        backend.decide = AsyncMock(side_effect=outcome)
+    else:
+        backend.decide = AsyncMock(return_value=outcome or _outcome())
+    crud = crud or _crud()
+    db = db or MagicMock(commit=AsyncMock(), rollback=AsyncMock())
+    quota = AsyncMock()
+    response = MagicMock(headers={})
+    with (
+        patch.object(api, "get_decisions_config", AsyncMock(return_value={**_CFG, **(cfg or {})})),
+        patch.object(api, "get_registry", return_value=registry or _fake_registry([])),
+        patch.object(api, "model_availability", AsyncMock(return_value=availability)),
+        patch.object(api, "_check_quota", quota),
+        patch.object(api, "get_decision_backend", return_value=backend),
+        patch.object(api, "get_upstream_backend", return_value=upstream_backend),
+        patch.object(api, "crud", crud),
+        patch.object(api, "bind_request_context"),
+    ):
+        try:
+            result = await api.systemone(_FakeRequest(body, path), response, db=db, auth=_auth())
+        except HTTPException as e:
+            e.mocks = (backend, crud, quota, db)  # let failure tests inspect the audit trail
+            raise
+    return result, backend, crud, quota, db, response
+
+
+class TestRoute:
+    async def test_success_is_a_jev_response_and_is_metered(self):
+        result, backend, crud, quota, db, response = await _call(_BODY)
+        assert result["model"] == "qwen3.8-27b"
+        assert result["answers"] == {"escalate": {"type": "noul", "noul": 0.8}}
+        assert result["usage"] == {"input_tokens": 56, "output_tokens": 1}
+        assert result["id"].startswith("dec-") and response.headers["x-typesafe-request-id"] == result["id"]
+        quota.assert_awaited_once()
+        backend.decide.assert_awaited_once()
+        assert backend.decide.call_args.kwargs == {"fanout": 4, "backend_concurrency": 4}
+        kw = crud.update_request_completed.call_args.kwargs
+        assert kw == {"prompt_tokens": 120, "completion_tokens": 1, "tokens_estimated": False, "backend_id": 7}
+        # 120 prompt - 64 prefix-cached + 1 scoring: the cached state is not charged twice.
+        crud.update_quota_usage.assert_awaited_once_with(db, 1, 57)
+        crud.incr_quota_redis.assert_awaited_once_with(1, 57)
+        db.commit.assert_awaited()
+
+    async def test_state_is_never_stored(self):
+        _, _, crud, _, _, _ = await _call(_BODY)
+        kw = crud.create_request.call_args.kwargs
+        assert kw["endpoint"] == "/v1/systemone" and kw["model"] == "qwen3.8-27b"
+        assert "messages" not in kw and "prompt" not in kw
+        assert "secret" not in json.dumps(kw["parameters"]) and "Escalate" not in json.dumps(kw["parameters"])
+        assert kw["parameters"]["questions"] == 1 and kw["parameters"]["state_chars"] == len("secret ticket text")
+        assert kw["parameters"]["types"] == ["noul"] and kw["parameters"]["model_requested"] == "jev-latest"
+
+    async def test_decisions_path_is_an_alias_with_the_same_shape(self):
+        result, _, crud, _, _, _ = await _call(_BODY, path="/v1/decisions")
+        assert result["answers"]["escalate"]["type"] == "noul"
+        assert crud.create_request.call_args.kwargs["endpoint"] == "/v1/decisions"
+
+    @pytest.mark.parametrize("model", ["jev-latest", "jev-preview", None, "qwen3.8-27b"])
+    async def test_jev_aliases_and_allowed_names_reach_the_default_model(self, model):
+        body = {k: v for k, v in {**_BODY, "model": model}.items() if v is not None}
+        result, backend, _, _, _, _ = await _call(body)
+        assert backend.decide.call_args.args[1] == "qwen3.8-27b" and result["model"] == "qwen3.8-27b"
+
+    @pytest.mark.parametrize("model", ["gpt-oss-120b", "jev-1.13.0"])
+    async def test_other_models_are_422_on_the_model_field(self, model):
+        # A pinned TypeSafe version is refused rather than silently answered by another model.
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "model": model})
+        assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "model"]
+        assert "jev-latest" in e.value.detail[0]["msg"]
+
+    async def test_alias_in_allow_list_admits_the_resolved_model(self):
+        # Review fix 3: both sides of the allow-list check are alias-resolved.
+        reg = _fake_registry([], aliases={"default-decisions": "qwen3.8-27b"})
+        _, backend, _, _, _, _ = await _call(
+            {**_BODY, "model": "qwen3.8-27b"}, cfg={"allowed_models": ["default-decisions"]}, registry=reg)
+        assert backend.decide.call_args.args[1] == "qwen3.8-27b"
+
+    async def test_disabled_is_404_before_any_work(self):
+        # 404, not 503: TypeSafe's SDK retries 5xx and retrying cannot help.
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg={"enabled": False})
+        assert e.value.status_code == 404
+        e.value.mocks[0].decide.assert_not_awaited()
+        e.value.mocks[1].create_request.assert_not_awaited()
+
+    async def test_unavailable_model_is_503_with_retry_after_and_a_string_detail(self):
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, availability="unavailable")
+        assert e.value.status_code == 503 and e.value.headers.get("Retry-After")
+        assert isinstance(e.value.detail, str)  # the SDK shows `detail` strings as the error message
+
+    async def test_state_over_admin_ceiling_is_422_on_state(self):
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "state": "x" * 1001})
+        assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "state"]
+
+    async def test_validation_errors_are_422_in_fastapi_shape(self):
+        with pytest.raises(HTTPException) as e:
+            await _call({"state": "s", "model": "jev-latest", "questions": {"q": {"type": "choice"}}})
+        assert e.value.status_code == 422
+        assert e.value.detail[0]["loc"][:3] == ["body", "questions", "q"]
+
+    async def test_invalid_json_is_422(self):
+        with pytest.raises(HTTPException) as e:
+            await _call(ValueError("nope"))
+        assert e.value.status_code == 422 and e.value.detail[0]["type"] == "json_invalid"
+
+    async def test_audit_row_is_started_and_committed_before_dialing_out(self):
+        # Review fixes 2 + 10: started_at is set and the transaction is closed
+        # before the fan-out, so no connection or api_keys lock is held across it.
+        order = []
+
+        async def decide(*a, **k):
+            order.append("decide")
+            return _outcome()
+
+        crud = _crud()
+        crud.update_request_started = AsyncMock(side_effect=lambda *a, **k: order.append("started"))
+        db = MagicMock(commit=AsyncMock(side_effect=lambda: order.append("commit")), rollback=AsyncMock())
+        await _call(_BODY, crud=crud, db=db, decide=decide)
+        assert order[:3] == ["started", "commit", "decide"]
+        assert crud.update_request_started.call_args.kwargs == {"backend_id": None}
+
+    async def test_backend_error_status_is_propagated_and_row_marked_failed(self):
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, outcome=DecisionBackendError("unreachable", 502))
+        assert e.value.status_code == 502 and isinstance(e.value.detail, str)
+        _, crud, _, _ = e.value.mocks
+        crud.update_request_failed.assert_awaited_once()
+        crud.update_request_completed.assert_not_awaited()
+        crud.update_quota_usage.assert_not_awaited()
+
+    async def test_unexpected_error_is_500_and_still_audited(self):
+        # Review fix 6: an unmapped exception keeps the audit row (failed) and answers 500.
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, outcome=RuntimeError("bug"))
+        assert e.value.status_code == 500
+        _, crud, _, _ = e.value.mocks
+        crud.update_request_failed.assert_awaited_once()
+        assert crud.update_request_failed.call_args.kwargs["error_code"] == "500"
+        crud.update_quota_usage.assert_not_awaited()
+
+    async def test_quota_charges_full_prompt_when_server_reports_no_cache(self):
+        out = _outcome()
+        out.usage = DecisionUsage(prompt_tokens=120, scoring_tokens=1, total_tokens=121, cached_tokens=None, backend_calls=1)
+        result, _, crud, _, db, _ = await _call(_BODY, outcome=out)
+        crud.update_quota_usage.assert_awaited_once_with(db, 1, 121)
+        assert result["usage"] == {"input_tokens": 120, "output_tokens": 1}
+
+    async def test_single_option_request_answers_without_a_backend_call(self):
+        body = {"state": "s", "model": "jev-latest",
+                "questions": {"only": {"type": "choice", "instructions": "?", "criteria": {"x": None}}}}
+        result, backend, crud, _, db, _ = await _call(body)
+        backend.decide.assert_not_awaited()
+        assert result["answers"]["only"]["choice"] == "x"
+        crud.update_quota_usage.assert_awaited_once_with(db, 1, 0)
+
+    def test_both_paths_are_registered(self):
+        from backend.app.api import api_router
+        paths = {getattr(r, "path", "") for r in api_router.routes}
+        assert {"/v1/systemone", "/v1/decisions"} <= paths
+
+
+
+# --------------------------------------------------------------------------
+# 7. choosing the underlying model: vLLM letter scoring vs an upstream
+#    System One server (Laya)
+# --------------------------------------------------------------------------
+
+_LAYA = up.Upstream(name="laya", url="https://laya.example.edu:8010", api_key="laya-secret", model=None)
+_Q3 = _SDK_BODY["questions"]
+
+# What laya-serve returns for _SDK_BODY, including the fields it adds beyond
+# Jev's (a root `routing`, per-answer `action`, `confidence` on a noul).
+_LAYA_REPLY = {
+    "model": "convaiinnovations/laya",
+    "answers": {
+        "department": {"type": "choice", "choice": "billing", "confidence": 0.9, "action": "accept",
+                       "probabilities": {"billing": 0.93, "technical": 0.05, "sales": 0.02}},
+        "urgency": {"type": "score", "score": 1.8, "confidence": 0.7,
+                    "legend": {"0": "Can wait", "1": "Needs attention this week",
+                               "2": {"level": "today", "note": "blocking"}},
+                    "probabilities": {"0": 0.05, "1": 0.1, "2": 0.85}},
+        "churn_risk": {"type": "noul", "noul": 0.97, "confidence": 0.94},
+    },
+    "usage": {"input_tokens": 412, "output_tokens": 0, "truncated": False},
+    "routing": {"model": "english", "reason": "Latin script, English"},
+}
+
+
+class _UpClient:
+    """Stands in for httpx.AsyncClient in the upstream module."""
+    calls: list = []
+    reply = None
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        _UpClient.calls.append((url, json, headers))
+        if isinstance(_UpClient.reply, Exception):
+            raise _UpClient.reply
+        return _UpClient.reply
+
+
+class _UpResponse:
+    def __init__(self, payload, status_code=200, text=None):
+        self._payload, self.status_code = payload, status_code
+        self.text = text if text is not None else json.dumps(payload)
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+@pytest.fixture
+def up_http(monkeypatch):
+    _UpClient.calls, _UpClient.reply = [], _UpResponse(_LAYA_REPLY)
+    monkeypatch.setattr(up.httpx, "AsyncClient", _UpClient)
+    return _UpClient
+
+
+class TestUpstreamConfig:
+    def test_valid_entry(self):
+        ups, problems = up.parse_upstreams(
+            {"laya": {"url": "https://h:8010/", "api_key": "k", "model": "multilingual", "timeout": 20}})
+        assert problems == []
+        assert ups["laya"] == up.Upstream(name="laya", url="https://h:8010", api_key="k", model="multilingual", timeout=20.0)
+
+    def test_empty_means_none(self):
+        assert up.parse_upstreams(None) == ({}, []) and up.parse_upstreams({}) == ({}, [])
+
+    @pytest.mark.parametrize("raw", [
+        ["laya"],
+        {"laya": "https://h"},
+        {"laya": {"url": "ftp://h"}},
+        {"laya": {}},
+        {"bad name!": {"url": "https://h"}},
+        {"laya": {"url": "https://h", "api_key": ""}},
+        {"laya": {"url": "https://h", "timeout": 0}},
+        {"laya": {"url": "https://h", "timeout": 999}},
+        {"laya": {"url": "https://h", "surprise": 1}},
+    ])
+    def test_bad_entries_are_reported_and_left_out(self, raw):
+        ups, problems = up.parse_upstreams(raw)
+        assert ups == {} and problems
+
+
+class TestUpstreamBackend:
+    async def test_forwards_state_and_questions_with_the_upstream_key(self, up_http):
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, _SDK_BODY["state"], _Q3)
+        (url, body, headers), = up_http.calls
+        assert url == "https://laya.example.edu:8010/v1/systemone"
+        assert body == {"state": _SDK_BODY["state"], "questions": _Q3}      # model omitted: Laya routes by language
+        assert headers["Authorization"] == "Bearer laya-secret"
+        assert out.input_tokens == 412 and out.output_tokens == 0
+        assert out.upstream_model == "convaiinnovations/laya" and out.extras["routing"]["model"] == "english"
+
+    async def test_configured_upstream_model_is_sent(self, up_http):
+        typed = up.Upstream(name="laya-typed", url="https://h", model="typed-decisions")
+        await up.SystemOneUpstreamBackend().answer(typed, "s", _Q3)
+        (_, body, headers), = up_http.calls
+        assert body["model"] == "typed-decisions" and "Authorization" not in headers
+
+    async def test_reply_is_reduced_to_typesafes_fields(self, up_http):
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert set(out.answers["department"]) == {"type", "choice", "probabilities", "confidence"}  # no `action`
+        assert out.answers["churn_risk"] == {"type": "noul", "noul": 0.97}                           # no `confidence`
+        assert set(out.answers["urgency"]) == {"type", "score", "legend", "probabilities", "confidence"}
+
+    @pytest.mark.parametrize("mutate", [
+        lambda r: r.pop("answers"),
+        lambda r: r["answers"].pop("urgency"),                                   # missing an answer
+        lambda r: r["answers"].update(extra={"type": "noul", "noul": 0.5}),      # answer nobody asked for
+        lambda r: r["answers"]["churn_risk"].update(type="choice"),              # wrong type for the question
+        lambda r: r["answers"]["churn_risk"].update(noul=1.7),                   # not a probability
+        lambda r: r["answers"]["churn_risk"].update(noul="high"),
+        lambda r: r["answers"]["department"].update(choice="legal"),             # option that was not offered
+        lambda r: r["answers"]["department"].pop("confidence"),
+        lambda r: r["answers"]["urgency"].update(score=float("nan")),
+    ])
+    async def test_invalid_replies_are_502_not_passed_on(self, up_http, mutate):
+        reply = json.loads(json.dumps(_LAYA_REPLY))
+        mutate(reply)
+        up_http.reply = _UpResponse(reply)
+        with pytest.raises(DecisionBackendError) as e:
+            await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert e.value.status_code == 502
+
+    async def test_upstream_422_is_the_callers_422(self, up_http):
+        up_http.reply = _UpResponse({"detail": "state exceeds 50000 characters"}, status_code=422)
+        with pytest.raises(so.SystemOneValidationError) as e:
+            await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert "state exceeds 50000" in e.value.detail[0]["msg"] and e.value.detail[0]["loc"] == ["body"]
+
+    @pytest.mark.parametrize("status,expected", [(503, 503), (429, 503), (401, 502), (500, 502)])
+    async def test_upstream_failures_map_to_gateway_statuses(self, up_http, status, expected):
+        # A 401 means MindRouter's configured key is wrong; the caller must not see 401.
+        up_http.reply = _UpResponse({"detail": "x"}, status_code=status)
+        with pytest.raises(DecisionBackendError) as e:
+            await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert e.value.status_code == expected
+
+    async def test_unreachable_and_non_json_are_502(self, up_http):
+        import httpx
+        for reply in (httpx.ConnectError("refused"), _UpResponse(ValueError("not json"), text="<html>")):
+            up_http.reply = reply
+            with pytest.raises(DecisionBackendError) as e:
+                await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+            assert e.value.status_code == 502
+
+
+def _upstream_backend(answer=None, error=None):
+    b = MagicMock()
+    b.name = "systemone_upstream"
+    b.answer = AsyncMock(side_effect=error) if error else AsyncMock(return_value=answer or up._checked("laya", json.loads(json.dumps(_LAYA_REPLY)), _Q3))
+    return b
+
+
+class TestModelSelection:
+    _cfg = {"upstreams": {"laya": _LAYA}}
+
+    async def test_model_laya_is_forwarded_not_scored_on_vllm(self):
+        ub = _upstream_backend()
+        result, vllm, crud, _, db, _ = await _call({**_SDK_BODY, "model": "laya"}, cfg=self._cfg, upstream_backend=ub)
+        vllm.decide.assert_not_awaited()
+        ub.answer.assert_awaited_once()
+        assert ub.answer.call_args.args == (_LAYA, _SDK_BODY["state"], _SDK_BODY["questions"])
+        assert result["model"] == "laya" and result["answers"]["department"]["choice"] == "billing"
+        assert result["usage"] == {"input_tokens": 412, "output_tokens": 0}
+        assert result["metadata"]["backend"] == "systemone_upstream"
+        assert result["metadata"]["score_semantics"] == "upstream_model_probability"
+        assert result["metadata"]["upstream_model"] == "convaiinnovations/laya"
+        assert result["metadata"]["routing"]["model"] == "english"
+        kw = crud.create_request.call_args.kwargs
+        assert kw["model"] == "laya" and kw["parameters"]["backend"] == "systemone_upstream"
+        crud.update_quota_usage.assert_awaited_once_with(db, 1, 412)
+        assert crud.update_request_completed.call_args.kwargs["backend_id"] is None
+
+    async def test_model_qwen_still_scores_on_vllm_when_laya_is_configured(self):
+        ub = _upstream_backend()
+        result, vllm, _, _, _, _ = await _call({**_BODY, "model": "qwen3.8-27b"}, cfg=self._cfg, upstream_backend=ub)
+        vllm.decide.assert_awaited_once()
+        ub.answer.assert_not_awaited()
+        assert result["model"] == "qwen3.8-27b" and result["metadata"]["backend"] == "vllm_logprobs"
+
+    async def test_jev_latest_follows_the_admin_default(self):
+        ub = _upstream_backend(answer=up._checked("laya", {"answers": {"escalate": {"type": "noul", "noul": 0.6}}},
+                                                  _BODY["questions"]))
+        result, vllm, _, _, _, _ = await _call(_BODY, cfg={**self._cfg, "default_model": "laya"}, upstream_backend=ub)
+        vllm.decide.assert_not_awaited()
+        assert result["model"] == "laya" and result["answers"]["escalate"] == {"type": "noul", "noul": 0.6}
+
+    async def test_upstream_takes_more_choice_options_than_letter_scoring(self):
+        # The 20-option ceiling belongs to letter scoring, not to the wire format.
+        criteria = {f"o{i}": None for i in range(40)}
+        body = {"state": "s", "model": "laya", "questions": {"q": {"type": "choice", "criteria": criteria}}}
+        reply = {"answers": {"q": {"type": "choice", "choice": "o3", "confidence": 0.5,
+                                   "probabilities": {k: 1 / 40 for k in criteria}}}}
+        ub = _upstream_backend(answer=up._checked("laya", reply, body["questions"]))
+        result, _, _, _, _, _ = await _call(body, cfg=self._cfg, upstream_backend=ub)
+        assert result["answers"]["q"]["choice"] == "o3"
+        with pytest.raises(HTTPException) as e:
+            await _call({**body, "model": "qwen3.8-27b"}, cfg=self._cfg, upstream_backend=ub)
+        assert e.value.status_code == 422
+
+    async def test_unknown_model_error_lists_every_choice(self):
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "model": "nope"}, cfg=self._cfg, upstream_backend=_upstream_backend())
+        msg = e.value.detail[0]["msg"]
+        assert all(n in msg for n in ("jev-latest", "qwen3.8-27b", "laya"))
+
+    async def test_upstream_failure_is_audited_and_not_charged(self):
+        ub = _upstream_backend(error=DecisionBackendError("decision model 'laya' is unreachable", 502))
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "model": "laya"}, cfg=self._cfg, upstream_backend=ub)
+        assert e.value.status_code == 502
+        _, crud, _, _ = e.value.mocks
+        crud.update_request_failed.assert_awaited_once()
+        crud.update_quota_usage.assert_not_awaited()
+
+    async def test_upstream_rejection_is_422_and_audited(self):
+        ub = _upstream_backend(error=so.SystemOneValidationError(
+            [{"loc": ["body"], "msg": "rejected by decision model 'laya': too long", "type": "value_error"}]))
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "model": "laya"}, cfg=self._cfg, upstream_backend=ub)
+        assert e.value.status_code == 422
+        e.value.mocks[1].update_request_failed.assert_awaited_once()
+
+    def test_model_list_names_both_kinds(self):
+        cfg = {"enabled": True, "default_model": "qwen3.8-27b", "allowed_models": ["qwen3.8-27b"],
+               "upstreams": {"laya": _LAYA}}
+        assert [m["name"] for m in so.typesafe_model_list(cfg)["models"]] == [
+            "jev-latest", "jev-preview", "qwen3.8-27b", "laya"]

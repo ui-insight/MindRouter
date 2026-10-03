@@ -157,6 +157,13 @@ class TestInternalChat:
 
         reg.get_backends_with_model = _get
         reg.is_backend_available = _avail
+        # The real picker, run against the stubs above (same selection logic).
+        from backend.app.core.telemetry.registry import BackendRegistry
+
+        async def _pick(model_name, *, engine=None):
+            return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine)
+
+        reg.pick_available_backend = _pick
         return reg
 
     def _backend(self, engine="vllm", url="http://node1:8000"):

@@ -18,6 +18,7 @@ import time
 from typing import List, Tuple
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.auth import authenticate_request
@@ -92,6 +93,15 @@ async def list_models(
     Returns all models available across healthy backends.
     """
     user, api_key = auth
+
+    # TypeSafe's SDK (System One clients pointed at MindRouter) lists models in
+    # its own shape and identifies itself with this header; everyone else gets
+    # the OpenAI list below. See services/decisions/systemone.py.
+    if request.headers.get("x-typesafe-sdk"):
+        from backend.app.services.decisions import get_decisions_config
+        from backend.app.services.decisions.systemone import typesafe_model_list
+
+        return JSONResponse(typesafe_model_list(await get_decisions_config(db)))
 
     registry = get_registry()
     backends = await registry.get_healthy_backends()

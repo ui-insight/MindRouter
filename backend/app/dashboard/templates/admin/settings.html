@@ -19,6 +19,7 @@
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
                 {% elif success == 'default_effort_updated' %}Default reasoning level updated.
                 {% elif success == 'sampling_policies_updated' %}Sampling policies updated.
+                {% elif success == 'decisions_updated' %}Decisions API settings updated.
                 {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
                 {% elif success == 'enrich_config_updated' %}Enrichment configuration saved.
                 {% elif success == 'agreement_updated' %}Use agreement text saved.
@@ -157,6 +158,43 @@
                             </form>
                             {% else %}
                             <pre class="mb-0 small">{{ sampling_policies_json or '(none)' }}</pre>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Decisions / System One API (EXPERIMENTAL, transitional) -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Decisions API (System One) <span class="badge bg-warning text-dark">Experimental</span></h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small"><code>POST /v1/systemone</code> (alias <code>/v1/decisions</code>) speaks TypeSafe's System One wire format (Jev): one shared <code>state</code> plus typed <code>noul</code> / <code>choice</code> / <code>score</code> questions in, typed answers with probabilities out. No text is generated. The request's <code>model</code> picks how answers are produced: a <strong>vLLM model</strong> below is scored by one-token letter likelihood on servers MindRouter already runs; an <strong>upstream server</strong> is a purpose-built decision model that is its own System One server (for example Laya). <code>jev-latest</code> means the default model. Off by default.</p>
+                            {% if not is_read_only %}
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_decisions">
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" role="switch" id="decisions_enabled" name="decisions_enabled" {% if decisions_enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="decisions_enabled">Enable <code>/v1/systemone</code></label>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="decisions_default_model" class="form-label">Default model</label>
+                                    <input type="text" class="form-control" id="decisions_default_model" name="decisions_default_model" value="{{ decisions_default_model }}">
+                                    <div class="form-text">Answers <code>jev-latest</code>, <code>jev-preview</code> and requests that name no model. A vLLM model or an upstream name.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="decisions_allowed_models" class="form-label">vLLM models (comma-separated)</label>
+                                    <input type="text" class="form-control" id="decisions_allowed_models" name="decisions_allowed_models" value="{{ decisions_allowed_models }}">
+                                    <div class="form-text">Only models this scoring method has been validated on (Qwen3.8-27B). At most 20 options per choice.</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="decisions_upstreams" class="form-label">Upstream System One servers (JSON)</label>
+                                    <textarea class="form-control font-monospace" id="decisions_upstreams" name="decisions_upstreams" rows="5" spellcheck="false" placeholder='{"laya": {"url": "https://host:8010", "api_key": "...", "model": null}}'>{{ decisions_upstreams_json }}</textarea>
+                                    <div class="form-text">Model name &rarr; <code>url</code> (server root), optional <code>api_key</code> (its bearer token), <code>model</code> (name sent upstream; <code>null</code> lets Laya pick a checkpoint by language) and <code>timeout</code> seconds. Not health-checked: a failing upstream answers 502 until fixed.</div>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                            {% else %}
+                            <p class="mb-0">Decisions API: <span class="badge {% if decisions_enabled %}bg-success">Enabled{% else %}bg-secondary">Disabled{% endif %}</span> &middot; default <code>{{ decisions_default_model }}</code> &middot; vLLM <code>{{ decisions_allowed_models or '(none)' }}</code> &middot; upstream <code>{{ decisions_upstream_names | join(', ') or '(none)' }}</code></p>
                             {% endif %}
                         </div>
                     </div>
