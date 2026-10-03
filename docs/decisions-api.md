@@ -50,7 +50,7 @@ The `model` field decides how an answer is produced.
 | `model` | Answered by | Configured in |
 |---|---|---|
 | a vLLM model name, e.g. `qwen3.8-27b` | One-token letter scoring on a chat model MindRouter already serves. No dedicated model, no extra GPU. | `decisions.allowed_models` |
-| an upstream name, e.g. `laya` | A purpose-built decision model running as its own System One server (Laya's `laya-serve`, Open-Jev). MindRouter forwards the request. | `decisions.upstreams` |
+| an upstream name, e.g. `laya` | A purpose-built decision model running as its own System One server (Laya's `laya-serve`, Open-Jev). MindRouter forwards the state and each question's `type`, `instructions` and `criteria` (nothing else), and checks the reply against what was asked. | `decisions.upstreams` |
 | `jev-latest`, `jev-preview`, or omitted | Whichever of the above the admin set as the default. `jev-latest` is what TypeSafe's SDK sends unless told otherwise. | `decisions.default_model` |
 
 Anything else, including a pinned TypeSafe version such as `jev-1.13.0`, is
@@ -160,7 +160,7 @@ its SDK parses.
 |---|---|
 | `401` | Missing or invalid MindRouter API key |
 | `404` | The decisions API is disabled on this server |
-| `422` | Invalid request. `detail` is a list of `{loc, msg, type}` with `loc` starting at `body`, e.g. `["body", "questions", "urgency", "score", "criteria"]`. Also: `model` not offered here, state over the server's limit, more than 20 choice options on a vLLM model, or the upstream model rejecting the content. |
+| `422` | Invalid request. `detail` is a list of `{loc, msg, type}` with `loc` starting at `body`, e.g. `["body", "questions", "urgency", "score", "criteria"]`. Also: `model` not offered here, state over the server's limit, more than 20 choice options on a vLLM model, text that is not valid Unicode (an unpaired surrogate) or a non-finite number anywhere in the body, or the upstream model rejecting the content. |
 | `429` | Token quota or requests-per-minute limit |
 | `500` | Unexpected failure (the request is still recorded as failed) |
 | `502` | The model's server failed or returned an invalid reply. Nothing is charged. |
@@ -210,7 +210,12 @@ Admin → Settings → "Decisions API (System One)", or `app_config`:
 Every request writes a `requests` row (`endpoint`, model, backend, token
 counts, timings, status). Its `parameters` column holds only the request's
 shape (question count and types, state length, the requested model name):
-**the state and question text are never stored or logged.**
+**the state and question text are never stored or logged.** That includes
+failures: error bodies from an engine or an upstream are not logged, an
+upstream's rejection text is returned to the caller but the row records only
+a fixed summary, and an unexpected error records its type, not its message.
+A request cancelled mid-flight is closed as failed (`error_code` 499) rather
+than left in `processing`.
 
 Quota is charged for what had to be computed: for a vLLM model, prompt tokens
 that were *not* served from the prefix cache, plus one scoring token per
@@ -264,7 +269,11 @@ fine-tuned on that benchmark; measure before relying on it
   suffix would show up as `label_mass` collapsing; watch it after model
   upgrades.
 * **Upstream credentials** are stored in `app_config` like other service
-  keys and are visible to full administrators on the settings page.
+  keys. The settings page never renders them back: a stored key shows as
+  `(stored)`, and saving the form with that placeholder keeps it.
+* **An upstream's token counts are charged as reported.** A reply claiming
+  more than 2,000,000 tokens, or a non-numeric count, is rejected as invalid
+  (502) rather than billed.
 
 ## Benchmarks
 

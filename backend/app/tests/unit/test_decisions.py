@@ -106,6 +106,12 @@ class _FakeResponse:
             raise httpx.HTTPStatusError("boom", request=MagicMock(), response=self)
 
 
+def _encode_like_httpx(payload):
+    """httpx serializes a `json=` body as UTF-8 with allow_nan=False. The fakes
+    do the same so input that cannot be sent fails in tests as it would live."""
+    json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
 class _FakeClient:
     """Stands in for httpx.AsyncClient; `handler(url, json)` returns a payload."""
 
@@ -122,6 +128,7 @@ class _FakeClient:
         return False
 
     async def post(self, url, json=None):
+        _encode_like_httpx(json)
         _FakeClient.calls.append((url, json))
         return _FakeClient.handler(url, json)
 
@@ -927,6 +934,7 @@ class _UpClient:
         return False
 
     async def post(self, url, json=None, headers=None):
+        _encode_like_httpx(json)
         _UpClient.calls.append((url, json, headers))
         if isinstance(_UpClient.reply, Exception):
             raise _UpClient.reply
@@ -1123,3 +1131,225 @@ class TestModelSelection:
                "upstreams": {"laya": _LAYA}}
         assert [m["name"] for m in so.typesafe_model_list(cfg)["models"]] == [
             "jev-latest", "jev-preview", "qwen3.8-27b", "laya"]
+
+
+# --------------------------------------------------------------------------
+# 8. settings load, and keeping request content out of the audit trail
+# --------------------------------------------------------------------------
+
+class _Rows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class TestSettings:
+    async def _cfg(self, rows):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_Rows(rows))
+        cfg = await pkg.get_decisions_config(db)
+        return cfg, db
+
+    async def test_defaults_when_nothing_is_configured(self):
+        cfg, db = await self._cfg([])
+        assert cfg == {"enabled": False, "default_model": "qwen3.8-27b", "allowed_models": ["qwen3.8-27b"],
+                       "max_state_chars": 32_000, "fanout": 8, "backend_concurrency": 4, "upstreams": {}}
+        db.execute.assert_awaited_once()   # one query for every decisions.* key, not one per key
+
+    async def test_rows_are_json_decoded_and_upstreams_parsed(self):
+        cfg, _ = await self._cfg([
+            ("decisions.enabled", "true"), ("decisions.default_model", '"laya"'),
+            ("decisions.allowed_models", '["qwen3.8-27b"]'), ("decisions.fanout", "3"),
+            ("decisions.upstreams", '{"laya": {"url": "https://h:8010", "api_key": "k"}}'),
+        ])
+        assert cfg["enabled"] is True and cfg["default_model"] == "laya" and cfg["fanout"] == 3
+        assert cfg["upstreams"]["laya"].url == "https://h:8010" and cfg["upstreams"]["laya"].api_key == "k"
+
+    async def test_unreadable_or_invalid_rows_fall_back(self):
+        cfg, _ = await self._cfg([
+            ("decisions.fanout", "not json"), ("decisions.max_state_chars", "null"),
+            ("decisions.upstreams", '{"laya": {"url": "ftp://nope"}}'),
+        ])
+        assert cfg["fanout"] == 8 and cfg["max_state_chars"] == 32_000 and cfg["upstreams"] == {}
+
+
+class TestNothingAboutTheRequestIsStored:
+    _cfg = {"upstreams": {"laya": _LAYA}}
+
+    async def test_upstream_rejection_text_goes_to_the_caller_not_the_audit_row(self, up_http):
+        # The upstream's 422 may quote the state; the caller sees it, the audit row does not.
+        up_http.reply = _UpResponse({"detail": "bad value near 'secret ticket text'"}, status_code=422)
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "model": "laya"}, cfg=self._cfg, upstream_backend=up.SystemOneUpstreamBackend())
+        assert e.value.status_code == 422 and "secret ticket text" in e.value.detail[0]["msg"]
+        stored = e.value.mocks[1].update_request_failed.call_args.args[2]
+        assert stored == "rejected by decision model 'laya' (HTTP 422)" and "secret" not in stored
+
+    async def test_upstream_error_body_is_not_logged(self, up_http):
+        up_http.reply = _UpResponse({"detail": "echo: secret ticket text"}, status_code=500)
+        with patch.object(up, "logger") as log:
+            with pytest.raises(DecisionBackendError):
+                await up.SystemOneUpstreamBackend().answer(_LAYA, "secret ticket text", _BODY["questions"])
+        assert "secret" not in repr(log.mock_calls)
+
+    async def test_forwarded_questions_are_size_capped(self):
+        big = {"q": {"type": "choice", "instructions": "?", "criteria": {"a": "x" * 300_000, "b": None}}}
+        ub = _upstream_backend()
+        with pytest.raises(HTTPException) as e:
+            await _call({"state": "s", "model": "laya", "questions": big}, cfg=self._cfg, upstream_backend=ub)
+        assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "questions"]
+        ub.answer.assert_not_awaited()
+
+    async def test_unknown_model_name_is_truncated_in_the_error(self):
+        with pytest.raises(HTTPException) as e:
+            await _call({**_BODY, "model": "m" * 5000})
+        assert len(e.value.detail[0]["msg"]) < 400
+
+
+# --------------------------------------------------------------------------
+# 9. findings from the pre-merge review of PR #21
+# --------------------------------------------------------------------------
+
+_SURROGATE = "SECRET \ud800 text"   # a lone surrogate: valid to Python's JSON parser, not encodable as UTF-8
+
+
+class TestUnsendableInputIsTheCallers422:
+    @pytest.mark.parametrize("body", [
+        {"state": _SURROGATE, "model": "jev-latest", "questions": {"q": {"type": "noul", "instructions": "?"}}},
+        {"state": "s", "model": "jev-latest", "questions": {"q": {"type": "noul", "instructions": _SURROGATE}}},
+        {"state": "s", "model": "jev-latest", "questions": {
+            "q": {"type": "choice", "instructions": "?", "criteria": {"a": _SURROGATE, "b": None}}}},
+        {"state": "s", "model": "jev-latest", "questions": {_SURROGATE: {"type": "noul", "instructions": "?"}}},
+        {"state": "s", "model": "jev-latest", "questions": {"q": {"type": "score", "criteria": ["a", _SURROGATE]}}},
+        {"state": {"x": float("nan")}, "model": "jev-latest", "questions": {"q": {"type": "noul", "instructions": "?"}}},
+        {"state": [float("inf")], "model": "jev-latest", "questions": {"q": {"type": "noul", "instructions": "?"}}},
+    ])
+    def test_surrogates_and_non_finite_numbers_are_refused_up_front(self, body):
+        with pytest.raises(so.SystemOneValidationError) as e:
+            so.validate_wire(body)
+        assert e.value.detail[0]["loc"] == ["body"]
+        assert "SECRET" not in json.dumps(e.value.detail, ensure_ascii=True)
+
+    async def test_route_answers_422_before_any_row_or_backend_call(self):
+        body = {"state": _SURROGATE, "model": "jev-latest", "questions": {"q": {"type": "noul", "instructions": "?"}}}
+        with pytest.raises(HTTPException) as e:
+            await _call(body)
+        assert e.value.status_code == 422
+        e.value.mocks[0].decide.assert_not_awaited()
+        e.value.mocks[1].create_request.assert_not_awaited()
+
+    def test_internal_model_errors_become_422_without_the_input_value(self):
+        # Reaching the internal models' own limits must not surface as an
+        # unhandled pydantic error, whose text carries the offending input.
+        wire = so.validate_wire({"state": "SECRET " + "x" * MAX_STATE_CHARS, "model": "jev-latest",
+                                 "questions": {"q": {"type": "noul", "instructions": "?"}}})
+        with pytest.raises(so.SystemOneValidationError) as e:
+            so.compile_plan(wire)
+        assert e.value.detail[0]["loc"][0] == "body" and "SECRET" not in json.dumps(e.value.detail)
+        assert "input" not in e.value.detail[0]
+
+    async def test_admin_ceiling_cannot_exceed_the_hard_cap(self):
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_Rows([("decisions.max_state_chars", "9000000")]))
+        assert (await pkg.get_decisions_config(db))["max_state_chars"] == MAX_STATE_CHARS
+
+
+class TestAuditRowNeverSticksInProcessing:
+    async def test_cancellation_closes_the_row_and_propagates(self):
+        import asyncio
+
+        async def decide(*a, **k):
+            raise asyncio.CancelledError()
+
+        crud = _crud()
+        with pytest.raises(asyncio.CancelledError):
+            await _call(_BODY, crud=crud, decide=decide)
+        crud.update_request_failed.assert_awaited_once()
+        assert crud.update_request_failed.call_args.kwargs["error_code"] == "499"
+        crud.update_quota_usage.assert_not_awaited()
+
+    async def test_failure_while_recording_completion_marks_the_row_failed(self):
+        crud = _crud()
+        crud.update_request_completed = AsyncMock(side_effect=RuntimeError("Out of range value for column"))
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, crud=crud)
+        assert e.value.status_code == 500
+        crud.update_request_failed.assert_awaited_once()
+        crud.incr_quota_redis.assert_not_awaited()
+
+    async def test_redis_counter_failure_does_not_fail_a_committed_request(self):
+        crud = _crud()
+        crud.incr_quota_redis = AsyncMock(side_effect=ConnectionError("redis down"))
+        result, _, crud, _, _, _ = await _call(_BODY, crud=crud)
+        assert result["answers"]["escalate"]["noul"] == 0.8
+        crud.update_request_failed.assert_not_awaited()
+
+    async def test_crash_log_carries_the_error_type_not_its_text(self):
+        with patch.object(api, "logger") as log:
+            with pytest.raises(HTTPException):
+                await _call(_BODY, outcome=RuntimeError("input_value='secret ticket text'"))
+        assert "secret" not in repr(log.mock_calls) and "RuntimeError" in repr(log.mock_calls)
+
+
+class TestUpstreamIsNotTrusted:
+    async def test_only_typesafes_question_fields_are_forwarded(self, up_http):
+        qs = {"q": {"type": "noul", "instructions": "?", "max_len": 8192, "x-inject": {"a": 1}}}
+        up_http.reply = _UpResponse({"answers": {"q": {"type": "noul", "noul": 0.5}}})
+        await up.SystemOneUpstreamBackend().answer(_LAYA, "s", qs)
+        (_, body, _), = up_http.calls
+        assert body["questions"] == {"q": {"type": "noul", "instructions": "?"}}
+
+    @pytest.mark.parametrize("mutate", [
+        lambda r: r["answers"]["department"].update(
+            choice="legal", probabilities={"legal": 0.9, "billing": 0.1}),     # options nobody asked about
+        lambda r: r["answers"]["department"]["probabilities"].pop("sales"),    # an asked option missing
+        lambda r: r["answers"]["urgency"].update(probabilities={"0": 0.5, "1": 0.5}),   # a level missing
+        lambda r: r["usage"].update(input_tokens=3_000_000_000),               # would overflow INT / drain quota
+        lambda r: r["usage"].update(input_tokens=-5),
+        lambda r: r["usage"].update(output_tokens="many"),
+    ])
+    async def test_mismatched_options_and_absurd_usage_are_502(self, up_http, mutate):
+        reply = json.loads(json.dumps(_LAYA_REPLY))
+        mutate(reply)
+        up_http.reply = _UpResponse(reply)
+        with pytest.raises(DecisionBackendError) as e:
+            await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert e.value.status_code == 502
+
+    async def test_vllm_error_body_is_not_logged(self, fake_http):
+        good = _default_handler()
+
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return good(url, body)
+            return _FakeResponse({"error": "prompt was: secret ticket text"}, status_code=400)
+        fake_http.handler = handler
+        with patch.object(vl, "logger") as log, patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+            with pytest.raises(DecisionBackendError):
+                await vl.VLLMLogprobsBackend().decide(_req(), "qwen3.8-27b", fanout=2)
+        assert "secret" not in repr(log.mock_calls)
+
+
+class TestUpstreamKeysAreNotRenderedBack:
+    _stored = {"laya": {"url": "https://h:8010", "api_key": "real-secret", "model": None},
+               "open": {"url": "https://o:8791"}}
+
+    def test_display_masks_every_key(self):
+        shown = up.mask_keys(self._stored)
+        assert "real-secret" not in json.dumps(shown)
+        assert shown["laya"]["api_key"] == up.KEY_PLACEHOLDER and shown["laya"]["url"] == "https://h:8010"
+        assert shown["open"] == {"url": "https://o:8791"}          # nothing to mask
+        assert self._stored["laya"]["api_key"] == "real-secret"      # not mutated
+
+    def test_saving_the_placeholder_keeps_the_stored_key(self):
+        submitted = {"laya": {"url": "https://h:9999", "api_key": up.KEY_PLACEHOLDER}}
+        value, problems = up.restore_keys(submitted, self._stored)
+        assert problems == [] and value == {"laya": {"url": "https://h:9999", "api_key": "real-secret"}}
+
+    def test_a_new_key_replaces_and_a_placeholder_without_a_stored_key_is_refused(self):
+        value, problems = up.restore_keys({"laya": {"url": "https://h", "api_key": "rotated"}}, self._stored)
+        assert problems == [] and value["laya"]["api_key"] == "rotated"
+        value, problems = up.restore_keys({"new": {"url": "https://n", "api_key": up.KEY_PLACEHOLDER}}, self._stored)
+        assert value == {} and problems and "new" in problems[0]

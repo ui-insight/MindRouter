@@ -5782,7 +5782,9 @@ async def admin_settings(
     sampling_policies_json = json.dumps(_sampling_raw, indent=2) if _sampling_raw else ""
     from backend.app.services.decisions import get_decisions_config
     decisions_cfg = await get_decisions_config(db)
-    _dec_up_raw = await crud.get_config_json(db, "decisions.upstreams", {}) or {}
+    from backend.app.services.decisions.upstream import mask_keys as _mask_upstream_keys
+    # Keys are never rendered back into the page; the form shows a placeholder.
+    _dec_up_raw = _mask_upstream_keys(await crud.get_config_json(db, "decisions.upstreams", {}) or {})
     decisions_upstreams_json = json.dumps(_dec_up_raw, indent=2) if _dec_up_raw else ""
 
     # Model auto-enrichment config
@@ -5965,7 +5967,7 @@ async def admin_settings_post(
 
     elif action == "set_decisions":
         # EXPERIMENTAL System One API (services/decisions). Off by default.
-        from backend.app.services.decisions.upstream import parse_upstreams
+        from backend.app.services.decisions.upstream import parse_upstreams, restore_keys
 
         enabled = form.get("decisions_enabled") == "on"
         default_model = form.get("decisions_default_model", "").strip()
@@ -5978,7 +5980,12 @@ async def admin_settings_post(
                 url="/admin/settings?error=" + quote_plus("Decisions: upstream servers must be valid JSON"),
                 status_code=302,
             )
+        # The form shows a placeholder instead of each stored key; put the real keys back.
+        upstreams_value, key_problems = restore_keys(
+            upstreams_value, await crud.get_config_json(db, "decisions.upstreams", {}) or {},
+        )
         upstreams, problems = parse_upstreams(upstreams_value)
+        problems = key_problems + problems
         if problems:
             return RedirectResponse(
                 url="/admin/settings?error=" + quote_plus("Decisions upstreams: " + "; ".join(problems)[:300]),

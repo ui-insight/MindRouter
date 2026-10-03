@@ -31,6 +31,8 @@ See docs/decisions-api.md.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 import uuid
 
@@ -55,6 +57,7 @@ from backend.app.services.decisions import (
 )
 from backend.app.services.decisions.systemone import (
     JEV_MODEL_ALIASES,
+    MAX_FORWARDED_QUESTIONS_CHARS,
     SystemOneValidationError,
     compile_plan,
     format_response,
@@ -140,6 +143,8 @@ async def systemone(
     plan = None
     if upstream is not None:
         model, backend = name, get_upstream_backend()
+        if len(json.dumps(body["questions"], ensure_ascii=False)) > MAX_FORWARDED_QUESTIONS_CHARS:
+            raise _invalid(["questions"], f"questions exceed {MAX_FORWARDED_QUESTIONS_CHARS} characters in total")
     else:
         registry = get_registry()
         model, _alias = registry.resolve_alias(name)
@@ -150,7 +155,7 @@ async def systemone(
             offered = [*JEV_MODEL_ALIASES, *cfg["allowed_models"], *cfg["upstreams"]]
             raise _invalid(
                 ["model"],
-                f"model '{requested}' is not available for decisions here; use one of: {', '.join(offered)}",
+                f"model '{str(requested)[:100]}' is not available for decisions here; use one of: {', '.join(offered)}",
             )
         try:
             plan = compile_plan(wire)
@@ -211,8 +216,9 @@ async def systemone(
                 dreq, model, fanout=cfg["fanout"], backend_concurrency=cfg["backend_concurrency"],
             )
     except SystemOneValidationError as e:
-        # The upstream refused the request's content.
-        await _record_failure(db, db_request.id, str(e), "422")
+        # The upstream refused the request's content. Its wording may quote
+        # the request, so the audit row gets the fixed summary instead.
+        await _record_failure(db, db_request.id, e.audit_message, "422")
         DECISION_REQUESTS.labels(model, backend.name, "error").inc()
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.detail) from None
     except DecisionBackendError as e:
@@ -224,15 +230,65 @@ async def systemone(
             questions=len(wire.questions), latency_ms=int((time.perf_counter() - started) * 1000),
         )
         raise HTTPException(e.status_code, detail=str(e)) from e
+    except asyncio.CancelledError:
+        # The client went away or the server is shutting down. Nothing sweeps
+        # a row left in PROCESSING, so close it before the cancellation continues.
+        await asyncio.shield(_record_failure(db, db_request.id, "cancelled before the model answered", "499"))
+        DECISION_REQUESTS.labels(model, backend.name, "error").inc()
+        raise
     except Exception as e:
         # Anything the backend did not map: keep the audit row and answer 500
-        # instead of letting the request vanish with an unhandled error.
-        logger.exception("decision_request_crashed", model=model, backend=backend.name)
+        # instead of letting the request vanish with an unhandled error. Only
+        # the exception's type is recorded; its text could quote the request.
+        logger.error("decision_request_crashed", model=model, backend=backend.name, error_type=type(e).__name__)
         await _record_failure(db, db_request.id, f"internal error: {type(e).__name__}", "500")
         DECISION_REQUESTS.labels(model, backend.name, "error").inc()
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="decision request failed") from e
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="decision request failed") from None
     latency_ms = int((time.perf_counter() - started) * 1000)
 
+    try:
+        payload, token_cost, counts = await _complete(
+            db, db_request.id, user.id, plan, outcome, answered,
+            model=model, request_id=request_id, backend_name=backend.name,
+        )
+    except Exception as e:
+        # The model answered but the result could not be formatted or recorded.
+        # Close the row as failed rather than leaving it in PROCESSING.
+        logger.error("decision_completion_failed", model=model, backend=backend.name, error_type=type(e).__name__)
+        await _record_failure(db, db_request.id, f"internal error: {type(e).__name__}", "500")
+        DECISION_REQUESTS.labels(model, backend.name, "error").inc()
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="decision request failed") from None
+    try:
+        await crud.incr_quota_redis(user.id, token_cost)
+    except Exception:
+        # The durable quota row is already committed; the Redis counter is a cache of it.
+        logger.warning("decision_quota_redis_failed", user_id=user.id)
+
+    prompt_tokens, scoring_tokens, cached_tokens = counts["prompt"], counts["scoring"], counts["cached"]
+    DECISION_REQUESTS.labels(model, backend.name, "ok").inc()
+    DECISION_LATENCY.labels(model).observe(latency_ms / 1000.0)
+    DECISION_TOKENS.labels(model, "prompt").inc(prompt_tokens)
+    DECISION_TOKENS.labels(model, "scoring").inc(scoring_tokens)
+    if cached_tokens:
+        DECISION_TOKENS.labels(model, "cached").inc(cached_tokens)
+    for q in wire.questions.values():
+        DECISION_QUESTIONS.labels(model, q.type).inc()
+
+    logger.info(
+        "decision_request",
+        endpoint=endpoint, model=model, model_requested=requested, backend=backend.name,
+        backend_id=counts["backend_id"], questions=len(wire.questions), backend_calls=counts["backend_calls"],
+        prompt_tokens=prompt_tokens, scoring_tokens=scoring_tokens, cached_tokens=cached_tokens,
+        charged_tokens=token_cost, latency_ms=latency_ms, incomplete=counts["incomplete"],
+    )
+
+    response.headers[REQUEST_ID_HEADER] = request_id
+    return payload
+
+
+async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, request_id, backend_name):
+    """Build the response and record the completed request + quota in one
+    transaction. Returns (payload, tokens charged, counts for metrics)."""
     if answered is not None:
         # An upstream reports its own token counts; charge what it says it read.
         prompt_tokens, scoring_tokens, cached_tokens = answered.input_tokens, answered.output_tokens, 0
@@ -244,7 +300,7 @@ async def systemone(
             "id": request_id,
             "metadata": {
                 "score_semantics": SCORE_SEMANTICS_UPSTREAM,
-                "backend": backend.name,
+                "backend": backend_name,
                 "upstream_model": answered.upstream_model,
                 **answered.extras,
             },
@@ -261,40 +317,22 @@ async def systemone(
         backend_id, backend_calls = outcome.backend_id, (usage.backend_calls if usage else 0)
         incomplete = sum(1 for r in outcome.results if not r.complete)
         payload = format_response(
-            plan, outcome.results, usage, model=model, request_id=request_id, backend_name=backend.name,
+            plan, outcome.results, usage, model=model, request_id=request_id, backend_name=backend_name,
         )
     token_cost = max(0, prompt_tokens - cached_tokens) + scoring_tokens
 
     await crud.update_request_completed(
-        db, db_request.id,
+        db, row_id,
         prompt_tokens=prompt_tokens,
         completion_tokens=scoring_tokens,
         tokens_estimated=False,
         backend_id=backend_id,
     )
-    await crud.update_quota_usage(db, user.id, token_cost)
+    await crud.update_quota_usage(db, user_id, token_cost)
     await db.commit()
-    await crud.incr_quota_redis(user.id, token_cost)
-
-    DECISION_REQUESTS.labels(model, backend.name, "ok").inc()
-    DECISION_LATENCY.labels(model).observe(latency_ms / 1000.0)
-    DECISION_TOKENS.labels(model, "prompt").inc(prompt_tokens)
-    DECISION_TOKENS.labels(model, "scoring").inc(scoring_tokens)
-    if cached_tokens:
-        DECISION_TOKENS.labels(model, "cached").inc(cached_tokens)
-    for q in wire.questions.values():
-        DECISION_QUESTIONS.labels(model, q.type).inc()
-
-    logger.info(
-        "decision_request",
-        endpoint=endpoint, model=model, model_requested=requested, backend=backend.name,
-        backend_id=backend_id, questions=len(wire.questions), backend_calls=backend_calls,
-        prompt_tokens=prompt_tokens, scoring_tokens=scoring_tokens, cached_tokens=cached_tokens,
-        charged_tokens=token_cost, latency_ms=latency_ms, incomplete=incomplete,
-    )
-
-    response.headers[REQUEST_ID_HEADER] = request_id
-    return payload
+    counts = {"prompt": prompt_tokens, "scoring": scoring_tokens, "cached": cached_tokens,
+              "backend_id": backend_id, "backend_calls": backend_calls, "incomplete": incomplete}
+    return payload, token_cost, counts
 
 
 async def _record_failure(db: AsyncSession, request_id: int, message: str, code: str) -> None:

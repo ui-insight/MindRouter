@@ -189,7 +189,7 @@
                                 <div class="mb-3">
                                     <label for="decisions_upstreams" class="form-label">Upstream System One servers (JSON)</label>
                                     <textarea class="form-control font-monospace" id="decisions_upstreams" name="decisions_upstreams" rows="5" spellcheck="false" placeholder='{"laya": {"url": "https://host:8010", "api_key": "...", "model": null}}'>{{ decisions_upstreams_json }}</textarea>
-                                    <div class="form-text">Model name &rarr; <code>url</code> (server root), optional <code>api_key</code> (its bearer token), <code>model</code> (name sent upstream; <code>null</code> lets Laya pick a checkpoint by language) and <code>timeout</code> seconds. Not health-checked: a failing upstream answers 502 until fixed.</div>
+                                    <div class="form-text">Model name &rarr; <code>url</code> (server root), optional <code>api_key</code> (its bearer token), <code>model</code> (name sent upstream; <code>null</code> lets Laya pick a checkpoint by language) and <code>timeout</code> seconds. A stored key is shown as <code>(stored)</code>; leave it to keep the key, or type a new one. Not health-checked: a failing upstream answers 502 until fixed.</div>
                                 </div>
                                 <button type="submit" class="btn btn-primary btn-sm">Save</button>
                             </form>

@@ -55,6 +55,10 @@ logger = get_logger(__name__)
 
 SCORE_SEMANTICS_UPSTREAM = "upstream_model_probability"
 
+# No System One request reads more than this; a larger reported count is a
+# malfunctioning upstream, not something to bill.
+MAX_PLAUSIBLE_TOKENS = 2_000_000
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/\-]{0,99}$")
 _DEFAULT_TIMEOUT = 30.0
 _MAX_TIMEOUT = 120.0
@@ -107,6 +111,41 @@ def parse_upstreams(raw: Any) -> tuple[dict[str, Upstream], list[str]]:
     return out, problems
 
 
+# Shown in the admin form in place of a stored api_key, and accepted back as
+# "keep the key already stored for this name".
+KEY_PLACEHOLDER = "(stored)"
+
+
+def mask_keys(raw: Any) -> Any:
+    """The upstreams setting with every api_key replaced by a placeholder, for
+    display. A bearer token is never rendered back into a page."""
+    if not isinstance(raw, dict):
+        return raw
+    return {
+        name: ({**spec, "api_key": KEY_PLACEHOLDER} if isinstance(spec, dict) and spec.get("api_key") else spec)
+        for name, spec in raw.items()
+    }
+
+
+def restore_keys(submitted: Any, stored: Any) -> tuple[Any, list[str]]:
+    """Replace placeholders in a submitted setting with the stored keys.
+    Returns (value, problems); a placeholder with no stored key is a problem."""
+    if not isinstance(submitted, dict):
+        return submitted, []
+    stored = stored if isinstance(stored, dict) else {}
+    out, problems = {}, []
+    for name, spec in submitted.items():
+        if isinstance(spec, dict) and spec.get("api_key") == KEY_PLACEHOLDER:
+            previous = stored.get(name)
+            key = previous.get("api_key") if isinstance(previous, dict) else None
+            if not key:
+                problems.append(f"{name}: no stored api_key to keep; enter the key")
+                continue
+            spec = {**spec, "api_key": key}
+        out[name] = spec
+    return out, problems
+
+
 @dataclass
 class UpstreamAnswer:
     answers: dict[str, dict[str, Any]]
@@ -134,6 +173,12 @@ class SystemOneUpstreamBackend:
     async def answer(
         self, upstream: Upstream, state: Any, questions: dict[str, Any], *, concurrency: int = 4
     ) -> UpstreamAnswer:
+        # Only TypeSafe's question fields go upstream. Anything else a caller
+        # put on a question is not sent under MindRouter's credential.
+        questions = {
+            qid: {k: q[k] for k in ("type", "instructions", "criteria") if k in q}
+            for qid, q in questions.items()
+        }
         payload: dict[str, Any] = {"state": state, "questions": questions}
         if upstream.model is not None:
             payload["model"] = upstream.model
@@ -152,16 +197,20 @@ class SystemOneUpstreamBackend:
 
         if resp.status_code in (400, 413, 422):
             # The upstream refused the request's content: the caller's to fix.
-            raise SystemOneValidationError([{
-                "loc": ["body"], "type": "value_error",
-                "msg": f"rejected by decision model '{upstream.name}': {_detail_text(resp)}",
-            }])
+            # The upstream's wording goes back to the caller (it is about their
+            # own request) but not into the audit row or logs, since it may
+            # quote the state or a question: ``audit_message`` is what is stored.
+            raise SystemOneValidationError(
+                [{"loc": ["body"], "type": "value_error",
+                  "msg": f"rejected by decision model '{upstream.name}': {_detail_text(resp)}"}],
+                audit_message=f"rejected by decision model '{upstream.name}' (HTTP {resp.status_code})",
+            )
         if resp.status_code in (429, 503, 529):
             raise DecisionBackendError(f"decision model '{upstream.name}' is busy", 503)
         if resp.status_code != 200:
             # 401/403 here means MindRouter's configured key is wrong, not the caller's.
-            logger.warning("decision_upstream_http_error", upstream=upstream.name, status=resp.status_code,
-                           body=resp.text[:300])
+            # Status only: an error body from a server we do not control may quote the request.
+            logger.warning("decision_upstream_http_error", upstream=upstream.name, status=resp.status_code)
             raise DecisionBackendError(f"decision model '{upstream.name}' returned HTTP {resp.status_code}", 502)
         try:
             data = resp.json()
@@ -226,15 +275,20 @@ def _checked(name: str, data: Any, questions: dict[str, Any]) -> UpstreamAnswer:
                 raise bad(f"'{qid}' has a non-probability value")
             clean[str(key)] = min(1.0, max(0.0, p))
         conf = min(1.0, max(0.0, conf))
+        criteria = q.get("criteria")
         if kind == "choice":
             choice = a.get("choice")
             if not isinstance(choice, str) or choice not in clean:
                 raise bad(f"'{qid}' chose an option it did not list")
+            if isinstance(criteria, dict) and set(clean) != set(criteria):
+                raise bad(f"'{qid}' answered a different set of options than was asked")
             answers[qid] = {"type": "choice", "choice": choice, "probabilities": clean, "confidence": conf}
         elif kind == "score":
             score, legend = a.get("score"), a.get("legend")
             if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
                 raise bad(f"'{qid}' has no numeric score")
+            if isinstance(criteria, list) and set(clean) != {str(i) for i in range(len(criteria))}:
+                raise bad(f"'{qid}' answered a different set of levels than was asked")
             if not isinstance(legend, dict):
                 # Laya and Jev both echo the levels; rebuild from the request if a server does not.
                 levels = q.get("criteria") if isinstance(q.get("criteria"), list) else []
@@ -247,8 +301,16 @@ def _checked(name: str, data: Any, questions: dict[str, Any]) -> UpstreamAnswer:
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
 
     def tokens(key: str) -> int:
+        # These counts are charged to the caller's quota and stored in an INT
+        # column, so a reply claiming an impossible number is a bad reply.
         v = usage.get(key)
-        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else 0
+        if v is None:
+            return 0
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+            raise bad(f"usage.{key} is not a token count")
+        if v > MAX_PLAUSIBLE_TOKENS:
+            raise bad(f"usage.{key} is implausibly large")
+        return int(v)
 
     extras = {k: data[k] for k in ("routing",) if k in data}
     upstream_model = data.get("model") if isinstance(data.get("model"), str) else None

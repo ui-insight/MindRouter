@@ -73,6 +73,11 @@ JEV_MODEL_ALIASES = ("jev-latest", "jev-preview")
 # TypeSafe caps a Score at 10 levels.
 MAX_SCORE_LEVELS = 10
 
+# Ceiling on the questions block forwarded to an upstream server, as JSON
+# characters. Letter scoring bounds each question and option separately; an
+# upstream gets the caller's questions as written, so the total is bounded.
+MAX_FORWARDED_QUESTIONS_CHARS = 256_000
+
 # Used only when a question arrives without instructions, which TypeSafe's
 # OpenAPI schema allows (``instructions`` is nullable).
 _DEFAULT_INSTRUCTIONS = {
@@ -134,9 +139,11 @@ class SystemOneRequestIn(_Wire):
 class SystemOneValidationError(Exception):
     """A request MindRouter cannot serve; ``detail`` is FastAPI's 422 list."""
 
-    def __init__(self, detail: list[dict[str, Any]]):
+    def __init__(self, detail: list[dict[str, Any]], audit_message: str | None = None):
         super().__init__(detail[0]["msg"] if detail else "invalid request")
         self.detail = detail
+        # What may be written to the audit row; never text that can quote the request.
+        self.audit_message = audit_message or "request validation failed"
 
 
 def _err(loc: list[str | int], msg: str, kind: str = "value_error") -> SystemOneValidationError:
@@ -183,12 +190,29 @@ def validate_wire(body: Any) -> SystemOneRequestIn:
     on a chat model needs. Raises SystemOneValidationError (422)."""
     if not isinstance(body, dict):
         raise _err([], "Input should be a valid dictionary", "dict_type")
+    # Python's JSON parser admits two things that cannot be sent on: lone
+    # surrogates (``"\ud800"``), which have no UTF-8 encoding, and NaN /
+    # Infinity. Refuse them here, where it is the caller's 422, instead of
+    # letting them fail later as a backend error or an unhandled exception.
+    try:
+        json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except UnicodeEncodeError:
+        raise _err([], "Request contains text that is not valid Unicode (an unpaired surrogate)") from None
+    except ValueError:
+        raise _err([], "Request contains a number that is not finite (NaN or Infinity)") from None
     try:
         return SystemOneRequestIn.model_validate(body)
     except ValidationError as e:
-        raise SystemOneValidationError([
-            {"loc": ["body", *err["loc"]], "msg": err["msg"], "type": err["type"]} for err in e.errors()
-        ]) from None
+        raise _from_pydantic(e) from None
+
+
+def _from_pydantic(e: ValidationError, prefix: tuple = ()) -> SystemOneValidationError:
+    """FastAPI-shaped details from a pydantic error: location, message and
+    type only. The offending input value is deliberately left out; it is the
+    caller's state or question text."""
+    return SystemOneValidationError([
+        {"loc": ["body", *prefix, *err["loc"]], "msg": err["msg"], "type": err["type"]} for err in e.errors()
+    ])
 
 
 def parse_request(body: Any) -> Plan:
@@ -200,6 +224,16 @@ def compile_plan(wire: SystemOneRequestIn) -> Plan:
     """Compile a validated request for one-token letter scoring on a chat
     model. Raises SystemOneValidationError (422) for what that method cannot
     express (more than MAX_OPTIONS choices, duplicate or oversized options)."""
+    try:
+        return _compile_plan(wire)
+    except ValidationError as e:
+        # The internal models have limits of their own (lengths, option rules).
+        # Anything they refuse is a 422, never an unhandled error whose text
+        # would carry the request into the logs.
+        raise _from_pydantic(e) from None
+
+
+def _compile_plan(wire: SystemOneRequestIn) -> Plan:
     state = render(wire.state)
     planned: list[PlannedQuestion] = []
     internal: list[BooleanQuestion | ChoiceQuestion] = []

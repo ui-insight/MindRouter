@@ -134,8 +134,8 @@ class VLLMLogprobsBackend:
             except DecisionBackendError:
                 raise
             except httpx.HTTPStatusError as e:
-                body = e.response.text[:300]
-                logger.warning("decision_backend_http_error", backend_id=backend.id, status=e.response.status_code, body=body)
+                # Status only: an engine's error text can quote the prompt.
+                logger.warning("decision_backend_http_error", backend_id=backend.id, status=e.response.status_code)
                 raise DecisionBackendError(f"decision backend returned HTTP {e.response.status_code}", 502) from e
             except httpx.HTTPError as e:
                 logger.warning("decision_backend_unreachable", backend_id=backend.id, error=str(e))
