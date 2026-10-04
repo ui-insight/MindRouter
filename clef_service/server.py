@@ -77,6 +77,9 @@ MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
 IMAGE_TYPES = ("image/png", "image/jpeg", "image/webp")
+# Longest base64 text for one image (5% allowed for line breaks); checked before decoding.
+MAX_IMAGE_CHARS = int((MAX_IMAGE_BYTES + 2) // 3 * 4 * 1.05) + 16
+_WHITESPACE = str.maketrans("", "", " \t\r\n")
 DEFAULT_MAX_BODY_BYTES = 13 * 1024 * 1024
 
 
@@ -203,7 +206,7 @@ class ClefEngine:
         pictures = []
         for index, blob in enumerate(blobs):
             try:
-                with Image.open(io.BytesIO(blob)) as image:
+                with Image.open(io.BytesIO(blob), formats=["PNG", "JPEG", "WEBP"]) as image:
                     if image.width * image.height > MAX_IMAGE_PIXELS:
                         raise ValueError(f"image {index} exceeds {MAX_IMAGE_PIXELS // 1_000_000} megapixels")
                     pictures.append(image.convert("RGB"))
@@ -318,8 +321,10 @@ def decode_images(raw: Any) -> List[bytes]:
             declared = "image/jpeg"
         if declared not in IMAGE_TYPES:
             raise BadRequest(f"image {index}: type must be image/png, image/jpeg or image/webp")
+        if len(encoded) > MAX_IMAGE_CHARS:
+            raise BadRequest(f"image {index} exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MiB")
         try:
-            data = base64.b64decode("".join(encoded.split()), validate=True)
+            data = base64.b64decode(encoded.translate(_WHITESPACE), validate=True)
         except (binascii.Error, ValueError):
             raise BadRequest(f"image {index} is not valid base64") from None
         if not data or len(data) > MAX_IMAGE_BYTES:
@@ -394,6 +399,11 @@ class Batcher:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Nobody will answer what is still queued; do not leave its callers waiting.
+        while not self._queue.empty():
+            pending = self._queue.get_nowait()
+            if not pending.future.done():
+                pending.future.cancel()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     async def submit(self, request: Dict[str, Any]) -> Tuple[Dict[str, Any], Encoded]:
@@ -410,19 +420,19 @@ class Batcher:
             first = await self._queue.get()
             batch = [first]
             deadline = time.monotonic() + self.config.batch_wait_ms / 1000.0
-            while len(batch) < self.config.max_batch:
-                timeout = deadline - time.monotonic()
-                if timeout <= 0:
-                    # Past the wait: take only what is already queued.
-                    if self._queue.empty():
-                        break
-                    batch.append(self._queue.get_nowait())
-                    continue
-                try:
-                    batch.append(await asyncio.wait_for(self._queue.get(), timeout))
-                except asyncio.TimeoutError:
-                    break
             try:
+                while len(batch) < self.config.max_batch:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        # Past the wait: take only what is already queued.
+                        if self._queue.empty():
+                            break
+                        batch.append(self._queue.get_nowait())
+                        continue
+                    try:
+                        batch.append(await asyncio.wait_for(self._queue.get(), timeout))
+                    except asyncio.TimeoutError:
+                        break
                 await self._process(batch)
             except asyncio.CancelledError:
                 for p in batch:
@@ -446,7 +456,12 @@ class Batcher:
             try:
                 item = await loop.run_in_executor(self._executor, self.engine.encode, pending.request)
             except ValueError as error:
-                pending.future.set_exception(BadRequest(str(error)))
+                _fail(pending, BadRequest(str(error)))
+                continue
+            except Exception as error:      # anything else is this request's failure, not the batch's
+                self.stats.failed += 1
+                logger.error("clef_encode_failed error_type=%s", type(error).__name__)
+                _fail(pending, RuntimeError("inference failed"))
                 continue
             encoded.append((pending, item))
 
@@ -471,22 +486,33 @@ class Batcher:
 
     async def _infer(self, group: List[Tuple[_Pending, Encoded]]) -> None:
         loop = asyncio.get_running_loop()
+        # A caller that has gone (disconnected, timed out) gets no forward pass.
+        group = [pair for pair in group if not pair[0].future.done()]
+        if not group:
+            return
         items = [item for _, item in group]
         requests = [pending.request for pending, _ in group]
+        retry_singly = False
         try:
             answers = await loop.run_in_executor(self._executor, self.engine.infer, items, requests)
+            if len(answers) != len(group):
+                raise RuntimeError("engine returned the wrong number of answers")
         except Exception as error:
             if len(group) > 1 and _is_out_of_memory(error):
-                # The batch did not fit; answer its requests one at a time.
-                logger.warning("clef_batch_oom size=%d; retrying singly", len(group))
-                for pair in group:
-                    await self._infer([pair])
+                retry_singly = True
+            else:
+                self.stats.failed += len(group)
+                logger.error("clef_inference_failed error_type=%s batch=%d", type(error).__name__, len(group))
+                for pending, _ in group:
+                    _fail(pending, RuntimeError("inference failed"))
                 return
-            self.stats.failed += len(group)
-            logger.error("clef_inference_failed error_type=%s batch=%d", type(error).__name__, len(group))
-            for pending, _ in group:
-                if not pending.future.done():
-                    pending.future.set_exception(RuntimeError("inference failed"))
+        if retry_singly:
+            # The batch did not fit; answer its requests one at a time. Done
+            # outside the except block so the failed batch's traceback (and
+            # the tensors it holds) is released first.
+            logger.warning("clef_batch_oom size=%d; retrying singly", len(group))
+            for pair in group:
+                await self._infer([pair])
             return
         self.stats.batches += 1
         self.stats.batched_requests += len(group)
@@ -494,6 +520,45 @@ class Batcher:
         for (pending, item), answer in zip(group, answers):
             if not pending.future.done():
                 pending.future.set_result((answer, item))
+
+
+def _fail(pending: "_Pending", error: BaseException) -> None:
+    """Fail one request, unless its caller has already gone."""
+    if not pending.future.done():
+        pending.future.set_exception(error)
+
+
+async def _read_body(request: Any, limit: int) -> Optional[bytes]:
+    """The request body, or None once it passes ``limit`` (nothing beyond the
+    limit is kept, whether or not the client declared a length)."""
+    chunks: List[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _unless_disconnected(request: Any, work: Any, poll_seconds: float = 0.25) -> Any:
+    """Await ``work``; cancel it if the client disconnects first, so a request
+    nobody is waiting for leaves the queue instead of costing a forward pass."""
+    task = asyncio.ensure_future(work)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=poll_seconds)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                raise ClientGone()
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+class ClientGone(Exception):
+    """The caller disconnected before its answer was ready."""
 
 
 # ---------------------------------------------------------------------------
@@ -554,8 +619,8 @@ def create_app(config: ServiceConfig):
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > config.max_body_bytes:
             raise HTTPException(status_code=413, detail="request body is too large")
-        raw = await request.body()
-        if len(raw) > config.max_body_bytes:
+        raw = await _read_body(request, config.max_body_bytes)
+        if raw is None:
             raise HTTPException(status_code=413, detail="request body is too large")
         try:
             body = validate_request(json.loads(raw))
@@ -568,7 +633,9 @@ def create_app(config: ServiceConfig):
 
         started = time.monotonic()
         try:
-            answers, item = await batcher.submit(body)
+            answers, item = await _unless_disconnected(request, batcher.submit(body))
+        except ClientGone:
+            raise HTTPException(status_code=499, detail="client closed request") from None
         except Oversubscribed:
             raise HTTPException(status_code=503, detail="server busy, try again shortly",
                                 headers={"Retry-After": "1"}) from None

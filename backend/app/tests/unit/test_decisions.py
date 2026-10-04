@@ -159,33 +159,32 @@ def _fake_registry(backends, aliases=None, open_circuits=()):
     against these stubs, so the selection rules are tested, not mocked."""
     from backend.app.core.telemetry.registry import BackendRegistry
 
-    from backend.app.db.models import Modality
-
     reg = MagicMock()
-
-    async def _with_model(model_name, modality=None):
-        # Like the SQL: healthy backends only, and with a modality, only copies of that modality.
-        found = [b for b in backends if getattr(b.status, "value", b.status) == "healthy"]
-        if modality == Modality.MULTIMODAL:
-            found = [b for b in found if getattr(b, "sees_images", False) is True]
-        return found
-
-    reg.get_backends_with_model = AsyncMock(side_effect=_with_model)
+    # Like the SQL: healthy backends only. Whether a copy of the model sees is
+    # NOT decided here; the real picker reads it from each backend's model rows.
+    reg.get_backends_with_model = AsyncMock(
+        side_effect=lambda model_name: [b for b in backends if getattr(b.status, "value", b.status) == "healthy"])
     reg.is_backend_available = AsyncMock(side_effect=lambda bid: bid not in open_circuits)
     reg.resolve_alias = MagicMock(side_effect=lambda m: ((aliases or {}).get(m, m), None))
 
-    async def _pick(model_name, *, engine=None, modality=None):
-        return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine, modality=modality)
+    async def _pick(model_name, *, engine=None, multimodal=False):
+        return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine, multimodal=multimodal)
 
     reg.pick_available_backend = _pick
     return reg
 
 
-def _vllm_backend(id=7, name="aspen5-gpu2-qwen3.8-27b", healthy=True, engine=None, sees_images=True):
+def _vllm_backend(id=7, name="aspen5-gpu2-qwen3.8-27b", healthy=True, engine=None, sees_images=False,
+                  model="qwen/qwen3.8-27b", other_models=()):
+    """A backend stub. Its model rows carry ``supports_multimodal`` like the
+    real ones; blind unless a test says otherwise, so no image test passes by default."""
+    from types import SimpleNamespace
+
     from backend.app.db.models import BackendEngine
     b = MagicMock()
     b.id, b.name, b.url = id, name, f"https://node{id}:8002"
-    b.sees_images = sees_images
+    b.models = [SimpleNamespace(name=model, supports_multimodal=sees_images),
+                *(SimpleNamespace(name=n, supports_multimodal=sees) for n, sees in other_models)]
     b.engine = engine or BackendEngine.VLLM
     b.status = MagicMock(value="healthy" if healthy else "unhealthy")
     return b
@@ -1647,6 +1646,46 @@ class TestImageValidation:
             img.normalize_images([_data_url(size=(8, 8))])       # 64 pixels
         assert "megapixels" in str(e.value)
 
+    def test_oversized_base64_is_refused_before_it_is_stripped_or_decoded(self, monkeypatch):
+        # 50 MB of "AA AA ..." once cost 1 s and 1 GB here: the length check comes first.
+        calls = []
+        monkeypatch.setattr(img.base64, "b64decode", lambda *a, **k: calls.append(1) or b"")
+        padded = "AA " * (img.MAX_IMAGE_CHARS // 3 + 10)
+        for item in (f"data:image/png;base64,{padded}", {"content_type": "image/png", "base64": padded}):
+            with pytest.raises(img.ImageError) as e:
+                img.normalize_images([item])
+            assert "MiB" in str(e.value) and e.value.index == 0
+        assert calls == []
+
+    def test_a_full_size_image_with_line_breaks_fits_the_length_limit(self):
+        encoded = (img.MAX_IMAGE_BYTES + 2) // 3 * 4
+        assert encoded + encoded // 60 * 2 <= img.MAX_IMAGE_CHARS      # wrapped at 60 columns with CRLF
+
+    def test_a_phone_cameras_multi_frame_jpeg_is_a_jpeg(self):
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), "red").save(buf, format="MPO", save_all=True,
+                                              append_images=[Image.new("RGB", (8, 8), "blue")])
+        (url,) = img.normalize_images([{"content_type": "image/jpeg", "base64": base64.b64encode(buf.getvalue()).decode()}])
+        assert url.startswith("data:image/jpeg;base64,")
+
+    def test_a_damaged_png_is_refused(self):
+        whole = _picture("PNG", size=(64, 64))
+        cut = base64.b64encode(whole[: len(whole) // 2]).decode()
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([f"data:image/png;base64,{cut}"])
+        assert "could not be read" in str(e.value)
+
+    def test_only_the_three_decoders_ever_open_caller_bytes(self, monkeypatch):
+        from PIL import Image
+        seen = []
+        real = Image.open
+        monkeypatch.setattr(Image, "open", lambda fp, **kw: seen.append(kw.get("formats")) or real(fp, **kw))
+        gif = io.BytesIO(); Image.new("RGB", (4, 4)).save(gif, format="GIF")
+        with pytest.raises(img.ImageError):
+            img.normalize_images([f"data:image/png;base64,{base64.b64encode(gif.getvalue()).decode()}"])
+        assert seen == [["PNG", "JPEG", "WEBP"]]
+
     def test_wire_validation_reports_images_in_fastapi_shape(self):
         with pytest.raises(so.SystemOneValidationError) as e:
             so.validate_wire({**_WITH_IMAGE, "images": [_data_url(), "https://example.com/x.png"]})
@@ -1668,7 +1707,7 @@ class TestImagesOnVLLMModels:
             "kind": {"type": "choice", "instructions": "What is it?", "criteria": {"receipt": None, "invoice": None}}}}
         plan = so.parse_request(body)
         backend = vl.VLLMLogprobsBackend()
-        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=True)])):
             await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
         chat = [b for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
         assert len(chat) == 3                                           # noul 1 + choice 2 orders
@@ -1720,9 +1759,41 @@ class TestImagesOnVLLMModels:
             f"q{i}": {"type": "noul", "instructions": f"Q{i}?"} for i in range(3)}}
         plan = so.parse_request(body)
         backend = vl.VLLMLogprobsBackend()
-        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=True)])):
             await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=8)
         assert events[:2] == ["start", "end"]
+
+    async def test_seeing_is_the_requested_models_own_flag(self, fake_http):
+        # Another vision model on the same backend does not make this one see.
+        backend_ = _vllm_backend(sees_images=False, other_models=[("google/gemma-4-31b", True)])
+        plan = so.parse_request(_WITH_IMAGE)
+        with patch.object(vl, "get_registry", return_value=_fake_registry([backend_])):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == 422
+
+    async def test_text_requests_do_not_need_a_model_that_sees(self, fake_http):
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=False)])):
+            out = await vl.VLLMLogprobsBackend().decide(_req(), "qwen/qwen3.8-27b", fanout=4)
+        assert out.backend_id == 7
+
+    async def test_no_healthy_replica_is_503_even_with_images(self, fake_http):
+        plan = so.parse_request(_WITH_IMAGE)
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(healthy=False, sees_images=True)])):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == 503
+
+    @pytest.mark.parametrize("with_image,status,expected", [(True, 400, 422), (True, 500, 502), (False, 400, 502)])
+    async def test_an_image_the_model_rejects_is_the_callers_422(self, fake_http, with_image, status, expected):
+        good = _default_handler()
+        fake_http.handler = lambda url, body: (
+            good(url, body) if url.endswith("/tokenize") else _FakeResponse({"error": "x"}, status_code=status))
+        request = so.parse_request(_WITH_IMAGE).decision_request if with_image else _req()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=True)])):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == expected
 
 
 class TestImagesOnUpstreams:

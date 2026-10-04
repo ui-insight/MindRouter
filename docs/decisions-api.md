@@ -107,9 +107,11 @@ How the two kinds differ:
   or an object `{"content_type": "image/png", "base64": "..."}`. PNG, JPEG or
   WebP; 4 MiB and 16 megapixels each, 8 MiB in total. Remote URLs are not
   accepted: MindRouter does not fetch on a caller's behalf. Every image is
-  checked before any model sees it (it must decode, be the type it claims and
-  be within the limits). A model that cannot see refuses the request with 422
-  rather than answering from the text alone. This is the same field and format
+  checked before any model sees it (it must be a readable file of the type it
+  claims, within the limits; an image whose pixel data turns out to be damaged
+  is a 422 from the model). A model that cannot see refuses the request with
+  422 rather than answering from the text alone; for a vLLM model that is the
+  model's multimodal capability flag, the one the admin override sets. This is the same field and format
   Cloudflare publishes for Clef on Workers AI.
 * `permutations` *(MindRouter extension, vLLM models only)* — how many option
   orders are scored. With `2` a question is also scored with its options

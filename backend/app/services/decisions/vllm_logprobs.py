@@ -60,7 +60,7 @@ from typing import Any
 import httpx
 
 from backend.app.core.telemetry.registry import get_registry
-from backend.app.db.models import BackendEngine, Modality
+from backend.app.db.models import BackendEngine
 from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
 
@@ -138,6 +138,10 @@ class VLLMLogprobsBackend:
             except httpx.HTTPStatusError as e:
                 # Status only: an engine's error text can quote the prompt.
                 logger.warning("decision_backend_http_error", backend_id=backend.id, status=e.response.status_code)
+                if images and e.response.status_code == 400:
+                    # The gateway reads only an image's header; pixels the model
+                    # cannot decode (a cut-off file) are the caller's to fix.
+                    raise DecisionBackendError("the model could not read the request's images", 422) from e
                 raise DecisionBackendError(f"decision backend returned HTTP {e.response.status_code}", 502) from e
             except httpx.HTTPError as e:
                 logger.warning("decision_backend_unreachable", backend_id=backend.id, error=str(e))
@@ -185,7 +189,7 @@ class VLLMLogprobsBackend:
         """
         registry = get_registry()
         backend = await registry.pick_available_backend(
-            model, engine=BackendEngine.VLLM, modality=Modality.MULTIMODAL if needs_vision else None)
+            model, engine=BackendEngine.VLLM, multimodal=needs_vision)
         if backend is None and needs_vision and await registry.pick_available_backend(model, engine=BackendEngine.VLLM):
             # The model is up; it just cannot see. The caller's request to fix.
             raise DecisionBackendError(f"model '{model}' does not accept images", 422)

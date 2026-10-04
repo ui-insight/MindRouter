@@ -27,7 +27,8 @@ request written for Workers AI is accepted unchanged:
 
 Every image is checked here, before any model sees it: the bytes must decode,
 must really be the type they claim, and must be within the size limits. Only
-the header is read; nothing is decoded to pixels in the gateway.
+the file's structure is read; nothing is decoded to pixels in the gateway, so
+an image whose pixel data is damaged is caught by the model instead (422).
 """
 from __future__ import annotations
 
@@ -41,10 +42,17 @@ MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_PIXELS = 16_000_000
+# Longest base64 text one image may arrive as: MAX_IMAGE_BYTES encoded, plus 5%
+# for line breaks. Checked before anything is stripped or decoded, so an
+# oversized or whitespace-padded string costs nothing.
+MAX_IMAGE_CHARS = int((MAX_IMAGE_BYTES + 2) // 3 * 4 * 1.05) + 16
 
-# content type <-> Pillow format name
-_FORMATS = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
-_TYPE_OF = {v: k for k, v in _FORMATS.items()}
+_TYPES = ("image/png", "image/jpeg", "image/webp")
+# Pillow format name -> content type. MPO is a JPEG carrying extra frames
+# (phone cameras write it); its first frame is an ordinary JPEG.
+_TYPE_OF = {"PNG": "image/png", "JPEG": "image/jpeg", "MPO": "image/jpeg", "WEBP": "image/webp"}
+_DECODERS = ["PNG", "JPEG", "WEBP"]
+_WHITESPACE = str.maketrans("", "", " \t\r\n")
 _DATA_URL = re.compile(r"^data:(?P<type>[\w.+-]+/[\w.+-]+);base64,(?P<data>.*)$", re.IGNORECASE | re.DOTALL)
 
 
@@ -70,8 +78,10 @@ def normalize_images(raw: Any) -> list[str]:
     total = 0
     for index, item in enumerate(raw):
         declared, encoded = _split(item, index)
+        if len(encoded) > MAX_IMAGE_CHARS:
+            raise ImageError(f"image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)} MiB", index)
         try:
-            data = base64.b64decode("".join(encoded.split()), validate=True)
+            data = base64.b64decode(encoded.translate(_WHITESPACE), validate=True)
         except (binascii.Error, ValueError):
             raise ImageError("image is not valid base64", index) from None
         if not data:
@@ -105,7 +115,7 @@ def _split(item: Any, index: int) -> tuple[str, str]:
         raise ImageError("image must be a data URL string or an object with content_type and base64", index)
     if declared == "image/jpg":
         declared = "image/jpeg"
-    if declared not in _FORMATS:
+    if declared not in _TYPES:
         raise ImageError("image type must be image/png, image/jpeg or image/webp", index)
     return declared, encoded
 
@@ -116,10 +126,14 @@ def _inspect(data: bytes, index: int) -> str:
     from PIL import Image
 
     try:
-        with Image.open(io.BytesIO(data)) as image:
+        # Only these decoders ever touch caller bytes. (MPO is not named: the
+        # JPEG decoder recognises it itself, and Pillow has no MPO opener to
+        # look up until every plugin is loaded.)
+        with Image.open(io.BytesIO(data), formats=_DECODERS) as image:
             fmt, (width, height) = image.format, image.size
+            image.verify()   # file structure (PNG: every chunk's checksum); no pixels decoded
     except Exception:
-        # Not an image, a truncated one, or one Pillow refuses as a decompression bomb.
+        # Not an image, a damaged one, or one Pillow refuses as a decompression bomb.
         raise ImageError("image could not be read as PNG, JPEG or WebP", index) from None
     if fmt not in _TYPE_OF:
         raise ImageError("image type must be image/png, image/jpeg or image/webp", index)

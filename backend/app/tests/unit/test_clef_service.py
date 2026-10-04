@@ -51,17 +51,23 @@ class FakeEngine:
     """Stands in for the loaded Clef model. One "token" per whitespace word."""
 
     device = "cpu"
+    short_answers = False
 
     def __init__(self, config, blocker=None, fail=None, oom_above=None):
         self.config = config
         self.batches = []          # size of every forward pass
         self.batch_tokens = []     # padded tokens of every forward pass
         self.seen_images = []      # image bytes handed to the model, per request
+        self.encoded = []          # states tokenized
+        self.inferred = []         # states that got a forward pass
         self._blocker, self._fail, self._oom_above = blocker, fail, oom_above
 
     def encode(self, request):
         if request["state"] == "SCHEMA-TOO-LONG":
             raise ValueError("schema requires 99999 tokens before state; maximum is 16384")
+        if request["state"] == "ENCODER-BUG":
+            raise RuntimeError("unexpected failure quoting " + SECRET)
+        self.encoded.append(request["state"])
         self.seen_images.append(list(request.get("_images") or []))
         full = len(str(request["state"]).split()) + 10
         dropped = max(0, full - self.config.max_length)
@@ -76,6 +82,9 @@ class FakeEngine:
         if self._fail is not None:
             raise self._fail
         self.batches.append(len(batch))
+        self.inferred.extend(r["state"] for r in requests)
+        if self.short_answers:
+            return [{}] * (len(batch) - 1)
         self.batch_tokens.append(len(batch) * max(item.tokens for item in batch))
         out = []
         for request in requests:
@@ -299,6 +308,102 @@ class TestBatching:
         assert not isinstance(results[0], Exception) and not isinstance(results[2], Exception)
         assert engine.batches == [2]
 
+    async def test_an_unexpected_encode_failure_also_fails_alone(self, monkeypatch):
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        try:
+            results = await asyncio.gather(
+                batcher.submit(_body(state="fine one")),
+                batcher.submit(_body(state="ENCODER-BUG")),
+                batcher.submit(_body(state="fine two")),
+                return_exceptions=True,
+            )
+        finally:
+            await batcher.stop()
+        assert isinstance(results[1], RuntimeError) and SECRET not in str(results[1])
+        assert not isinstance(results[0], Exception) and not isinstance(results[2], Exception)
+        assert engine.batches == [2] and batcher.stats.failed == 1
+
+    async def test_a_caller_who_left_gets_no_forward_pass(self, monkeypatch):
+        gate = threading.Event()
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=0, max_batch=1),
+                                         blocker=gate)
+        try:
+            first = asyncio.ensure_future(batcher.submit(_body(state="first")))
+            await asyncio.sleep(0.05)                       # "first" is on the GPU, held by the gate
+            gone = asyncio.ensure_future(batcher.submit(_body(state="gone")))
+            stays = asyncio.ensure_future(batcher.submit(_body(state="stays")))
+            await asyncio.sleep(0.02)
+            gone.cancel()                                   # its client disconnected while queued
+            gate.set()
+            await asyncio.gather(first, stays)
+        finally:
+            await batcher.stop()
+        assert engine.inferred == ["first", "stays"] and "gone" not in engine.encoded
+
+    async def test_a_caller_leaving_mid_batch_does_not_hurt_the_others(self, monkeypatch):
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        try:
+            tasks = [asyncio.ensure_future(batcher.submit(_body(state=s)))
+                     for s in ("one", "SCHEMA-TOO-LONG", "two")]
+            await asyncio.sleep(0.01)
+            tasks[1].cancel()                               # leaves before its encode fails
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            await batcher.stop()
+        assert isinstance(results[1], asyncio.CancelledError)
+        assert not isinstance(results[0], Exception) and not isinstance(results[2], Exception)
+
+    async def test_a_disconnect_cancels_the_waiting_work(self):
+        class Gone:
+            async def is_disconnected(self):
+                return True
+
+        cancelled = []
+
+        async def work():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        with pytest.raises(server.ClientGone):
+            await server._unless_disconnected(Gone(), work(), poll_seconds=0.01)
+        await asyncio.sleep(0)
+        assert cancelled == [True]
+
+    async def test_a_connected_caller_gets_the_result(self):
+        class Here:
+            async def is_disconnected(self):
+                return False
+
+        async def work():
+            await asyncio.sleep(0.03)
+            return "answer"
+
+        assert await server._unless_disconnected(Here(), work(), poll_seconds=0.01) == "answer"
+
+    async def test_stop_releases_everyone_still_waiting(self, monkeypatch):
+        gate = threading.Event()
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=0, max_batch=1),
+                                         blocker=gate)
+        tasks = [asyncio.ensure_future(batcher.submit(_body(state=f"t{i}"))) for i in range(4)]
+        await asyncio.sleep(0.05)
+        await batcher.stop()
+        gate.set()
+        done, waiting = await asyncio.wait(tasks, timeout=2)
+        assert not waiting                                  # nobody is left hanging
+
+    async def test_a_short_reply_from_the_engine_fails_the_batch_instead_of_hanging(self, monkeypatch):
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        engine.short_answers = True
+        try:
+            results = await asyncio.wait_for(asyncio.gather(
+                *(batcher.submit(_body(state=f"t{i}")) for i in range(3)), return_exceptions=True), timeout=2)
+        finally:
+            await batcher.stop()
+        assert all(isinstance(r, RuntimeError) for r in results)
+
     async def test_out_of_memory_batch_is_retried_one_at_a_time(self, monkeypatch):
         batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60), oom_above=1)
         try:
@@ -436,6 +541,50 @@ class TestImages:
         with TestClient(server.create_app(_config())) as c:
             r = c.post("/v1/systemone", json=_body(images=[_url(PNG, "image/png")]), headers=AUTH)
         assert r.status_code == 422 and "could not be decoded" in r.json()["detail"]
+
+    def test_oversized_base64_is_refused_before_decoding(self, client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(server.base64, "b64decode", lambda *a, **k: calls.append(1) or b"")
+        monkeypatch.setattr(server, "MAX_IMAGE_CHARS", 200)
+        padded = "AA " * 100
+        r = client.post("/v1/systemone", json=_body(images=[f"data:image/png;base64,{padded}"]), headers=AUTH)
+        assert r.status_code == 422 and "MiB" in r.json()["detail"] and calls == []
+
+    def test_a_chunked_body_is_cut_off_at_the_limit(self, engine_box):
+        def chunks():
+            for _ in range(50):
+                yield b"x" * 100
+        with TestClient(server.create_app(_config(max_body_bytes=1000))) as c:
+            r = c.post("/v1/systemone", content=chunks(), headers=AUTH)     # no Content-Length
+        assert r.status_code == 413 and engine_box["engine"].batches == []
+
+    def test_real_images_are_decoded_for_the_model(self):
+        """The real engine's image step (no model needed): real files in, RGB pictures out."""
+        import io
+        from PIL import Image
+
+        def picture(fmt, size=(12, 8), mode="RGB"):
+            buf = io.BytesIO()
+            Image.new(mode, size, "red").save(buf, format=fmt)
+            return buf.getvalue()
+
+        out = server.ClefEngine._open_images([picture("PNG", mode="RGBA"), picture("JPEG"), picture("WEBP")])
+        assert [(p.mode, p.size) for p in out] == [("RGB", (12, 8))] * 3
+        assert server.ClefEngine._open_images([]) == []
+
+    def test_real_image_limits_are_the_callers_422(self, monkeypatch):
+        import io
+        from PIL import Image
+        buf = io.BytesIO(); Image.new("RGB", (64, 64), "red").save(buf, format="PNG")
+        whole = buf.getvalue()
+        with pytest.raises(ValueError, match="could not be decoded"):
+            server.ClefEngine._open_images([whole[: len(whole) // 2]])           # pixel data cut off
+        gif = io.BytesIO(); Image.new("RGB", (4, 4)).save(gif, format="GIF")
+        with pytest.raises(ValueError, match="could not be decoded"):
+            server.ClefEngine._open_images([gif.getvalue()])                      # not one of the three types
+        monkeypatch.setattr(server, "MAX_IMAGE_PIXELS", 100)
+        with pytest.raises(ValueError, match="megapixels"):
+            server.ClefEngine._open_images([whole])                               # checked before decoding
 
     def test_health_says_the_server_takes_images(self, client):
         assert client.get("/health", headers=AUTH).json()["images"] is True

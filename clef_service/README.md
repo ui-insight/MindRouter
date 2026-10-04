@@ -22,6 +22,8 @@ the weights and a Python function (`systemone()` in the model repo's
   they share the same compute and hold the 55 GB of weights twice.
 - A bounded queue: beyond `CLEF_MAX_QUEUE` waiting requests the answer is
   `503` with `Retry-After`, not an ever-growing backlog.
+- A caller that disconnects or times out while waiting is dropped from the
+  queue; the GPU is not spent on an answer nobody will read.
 - `GET /health`: `{"status": "ok"}` for anyone (`"loading"` while the weights
   load); model, device, queue depth and batch statistics with the key.
 - Truncation is reported. Clef cuts the state to fit `CLEF_MAX_LENGTH` tokens;
