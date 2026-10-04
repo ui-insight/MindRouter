@@ -4157,6 +4157,9 @@ async def create_local_user(
             department=department.strip() if department and department.strip() else None,
             intended_use=intended_use.strip() if intended_use and intended_use.strip() else None,
         )
+        # Created in MindRouter by an administrator: a MindRouter account, not
+        # one that exists only through an app (bulk-email audiences, migration 088).
+        new_user.last_direct_login_at = datetime.now(timezone.utc)
         await crud.create_quota(db, user_id=new_user.id, rpm_limit=group.rpm_limit)
         await crud.log_admin_action(
             db, user_id=session_user_id, action="user.create",

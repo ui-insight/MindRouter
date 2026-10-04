@@ -43,7 +43,7 @@ async def db():
     from backend.app.db.models import Base
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    names = ("groups", "users", "quotas", "app_config")
+    names = ("groups", "users", "quotas", "app_config", "apps", "api_keys")
     tables = [Base.metadata.tables[t] for t in names]
     async with engine.begin() as conn:
         await conn.run_sync(lambda s: Base.metadata.create_all(s, tables=tables))
@@ -169,6 +169,23 @@ class TestWhoCountsAsDirect:
         user = await find_or_create_azure_user(db, dict(self._PROFILE))
         assert user.last_direct_login_at is not None and user.last_direct_login_at == user.last_login_at
 
+    async def test_a_generic_sso_sign_in_is_direct_for_new_and_returning_people(self, db):
+        from backend.app.dashboard.sso.base import SSOProfile, find_or_create_sso_user
+
+        await self._groups(db)
+        profile = SSOProfile(provider="google", subject="sub-1", email="g.user@example.edu", display_name="G User")
+        created = await find_or_create_sso_user(db, profile, "other")
+        assert created is not None and created.last_direct_login_at is not None
+        created.last_direct_login_at = None
+        await db.flush()
+        returning = await find_or_create_sso_user(db, profile, "other")
+        assert returning.id == created.id and returning.last_direct_login_at is not None
+
+    def test_accounts_an_admin_creates_are_mindrouter_accounts(self):
+        for rel in (("dashboard", "routes.py"), ("api", "admin_api.py")):
+            src = _APP.joinpath(*rel).read_text()
+            assert "last_direct_login_at = datetime.now(timezone.utc)" in src, rel
+
     def test_the_app_route_is_the_only_caller_that_says_not_direct(self):
         apps = (_APP / "api" / "apps_api.py").read_text()
         assert "find_or_create_azure_user(db, profile, direct=False)" in apps
@@ -248,6 +265,65 @@ class TestAdminEmailRoute:
         assert (await count({"mode": "groups", "group_ids": [], "audience": "all"}))["counts"] == {"all": 0, "direct": 0}
 
 
+class TestCountMatchesSend:
+    """The count on the form and the send, against the real query: an admin
+    must never see "0 recipients" and then mail everyone."""
+
+    async def _count(self, db, body):
+        import json
+
+        from backend.app.dashboard import email_routes as er
+
+        request = MagicMock(); request.json = AsyncMock(return_value=body)
+        with patch.object(er, "_require_admin", AsyncMock(return_value=(_admin(), None))):
+            return json.loads((await er.recipient_count(request, db=db)).body)
+
+    async def _send(self, db, **form):
+        from backend.app.dashboard import email_routes as er
+
+        svc = MagicMock()
+        svc.get_smtp_config = AsyncMock(return_value={"default_sender": "noreply@example.edu"})
+        svc.is_smtp_configured = MagicMock(return_value=True)
+        svc.get_base_url = AsyncMock(return_value="https://x")
+        svc.send_bulk_email = MagicMock(side_effect=lambda *a, **k: (a, k))
+        with patch.object(er, "_require_admin", AsyncMock(return_value=(_admin(), None))), \
+             patch.object(er, "email_service", svc), patch.object(er.asyncio, "create_task"), \
+             patch.object(er.crud, "create_email_log", AsyncMock(return_value=MagicMock(id=1))):
+            args = {"subject": "s", "body": "b", "recipient_mode": "all", "group_ids": None, "user_ids": None, "audience": "all", **form}
+            resp = await er.send_email(MagicMock(), db=db, **args)
+        sent = sorted(r["username"] for r in svc.send_bulk_email.call_args.args[3]) if svc.send_bulk_email.called else []
+        return resp.headers["location"], sent
+
+    @pytest.mark.parametrize("mode", ["groups", "users", "nonsense"])
+    @pytest.mark.parametrize("audience", ["all", "direct"])
+    async def test_nothing_selected_counts_zero_and_sends_to_nobody(self, db, people, mode, audience):
+        counted = await self._count(db, {"mode": mode, "group_ids": [], "user_ids": [], "audience": audience})
+        assert counted == {"count": 0, "counts": {"all": 0, "direct": 0}}
+        location, sent = await self._send(db, recipient_mode=mode, group_ids="", user_ids="", audience=audience)
+        assert "error=No+recipients+found" in location and sent == []
+
+    async def test_every_selection_sends_to_exactly_the_people_counted(self, db, people):
+        staff, vera = str(people["staff"].id), str(people["vera_app_only"].id)
+        cases = [
+            ({"mode": "all"}, {"recipient_mode": "all"}),
+            ({"mode": "groups", "group_ids": [staff]}, {"recipient_mode": "groups", "group_ids": staff}),
+            ({"mode": "users", "user_ids": [vera, str(people["dana_direct"].id)]},
+             {"recipient_mode": "users", "user_ids": f"{vera},{people['dana_direct'].id}"}),
+        ]
+        for count_body, send_form in cases:
+            for audience in ("all", "direct"):
+                counted = (await self._count(db, {**count_body, "audience": audience}))["count"]
+                location, sent = await self._send(db, audience=audience, **send_form)
+                assert len(sent) == counted and counted > 0, (count_body, audience, counted, sent)
+                assert f"Sending+to+{counted}+recipients" in location
+                if audience == "direct":
+                    assert not any("app_only" in name for name in sent)
+
+    async def test_odd_input_to_the_count_is_not_a_crash(self, db, people):
+        out = await self._count(db, {"mode": "all", "audience": ["direct"], "group_ids": "3", "user_ids": [None, "x", "2"]})
+        assert out["count"] is None and out["counts"]["all"] == 5
+
+
 class TestBlogEmailRoute:
     async def _send(self, audience):
         from backend.app.dashboard import blog
@@ -291,6 +367,67 @@ class TestFormsAndMigration:
             assert all("required" in r and "checked" not in r for r in radios), name
             assert {'value="all"', 'value="direct"'} <= {v for r in radios for v in ('value="all"', 'value="direct"') if v in r}
 
+    async def test_the_backfill_classifies_each_kind_of_account(self, db):
+        from backend.app.db.models import ApiKey, App, Group, User
+
+        path = _APP / "db" / "migrations" / "versions" / "20261004_000001_088_direct_login_and_email_audience.py"
+        spec = importlib.util.spec_from_file_location("migration_088_run", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        before, app_day, after = datetime(2026, 7, 1), datetime(2026, 8, 9), datetime(2026, 9, 1)
+        g = Group(name="students", display_name="S", token_budget=1, rpm_limit=30)
+        db.add(g); await db.flush()
+
+        def user(name, created, **kw):
+            kw.setdefault("group_classified", False)        # what an app-created account looks like
+            return User(username=name, email=f"{name}@example.edu", group_id=g.id, created_at=created, last_login_at=after, **kw)
+
+        rows = {
+            "agreed": user("agreed", after, agreement_accepted_at=after),
+            "has_password": user("has_password", after, password_hash="x"),
+            "old_account": user("old_account", before),
+            "own_key": user("own_key", after),
+            "settled_group": user("settled_group", after, group_classified=True),
+            "app_only": user("app_only", after),
+            "app_only_with_app_key": user("app_only_with_app_key", after),
+            "already_stamped": user("already_stamped", after, agreement_accepted_at=after, last_direct_login_at=datetime(2026, 9, 30)),
+        }
+        db.add_all(rows.values()); await db.flush()
+        app = App(slug="vandalchat", name="VandalChat", created_at=app_day)
+        db.add(app); await db.flush()
+        db.add_all([
+            ApiKey(user_id=rows["own_key"].id, key_hash="h1", key_prefix="mr2_a", name="mine"),
+            ApiKey(user_id=rows["app_only_with_app_key"].id, key_hash="h2", key_prefix="mr2_b", name="vc", app_id=app.id),
+        ])
+        await db.commit()
+
+        conn = await db.connection()
+        await conn.run_sync(module.backfill)
+        await conn.run_sync(module.backfill)                 # safe to run again
+        await db.commit()
+        for row in rows.values():
+            await db.refresh(row)
+        direct = {name for name, row in rows.items() if row.last_direct_login_at is not None}
+        assert direct == {"agreed", "has_password", "old_account", "own_key", "settled_group", "already_stamped"}
+        assert rows["already_stamped"].last_direct_login_at.day == 30          # an existing stamp is not overwritten
+
+    async def test_with_no_registered_app_everyone_is_direct(self, db):
+        from backend.app.db.models import Group, User
+
+        path = _APP / "db" / "migrations" / "versions" / "20261004_000001_088_direct_login_and_email_audience.py"
+        spec = importlib.util.spec_from_file_location("migration_088_noapps", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        g = Group(name="students", display_name="S", token_budget=1, rpm_limit=30)
+        db.add(g); await db.flush()
+        u = User(username="solo", email="solo@example.edu", group_id=g.id, group_classified=False)
+        db.add(u); await db.commit()
+        conn = await db.connection()
+        await conn.run_sync(module.backfill)
+        await db.commit(); await db.refresh(u)
+        assert u.last_direct_login_at is not None
+
     def test_migration_088(self):
         path = _APP / "db" / "migrations" / "versions" / "20261004_000001_088_direct_login_and_email_audience.py"
         spec = importlib.util.spec_from_file_location("migration_088", path)
@@ -300,8 +437,10 @@ class TestFormsAndMigration:
         src = path.read_text()
         # Every piece of evidence for direct use is in the backfill, and the no-apps case is handled.
         for clause in ("agreement_accepted_at IS NOT NULL", "password_hash IS NOT NULL", "created_at < :first_app",
-                       "k.app_id IS NULL", "if first_app is None"):
+                       "k.app_id IS NULL", "group_classified = 1", "if first_app is None"):
             assert clause in src, clause
+        # Re-runnable after a partial failure: columns are added only when missing.
+        assert src.count("if not _has_column(bind,") == 2
 
     def test_the_orm_has_the_columns_the_migration_adds(self):
         from backend.app.db.models import EmailLog, User

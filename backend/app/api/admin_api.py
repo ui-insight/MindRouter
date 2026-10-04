@@ -1491,6 +1491,9 @@ async def create_user(
         department=request.department,
         intended_use=request.intended_use,
     )
+    # Created in MindRouter by an administrator: a MindRouter account, not one
+    # that exists only through an app (bulk-email audiences, migration 088).
+    user.last_direct_login_at = datetime.now(timezone.utc)
 
     # Create quota with group defaults
     await crud.create_quota(
