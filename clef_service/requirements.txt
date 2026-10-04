@@ -1,0 +1,27 @@
+# ############################################################
+# mindrouter - Clef System One service requirements
+#
+# These are the versions Cloudflare tested the Clef release
+# with ("torch 2.11 and transformers 5.10.2 on a single H200").
+# Install torch FIRST from the CUDA wheel index, then the rest:
+#
+#   pip install torch==2.11.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r clef_service/requirements.txt
+#
+# accelerate is required: Clef's loader uses device_map.
+# ############################################################
+
+torch==2.11.0
+# Not listed on Clef's model card, but its processor (Qwen3VLVideoProcessor)
+# will not load without it. Install from the same CUDA index as torch.
+torchvision
+transformers==5.10.2
+accelerate
+safetensors
+pillow
+huggingface_hub[hf_xet]
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# Unit tests (no GPU, no torch needed there): httpx for the test client.
+httpx>=0.27

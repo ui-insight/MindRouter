@@ -49,7 +49,7 @@ from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
 
 from . import DecisionBackendError
-from .systemone import SystemOneValidationError
+from .systemone import SystemOneValidationError, choice_confidence, score_confidence
 
 logger = get_logger(__name__)
 
@@ -71,6 +71,7 @@ class Upstream:
     api_key: str | None = None
     model: str | None = None  # sent upstream as ``model``; None omits the field
     timeout: float = _DEFAULT_TIMEOUT
+    images: bool = False      # the upstream accepts the ``images`` extension (Clef does; Laya does not)
 
 
 def parse_upstreams(raw: Any) -> tuple[dict[str, Upstream], list[str]]:
@@ -89,7 +90,7 @@ def parse_upstreams(raw: Any) -> tuple[dict[str, Upstream], list[str]]:
         if not isinstance(spec, dict):
             problems.append(f"{name}: must be an object with a 'url'")
             continue
-        unknown = set(spec) - {"url", "api_key", "model", "timeout"}
+        unknown = set(spec) - {"url", "api_key", "model", "timeout", "images"}
         if unknown:
             problems.append(f"{name}: unknown keys {sorted(unknown)}")
             continue
@@ -107,7 +108,12 @@ def parse_upstreams(raw: Any) -> tuple[dict[str, Upstream], list[str]]:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= _MAX_TIMEOUT:
             problems.append(f"{name}: 'timeout' must be a number of seconds up to {int(_MAX_TIMEOUT)}")
             continue
-        out[name] = Upstream(name=name, url=url.rstrip("/"), api_key=api_key, model=model, timeout=float(timeout))
+        accepts_images = spec.get("images", False)
+        if not isinstance(accepts_images, bool):
+            problems.append(f"{name}: 'images' must be true or false")
+            continue
+        out[name] = Upstream(name=name, url=url.rstrip("/"), api_key=api_key, model=model, timeout=float(timeout),
+                             images=accepts_images)
     return out, problems
 
 
@@ -171,7 +177,8 @@ class SystemOneUpstreamBackend:
         return current[1]
 
     async def answer(
-        self, upstream: Upstream, state: Any, questions: dict[str, Any], *, concurrency: int = 4
+        self, upstream: Upstream, state: Any, questions: dict[str, Any], *, concurrency: int = 4,
+        images: list[str] | None = None,
     ) -> UpstreamAnswer:
         # Only TypeSafe's question fields go upstream. Anything else a caller
         # put on a question is not sent under MindRouter's credential.
@@ -182,6 +189,9 @@ class SystemOneUpstreamBackend:
         payload: dict[str, Any] = {"state": state, "questions": questions}
         if upstream.model is not None:
             payload["model"] = upstream.model
+        if images:
+            # Already validated and normalized to data URLs by the gateway.
+            payload["images"] = images
         headers = {"Content-Type": "application/json"}
         if upstream.api_key:
             headers["Authorization"] = f"Bearer {upstream.api_key}"
@@ -265,24 +275,30 @@ def _checked(name: str, data: Any, questions: dict[str, Any]) -> UpstreamAnswer:
                 raise bad(f"'{qid}' has no noul probability")
             answers[qid] = {"type": "noul", "noul": min(1.0, max(0.0, p))}
             continue
-        probs, conf = a.get("probabilities"), _prob(a.get("confidence"))
-        if not isinstance(probs, dict) or not probs or conf is None:
-            raise bad(f"'{qid}' lacks probabilities or confidence")
+        probs = a.get("probabilities")
+        if not isinstance(probs, dict) or not probs:
+            raise bad(f"'{qid}' lacks probabilities")
         clean = {}
         for key, value in probs.items():
             p = _prob(value)
             if p is None:
                 raise bad(f"'{qid}' has a non-probability value")
             clean[str(key)] = min(1.0, max(0.0, p))
-        conf = min(1.0, max(0.0, conf))
         criteria = q.get("criteria")
+        # ``confidence`` is recomputed from the probabilities with TypeSafe's
+        # formulas rather than taken from the upstream. Servers disagree on what
+        # the field means (Clef reports its top probability; Laya and Jev use
+        # the formula), and a caller thresholding on it must get one meaning
+        # whichever model answered.
+        ordered = list(clean.values())
         if kind == "choice":
             choice = a.get("choice")
             if not isinstance(choice, str) or choice not in clean:
                 raise bad(f"'{qid}' chose an option it did not list")
             if isinstance(criteria, dict) and set(clean) != set(criteria):
                 raise bad(f"'{qid}' answered a different set of options than was asked")
-            answers[qid] = {"type": "choice", "choice": choice, "probabilities": clean, "confidence": conf}
+            answers[qid] = {"type": "choice", "choice": choice, "probabilities": clean,
+                            "confidence": choice_confidence(ordered)}
         elif kind == "score":
             score, legend = a.get("score"), a.get("legend")
             if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
@@ -293,8 +309,10 @@ def _checked(name: str, data: Any, questions: dict[str, Any]) -> UpstreamAnswer:
                 # Laya and Jev both echo the levels; rebuild from the request if a server does not.
                 levels = q.get("criteria") if isinstance(q.get("criteria"), list) else []
                 legend = {str(i): level for i, level in enumerate(levels)}
+            # Levels in index order, whatever order the upstream listed them in.
+            by_level = [clean[str(i)] for i in range(len(clean))] if all(str(i) in clean for i in range(len(clean))) else ordered
             answers[qid] = {"type": "score", "score": float(score), "legend": {str(k): v for k, v in legend.items()},
-                            "probabilities": clean, "confidence": conf}
+                            "probabilities": clean, "confidence": score_confidence(by_level)}
         else:
             raise bad(f"'{qid}' has unknown type")
 
@@ -313,6 +331,14 @@ def _checked(name: str, data: Any, questions: dict[str, Any]) -> UpstreamAnswer:
         return int(v)
 
     extras = {k: data[k] for k in ("routing",) if k in data}
+    # A decision model with a short context cuts the state to fit. Servers that
+    # say so (Laya, clef_service) report it in usage; pass it on, because an
+    # answer about half the state is not the answer the caller asked for.
+    if isinstance(usage.get("truncated"), bool):
+        extras["truncated"] = usage["truncated"]
+    dropped = usage.get("state_tokens_dropped")
+    if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped >= 0:
+        extras["state_tokens_dropped"] = dropped
     upstream_model = data.get("model") if isinstance(data.get("model"), str) else None
     return UpstreamAnswer(answers=answers, input_tokens=tokens("input_tokens"), output_tokens=tokens("output_tokens"),
                           upstream_model=upstream_model, extras=extras)

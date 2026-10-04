@@ -41,9 +41,10 @@ What is NOT the same (a model is not Jev just because the wire is):
     default decisions model) or a model on the decisions allow-list; the
     response's ``model`` names the model that actually answered.
 
-Extensions (ignored by Jev clients): optional request field ``permutations``
-(1 or 2; omitted = the server's per-type defaults), and response fields ``id``
-and ``metadata``.
+Extensions (ignored by Jev clients): optional request fields ``permutations``
+(1 or 2; omitted = the server's per-type defaults) and ``images`` (Cloudflare
+Clef's extension: up to 4 base64 PNG/JPEG/WebP images shown before the state,
+for models that can see), and response fields ``id`` and ``metadata``.
 """
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .images import ImageError, normalize_images
 from .scoring import apply_temperature
 from .schema import (
     MAX_OPTION_CHARS,
@@ -189,6 +191,9 @@ class SystemOneRequestIn(_Wire):
     # Extension. Omitted: the server's per-type defaults (decisions.permutations).
     # Given: that many option orders for every question in the request.
     permutations: int | None = Field(default=None, ge=1, le=MAX_PERMUTATIONS)
+    # Cloudflare Clef's extension: base64 images placed before the state. Checked
+    # and normalized to data URLs by validate_wire (see images.py).
+    images: list[Any] | None = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -240,6 +245,7 @@ class Plan:
     state: str
     questions: list[PlannedQuestion]
     decision_request: DecisionRequest | None   # None when nothing needs the model
+    images: list[str] = field(default_factory=list)
 
 
 def validate_wire(body: Any) -> SystemOneRequestIn:
@@ -259,9 +265,14 @@ def validate_wire(body: Any) -> SystemOneRequestIn:
     except ValueError:
         raise _err([], "Request contains a number that is not finite (NaN or Infinity)") from None
     try:
-        return SystemOneRequestIn.model_validate(body)
+        wire = SystemOneRequestIn.model_validate(body)
     except ValidationError as e:
         raise _from_pydantic(e) from None
+    try:
+        wire.images = normalize_images(wire.images)
+    except ImageError as e:
+        raise _err(["images"] if e.index is None else ["images", e.index], str(e)) from None
+    return wire
 
 
 def _from_pydantic(e: ValidationError, prefix: tuple = ()) -> SystemOneValidationError:
@@ -357,10 +368,12 @@ def _compile_plan(wire: SystemOneRequestIn, default_permutations: dict[str, int]
                                        permutations=perms))
 
     request = (
-        DecisionRequest(model=wire.model, state=state, questions=internal)  # permutations are per question
+        DecisionRequest(model=wire.model, state=state, questions=internal,  # permutations are per question
+                        images=list(wire.images or []))
         if internal else None
     )
-    return Plan(model_requested=wire.model, state=state, questions=planned, decision_request=request)
+    return Plan(model_requested=wire.model, state=state, questions=planned, decision_request=request,
+                images=list(wire.images or []))
 
 
 def _check_len(text: str, loc: list[str | int]) -> None:

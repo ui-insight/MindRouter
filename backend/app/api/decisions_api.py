@@ -145,6 +145,10 @@ async def systemone(
         model, backend = name, get_upstream_backend()
         if len(json.dumps(body["questions"], ensure_ascii=False)) > MAX_FORWARDED_QUESTIONS_CHARS:
             raise _invalid(["questions"], f"questions exceed {MAX_FORWARDED_QUESTIONS_CHARS} characters in total")
+        if wire.images and not upstream.images:
+            # Forwarding to a server that ignores the field would get an answer
+            # about the text alone, with nothing to say the image went unseen.
+            raise _invalid(["images"], f"model '{name}' does not accept images")
     else:
         registry = get_registry()
         model, _alias = registry.resolve_alias(name)
@@ -187,6 +191,7 @@ async def systemone(
             "permutations": wire.permutations if wire.permutations is not None else "default",
             "types": sorted({q.type for q in wire.questions.values()}),
             "state_chars": len(state_text),
+            "images": len(wire.images or []),
             "model_requested": requested,
         },
         client_ip=request.client.host if request.client else None,
@@ -206,6 +211,7 @@ async def systemone(
             # Forward the caller's own state and questions, untouched.
             answered = await backend.answer(
                 upstream, body["state"], body["questions"], concurrency=cfg["backend_concurrency"],
+                images=wire.images or None,
             )
             outcome = None
         elif dreq is None:
