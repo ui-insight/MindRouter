@@ -266,6 +266,14 @@ class TestBatching:
         assert engine.batches == [5] and batcher.stats.largest_batch == 5
         assert all(answers["urgent"]["noul"] == 0.75 for answers, _ in results)
 
+    async def test_by_default_requests_run_one_at_a_time(self, monkeypatch):
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=30))
+        try:
+            await asyncio.gather(*(batcher.submit(_body(state=f"ticket {i}")) for i in range(5)))
+        finally:
+            await batcher.stop()
+        assert engine.batches == [1] * 5
+
     async def test_batch_size_is_capped(self, monkeypatch):
         batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60, max_batch=3))
         try:
@@ -294,7 +302,7 @@ class TestBatching:
         assert engine.batches == [1] and item.tokens == 5010
 
     async def test_a_bad_request_fails_alone_inside_a_batch(self, monkeypatch):
-        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60, max_batch=8))
         try:
             results = await asyncio.gather(
                 batcher.submit(_body(state="fine one")),
@@ -309,7 +317,7 @@ class TestBatching:
         assert engine.batches == [2]
 
     async def test_an_unexpected_encode_failure_also_fails_alone(self, monkeypatch):
-        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60, max_batch=8))
         try:
             results = await asyncio.gather(
                 batcher.submit(_body(state="fine one")),
@@ -341,7 +349,7 @@ class TestBatching:
         assert engine.inferred == ["first", "stays"] and "gone" not in engine.encoded
 
     async def test_a_caller_leaving_mid_batch_does_not_hurt_the_others(self, monkeypatch):
-        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60, max_batch=8))
         try:
             tasks = [asyncio.ensure_future(batcher.submit(_body(state=s)))
                      for s in ("one", "SCHEMA-TOO-LONG", "two")]
@@ -395,7 +403,7 @@ class TestBatching:
         assert not waiting                                  # nobody is left hanging
 
     async def test_a_short_reply_from_the_engine_fails_the_batch_instead_of_hanging(self, monkeypatch):
-        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60))
+        batcher, engine = await _started(monkeypatch, ServiceConfig(api_key=KEY, batch_wait_ms=60, max_batch=8))
         engine.short_answers = True
         try:
             results = await asyncio.wait_for(asyncio.gather(
@@ -468,13 +476,16 @@ class TestEnvConfig:
                 monkeypatch.delenv(name)
         cfg = ServiceConfig.from_env()
         assert (cfg.model, cfg.served_name, cfg.host, cfg.port) == ("Cloudflare/clef", "clef", "127.0.0.1", 18004)
-        assert cfg.api_key is None and cfg.max_length == 16384 and cfg.max_batch == 8
+        # One request per forward pass and no cuDNN attention: the measured best for mixed traffic.
+        assert cfg.api_key is None and cfg.max_length == 16384 and cfg.max_batch == 1
+        assert cfg.cudnn_attention is False
 
     def test_environment_overrides_and_bad_values_stop_the_service(self, monkeypatch):
         monkeypatch.setenv("CLEF_API_KEY", "  k  ")
         monkeypatch.setenv("CLEF_MAX_BATCH", "4")
+        monkeypatch.setenv("CLEF_CUDNN_ATTENTION", "1")
         cfg = ServiceConfig.from_env()
-        assert cfg.api_key == "k" and cfg.max_batch == 4
+        assert cfg.api_key == "k" and cfg.max_batch == 4 and cfg.cudnn_attention is True
         monkeypatch.setenv("CLEF_MAX_BATCH", "many")
         with pytest.raises(SystemExit):
             ServiceConfig.from_env()
@@ -585,6 +596,11 @@ class TestImages:
         monkeypatch.setattr(server, "MAX_IMAGE_PIXELS", 100)
         with pytest.raises(ValueError, match="megapixels"):
             server.ClefEngine._open_images([whole])                               # checked before decoding
+
+    def test_health_reports_whether_the_fast_path_is_in_use(self, client, engine_box):
+        engine_box["engine"].fast_path = True
+        assert client.get("/health", headers=AUTH).json()["fast_path"] is True
+        assert "fast_path" not in client.get("/health").json()          # detail needs the key
 
     def test_health_says_the_server_takes_images(self, client):
         assert client.get("/health", headers=AUTH).json()["images"] is True

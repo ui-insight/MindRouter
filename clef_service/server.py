@@ -110,11 +110,19 @@ class ServiceConfig:
     api_key: Optional[str] = None
     allow_no_auth: bool = False
     max_length: int = 16384              # tokens per request (state is cut to fit; reported in usage)
-    max_batch: int = 8                   # requests per forward pass
+    # Requests per forward pass. 1 = one at a time, the measured best for real
+    # traffic: requests of different lengths are padded to the longest, which
+    # costs as much as running them separately, and padded batches sometimes
+    # stall for seconds. Raise it only for many short requests of equal length.
+    max_batch: int = 1
     batch_wait_ms: int = 5               # how long the first request waits for company
     max_batch_tokens: int = 65536        # padded tokens per forward pass (batch size x longest request)
     max_queue: int = 64                  # requests waiting; beyond this the answer is 503
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    # PyTorch's cuDNN attention backend re-plans for every new input length
+    # (measured: +1.2 s on the first request at each length, i.e. on nearly
+    # every real request). Off by default.
+    cudnn_attention: bool = False
 
     @classmethod
     def from_env(cls) -> "ServiceConfig":
@@ -132,6 +140,7 @@ class ServiceConfig:
             max_batch_tokens=_env_int("CLEF_MAX_BATCH_TOKENS", cls.max_batch_tokens, 256),
             max_queue=_env_int("CLEF_MAX_QUEUE", cls.max_queue),
             max_body_bytes=_env_int("CLEF_MAX_BODY_BYTES", cls.max_body_bytes, 1024),
+            cudnn_attention=os.environ.get("CLEF_CUDNN_ATTENTION", "") == "1",
         )
 
 
@@ -156,6 +165,16 @@ class Encoded:
 MODEL_FACTORY: Optional[Callable[[ServiceConfig], Any]] = None
 
 
+def _fast_path_available() -> Optional[bool]:
+    """Whether the backbone runs its fused kernels (flash-linear-attention +
+    causal-conv1d) rather than the plain-torch fallback. None if unknown."""
+    try:
+        from transformers.models.qwen3_5 import modeling_qwen3_5
+        return bool(modeling_qwen3_5.is_fast_path_available)
+    except Exception:
+        return None
+
+
 class ClefEngine:
     """Cloudflare's release code (``joint_schema_model.py`` from the model repo)."""
 
@@ -175,8 +194,14 @@ class ClefEngine:
 
         self._torch, self._release = torch, release
         self._max_length = config.max_length
+        if not config.cudnn_attention:
+            torch.backends.cuda.enable_cudnn_sdp(False)
         self.model, self.processor = release.load_release_model(path, device=config.device)
         self.device = str(next(self.model.parameters()).device)
+        self.fast_path = _fast_path_available()
+        if not self.fast_path:
+            logger.warning("clef_slow_path: flash-linear-attention and causal-conv1d are not both installed; "
+                           "requests take about 2.5x longer (see README)")
 
     def encode(self, request: Dict[str, Any]) -> Encoded:
         release, tokenizer = self._release, self.processor.tokenizer
@@ -604,7 +629,8 @@ def create_app(config: ServiceConfig):
             return {"status": status}      # liveness only without the key
         return {"status": status, "model": config.served_name, "source": config.model,
                 "device": getattr(batcher.engine, "device", None), "max_length": config.max_length,
-                "max_batch": config.max_batch, "images": True, "queue_depth": batcher.queue_depth(),
+                "max_batch": config.max_batch, "images": True,
+                "fast_path": getattr(batcher.engine, "fast_path", None), "queue_depth": batcher.queue_depth(),
                 "max_queue": config.max_queue, "stats": batcher.stats.as_dict()}
 
     @app.get("/v1/models")

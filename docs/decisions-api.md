@@ -353,9 +353,18 @@ matches the reference label. No request failed in any run.
 | Qwen3.8-27B, 2.9.84 defaults, predicted offline | 0.710 | 0.770 | 0.718 | 0.657 | 0.022 | 0.377 |
 | **Qwen3.8-27B, 2.9.84 defaults, measured on the deployed code** | **0.713** | 0.772 | 0.717 | 0.665 | **0.019** | — |
 | Qwen3.8-27B, `permutations: 2` for every type | 0.707 | 0.752 | 0.718 | 0.664 | 0.063 | 0.382 |
+| **Clef 27B (Cloudflare), upstream on one H200, measured 2026-10-04** | **0.726** | 0.847 | 0.647 | 0.694 | 0.023 | — |
 | Laya (base checkpoints, zero-shot) | 0.361 | 0.487 | 0.287 | 0.323 | 0.175 | — |
 | *TypeSafe Jev 1.13.0 (published, not measured here)* | *0.727* | | | | *0.144* | *0.391* |
 | *random / majority class / teacher self-agreement ceiling* | *0.318 / 0.461 / 0.735* | | | | | |
+
+Clef and the native path trade places by question type: Clef is clearly
+better on yes/no questions (0.847 vs 0.772), the native path on `choice`
+(0.717 vs 0.647). On speed, the same 400 cases at six concurrent callers took
+44 s on Clef (one GPU, p50 612 ms) and 36 s on the native path (five replicas
+shared with chat, p50 468 ms). Clef reads the state once per request, so it
+bills far fewer tokens when a request asks many questions about a long state.
+Clef's numbers need its fast path, see `clef_service/README.md` (Performance).
 
 How the 2.9.84 defaults were chosen: the per-type option-order setting and the
 temperatures were fitted on a 400-case sample of the benchmark's **training**
