@@ -61,8 +61,16 @@ class TestHealth:
         health = await a.health_check()
         assert health.is_healthy is False and "loading" in health.error_message
 
-    @pytest.mark.parametrize("kwargs", [{"body": {}}, {"body": {"model": "x"}}, {"body": ["x"]}, {"not_json": True}])
-    async def test_a_200_without_a_status_field_is_healthy(self, kwargs):
+    @pytest.mark.parametrize("word", ["loading", "Loading", "starting", "initializing", "warming", "error", "unhealthy"])
+    async def test_every_not_ready_word_is_unhealthy(self, word):
+        a = _adapter()
+        a._client = _client(body={"status": word})
+        assert (await a.health_check()).is_healthy is False
+
+    @pytest.mark.parametrize("kwargs", [{"body": {}}, {"body": {"model": "x"}}, {"body": ["x"]}, {"not_json": True},
+                                        {"body": {"status": "healthy"}}, {"body": {"status": "OK"}},
+                                        {"body": {"status": "ready"}}, {"body": {"status": 1}}])
+    async def test_a_200_that_does_not_say_not_ready_is_healthy(self, kwargs):
         a = _adapter()
         a._client = _client(**kwargs)
         assert (await a.health_check()).is_healthy is True
@@ -81,6 +89,21 @@ class TestHealth:
         a._client = _client(exc=httpx.ReadTimeout("slow"))
         health = await a.health_check()
         assert health.is_healthy is False and health.error_message == "Connection timeout"
+
+
+class TestTls:
+    @pytest.mark.parametrize("setting", [True, False])
+    async def test_verification_follows_the_internal_tls_setting(self, setting, monkeypatch):
+        # The decisions API dials the server with this setting; the health check must agree,
+        # or registering a server with an internal certificate would mark a working server down.
+        import backend.app.core.telemetry.adapters.decision as mod
+        import backend.app.settings as settings_mod
+
+        seen = {}
+        monkeypatch.setattr(settings_mod, "get_settings", lambda: MagicMock(internal_tls_verify=setting))
+        monkeypatch.setattr(mod.httpx, "AsyncClient", lambda **kw: seen.update(kw) or MagicMock(is_closed=False))
+        await _adapter()._get_client()
+        assert seen["verify"] is setting and seen["base_url"] == "https://aspen4.example.edu:8001"
 
 
 class TestNoModels:

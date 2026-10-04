@@ -67,6 +67,30 @@ def health_status_transition(
     return None
 
 
+def normalize_server_url(url: str) -> str:
+    """A server root in one spelling: lower-case scheme and host, no default
+    port, no trailing slash. Unparseable input comes back stripped, unchanged."""
+    from urllib.parse import urlsplit
+
+    raw = (url or "").strip()
+    try:
+        parts = urlsplit(raw)
+        host = (parts.hostname or "").lower()
+        if not parts.scheme or not host:
+            return raw.rstrip("/")
+        scheme = parts.scheme.lower()
+        port = parts.port
+        if port is None or port == {"https": 443, "http": 80}.get(scheme):
+            netloc = host
+        else:
+            netloc = f"{host}:{port}"
+        if ":" in host:                       # IPv6 literal
+            netloc = netloc.replace(host, f"[{host}]", 1)
+        return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
+    except ValueError:
+        return raw.rstrip("/")
+
+
 class BackendRegistry:
     """
     Central registry for backend management.
@@ -577,7 +601,9 @@ class BackendRegistry:
                 continue
         return random.choice(available) if available else None
 
-    async def decision_server_state(self, url: str) -> tuple[Optional[int], Optional[str]]:
+    async def decision_server_state(
+        self, url: str, db: Optional[AsyncSession] = None
+    ) -> tuple[Optional[int], Optional[str]]:
         """Is the decision server at ``url`` registered as a backend, and can
         it take a request now?
 
@@ -586,18 +612,26 @@ class BackendRegistry:
         its circuit is open), and ``(None, None)`` when no backend with engine
         ``decision`` has that URL: an unmonitored upstream, dialed as before.
         A just-registered backend (status unknown) is usable.
+
+        URLs are compared by scheme, host (case-insensitively), port (the
+        scheme's default counts as given) and path, so ``https://Host/`` and
+        ``https://host:443`` are the same server. Pass the request's own
+        ``db`` session to avoid taking a second pooled connection.
         """
-        wanted = url.rstrip("/")
-        async with get_async_db_context() as db:
-            servers = await crud.get_backends_by_engine(db, BackendEngine.DECISION)
-        for backend in servers:
-            if (backend.url or "").rstrip("/") != wanted:
+        wanted = normalize_server_url(url)
+        if db is not None:
+            servers = await crud.get_decision_servers(db)
+        else:
+            async with get_async_db_context() as own:
+                servers = await crud.get_decision_servers(own)
+        for backend_id, backend_url, backend_status in servers:
+            if normalize_server_url(backend_url or "") != wanted:
                 continue
-            if backend.status in (BackendStatus.UNHEALTHY, BackendStatus.DISABLED, BackendStatus.DRAINING):
-                return backend.id, backend.status.value
-            if not await self.is_backend_available(backend.id):
-                return backend.id, "circuit open"
-            return backend.id, None
+            if backend_status in (BackendStatus.UNHEALTHY, BackendStatus.DISABLED, BackendStatus.DRAINING):
+                return backend_id, backend_status.value
+            if not await self.is_backend_available(backend_id):
+                return backend_id, "circuit open"
+            return backend_id, None
         return None, None
 
     async def model_exists(self, model_name: str) -> bool:

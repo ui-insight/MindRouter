@@ -47,7 +47,7 @@ from backend.app.api.model_availability import AVAILABLE, model_availability, op
 from backend.app.api.voice_api import _check_quota
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
-from backend.app.db.models import ApiKey, Modality, User
+from backend.app.db.models import ApiKey, BackendEngine, Modality, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.decisions import (
@@ -148,7 +148,7 @@ async def _report(report, backend_id: int) -> None:
         logger.warning("decision_circuit_report_failed", backend_id=backend_id)
 
 
-async def _prepare(name: str, *, wire, body, cfg, requested, registry) -> _Target:
+async def _prepare(name: str, *, wire, body, cfg, requested, registry, db) -> _Target:
     """Check that ``name`` can answer this request and return how to call it.
 
     Raises HTTPException(422) when the request itself is the problem for this
@@ -164,7 +164,13 @@ async def _prepare(name: str, *, wire, body, cfg, requested, registry) -> _Targe
             raise _invalid(["images"], f"model '{name}' does not accept images")
         # A decision server registered as a backend (engine "decision") is
         # health-polled; when it is known to be down, do not dial it.
-        monitor_id, problem = await registry.decision_server_state(upstream.url)
+        try:
+            monitor_id, problem = await registry.decision_server_state(upstream.url, db)
+        except Exception as e:
+            # Monitoring is an optimisation. If the lookup itself fails, dial
+            # the server as if it were not registered rather than fail the request.
+            logger.warning("decision_server_lookup_failed", model=name, error_type=type(e).__name__)
+            monitor_id, problem = None, None
         if problem:
             raise _Unavailable(
                 status.HTTP_503_SERVICE_UNAVAILABLE, f"model '{name}' is unavailable ({problem})",
@@ -190,6 +196,13 @@ async def _prepare(name: str, *, wire, body, cfg, requested, registry) -> _Targe
     if availability != AVAILABLE:
         code, detail, headers = openai_error(model, availability)
         raise _Unavailable(code, detail["error"]["message"], headers, reason="no healthy replica")
+    if wire.images and await registry.pick_available_backend(
+        model, engine=BackendEngine.VLLM, multimodal=True
+    ) is None:
+        # Known before any work, like the upstream check above. As a fallback
+        # target this means "cannot take this request", not an error about a
+        # model the caller never named.
+        raise _invalid(["images"], f"model '{name}' does not accept images")
     return _Target(name=name, model=model, backend=get_decision_backend(), plan=plan)
 
 
@@ -198,12 +211,19 @@ async def _prepare_fallback(name: str, **ctx) -> Optional[_Target]:
     there is none or it cannot take this request either (it is down too, or
     the request does not fit it: images to a model that cannot see, more
     options than letter scoring allows)."""
-    alternative = ctx["cfg"].get("fallbacks", {}).get(name)
+    fallbacks = ctx["cfg"].get("fallbacks", {})
+    # The setting may name the model by its catalog name while the caller used an alias.
+    alternative = fallbacks.get(name) or fallbacks.get(ctx["registry"].resolve_alias(name)[0])
     if not alternative:
         return None
     try:
         return await _prepare(alternative, **ctx)
     except (HTTPException, _Unavailable):
+        return None
+    except Exception as e:
+        # A fallback is best effort: whatever goes wrong preparing it, the
+        # caller gets the original model's error, not this one.
+        logger.warning("decision_fallback_unusable", model=alternative, error_type=type(e).__name__)
         return None
 
 
@@ -251,7 +271,8 @@ async def systemone(
     requested = wire.model
     name = cfg["default_model"] if requested is None or requested in JEV_MODEL_ALIASES else requested
     registry = get_registry()
-    ctx = {"wire": wire, "body": body, "cfg": cfg, "requested": requested, "registry": registry}
+    ctx = {"wire": wire, "body": body, "cfg": cfg, "requested": requested, "registry": registry, "db": db}
+    request_started = time.perf_counter()
 
     # ``fallback`` is set once a configured alternative (decisions.fallbacks)
     # is answering in place of the model that was asked for.
@@ -379,6 +400,8 @@ async def systemone(
         except _AttemptFailed as failed_again:
             raise failed_again.error from None
     model, backend, plan = target.model, target.backend, target.plan
+    # What the caller waited, including a failed attempt before a fallback.
+    started = request_started
     if fallback:
         DECISION_FALLBACKS.labels(fallback["requested"], model).inc()
         logger.warning("decision_fallback", requested=fallback["requested"], answered_by=model, reason=fallback["reason"])

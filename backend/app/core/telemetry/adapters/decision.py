@@ -22,9 +22,12 @@ it discovers ZERO models, which keeps it out of chat routing and the model
 catalog. ``/v1/systemone`` reaches it through ``decisions.upstreams``, matched
 by URL, and consults this health status before dialing (see decisions_api).
 
-Health is ``GET /health`` without a key: 200 with ``{"status": "ok"}``.
-clef_service reports ``"loading"`` while the weights load, which is NOT
-healthy. A server whose health body has no ``status`` field is healthy on 200.
+Health is ``GET /health`` without a key. A 200 is healthy unless the body's
+``status`` says the server is not ready: clef_service reports ``"loading"``
+while the weights load. Any other status word (``ok``, ``healthy``, ...), or
+no status field at all, is healthy, so registering a working server can never
+take it out of service over a wording difference. TLS verification follows
+``internal_tls_verify``, the same setting the decisions API uses to dial it.
 """
 
 import time
@@ -43,6 +46,9 @@ from backend.app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# ``status`` values that mean "up, but cannot answer yet".
+NOT_READY = frozenset({"loading", "starting", "initializing", "warming", "unhealthy", "error", "down"})
+
 
 class DecisionAdapter:
     """Health and telemetry for a System One decision server. Same interface
@@ -55,7 +61,10 @@ class DecisionAdapter:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
+            from backend.app.settings import get_settings
+
+            verify = bool(getattr(get_settings(), "internal_tls_verify", True))
+            self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, verify=verify)
         return self._client
 
     async def close(self) -> None:
@@ -72,7 +81,7 @@ class DecisionAdapter:
                 return BackendHealth(is_healthy=False, status_code=response.status_code, latency_ms=latency_ms,
                                      error_message=f"HTTP {response.status_code}")
             state = self._state(response)
-            if state not in (None, "ok"):
+            if isinstance(state, str) and state.strip().lower() in NOT_READY:
                 return BackendHealth(is_healthy=False, status_code=200, latency_ms=latency_ms,
                                      error_message=f"not ready ({str(state)[:40]})")
             return BackendHealth(is_healthy=True, status_code=200, latency_ms=latency_ms)

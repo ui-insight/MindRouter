@@ -1572,6 +1572,15 @@ async def get_backends_by_engine(
     return list(result.scalars().all())
 
 
+async def get_decision_servers(db: AsyncSession) -> list:
+    """(id, url, status) of every backend with engine ``decision``. Lean on
+    purpose: /v1/systemone asks on each upstream request."""
+    result = await db.execute(
+        select(Backend.id, Backend.url, Backend.status).where(Backend.engine == BackendEngine.DECISION)
+    )
+    return [(row[0], row[1], row[2]) for row in result.all()]
+
+
 async def create_backend(
     db: AsyncSession,
     name: str,

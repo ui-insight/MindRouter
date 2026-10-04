@@ -344,8 +344,9 @@ curl -X POST https://mindrouter.example.edu/api/admin/backends/register \
 ```
 
 It is then a fleet member like the DLP scan service: health-polled
-(`GET /health`, which must report `"status": "ok"`; `"loading"` is not
-healthy), shown on the backends page with status and the GPU telemetry from
+(`GET /health` must answer 200 and must not report a not-ready `status` such
+as `"loading"`; TLS verification follows `INTERNAL_TLS_VERIFY`, as it does
+when the server is dialed), shown on the backends page with status and the GPU telemetry from
 the node's sidecar, included in health alerts, and covered by a circuit
 breaker. It discovers no models, so it never takes chat traffic and never
 appears in the model catalog.
@@ -354,8 +355,11 @@ The decisions API uses that status. Before dialing an upstream it looks for a
 `decision` backend with the same URL: if that backend is unhealthy, disabled,
 draining or its circuit is open, the request goes straight to the fallback (or
 is refused with 503 and `Retry-After`) instead of waiting for a timeout. Live
-failures (502/504) count against the circuit; "busy" (503) does not. Requests
-are recorded against the backend's id. **Disabling the backend is how to take
+failures, including timeouts, count against the circuit; "busy" (503) does
+not. Requests are recorded against the backend's id. The two URLs are compared
+by scheme, host, port and path, so `https://Host:443/` and `https://host`
+match. If the status lookup itself fails, the server is dialed as if it were
+not registered: monitoring never fails a request. **Disabling the backend is how to take
 a decision server out of service**: with a fallback configured, callers keep
 getting answers. An upstream with no matching backend behaves as before:
 dialed every time, not monitored.
