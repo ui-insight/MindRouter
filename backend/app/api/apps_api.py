@@ -300,7 +300,10 @@ async def _provision_user(db: AsyncSession, identity) -> Tuple[Optional[User], b
         "displayName": identity.display_name,
         # jobTitle intentionally omitted — see docstring.
     }
-    user = await find_or_create_azure_user(db, profile)
+    # direct=False: an app acting for the person is not the person signing in
+    # to MindRouter. The account stays "app-only" for email audiences until
+    # they do.
+    user = await find_or_create_azure_user(db, profile, direct=False)
     if user is None:
         return None, False
 

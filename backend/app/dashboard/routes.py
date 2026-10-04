@@ -722,8 +722,9 @@ async def login(
         await _log_auth_event(user.id, "auth.login_failure", request, detail="inactive")
         return _login_page(request, "Account is inactive")
 
-    # Update last login
+    # Update last login. A password sign-in is always a direct one.
     user.last_login_at = datetime.now(timezone.utc)
+    user.last_direct_login_at = user.last_login_at
     await db.commit()
 
     await _log_auth_event(user.id, "auth.login_success", request, detail=f"username={username}")

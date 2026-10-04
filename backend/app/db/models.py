@@ -248,6 +248,11 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When the person last signed in to MindRouter ITSELF (password or any
+    # SSO). Never set by a registered app creating or refreshing the account,
+    # which does bump last_login_at. NULL = the account exists only through an
+    # app (e.g. VandalChat). Used to choose bulk-email audiences (migration 088).
+    last_direct_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     # False when the group was assigned without the directory attribute that
     # normally decides it — an app can provision from an id_token, which does
     # not carry jobTitle. Settled on the user's first direct MindRouter
@@ -1405,6 +1410,8 @@ class EmailLog(Base):
     # Nullable: user deletion detaches the reference, keeping the log row.
     sent_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     blog_post_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("blog_posts.id"), nullable=True)
+    # Who it went to: "all" or "direct" (see crud.EMAIL_AUDIENCES). NULL on rows from before migration 088.
+    audience: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     status: Mapped[EmailStatus] = mapped_column(
         Enum(EmailStatus, values_callable=_enum_values), nullable=False, server_default="pending"
     )

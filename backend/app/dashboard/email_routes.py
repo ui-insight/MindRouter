@@ -78,6 +78,7 @@ async def admin_email_page(
             "groups": groups,
             "smtp_ready": smtp_ready,
             "email_logs": email_logs,
+            "audience_labels": crud.EMAIL_AUDIENCE_LABELS,
             "success": success,
             "error": error,
             "active": "email",
@@ -99,17 +100,23 @@ async def recipient_count(
     mode = body.get("mode", "all")
     group_ids = body.get("group_ids", [])
     user_ids = body.get("user_ids", [])
+    audience = body.get("audience")
 
-    if mode == "all":
-        users = await crud.get_emailable_users(db)
-    elif mode == "groups":
-        users = await crud.get_emailable_users(db, group_ids=[int(g) for g in group_ids])
-    elif mode == "users":
-        users = await crud.get_emailable_users(db, user_ids=[int(u) for u in user_ids])
-    else:
-        users = []
+    # Both audiences are counted so the form can show each number before the
+    # admin picks one. "count" is the selected audience's, or null until one is.
+    counts = {}
+    for name in crud.EMAIL_AUDIENCES:
+        if mode == "all":
+            users = await crud.get_emailable_users(db, audience=name)
+        elif mode == "groups":
+            users = await crud.get_emailable_users(db, group_ids=[int(g) for g in group_ids], audience=name) if group_ids else []
+        elif mode == "users":
+            users = await crud.get_emailable_users(db, user_ids=[int(u) for u in user_ids], audience=name) if user_ids else []
+        else:
+            users = []
+        counts[name] = len(users)
 
-    return JSONResponse({"count": len(users)})
+    return JSONResponse({"count": counts.get(audience), "counts": counts})
 
 
 @email_router.post("/admin/email/send")
@@ -120,12 +127,20 @@ async def send_email(
     recipient_mode: str = Form("all"),
     group_ids: Optional[str] = Form(None),
     user_ids: Optional[str] = Form(None),
+    audience: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_async_db),
 ):
     """Send bulk email."""
     user, redirect = await _require_admin(request, db)
     if redirect:
         return redirect
+
+    # The audience is chosen every time, never defaulted: a technical notice
+    # and a campus-wide one go to very different sets of people.
+    if audience not in crud.EMAIL_AUDIENCES:
+        return RedirectResponse(
+            "/admin/email?error=Choose+an+audience:+everyone,+or+direct+MindRouter+users+only", status_code=302
+        )
 
     smtp_config = await email_service.get_smtp_config(db)
     if not email_service.is_smtp_configured(smtp_config):
@@ -136,11 +151,11 @@ async def send_email(
     uids = [int(u) for u in user_ids.split(",") if u.strip()] if user_ids else None
 
     if recipient_mode == "groups" and gids:
-        users = await crud.get_emailable_users(db, group_ids=gids)
+        users = await crud.get_emailable_users(db, group_ids=gids, audience=audience)
     elif recipient_mode == "users" and uids:
-        users = await crud.get_emailable_users(db, user_ids=uids)
+        users = await crud.get_emailable_users(db, user_ids=uids, audience=audience)
     else:
-        users = await crud.get_emailable_users(db)
+        users = await crud.get_emailable_users(db, audience=audience)
 
     if not users:
         return RedirectResponse("/admin/email?error=No+recipients+found", status_code=302)
@@ -152,7 +167,7 @@ async def send_email(
     # Create log
     log = await crud.create_email_log(
         db, subject=subject, sent_by=user.id,
-        recipient_count=len(users), body_preview=subject,
+        recipient_count=len(users), body_preview=subject, audience=audience,
     )
     await db.commit()
 

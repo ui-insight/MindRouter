@@ -221,7 +221,7 @@ async def azure_callback(
     return response
 
 
-async def find_or_create_azure_user(db: AsyncSession, profile: dict):
+async def find_or_create_azure_user(db: AsyncSession, profile: dict, direct: bool = True):
     """Find or create a user from Azure AD profile (JIT provisioning).
 
     Profile fields from Microsoft Graph /me:
@@ -232,6 +232,12 @@ async def find_or_create_azure_user(db: AsyncSession, profile: dict):
     - jobTitle: Job title (used to map to group)
     - department: Department name
     - officeLocation: Office/college location
+    
+    ``direct`` says whether a person is signing in to MindRouter itself (the
+    web sign-in, the default) or a registered app is provisioning the account
+    on their behalf (``direct=False``). Only a direct sign-in stamps
+    ``last_direct_login_at``, which is what separates people who use
+    MindRouter from accounts that exist only through an app.
     """
     azure_oid = profile.get("id")
     email = profile.get("mail") or profile.get("userPrincipalName")
@@ -323,6 +329,8 @@ async def find_or_create_azure_user(db: AsyncSession, profile: dict):
             )
 
         user.last_login_at = datetime.now(timezone.utc)
+        if direct:
+            user.last_direct_login_at = user.last_login_at
         await db.flush()
         return user
 
@@ -369,6 +377,8 @@ async def find_or_create_azure_user(db: AsyncSession, profile: dict):
     )
     user.azure_oid = azure_oid
     user.last_login_at = datetime.now(timezone.utc)
+    if direct:
+        user.last_direct_login_at = user.last_login_at
     await db.flush()
 
     # Create quota from group defaults

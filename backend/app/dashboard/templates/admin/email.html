@@ -74,9 +74,26 @@
                                     <input type="hidden" name="group_ids" id="groupIdsField">
                                     <input type="hidden" name="user_ids" id="userIdsField">
 
+                                    <!-- Audience: chosen every time, no default -->
+                                    <label class="form-label fw-bold mt-2">Audience <span class="text-danger">*</span></label>
+                                    <div class="form-check">
+                                        <input class="form-check-input audience-radio" type="radio" name="audience" id="audienceAll" value="all" required>
+                                        <label class="form-check-label" for="audienceAll">
+                                            <strong>Everyone</strong> <span class="text-muted" id="audienceCountAll"></span>
+                                            <div class="form-text mt-0">Includes people whose account exists only because they use a registered app such as VandalChat.</div>
+                                        </label>
+                                    </div>
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input audience-radio" type="radio" name="audience" id="audienceDirect" value="direct" required>
+                                        <label class="form-check-label" for="audienceDirect">
+                                            <strong>Direct MindRouter users only</strong> <span class="text-muted" id="audienceCountDirect"></span>
+                                            <div class="form-text mt-0">Only people who have signed in to MindRouter itself. Use for technical notices.</div>
+                                        </label>
+                                    </div>
+
                                     <div class="text-muted small">
                                         <i class="bi bi-people me-1"></i>
-                                        <span id="recipientCount">Calculating...</span>
+                                        <span id="recipientCount">Choose an audience</span>
                                     </div>
                                 </div>
 
@@ -124,7 +141,7 @@
                                         <div>
                                             <strong class="small">{{ log.subject }}</strong>
                                             <div class="text-muted" style="font-size:0.75rem;">
-                                                {{ log.created_at|localtime }}
+                                                {{ log.created_at|localtime }}{% if log.audience %} &middot; {{ audience_labels.get(log.audience, log.audience) }}{% endif %}
                                             </div>
                                         </div>
                                         <div class="text-end">
@@ -173,6 +190,12 @@
 
     let selectedUserIds = new Set();
 
+    function selectedAudience() {
+        const picked = document.querySelector('input[name="audience"]:checked');
+        return picked ? picked.value : null;
+    }
+    document.querySelectorAll('.audience-radio').forEach(r => r.addEventListener('change', updateRecipientCount));
+
     function updateRecipientMode() {
         const mode = document.querySelector('input[name="recipient_mode"]:checked').value;
         groupSelect.style.display = mode === 'groups' ? '' : 'none';
@@ -191,12 +214,18 @@
         fetch('/admin/email/recipient-count', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({mode, group_ids: groupIds, user_ids: userIds})
+            body: JSON.stringify({mode, group_ids: groupIds, user_ids: userIds, audience: selectedAudience()})
         })
         .then(r => r.json())
         .then(data => {
-            if (data.count !== undefined) {
+            if (data.counts) {
+                document.getElementById('audienceCountAll').textContent = '(' + data.counts.all + ')';
+                document.getElementById('audienceCountDirect').textContent = '(' + data.counts.direct + ')';
+            }
+            if (data.count !== undefined && data.count !== null) {
                 recipientCount.textContent = data.count + ' recipient' + (data.count !== 1 ? 's' : '');
+            } else {
+                recipientCount.textContent = 'Choose an audience';
             }
         })
         .catch(() => { recipientCount.textContent = 'Error loading count'; });

@@ -3895,6 +3895,7 @@ async def create_email_log(
     recipient_count: int,
     body_preview: Optional[str] = None,
     blog_post_id: Optional[int] = None,
+    audience: Optional[str] = None,
 ) -> EmailLog:
     """Create an email log entry."""
     log = EmailLog(
@@ -3903,6 +3904,7 @@ async def create_email_log(
         recipient_count=recipient_count,
         sent_by=sent_by,
         blog_post_id=blog_post_id,
+        audience=audience,
         status="pending",
     )
     db.add(log)
@@ -3935,21 +3937,42 @@ async def get_email_logs(
     return list(result.scalars().all())
 
 
+# Who a bulk email goes to. "direct" leaves out accounts that exist only because
+# a registered app (e.g. VandalChat) provisioned them: people who have never
+# signed in to MindRouter itself (users.last_direct_login_at IS NULL).
+EMAIL_AUDIENCE_ALL = "all"
+EMAIL_AUDIENCE_DIRECT = "direct"
+EMAIL_AUDIENCES = (EMAIL_AUDIENCE_ALL, EMAIL_AUDIENCE_DIRECT)
+EMAIL_AUDIENCE_LABELS = {
+    EMAIL_AUDIENCE_ALL: "Everyone",
+    EMAIL_AUDIENCE_DIRECT: "Direct MindRouter users",
+}
+
+
 async def get_emailable_users(
     db: AsyncSession,
     group_ids: Optional[List[int]] = None,
     user_ids: Optional[List[int]] = None,
     exclude_blog_optout: bool = False,
+    audience: str = EMAIL_AUDIENCE_ALL,
 ) -> List[User]:
     """Get active users for emailing, optionally filtered by group/user IDs.
 
+    ``audience`` is one of EMAIL_AUDIENCES; "direct" keeps only people who have
+    signed in to MindRouter itself. An unknown value raises, so a typo can
+    never widen a send to everyone.
+
     If exclude_blog_optout=True, exclude users who set email_optout preference.
     """
+    if audience not in EMAIL_AUDIENCES:
+        raise ValueError(f"unknown email audience: {audience!r}")
     stmt = select(User).options(selectinload(User.group)).where(
         User.is_active == True,  # noqa: E712
         User.email.isnot(None),
         User.email != "",
     )
+    if audience == EMAIL_AUDIENCE_DIRECT:
+        stmt = stmt.where(User.last_direct_login_at.isnot(None))
     if group_ids:
         stmt = stmt.where(User.group_id.in_(group_ids))
     if user_ids:
