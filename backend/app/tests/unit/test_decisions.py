@@ -160,22 +160,31 @@ def _fake_registry(backends, aliases=None, open_circuits=()):
     from backend.app.core.telemetry.registry import BackendRegistry
 
     reg = MagicMock()
+    # Like the SQL: healthy backends only. Whether a copy of the model sees is
+    # NOT decided here; the real picker reads it from each backend's model rows.
     reg.get_backends_with_model = AsyncMock(
-        return_value=[b for b in backends if getattr(b.status, "value", b.status) == "healthy"])
+        side_effect=lambda model_name: [b for b in backends if getattr(b.status, "value", b.status) == "healthy"])
     reg.is_backend_available = AsyncMock(side_effect=lambda bid: bid not in open_circuits)
     reg.resolve_alias = MagicMock(side_effect=lambda m: ((aliases or {}).get(m, m), None))
 
-    async def _pick(model_name, *, engine=None):
-        return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine)
+    async def _pick(model_name, *, engine=None, multimodal=False):
+        return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine, multimodal=multimodal)
 
     reg.pick_available_backend = _pick
     return reg
 
 
-def _vllm_backend(id=7, name="aspen5-gpu2-qwen3.8-27b", healthy=True, engine=None):
+def _vllm_backend(id=7, name="aspen5-gpu2-qwen3.8-27b", healthy=True, engine=None, sees_images=False,
+                  model="qwen/qwen3.8-27b", other_models=()):
+    """A backend stub. Its model rows carry ``supports_multimodal`` like the
+    real ones; blind unless a test says otherwise, so no image test passes by default."""
+    from types import SimpleNamespace
+
     from backend.app.db.models import BackendEngine
     b = MagicMock()
     b.id, b.name, b.url = id, name, f"https://node{id}:8002"
+    b.models = [SimpleNamespace(name=model, supports_multimodal=sees_images),
+                *(SimpleNamespace(name=n, supports_multimodal=sees) for n, sees in other_models)]
     b.engine = engine or BackendEngine.VLLM
     b.status = MagicMock(value="healthy" if healthy else "unhealthy")
     return b
@@ -1018,7 +1027,6 @@ class TestUpstreamBackend:
         lambda r: r["answers"]["churn_risk"].update(noul=1.7),                   # not a probability
         lambda r: r["answers"]["churn_risk"].update(noul="high"),
         lambda r: r["answers"]["department"].update(choice="legal"),             # option that was not offered
-        lambda r: r["answers"]["department"].pop("confidence"),
         lambda r: r["answers"]["urgency"].update(score=float("nan")),
     ])
     async def test_invalid_replies_are_502_not_passed_on(self, up_http, mutate):
@@ -1510,3 +1518,325 @@ class TestTuningSettings:
         cfg = await pkg.get_decisions_config(db)
         assert cfg["permutations"] == {"noul": 1, "choice": 1, "score": 1}
         assert cfg["temperature"] == {"noul": 1.35, "choice": 1.05, "score": 2.0}
+
+
+class TestUpstreamAnswersMeanTheSameThing:
+    """An upstream's reply is normalized so fields mean one thing for every model."""
+
+    async def test_confidence_is_recomputed_with_typesafes_formula(self, up_http):
+        # Clef reports its top probability as confidence (0.93 here); TypeSafe's
+        # formula for three options at 0.93 is (3 * 0.93 - 1) / 2 = 0.895.
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert out.answers["department"]["confidence"] == pytest.approx((3 * 0.93 - 1) / 2)
+        assert out.answers["urgency"]["confidence"] == pytest.approx(so.score_confidence([0.05, 0.1, 0.85]))
+
+    async def test_a_reply_without_confidence_is_still_usable(self, up_http):
+        reply = json.loads(json.dumps(_LAYA_REPLY))
+        reply["answers"]["department"].pop("confidence")
+        reply["answers"]["urgency"].pop("confidence")
+        up_http.reply = _UpResponse(reply)
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert 0 <= out.answers["department"]["confidence"] <= 1
+
+    async def test_score_confidence_uses_level_order_not_reply_order(self, up_http):
+        reply = json.loads(json.dumps(_LAYA_REPLY))
+        reply["answers"]["urgency"]["probabilities"] = {"2": 0.85, "0": 0.05, "1": 0.1}   # shuffled keys
+        up_http.reply = _UpResponse(reply)
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert out.answers["urgency"]["confidence"] == pytest.approx(so.score_confidence([0.05, 0.1, 0.85]))
+
+    async def test_a_cut_state_is_passed_on(self, up_http):
+        reply = json.loads(json.dumps(_LAYA_REPLY))
+        reply["usage"].update(truncated=True, state_tokens_dropped=1488)
+        up_http.reply = _UpResponse(reply)
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert out.extras["truncated"] is True and out.extras["state_tokens_dropped"] == 1488
+        ub = MagicMock()
+        ub.name = "systemone_upstream"
+        ub.answer = AsyncMock(return_value=out)
+        result, _, _, _, _, _ = await _call({**_SDK_BODY, "model": "laya"}, cfg={"upstreams": {"laya": _LAYA}},
+                                            upstream_backend=ub)
+        assert result["metadata"]["truncated"] is True and result["metadata"]["state_tokens_dropped"] == 1488
+
+    async def test_no_truncation_fields_when_the_upstream_reports_none(self, up_http):
+        reply = json.loads(json.dumps(_LAYA_REPLY))
+        reply["usage"] = {"input_tokens": 10, "output_tokens": 0}
+        up_http.reply = _UpResponse(reply)
+        out = await up.SystemOneUpstreamBackend().answer(_LAYA, "s", _Q3)
+        assert "truncated" not in out.extras and "state_tokens_dropped" not in out.extras
+
+
+# --------------------------------------------------------------------------
+# 11. images (Cloudflare Clef's extension to the System One request)
+# --------------------------------------------------------------------------
+
+import base64  # noqa: E402
+import io  # noqa: E402
+
+from backend.app.services.decisions import images as img  # noqa: E402
+
+
+def _picture(fmt="PNG", size=(8, 8), color=(200, 30, 30)):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format=fmt)
+    return buf.getvalue()
+
+
+def _data_url(fmt="PNG", **kw):
+    kind = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}[fmt]
+    return f"data:{kind};base64,{base64.b64encode(_picture(fmt, **kw)).decode()}"
+
+
+_WITH_IMAGE = {"state": "Review the attached receipt.", "model": "jev-latest", "images": [_data_url("PNG")],
+               "questions": {"legible": {"type": "noul", "instructions": "Is the total legible?"}}}
+
+
+class TestImageValidation:
+    @pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP"])
+    def test_data_urls_and_objects_are_both_accepted(self, fmt):
+        url = _data_url(fmt)
+        kind, b64 = url[len("data:"):].split(";base64,")
+        assert img.normalize_images([url]) == [url]
+        assert img.normalize_images([{"content_type": kind, "base64": b64}]) == [url]   # same canonical form
+
+    def test_no_images_is_fine(self):
+        assert img.normalize_images(None) == [] and img.normalize_images([]) == []
+
+    def test_whitespace_in_base64_and_jpg_alias_are_tolerated(self):
+        url = _data_url("JPEG")
+        b64 = url.split(",", 1)[1]
+        wrapped = "\n".join(b64[i:i + 40] for i in range(0, len(b64), 40))
+        assert img.normalize_images([{"content_type": "image/jpg", "base64": wrapped}]) == [url]
+
+    @pytest.mark.parametrize("bad,index", [
+        ("https://example.com/cat.png", 0),                                      # remote URLs are never fetched
+        ("data:image/gif;base64,R0lGODlhAQABAAAAACw=", 0),                        # not an accepted type
+        ("data:image/png;base64,!!!not-base64!!!", 0),
+        ("data:image/png;base64," + base64.b64encode(b"not an image at all").decode(), 0),
+        ({"content_type": "image/png"}, 0),                                      # no data
+        (42, 0),
+    ])
+    def test_bad_items_name_their_position(self, bad, index):
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([bad])
+        assert e.value.index == index
+
+    def test_declared_type_must_match_the_bytes(self):
+        jpeg = base64.b64encode(_picture("JPEG")).decode()
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([f"data:image/png;base64,{jpeg}"])
+        assert "image/jpeg" in str(e.value)
+
+    def test_count_size_and_pixel_limits(self, monkeypatch):
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([_data_url()] * (img.MAX_IMAGES + 1))
+        assert e.value.index is None
+        monkeypatch.setattr(img, "MAX_IMAGE_BYTES", 50)
+        with pytest.raises(img.ImageError):
+            img.normalize_images([_data_url()])
+        monkeypatch.undo()
+        monkeypatch.setattr(img, "MAX_TOTAL_IMAGE_BYTES", len(_picture()) + 10)
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([_data_url(), _data_url()])
+        assert "in total" in str(e.value)
+        monkeypatch.undo()
+        monkeypatch.setattr(img, "MAX_IMAGE_PIXELS", 50)
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([_data_url(size=(8, 8))])       # 64 pixels
+        assert "megapixels" in str(e.value)
+
+    def test_oversized_base64_is_refused_before_it_is_stripped_or_decoded(self, monkeypatch):
+        # 50 MB of "AA AA ..." once cost 1 s and 1 GB here: the length check comes first.
+        calls = []
+        monkeypatch.setattr(img.base64, "b64decode", lambda *a, **k: calls.append(1) or b"")
+        padded = "AA " * (img.MAX_IMAGE_CHARS // 3 + 10)
+        for item in (f"data:image/png;base64,{padded}", {"content_type": "image/png", "base64": padded}):
+            with pytest.raises(img.ImageError) as e:
+                img.normalize_images([item])
+            assert "MiB" in str(e.value) and e.value.index == 0
+        assert calls == []
+
+    def test_a_full_size_image_with_line_breaks_fits_the_length_limit(self):
+        encoded = (img.MAX_IMAGE_BYTES + 2) // 3 * 4
+        assert encoded + encoded // 60 * 2 <= img.MAX_IMAGE_CHARS      # wrapped at 60 columns with CRLF
+
+    def test_a_phone_cameras_multi_frame_jpeg_is_a_jpeg(self):
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), "red").save(buf, format="MPO", save_all=True,
+                                              append_images=[Image.new("RGB", (8, 8), "blue")])
+        (url,) = img.normalize_images([{"content_type": "image/jpeg", "base64": base64.b64encode(buf.getvalue()).decode()}])
+        assert url.startswith("data:image/jpeg;base64,")
+
+    def test_a_damaged_png_is_refused(self):
+        whole = _picture("PNG", size=(64, 64))
+        cut = base64.b64encode(whole[: len(whole) // 2]).decode()
+        with pytest.raises(img.ImageError) as e:
+            img.normalize_images([f"data:image/png;base64,{cut}"])
+        assert "could not be read" in str(e.value)
+
+    def test_only_the_three_decoders_ever_open_caller_bytes(self, monkeypatch):
+        from PIL import Image
+        seen = []
+        real = Image.open
+        monkeypatch.setattr(Image, "open", lambda fp, **kw: seen.append(kw.get("formats")) or real(fp, **kw))
+        gif = io.BytesIO(); Image.new("RGB", (4, 4)).save(gif, format="GIF")
+        with pytest.raises(img.ImageError):
+            img.normalize_images([f"data:image/png;base64,{base64.b64encode(gif.getvalue()).decode()}"])
+        assert seen == [["PNG", "JPEG", "WEBP"]]
+
+    def test_wire_validation_reports_images_in_fastapi_shape(self):
+        with pytest.raises(so.SystemOneValidationError) as e:
+            so.validate_wire({**_WITH_IMAGE, "images": [_data_url(), "https://example.com/x.png"]})
+        assert e.value.detail[0]["loc"] == ["body", "images", 1]
+        with pytest.raises(so.SystemOneValidationError) as e:
+            so.validate_wire({**_WITH_IMAGE, "images": "one.png"})
+        assert e.value.detail[0]["loc"][:2] == ["body", "images"]
+
+    def test_plan_carries_the_normalized_images(self):
+        plan = so.parse_request(_WITH_IMAGE)
+        assert plan.images == _WITH_IMAGE["images"] == plan.decision_request.images
+        assert so.parse_request(_SDK_BODY).images == []
+
+
+class TestImagesOnVLLMModels:
+    async def test_images_precede_the_text_in_every_scoring_call(self, fake_http):
+        body = {**_WITH_IMAGE, "questions": {
+            "legible": {"type": "noul", "instructions": "Is the total legible?"},
+            "kind": {"type": "choice", "instructions": "What is it?", "criteria": {"receipt": None, "invoice": None}}}}
+        plan = so.parse_request(body)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=True)])):
+            await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        chat = [b for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        assert len(chat) == 3                                           # noul 1 + choice 2 orders
+        for call in chat:
+            content = call["messages"][0]["content"]
+            assert [part["type"] for part in content] == ["image_url", "text"]
+            assert content[0]["image_url"] == {"url": _WITH_IMAGE["images"][0]}
+            assert content[1]["text"].startswith(INSTRUCTION)
+
+    async def test_text_only_requests_keep_a_plain_string_turn(self, fake_http):
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend()])):
+            await backend.decide(_req(), "qwen/qwen3.8-27b", fanout=4)
+        chat = [b for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        assert all(isinstance(b["messages"][0]["content"], str) for b in chat)
+
+    async def test_only_a_copy_of_the_model_that_sees_is_picked(self, fake_http):
+        blind, sighted = _vllm_backend(id=7, sees_images=False), _vllm_backend(id=8, sees_images=True)
+        plan = so.parse_request(_WITH_IMAGE)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([blind, sighted])):
+            for _ in range(8):
+                out = await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+                assert out.backend_id == 8
+
+    async def test_a_model_that_cannot_see_is_the_callers_422(self, fake_http):
+        plan = so.parse_request(_WITH_IMAGE)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=False)])):
+            with pytest.raises(DecisionBackendError) as e:
+                await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == 422 and "does not accept images" in str(e.value)
+        assert not [u for u, _ in fake_http.calls if u.endswith("/v1/chat/completions")]
+
+    async def test_first_view_still_warms_the_cache_when_only_images_are_shared(self, monkeypatch, fake_http):
+        import asyncio
+        events, base = [], _default_handler()
+
+        class _Client(_FakeClient):
+            async def post(self, url, json=None):
+                if url.endswith("/tokenize"):
+                    return base(url, json)
+                events.append("start")
+                await asyncio.sleep(0.002)
+                events.append("end")
+                return base(url, json)
+        monkeypatch.setattr(vl.httpx, "AsyncClient", _Client)
+        body = {"state": "", "model": "jev-latest", "images": [_data_url()], "questions": {
+            f"q{i}": {"type": "noul", "instructions": f"Q{i}?"} for i in range(3)}}
+        plan = so.parse_request(body)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=True)])):
+            await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=8)
+        assert events[:2] == ["start", "end"]
+
+    async def test_seeing_is_the_requested_models_own_flag(self, fake_http):
+        # Another vision model on the same backend does not make this one see.
+        backend_ = _vllm_backend(sees_images=False, other_models=[("google/gemma-4-31b", True)])
+        plan = so.parse_request(_WITH_IMAGE)
+        with patch.object(vl, "get_registry", return_value=_fake_registry([backend_])):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == 422
+
+    async def test_text_requests_do_not_need_a_model_that_sees(self, fake_http):
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=False)])):
+            out = await vl.VLLMLogprobsBackend().decide(_req(), "qwen/qwen3.8-27b", fanout=4)
+        assert out.backend_id == 7
+
+    async def test_no_healthy_replica_is_503_even_with_images(self, fake_http):
+        plan = so.parse_request(_WITH_IMAGE)
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(healthy=False, sees_images=True)])):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == 503
+
+    @pytest.mark.parametrize("with_image,status,expected", [(True, 400, 422), (True, 500, 502), (False, 400, 502)])
+    async def test_an_image_the_model_rejects_is_the_callers_422(self, fake_http, with_image, status, expected):
+        good = _default_handler()
+        fake_http.handler = lambda url, body: (
+            good(url, body) if url.endswith("/tokenize") else _FakeResponse({"error": "x"}, status_code=status))
+        request = so.parse_request(_WITH_IMAGE).decision_request if with_image else _req()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([_vllm_backend(sees_images=True)])):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(request, "qwen/qwen3.8-27b", fanout=4)
+        assert e.value.status_code == expected
+
+
+class TestImagesOnUpstreams:
+    _clef = up.Upstream(name="clef", url="https://clef.example.edu:8004", api_key="k", model="clef", images=True)
+
+    def test_images_capability_is_a_setting(self):
+        ups, problems = up.parse_upstreams({"clef": {"url": "https://h", "images": True}, "laya": {"url": "https://l"}})
+        assert problems == [] and ups["clef"].images is True and ups["laya"].images is False
+        assert up.parse_upstreams({"clef": {"url": "https://h", "images": "yes"}})[1]
+
+    async def test_images_are_forwarded_to_an_upstream_that_sees(self, up_http):
+        up_http.reply = _UpResponse({"answers": {"legible": {"type": "noul", "noul": 0.9}}})
+        await up.SystemOneUpstreamBackend().answer(
+            self._clef, _WITH_IMAGE["state"], _WITH_IMAGE["questions"], images=_WITH_IMAGE["images"])
+        (_, body, _), = up_http.calls
+        assert body["images"] == _WITH_IMAGE["images"] and body["model"] == "clef"
+
+    async def test_no_images_key_when_there_are_none(self, up_http):
+        up_http.reply = _UpResponse({"answers": {"legible": {"type": "noul", "noul": 0.9}}})
+        await up.SystemOneUpstreamBackend().answer(self._clef, "s", _WITH_IMAGE["questions"])
+        assert "images" not in up_http.calls[0][1]
+
+    async def test_route_forwards_images_to_clef_and_records_only_their_count(self):
+        ub = _upstream_backend(answer=up._checked("clef", {"answers": {"legible": {"type": "noul", "noul": 0.9}}},
+                                                  _WITH_IMAGE["questions"]))
+        result, _, crud, _, _, _ = await _call({**_WITH_IMAGE, "model": "clef"},
+                                               cfg={"upstreams": {"clef": self._clef}}, upstream_backend=ub)
+        assert ub.answer.call_args.kwargs["images"] == _WITH_IMAGE["images"]
+        params = crud.create_request.call_args.kwargs["parameters"]
+        assert params["images"] == 1 and "base64" not in json.dumps(params)
+        assert result["answers"]["legible"]["noul"] == 0.9
+
+    async def test_an_upstream_that_cannot_see_refuses_images(self):
+        # Laya ignores unknown fields: forwarding would return an answer about the text alone.
+        ub = _upstream_backend()
+        with pytest.raises(HTTPException) as e:
+            await _call({**_WITH_IMAGE, "model": "laya"}, cfg={"upstreams": {"laya": _LAYA}}, upstream_backend=ub)
+        assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "images"]
+        ub.answer.assert_not_awaited()
+        e.value.mocks[1].create_request.assert_not_awaited()
+
+    async def test_bad_image_is_422_before_any_row_or_backend_call(self):
+        with pytest.raises(HTTPException) as e:
+            await _call({**_WITH_IMAGE, "images": ["https://example.com/x.png"]})
+        assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "images", 0]
+        e.value.mocks[1].create_request.assert_not_awaited()

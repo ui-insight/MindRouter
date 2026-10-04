@@ -96,7 +96,8 @@ class VLLMLogprobsBackend:
     async def decide(
         self, request: DecisionRequest, model: str, *, fanout: int = 8, backend_concurrency: int = 4
     ) -> DecisionOutcome:
-        backend = await self._pick_backend(model)
+        images = list(request.images)
+        backend = await self._pick_backend(model, needs_vision=bool(images))
         settings = get_settings()
         timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
         verify = bool(getattr(settings, "internal_tls_verify", True))
@@ -120,12 +121,13 @@ class VLLMLogprobsBackend:
                     shown = [q.options[k] for k in order]
                     text = render_turn(q.question, shown, request.state)
                     async with request_gate, backend_gate:
-                        return await self._score_one(client, backend.url, model, text, label_ids[: len(shown)])
+                        return await self._score_one(
+                            client, backend.url, model, text, label_ids[: len(shown)], images)
 
                 # Every view starts with the same state. Score the first one on
                 # its own so it fills vLLM's prefix cache; the rest then hit the
                 # cache instead of each prefilling the whole state in parallel.
-                if request.state and len(views) > 1:
+                if (request.state or images) and len(views) > 1:
                     first = await score(*views[0])
                     rest = await _gather_or_cancel([score(qi, order) for qi, order in views[1:]])
                     scored = [first, *rest]
@@ -136,6 +138,10 @@ class VLLMLogprobsBackend:
             except httpx.HTTPStatusError as e:
                 # Status only: an engine's error text can quote the prompt.
                 logger.warning("decision_backend_http_error", backend_id=backend.id, status=e.response.status_code)
+                if images and e.response.status_code == 400:
+                    # The gateway reads only an image's header; pixels the model
+                    # cannot decode (a cut-off file) are the caller's to fix.
+                    raise DecisionBackendError("the model could not read the request's images", 422) from e
                 raise DecisionBackendError(f"decision backend returned HTTP {e.response.status_code}", 502) from e
             except httpx.HTTPError as e:
                 logger.warning("decision_backend_unreachable", backend_id=backend.id, error=str(e))
@@ -173,14 +179,20 @@ class VLLMLogprobsBackend:
 
     # ---------------------------------------------------------------- internals
 
-    async def _pick_backend(self, model: str):
-        """A random healthy, circuit-closed vLLM backend serving ``model``.
+    async def _pick_backend(self, model: str, needs_vision: bool = False):
+        """A random healthy, circuit-closed vLLM backend serving ``model``;
+        with ``needs_vision``, one whose copy of the model takes images.
 
         Mirrors the direct-to-backend precedents (image_policy, dlp_worker):
         no scheduler slot is taken; ``_backend_gate`` bounds the load instead.
         See docs/decisions-api.md "Limitations".
         """
-        backend = await get_registry().pick_available_backend(model, engine=BackendEngine.VLLM)
+        registry = get_registry()
+        backend = await registry.pick_available_backend(
+            model, engine=BackendEngine.VLLM, multimodal=needs_vision)
+        if backend is None and needs_vision and await registry.pick_available_backend(model, engine=BackendEngine.VLLM):
+            # The model is up; it just cannot see. The caller's request to fix.
+            raise DecisionBackendError(f"model '{model}' does not accept images", 422)
         if backend is None:
             raise DecisionBackendError(f"no healthy vLLM backend serves '{model}'", 503)
         return backend
@@ -222,12 +234,19 @@ class VLLMLogprobsBackend:
         return ids
 
     async def _score_one(
-        self, client: httpx.AsyncClient, url: str, model: str, text: str, label_ids: Sequence[int]
+        self, client: httpx.AsyncClient, url: str, model: str, text: str, label_ids: Sequence[int],
+        images: Sequence[str] = (),
     ) -> tuple[LabelReadout, dict]:
         ids = list(label_ids)
+        # Images go first, before the state, identically in every view, so they
+        # are part of the prefix the server caches across the questions.
+        content: Any = text if not images else [
+            *({"type": "image_url", "image_url": {"url": url_}} for url_ in images),
+            {"type": "text", "text": text},
+        ]
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": text}],
+            "messages": [{"role": "user", "content": content}],
             "max_tokens": 1,
             "temperature": 0.0,
             "stream": False,

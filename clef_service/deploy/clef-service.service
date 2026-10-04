@@ -1,0 +1,46 @@
+############################################################
+# mindrouter - Clef System One service
+# systemd unit TEMPLATE
+#
+# Placeholders to substitute before installing:
+#
+#   __REPO_DIR__   directory that contains the clef_service package
+#   __VENV_DIR__   venv with clef_service/requirements.txt installed
+#   __ENV_FILE__   env file with CLEF_API_KEY and the CLEF_* settings (chmod 600)
+#   __USER__       service account
+#   __GPU__        physical GPU index for this instance
+#   __HF_HOME__    HuggingFace cache that holds the Clef snapshot
+#
+# One instance per GPU. Do not run two on the same card: they would take
+# turns on the same compute and hold the weights twice. The service batches
+# concurrent requests itself (CLEF_MAX_BATCH / CLEF_BATCH_WAIT_MS).
+############################################################
+
+[Unit]
+Description=MindRouter Clef System One service (Cloudflare Clef 27B, GPU __GPU__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+
+# CLEF_API_KEY and the CLEF_* settings. Keep it chmod 600: it holds the key.
+EnvironmentFile=__ENV_FILE__
+Environment=CUDA_VISIBLE_DEVICES=__GPU__
+Environment=HF_HOME=__HF_HOME__
+# Serve the snapshot already on disk; never reach out at start.
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=__VENV_DIR__/bin/python -m clef_service
+
+Restart=on-failure
+RestartSec=15
+# Loading 55 GB of weights takes a few minutes.
+TimeoutStartSec=1800
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

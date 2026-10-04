@@ -545,20 +545,29 @@ class BackendRegistry:
         model_name: str,
         *,
         engine: Optional[BackendEngine] = None,
+        multimodal: bool = False,
     ) -> Optional[Backend]:
         """A random healthy, circuit-closed backend serving ``model_name``.
 
         For callers that dispatch straight to a backend without a scheduler
         slot (DLP's LLM scanner, /v1/decisions). ``get_backends_with_model``
         already filters on HEALTHY in SQL; this adds the circuit breaker and
-        an optional engine filter, then spreads load uniformly. Returns None
-        when nothing qualifies, so each caller keeps its own error wording.
+        an optional engine filter, then spreads load uniformly. ``multimodal``
+        restricts to backends whose copy of the model takes images: the model
+        row's ``supports_multimodal``, the same flag the scheduler routes on
+        and the one an admin override sets (``Model.modality`` is only a
+        discovery-time name guess). Returns None when nothing qualifies, so
+        each caller keeps its own error wording.
         """
         import random
 
         available: List[Backend] = []
         for b in await self.get_backends_with_model(model_name):
             if engine is not None and b.engine != engine:
+                continue
+            if multimodal and not any(
+                m.name == model_name and m.supports_multimodal for m in (b.models or [])
+            ):
                 continue
             try:
                 if await self.is_backend_available(b.id):

@@ -7,7 +7,7 @@
 > MindRouter-specific `metadata` block may change. Measured on our fleet in
 > [Benchmarks](#benchmarks).
 
-Last updated: 2026-10-03 (release 2.9.84)
+Last updated: 2026-10-04 (release 2.9.85)
 
 ## What it is
 
@@ -50,7 +50,7 @@ The `model` field decides how an answer is produced.
 | `model` | Answered by | Configured in |
 |---|---|---|
 | a vLLM model's catalog name, e.g. `qwen/qwen3.8-27b` | One-token letter scoring on a chat model MindRouter already serves. No dedicated model, no extra GPU. | `decisions.allowed_models` |
-| an upstream name, e.g. `laya` | A purpose-built decision model running as its own System One server (Laya's `laya-serve`, Open-Jev). MindRouter forwards the state and each question's `type`, `instructions` and `criteria` (nothing else), and checks the reply against what was asked. | `decisions.upstreams` |
+| an upstream name, e.g. `clef` or `laya` | A purpose-built decision model running as its own System One server (Cloudflare's Clef behind `clef_service`, Laya's `laya-serve`, Open-Jev). MindRouter forwards the state and each question's `type`, `instructions` and `criteria` (nothing else), and checks the reply against what was asked. | `decisions.upstreams` |
 | `jev-latest`, `jev-preview`, or omitted | Whichever of the above the admin set as the default. `jev-latest` is what TypeSafe's SDK sends unless told otherwise. | `decisions.default_model` |
 
 Anything else, including a pinned TypeSafe version such as `jev-1.13.0`, is
@@ -61,11 +61,13 @@ normal OpenAI model list).
 
 How the two kinds differ:
 
-| | vLLM letter scoring (`qwen/qwen3.8-27b`) | Upstream server (`laya`) |
+| | vLLM letter scoring (`qwen/qwen3.8-27b`) | Upstream server (`clef`, `laya`) |
 |---|---|---|
 | What the number is | The chat model's next-token likelihood over option letters, renormalized, then softened by a per-type temperature fitted on one public benchmark (`metadata.score_semantics = normalized_label_likelihood`, `metadata.temperature`). Calibrated on that benchmark, not on your data. | Whatever that model reports (`upstream_model_probability`); MindRouter does not adjust it. |
-| Choice options | At most **20** (one single-token letter each); more is a 422 | The upstream's own limit (Laya: 100) |
-| State size | `decisions.max_state_chars`, then the model's context (large) | `decisions.max_state_chars`, then the upstream's (Laya: 512–1,024 tokens by default) |
+| Choice options | At most **20** (one single-token letter each); more is a 422 | The upstream's own limit (Clef: 255; Laya: 100) |
+| Images | Yes, when the model's replicas serve it with vision (Qwen3.8-27B does) | Only upstreams marked `"images": true` (Clef); others refuse a request with images |
+| Model passes per request | One per question (two for a `choice`) | Clef: one for the whole request |
+| State size | `decisions.max_state_chars`, then the model's context (large) | `decisions.max_state_chars`, then the upstream's (Clef: 16,384 tokens as deployed; Laya: 512–1,024). A cut state is reported in `metadata.truncated`. |
 | Cost | One 1-token forward pass per question on a 27B model; state prefix-cached after the first | One small encoder pass |
 | Routing | A healthy, circuit-closed replica chosen per request | A fixed URL; not health-checked |
 
@@ -100,6 +102,17 @@ How the two kinds differ:
     a level's position is its value, starting at 0.
   * `instructions`, option descriptions and score levels may each be a string,
     an object or an array.
+* `images` *(Cloudflare Clef's extension)* — up to 4 images the model looks at
+  before the state. Each is a base64 data URL (`"data:image/png;base64,..."`)
+  or an object `{"content_type": "image/png", "base64": "..."}`. PNG, JPEG or
+  WebP; 4 MiB and 16 megapixels each, 8 MiB in total. Remote URLs are not
+  accepted: MindRouter does not fetch on a caller's behalf. Every image is
+  checked before any model sees it (it must be a readable file of the type it
+  claims, within the limits; an image whose pixel data turns out to be damaged
+  is a 422 from the model). A model that cannot see refuses the request with
+  422 rather than answering from the text alone; for a vLLM model that is the
+  model's multimodal capability flag, the one the admin override sets. This is the same field and format
+  Cloudflare publishes for Clef on Workers AI.
 * `permutations` *(MindRouter extension, vLLM models only)* — how many option
   orders are scored. With `2` a question is also scored with its options
   reversed and the two distributions averaged, which cancels most position
@@ -156,7 +169,12 @@ option orders were scored), and `metadata.temperature` lists the temperature
 applied to each question type's probabilities. Temperature changes how
 confident the numbers are, never which answer is chosen. For an upstream,
 `metadata.upstream_model` and, for Laya, `metadata.routing` say which
-checkpoint answered.
+checkpoint answered, and `metadata.truncated` / `metadata.state_tokens_dropped`
+appear when the upstream says it cut the state to fit its context.
+
+`confidence` means the same thing whichever model answered: for an upstream
+it is recomputed from the returned probabilities with TypeSafe's formulas
+(Clef, for one, reports its top probability in that field).
 
 ## Errors
 
@@ -167,7 +185,7 @@ its SDK parses.
 |---|---|
 | `401` | Missing or invalid MindRouter API key |
 | `404` | The decisions API is disabled on this server |
-| `422` | Invalid request. `detail` is a list of `{loc, msg, type}` with `loc` starting at `body`, e.g. `["body", "questions", "urgency", "score", "criteria"]`. Also: `model` not offered here, state over the server's limit, more than 20 choice options on a vLLM model, text that is not valid Unicode (an unpaired surrogate) or a non-finite number anywhere in the body, or the upstream model rejecting the content. |
+| `422` | Invalid request. `detail` is a list of `{loc, msg, type}` with `loc` starting at `body`, e.g. `["body", "questions", "urgency", "score", "criteria"]`. Also: `model` not offered here, state over the server's limit, an invalid image or images sent to a model that cannot see, more than 20 choice options on a vLLM model, text that is not valid Unicode (an unpaired surrogate) or a non-finite number anywhere in the body, or the upstream model rejecting the content. |
 | `429` | Token quota or requests-per-minute limit |
 | `500` | Unexpected failure (the request is still recorded as failed) |
 | `502` | The model's server failed or returned an invalid reply. Nothing is charged. |
@@ -209,7 +227,7 @@ Admin → Settings → "Decisions API (System One)", or `app_config`:
 | `decisions.allowed_models` | `["qwen/qwen3.8-27b"]` | vLLM chat models that may be letter-scored. Use the catalog name exactly as `/v1/models` lists it. |
 | `decisions.permutations` | `{"noul": 1, "choice": 2, "score": 1}` | Option orders scored and averaged per question type on vLLM models (1 or 2). A request's own `permutations` overrides it. |
 | `decisions.temperature` | `{"noul": 1.35, "choice": 1.05, "score": 1.45}` | Temperature applied to each question type's probabilities on vLLM models (0.2–5; `1` is off; above 1 softens). Fitted on Qwen3.8-27B; refit if you change the model. |
-| `decisions.upstreams` | `{}` | Upstream System One servers: `{"laya": {"url": "https://host:8010", "api_key": "…", "model": null, "timeout": 30}}`. `model` is the name sent upstream; `null` omits it (Laya then picks a checkpoint by language). |
+| `decisions.upstreams` | `{}` | Upstream System One servers: `{"clef": {"url": "https://host:8004", "api_key": "…", "model": "clef", "images": true, "timeout": 30}}`. `model` is the name sent upstream (`null` omits it; Laya then picks a checkpoint by language). `images: true` marks an upstream that accepts the `images` extension. |
 | `decisions.max_state_chars` | `32000` | Ceiling on the rendered state (hard cap 64,000) |
 | `decisions.fanout` | `8` | Concurrent scoring calls per request (vLLM models) |
 | `decisions.backend_concurrency` | `4` | Concurrent calls to one backend or upstream across all requests, per app worker process. With 8 workers the worst case on one replica is 32. |
@@ -236,6 +254,24 @@ Prometheus: `mindrouter_decisions_requests_total{model,backend,status}`,
 `mindrouter_decisions_latency_seconds{model}`,
 `mindrouter_decisions_tokens_total{model,type=prompt|scoring|cached}`. Log
 event `decision_request`.
+
+### Adding Clef as an upstream
+
+[Clef](https://huggingface.co/Cloudflare/clef) (Cloudflare, Apache-2.0) is
+Qwen3.8-27B post-trained for decisions with a small joint head. It answers a
+whole request, every question at once, in one forward pass, and it can look at
+images. Cloudflare publishes weights and a Python function but no server;
+`clef_service/` in this repository is that server (bearer key, dynamic
+batching, bounded queue; see its README). It needs one GPU with about 60 GB
+free. Then:
+
+```json
+{"clef": {"url": "https://<host>:<tls-port>", "api_key": "<CLEF_API_KEY>", "model": "clef", "images": true}}
+```
+
+Callers select it with `"model": "clef"`. It cannot share the Qwen3.8-27B
+vLLM replicas: its backbone weights are modified and its head reads the
+model's internal states.
 
 ### Adding Laya as an upstream
 
@@ -314,7 +350,8 @@ matches the reference label. No request failed in any run.
 | | Accuracy | noul | choice | score | Calibration error (ECE) | Score MAE |
 |---|---|---|---|---|---|---|
 | Qwen3.8-27B, 2.9.83 (one option order, no temperature) | 0.687 | 0.770 | 0.643 | 0.657 | 0.090 | 0.403 |
-| **Qwen3.8-27B, 2.9.84 defaults** | **0.710** | 0.770 | 0.718 | 0.657 | **0.022** | **0.377** |
+| Qwen3.8-27B, 2.9.84 defaults, predicted offline | 0.710 | 0.770 | 0.718 | 0.657 | 0.022 | 0.377 |
+| **Qwen3.8-27B, 2.9.84 defaults, measured on the deployed code** | **0.713** | 0.772 | 0.717 | 0.665 | **0.019** | — |
 | Qwen3.8-27B, `permutations: 2` for every type | 0.707 | 0.752 | 0.718 | 0.664 | 0.063 | 0.382 |
 | Laya (base checkpoints, zero-shot) | 0.361 | 0.487 | 0.287 | 0.323 | 0.175 | — |
 | *TypeSafe Jev 1.13.0 (published, not measured here)* | *0.727* | | | | *0.144* | *0.391* |
@@ -322,10 +359,12 @@ matches the reference label. No request failed in any run.
 
 How the 2.9.84 defaults were chosen: the per-type option-order setting and the
 temperatures were fitted on a 400-case sample of the benchmark's **training**
-split and then scored once on the test split; the 2.9.84 row is that result
-(computed from per-question answers collected through production at one and
-two option orders). With those defaults, answers reported at 0.9 confidence or
-higher were correct 94.7% of the time (89.8% before).
+split and then scored once on the test split; the "predicted offline" row is
+that result (computed from per-question answers collected through production
+at one and two option orders), and the "measured" row is the same benchmark
+re-run end to end after 2.9.84 was deployed. With those defaults, answers
+reported at 0.9 confidence or higher were correct 94.5% of the time (89.8%
+before).
 
 Things the numbers say:
 
@@ -375,8 +414,8 @@ responses. The captured request body is a fixture in
 ## Replacing or removing this layer
 
 Everything lives in `backend/app/services/decisions/`
-(`systemone.py` wire format, `vllm_logprobs.py` letter scoring, `upstream.py`
-forwarding) and `backend/app/api/decisions_api.py`, plus one router line in
+(`systemone.py` wire format, `images.py` image checks, `vllm_logprobs.py`
+letter scoring, `upstream.py` forwarding) and `backend/app/api/decisions_api.py`, plus one router line in
 `backend/app/api/__init__.py`, a branch in `GET /v1/models` for TypeSafe's
 SDK, one admin card, this document and
 `backend/app/tests/unit/test_decisions.py`. No migration. To remove: delete

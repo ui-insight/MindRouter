@@ -114,6 +114,9 @@ class DecisionRequest(BaseModel):
     state: str | None = Field(default=None, max_length=MAX_STATE_CHARS)
     questions: list[Question] = Field(min_length=1, max_length=MAX_QUESTIONS)
     permutations: int = Field(default=1, ge=1, le=MAX_PERMUTATIONS)
+    # Already-validated base64 data URLs (services/decisions/images.py), shown
+    # to the model before the state.
+    images: list[str] = Field(default_factory=list)
 
     @field_validator("questions")
     @classmethod
