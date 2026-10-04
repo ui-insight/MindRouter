@@ -25,6 +25,16 @@ def test_multimodal_heuristic_covers_qwen36_and_dots():
     assert '"dots"' in block     # dots.OCR / dots.mocr
 
 
+def test_discovery_knows_kimi_k3_sees_thinks_and_calls_tools():
+    # Registered 2026-10-04 with all three guessed false: images were refused and think=false ignored
+    # until an admin set the overrides by hand.
+    src = _read("backend/app/core/telemetry/adapters/vllm.py")
+    for flag in ("supports_multimodal", "supports_thinking", "supports_tools"):
+        block = src[src.index(f"{flag} = any("):]
+        block = block[: block.index("\n                )")]
+        assert '"kimi-k3"' in block, flag
+
+
 def test_vllm_injects_include_usage_for_streaming():
     # #10b: streaming requests must ask vLLM for usage so quota accounting is real.
     from backend.app.core.translators.vllm_out import VLLMOutTranslator

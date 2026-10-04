@@ -88,6 +88,58 @@ class TestProfiles:
         assert mimo.family == "mimo" and mimo.toggleable and not mimo.has_levels
         assert R.profile_for("XiaomiMiMo/MiMo-V2.6-Flash-MOPD").family == "mimo"
 
+    def test_kimi_k3_has_a_switch_and_three_levels(self):
+        kimi = R.profile_for("moonshotai/kimi-k3")
+        assert kimi.family == "kimi-k3" and kimi.toggleable
+        assert kimi.levels == ("low", "high", "max") and kimi.default_level == "max"
+        for name in ("RedHatAI/Kimi-K3-NVFP4", "moonshotai/Kimi_K3", "kimi-k3:latest"):
+            assert R.profile_for(name).family == "kimi-k3", name
+        # The name decides, whatever the discovery flag says (it is name-guessed false for Kimi).
+        assert R.profile_for("moonshotai/kimi-k3", supports_thinking=False).family == "kimi-k3"
+        # Earlier Kimi models have other templates and are not claimed.
+        assert R.profile_for("moonshotai/kimi-k2", supports_thinking=True).family == "generic"
+
+    def test_kimi_k3_never_forwards_a_level_vllm_would_reject(self):
+        # vLLM answers 400 to any thinking_effort other than low/high/max.
+        kimi = R.profile_for("moonshotai/kimi-k3")
+        for lvl in R.GATEWAY_LEVELS:
+            if lvl == "none":
+                continue                      # "none" is the switch on a family that has one
+            assert kimi.native_level(lvl) in kimi.levels, lvl
+        assert kimi.native_level("medium") == "high" and kimi.native_level("minimal") == "low"
+        assert kimi.native_level("xhigh") == "max"
+
+    def test_kimi_k3_resolution(self):
+        kimi = R.profile_for("moonshotai/kimi-k3")
+        # Nothing said: off (gateway policy), and no level sent.
+        assert R.resolve_reasoning(None, None, kimi) == R.ResolvedReasoning(enabled=False)
+        assert R.resolve_reasoning(False, "high", kimi) == R.ResolvedReasoning(enabled=False)   # off wins
+        assert R.resolve_reasoning(None, "none", kimi) == R.ResolvedReasoning(enabled=False)
+        # On: the switch plus a level Kimi knows.
+        assert R.resolve_reasoning(True, None, kimi) == R.ResolvedReasoning(enabled=True, effort="high")   # admin default medium
+        assert R.resolve_reasoning(None, "low", kimi) == R.ResolvedReasoning(enabled=True, effort="low")
+        assert R.resolve_reasoning(None, "medium", kimi) == R.ResolvedReasoning(enabled=True, effort="high")
+        assert R.resolve_reasoning(None, "max", kimi) == R.ResolvedReasoning(enabled=True, effort="max")
+        assert R.resolve_reasoning(None, "xhigh", kimi) == R.ResolvedReasoning(enabled=True, effort="max")
+        # No gateway default: thinking on at the model's own default (max), nothing sent.
+        assert R.resolve_reasoning(True, None, kimi, default_effort=None) == R.ResolvedReasoning(enabled=True, effort=None)
+        # Policy off: the model's own default (thinking on) is left alone.
+        assert R.resolve_reasoning(None, None, kimi, off_by_default=False) == R.ResolvedReasoning(enabled=None)
+
+    def test_kimi_k3_request_as_vllm_reads_it(self):
+        from backend.app.core.translators.vllm_out import VLLMOutTranslator
+
+        def payload(think, effort):
+            req = CanonicalChatRequest(model="moonshotai/kimi-k3",
+                                       messages=[CanonicalMessage(role=MessageRole.USER, content="hi")],
+                                       think=think, reasoning_effort=effort)
+            return VLLMOutTranslator.translate_chat_request(req)
+
+        on = payload(True, "high")
+        assert on["reasoning_effort"] == "high" and on["chat_template_kwargs"] == {"enable_thinking": True}
+        off = payload(False, None)
+        assert "reasoning_effort" not in off and off["chat_template_kwargs"] == {"enable_thinking": False}
+
     def test_native_max_is_accepted_everywhere(self):
         # The chat page sends GLM's native "max" back; it must validate and
         # mean the top gateway level on every family (2.9.82 hotfix).
@@ -125,7 +177,7 @@ class TestProfiles:
         }
 
     def test_every_gateway_level_maps_for_families_with_levels(self):
-        for prof in (Q38, GPT):
+        for prof in (Q38, GPT, R.profile_for("moonshotai/kimi-k3")):
             for lvl in R.GATEWAY_LEVELS:
                 if lvl == "none" and prof.toggleable:
                     continue  # "none" is the switch, not a level, when a switch exists

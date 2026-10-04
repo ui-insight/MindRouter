@@ -423,12 +423,13 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
 }</code></pre>
                 <p><strong>Levels.</strong> The gateway vocabulary is <code>none</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, translated to what the model understands:</p>
                 <table class="table table-sm table-bordered">
-                    <thead><tr><th>Gateway level</th><th>Qwen3.8 (<code>low</code>/<code>medium</code>/<code>xhigh</code>)</th><th>gpt-oss (<code>low</code>/<code>medium</code>/<code>high</code>)</th><th>Qwen3.5/3.6, Gemma 4, Nemotron (switch only)</th></tr></thead>
+                    <thead><tr><th>Gateway level</th><th>Qwen3.8 (<code>low</code>/<code>medium</code>/<code>xhigh</code>)</th><th>gpt-oss (<code>low</code>/<code>medium</code>/<code>high</code>)</th><th>Kimi K3 (<code>low</code>/<code>high</code>/<code>max</code>)</th><th>Qwen3.5/3.6, Gemma 4, Nemotron (switch only)</th></tr></thead>
                     <tbody>
-                        <tr><td><code>none</code></td><td>thinking off</td><td><code>low</code> (cannot switch off)</td><td>thinking off</td></tr>
-                        <tr><td><code>minimal</code>, <code>low</code></td><td><code>low</code></td><td><code>low</code></td><td>on, level ignored</td></tr>
-                        <tr><td><code>medium</code></td><td><code>medium</code></td><td><code>medium</code></td><td>on, level ignored</td></tr>
-                        <tr><td><code>high</code>, <code>xhigh</code></td><td><code>xhigh</code></td><td><code>high</code></td><td>on, level ignored</td></tr>
+                        <tr><td><code>none</code></td><td>thinking off</td><td><code>low</code> (cannot switch off)</td><td>thinking off</td><td>thinking off</td></tr>
+                        <tr><td><code>minimal</code>, <code>low</code></td><td><code>low</code></td><td><code>low</code></td><td><code>low</code></td><td>on, level ignored</td></tr>
+                        <tr><td><code>medium</code></td><td><code>medium</code></td><td><code>medium</code></td><td><code>high</code></td><td>on, level ignored</td></tr>
+                        <tr><td><code>high</code></td><td><code>xhigh</code></td><td><code>high</code></td><td><code>high</code></td><td>on, level ignored</td></tr>
+                        <tr><td><code>xhigh</code> (or <code>max</code>)</td><td><code>xhigh</code></td><td><code>high</code></td><td><code>max</code></td><td>on, level ignored</td></tr>
                     </tbody>
                 </table>
                 <p>A level outside the vocabulary is rejected with a 400 naming the accepted values; a level a family cannot express is accepted and dropped. Each model's switch, native levels and default are published on <code>/v1/models</code> under <code>reasoning</code>. When thinking is enabled, the response includes <code>reasoning_content</code> alongside <code>content</code>.</p>
