@@ -35,6 +35,8 @@ import asyncio
 import json
 import time
 import uuid
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from prometheus_client import Counter, Histogram
@@ -45,7 +47,7 @@ from backend.app.api.model_availability import AVAILABLE, model_availability, op
 from backend.app.api.voice_api import _check_quota
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
-from backend.app.db.models import ApiKey, Modality, User
+from backend.app.db.models import ApiKey, BackendEngine, Modality, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.decisions import (
@@ -93,7 +95,136 @@ DECISION_TOKENS = Counter(
 )
 
 
+DECISION_FALLBACKS = Counter(
+    "mindrouter_decisions_fallbacks_total",
+    "Decision requests answered by the configured fallback instead of the requested model",
+    ["requested", "answered_by"],
+)
+
 REQUEST_ID_HEADER = "x-typesafe-request-id"  # what TypeSafe's SDK reads as request_id
+
+# A model that answers one of these is "not working" for this request: the
+# configured fallback (decisions.fallbacks) takes over. 4xx are the caller's.
+_FALLBACK_STATUSES = frozenset({500, 502, 503, 504})
+# Of those, the ones that count against a monitored server's circuit breaker.
+# 503 is "busy", which is load, not sickness.
+_SICK_STATUSES = frozenset({500, 502, 504})
+
+
+@dataclass
+class _Target:
+    """One model that could answer the request, checked and ready to call."""
+
+    name: str                      # the name it goes by in the settings
+    model: str                     # the name recorded and returned
+    backend: Any                   # the implementation that calls it
+    upstream: Any = None           # set for a System One server
+    plan: Any = None               # set for letter scoring on a vLLM model
+    monitor_id: Optional[int] = None   # its registered backend, when monitored
+
+
+class _Unavailable(Exception):
+    """The model cannot take a request right now (known before any work)."""
+
+    def __init__(self, status_code: int, detail: str, headers: Optional[dict] = None, reason: str = "unavailable"):
+        super().__init__(detail)
+        self.status_code, self.detail, self.headers, self.reason = status_code, detail, headers, reason
+
+
+class _AttemptFailed(Exception):
+    """A model was tried and failed; ``error`` is the HTTP error to send."""
+
+    def __init__(self, error: HTTPException, retryable: bool = False, reason: str = "failed"):
+        super().__init__(reason)
+        self.error, self.retryable, self.reason = error, retryable, reason
+
+
+async def _report(report, backend_id: int) -> None:
+    """Tell the registry how a live request to a monitored server went. Never
+    lets bookkeeping fail the request."""
+    try:
+        await report(backend_id)
+    except Exception:
+        logger.warning("decision_circuit_report_failed", backend_id=backend_id)
+
+
+async def _prepare(name: str, *, wire, body, cfg, requested, registry, db) -> _Target:
+    """Check that ``name`` can answer this request and return how to call it.
+
+    Raises HTTPException(422) when the request itself is the problem for this
+    model, and _Unavailable when the model is down.
+    """
+    upstream = cfg["upstreams"].get(name)
+    if upstream is not None:
+        if len(json.dumps(body["questions"], ensure_ascii=False)) > MAX_FORWARDED_QUESTIONS_CHARS:
+            raise _invalid(["questions"], f"questions exceed {MAX_FORWARDED_QUESTIONS_CHARS} characters in total")
+        if wire.images and not upstream.images:
+            # Forwarding to a server that ignores the field would get an answer
+            # about the text alone, with nothing to say the image went unseen.
+            raise _invalid(["images"], f"model '{name}' does not accept images")
+        # A decision server registered as a backend (engine "decision") is
+        # health-polled; when it is known to be down, do not dial it.
+        try:
+            monitor_id, problem = await registry.decision_server_state(upstream.url, db)
+        except Exception as e:
+            # Monitoring is an optimisation. If the lookup itself fails, dial
+            # the server as if it were not registered rather than fail the request.
+            logger.warning("decision_server_lookup_failed", model=name, error_type=type(e).__name__)
+            monitor_id, problem = None, None
+        if problem:
+            raise _Unavailable(
+                status.HTTP_503_SERVICE_UNAVAILABLE, f"model '{name}' is unavailable ({problem})",
+                {"Retry-After": "15"}, reason=problem,
+            )
+        return _Target(name=name, model=name, backend=get_upstream_backend(), upstream=upstream, monitor_id=monitor_id)
+
+    model, _alias = registry.resolve_alias(name)
+    # Resolve the admin's list too: an alias typed into decisions.allowed_models
+    # must admit the model it points at, not reject every request.
+    allowed = {registry.resolve_alias(m)[0] for m in cfg["allowed_models"]}
+    if model not in allowed:
+        offered = [*JEV_MODEL_ALIASES, *cfg["allowed_models"], *cfg["upstreams"]]
+        raise _invalid(
+            ["model"],
+            f"model '{str(requested)[:100]}' is not available for decisions here; use one of: {', '.join(offered)}",
+        )
+    try:
+        plan = compile_plan(wire, cfg["permutations"])
+    except SystemOneValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.detail) from None
+    availability = await model_availability(registry, model)
+    if availability != AVAILABLE:
+        code, detail, headers = openai_error(model, availability)
+        raise _Unavailable(code, detail["error"]["message"], headers, reason="no healthy replica")
+    if wire.images and await registry.pick_available_backend(
+        model, engine=BackendEngine.VLLM, multimodal=True
+    ) is None:
+        # Known before any work, like the upstream check above. As a fallback
+        # target this means "cannot take this request", not an error about a
+        # model the caller never named.
+        raise _invalid(["images"], f"model '{name}' does not accept images")
+    return _Target(name=name, model=model, backend=get_decision_backend(), plan=plan)
+
+
+async def _prepare_fallback(name: str, **ctx) -> Optional[_Target]:
+    """The configured alternative for ``name``, ready to call, or None when
+    there is none or it cannot take this request either (it is down too, or
+    the request does not fit it: images to a model that cannot see, more
+    options than letter scoring allows)."""
+    fallbacks = ctx["cfg"].get("fallbacks", {})
+    # The setting may name the model by its catalog name while the caller used an alias.
+    alternative = fallbacks.get(name) or fallbacks.get(ctx["registry"].resolve_alias(name)[0])
+    if not alternative:
+        return None
+    try:
+        return await _prepare(alternative, **ctx)
+    except (HTTPException, _Unavailable):
+        return None
+    except Exception as e:
+        # A fallback is best effort: whatever goes wrong preparing it, the
+        # caller gets the original model's error, not this one.
+        logger.warning("decision_fallback_unusable", model=alternative, error_type=type(e).__name__)
+        return None
 
 
 def _invalid(loc: list, msg: str, kind: str = "value_error") -> HTTPException:
@@ -135,128 +266,152 @@ async def systemone(
         raise _invalid(["state"], f"state exceeds {cfg['max_state_chars']} characters on this server")
 
     # ``model`` picks how the answer is produced: an upstream decision server
-    # (decisions.upstreams, e.g. Laya) or letter scoring on a vLLM chat model
+    # (decisions.upstreams, e.g. Clef) or letter scoring on a vLLM chat model
     # (decisions.allowed_models). Jev's aliases mean "this server's default".
     requested = wire.model
     name = cfg["default_model"] if requested is None or requested in JEV_MODEL_ALIASES else requested
-    upstream = cfg["upstreams"].get(name)
-    plan = None
-    if upstream is not None:
-        model, backend = name, get_upstream_backend()
-        if len(json.dumps(body["questions"], ensure_ascii=False)) > MAX_FORWARDED_QUESTIONS_CHARS:
-            raise _invalid(["questions"], f"questions exceed {MAX_FORWARDED_QUESTIONS_CHARS} characters in total")
-        if wire.images and not upstream.images:
-            # Forwarding to a server that ignores the field would get an answer
-            # about the text alone, with nothing to say the image went unseen.
-            raise _invalid(["images"], f"model '{name}' does not accept images")
-    else:
-        registry = get_registry()
-        model, _alias = registry.resolve_alias(name)
-        # Resolve the admin's list too: an alias typed into decisions.allowed_models
-        # must admit the model it points at, not reject every request.
-        allowed = {registry.resolve_alias(m)[0] for m in cfg["allowed_models"]}
-        if model not in allowed:
-            offered = [*JEV_MODEL_ALIASES, *cfg["allowed_models"], *cfg["upstreams"]]
-            raise _invalid(
-                ["model"],
-                f"model '{str(requested)[:100]}' is not available for decisions here; use one of: {', '.join(offered)}",
-            )
-        try:
-            plan = compile_plan(wire, cfg["permutations"])
-        except SystemOneValidationError as e:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.detail) from None
-        availability = await model_availability(registry, model)
-        if availability != AVAILABLE:
-            code, detail, headers = openai_error(model, availability)
-            raise HTTPException(code, detail=detail["error"]["message"], headers=headers)
-        backend = get_decision_backend()
+    registry = get_registry()
+    ctx = {"wire": wire, "body": body, "cfg": cfg, "requested": requested, "registry": registry, "db": db}
+    request_started = time.perf_counter()
+
+    # ``fallback`` is set once a configured alternative (decisions.fallbacks)
+    # is answering in place of the model that was asked for.
+    fallback: dict | None = None
+    try:
+        target = await _prepare(name, **ctx)
+    except _Unavailable as unavailable:
+        # Known to be down before any work is done: go straight to the alternative.
+        target = await _prepare_fallback(name, **ctx)
+        if target is None:
+            raise HTTPException(unavailable.status_code, detail=unavailable.detail, headers=unavailable.headers) from None
+        fallback = {"requested": name, "reason": unavailable.reason}
 
     # Quota + RPM BEFORE any GPU work, like every endpoint that dispatches
     # outside InferenceService (voice, moderations).
     await _check_quota(db, user, api_key)
 
-    dreq = plan.decision_request if plan else None
-    db_request = await crud.create_request(
-        db=db,
-        user_id=user.id,
-        api_key_id=api_key.id,
-        endpoint=endpoint,
-        model=model,
-        modality=Modality.CHAT,
-        # Shape only — never the state or the question text.
-        parameters={
-            "backend": backend.name,
-            "questions": len(wire.questions),
-            # A number when the caller named it; otherwise the server's per-type defaults applied.
-            "permutations": wire.permutations if wire.permutations is not None else "default",
-            "types": sorted({q.type for q in wire.questions.values()}),
-            "state_chars": len(state_text),
-            "images": len(wire.images or []),
-            "model_requested": requested,
-        },
-        client_ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-
-    # Commit the audit row BEFORE dialing out. Held open, this transaction
-    # would pin a pooled connection for the whole fan-out and keep the
-    # requests-row FK lock on api_keys, which the completion writers take
-    # exclusively (the 2.9.81 deadlock order).
-    await crud.update_request_started(db, db_request.id, backend_id=None)
-    await db.commit()
-
-    started = time.perf_counter()
-    try:
-        if upstream is not None:
-            # Forward the caller's own state and questions, untouched.
-            answered = await backend.answer(
-                upstream, body["state"], body["questions"], concurrency=cfg["backend_concurrency"],
-                images=wire.images or None,
-            )
-            outcome = None
-        elif dreq is None:
-            # Every question had a single option: answered without the model.
-            answered, outcome = None, DecisionOutcome(results=[], usage=None, backend_id=None, backend_name=None)
-        else:
-            answered = None
-            outcome = await backend.decide(
-                dreq, model, fanout=cfg["fanout"], backend_concurrency=cfg["backend_concurrency"],
-            )
-    except SystemOneValidationError as e:
-        # The upstream refused the request's content. Its wording may quote
-        # the request, so the audit row gets the fixed summary instead.
-        await _record_failure(db, db_request.id, e.audit_message, "422")
-        DECISION_REQUESTS.labels(model, backend.name, "error").inc()
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.detail) from None
-    except DecisionBackendError as e:
-        await _record_failure(db, db_request.id, str(e), str(e.status_code))
-        DECISION_REQUESTS.labels(model, backend.name, "error").inc()
-        logger.warning(
-            "decision_request_failed",
-            model=model, backend=backend.name, status=e.status_code, error=str(e),
-            questions=len(wire.questions), latency_ms=int((time.perf_counter() - started) * 1000),
+    async def attempt(target: _Target, fallback: dict | None):
+        """One model's try at the request: its audit row, the call, and the
+        failure bookkeeping. Returns (row, answered, outcome, started) or
+        raises _AttemptFailed with the HTTP error to send."""
+        model, backend = target.model, target.backend
+        dreq = target.plan.decision_request if target.plan else None
+        db_request = await crud.create_request(
+            db=db,
+            user_id=user.id,
+            api_key_id=api_key.id,
+            endpoint=endpoint,
+            model=model,
+            modality=Modality.CHAT,
+            # Shape only — never the state or the question text.
+            parameters={
+                "backend": backend.name,
+                "questions": len(wire.questions),
+                # A number when the caller named it; otherwise the server's per-type defaults applied.
+                "permutations": wire.permutations if wire.permutations is not None else "default",
+                "types": sorted({q.type for q in wire.questions.values()}),
+                "state_chars": len(state_text),
+                "images": len(wire.images or []),
+                "model_requested": requested,
+                **({"fallback_from": fallback["requested"], "fallback_reason": fallback["reason"]} if fallback else {}),
+            },
+            client_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
         )
-        raise HTTPException(e.status_code, detail=str(e)) from e
-    except asyncio.CancelledError:
-        # The client went away or the server is shutting down. Nothing sweeps
-        # a row left in PROCESSING, so close it before the cancellation continues.
-        await asyncio.shield(_record_failure(db, db_request.id, "cancelled before the model answered", "499"))
-        DECISION_REQUESTS.labels(model, backend.name, "error").inc()
-        raise
-    except Exception as e:
-        # Anything the backend did not map: keep the audit row and answer 500
-        # instead of letting the request vanish with an unhandled error. Only
-        # the exception's type is recorded; its text could quote the request.
-        logger.error("decision_request_crashed", model=model, backend=backend.name, error_type=type(e).__name__)
-        await _record_failure(db, db_request.id, f"internal error: {type(e).__name__}", "500")
-        DECISION_REQUESTS.labels(model, backend.name, "error").inc()
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="decision request failed") from None
+
+        # Commit the audit row BEFORE dialing out. Held open, this transaction
+        # would pin a pooled connection for the whole fan-out and keep the
+        # requests-row FK lock on api_keys, which the completion writers take
+        # exclusively (the 2.9.81 deadlock order).
+        await crud.update_request_started(db, db_request.id, backend_id=target.monitor_id)
+        await db.commit()
+
+        started = time.perf_counter()
+        try:
+            if target.upstream is not None:
+                # Forward the caller's own state and questions, untouched.
+                answered = await backend.answer(
+                    target.upstream, body["state"], body["questions"], concurrency=cfg["backend_concurrency"],
+                    images=wire.images or None,
+                )
+                outcome = None
+            elif dreq is None:
+                # Every question had a single option: answered without the model.
+                answered, outcome = None, DecisionOutcome(results=[], usage=None, backend_id=None, backend_name=None)
+            else:
+                answered = None
+                outcome = await backend.decide(
+                    dreq, model, fanout=cfg["fanout"], backend_concurrency=cfg["backend_concurrency"],
+                )
+        except SystemOneValidationError as e:
+            # The upstream refused the request's content. Its wording may quote
+            # the request, so the audit row gets the fixed summary instead.
+            await _record_failure(db, db_request.id, e.audit_message, "422")
+            DECISION_REQUESTS.labels(model, backend.name, "error").inc()
+            raise _AttemptFailed(HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=e.detail)) from None
+        except DecisionBackendError as e:
+            await _record_failure(db, db_request.id, str(e), str(e.status_code))
+            DECISION_REQUESTS.labels(model, backend.name, "error").inc()
+            logger.warning(
+                "decision_request_failed",
+                model=model, backend=backend.name, status=e.status_code, error=str(e),
+                questions=len(wire.questions), latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+            if target.monitor_id is not None and e.status_code in _SICK_STATUSES:
+                # A monitored decision server that fails live requests is marked
+                # down by its circuit breaker, so the next callers skip it at once.
+                await _report(registry.report_live_failure, target.monitor_id)
+            raise _AttemptFailed(
+                HTTPException(e.status_code, detail=str(e)),
+                retryable=e.status_code in _FALLBACK_STATUSES, reason=str(e)[:160],
+            ) from e
+        except asyncio.CancelledError:
+            # The client went away or the server is shutting down. Nothing sweeps
+            # a row left in PROCESSING, so close it before the cancellation continues.
+            await asyncio.shield(_record_failure(db, db_request.id, "cancelled before the model answered", "499"))
+            DECISION_REQUESTS.labels(model, backend.name, "error").inc()
+            raise
+        except Exception as e:
+            # Anything the backend did not map: keep the audit row and answer 500
+            # instead of letting the request vanish with an unhandled error. Only
+            # the exception's type is recorded; its text could quote the request.
+            logger.error("decision_request_crashed", model=model, backend=backend.name, error_type=type(e).__name__)
+            await _record_failure(db, db_request.id, f"internal error: {type(e).__name__}", "500")
+            DECISION_REQUESTS.labels(model, backend.name, "error").inc()
+            raise _AttemptFailed(
+                HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="decision request failed")) from None
+        if target.monitor_id is not None:
+            await _report(registry.report_live_success, target.monitor_id)
+        return db_request, answered, outcome, started
+
+    try:
+        db_request, answered, outcome, started = await attempt(target, fallback)
+    except _AttemptFailed as failed:
+        # The model failed this request. If an alternative is configured and
+        # can take the request, it answers; its row is separate from the
+        # failed one, so each model's record stays true.
+        alternative = await _prepare_fallback(name, **ctx) if failed.retryable and fallback is None else None
+        if alternative is None:
+            raise failed.error from None
+        fallback = {"requested": name, "reason": failed.reason}
+        target = alternative
+        try:
+            db_request, answered, outcome, started = await attempt(target, fallback)
+        except _AttemptFailed as failed_again:
+            raise failed_again.error from None
+    model, backend, plan = target.model, target.backend, target.plan
+    # What the caller waited, including a failed attempt before a fallback.
+    started = request_started
+    if fallback:
+        DECISION_FALLBACKS.labels(fallback["requested"], model).inc()
+        logger.warning("decision_fallback", requested=fallback["requested"], answered_by=model, reason=fallback["reason"])
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     try:
         payload, token_cost, counts = await _complete(
             db, db_request.id, user.id, plan, outcome, answered,
             model=model, request_id=request_id, backend_name=backend.name, temperature=cfg["temperature"],
+            monitor_id=target.monitor_id, fallback=fallback,
         )
     except Exception as e:
         # The model answered but the result could not be formatted or recorded.
@@ -293,13 +448,15 @@ async def systemone(
     return payload
 
 
-async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, request_id, backend_name, temperature):
+async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, request_id, backend_name, temperature,
+                    monitor_id=None, fallback=None):
     """Build the response and record the completed request + quota in one
     transaction. Returns (payload, tokens charged, counts for metrics)."""
     if answered is not None:
         # An upstream reports its own token counts; charge what it says it read.
         prompt_tokens, scoring_tokens, cached_tokens = answered.input_tokens, answered.output_tokens, 0
-        backend_id, backend_calls, incomplete = None, 1, 0
+        # The registered backend for this decision server, when it is monitored.
+        backend_id, backend_calls, incomplete = monitor_id, 1, 0
         payload = {
             "model": model,
             "answers": answered.answers,
@@ -328,6 +485,10 @@ async def _complete(db, row_id, user_id, plan, outcome, answered, *, model, requ
             temperature=temperature,
         )
     token_cost = max(0, prompt_tokens - cached_tokens) + scoring_tokens
+    if fallback:
+        # Tell the caller another model answered, and why. ``model`` above is
+        # already the one that did.
+        payload.setdefault("metadata", {})["fallback"] = dict(fallback)
 
     await crud.update_request_completed(
         db, row_id,

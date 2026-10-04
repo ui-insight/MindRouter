@@ -132,5 +132,5 @@ def test_registry_and_crud_expose_the_configured_check():
     # precisely to explain why this function omits it).
     code_only = body[body.index('"""', body.index('"""') + 3) + 3 :]
     assert "BackendStatus.HEALTHY" not in code_only
-    # ...but must still exclude DLP engines, mirroring the routable filter.
-    assert "BackendEngine.DLP" in body
+    # ...but must still exclude model-less engines (DLP, decision servers), mirroring the routable filter.
+    assert "Backend.engine.notin_(MODELLESS_ENGINES)" in body

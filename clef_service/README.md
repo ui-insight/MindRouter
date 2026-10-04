@@ -15,11 +15,13 @@ the weights and a Python function (`systemone()` in the model repo's
   MindRouter's `/v1/systemone` takes), answered by Clef.
 - A bearer key (`CLEF_API_KEY`). Without one the service refuses to start
   unless `CLEF_ALLOW_NO_AUTH=1`.
-- **Dynamic batching.** Requests arriving within `CLEF_BATCH_WAIT_MS` of each
-  other are answered by one forward pass (up to `CLEF_MAX_BATCH` requests and
-  `CLEF_MAX_BATCH_TOKENS` padded tokens). This is how one copy of the model
-  serves concurrent callers. Do not run two instances on one GPU instead:
-  they share the same compute and hold the 55 GB of weights twice.
+- One inference thread with a queue in front, so concurrent callers are served
+  in turn. **Optional dynamic batching** (`CLEF_MAX_BATCH` > 1): requests
+  arriving within `CLEF_BATCH_WAIT_MS` of each other are answered by one
+  forward pass (up to `CLEF_MAX_BATCH_TOKENS` padded tokens). It is off by
+  default because it did not help mixed-length traffic (see Performance). Do
+  not run two instances on one GPU: they share the same compute and hold the
+  55 GB of weights twice.
 - A bounded queue: beyond `CLEF_MAX_QUEUE` waiting requests the answer is
   `503` with `Retry-After`, not an ever-growing backlog.
 - A caller that disconnects or times out while waiting is dropped from the
@@ -47,11 +49,12 @@ refused with 422.
 | `CLEF_DEVICE` | `cuda` | Torch device (pick the card with `CUDA_VISIBLE_DEVICES`) |
 | `CLEF_HOST` / `CLEF_PORT` | `127.0.0.1` / `18004` | Bind address; put nginx TLS in front |
 | `CLEF_MAX_LENGTH` | `16384` | Tokens per request; the state is cut to fit |
-| `CLEF_MAX_BATCH` | `8` | Requests per forward pass |
+| `CLEF_MAX_BATCH` | `1` | Requests per forward pass. Keep 1 for mixed traffic (see Performance) |
 | `CLEF_BATCH_WAIT_MS` | `5` | How long the first request waits for others |
 | `CLEF_MAX_BATCH_TOKENS` | `65536` | Padded tokens per forward pass (batch size × longest request) |
 | `CLEF_MAX_QUEUE` | `64` | Waiting requests before 503 |
 | `CLEF_MAX_BODY_BYTES` | `13631488` | Request body limit, 13 MiB (413 above it) |
+| `CLEF_CUDNN_ATTENTION` | off | `1` re-enables PyTorch's cuDNN attention backend (see Performance) |
 
 ## Install and run
 
@@ -66,6 +69,38 @@ CLEF_API_KEY=... CUDA_VISIBLE_DEVICES=1 HF_HOME=/path/to/models \
 ```
 
 `deploy/clef-service.service` is a systemd unit template.
+
+## Performance (measured on one H200, 2026-10-04)
+
+Three things decide how fast this is. Together they are worth about 6x on
+real traffic and do not change accuracy (0.726 vs 0.725 on 2,000 benchmark
+decisions).
+
+1. **Install the fast path.** Without `flash-linear-attention` and
+   `causal-conv1d`, the backbone falls back to a plain-torch implementation and
+   every request takes about 2.5x longer (a 313-token request: 194 ms vs 76 ms).
+   `causal-conv1d` compiles against CUDA:
+
+   ```bash
+   pip install flash-linear-attention wheel setuptools ninja
+   CUDA_HOME=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:$PATH \
+       CAUSAL_CONV1D_FORCE_BUILD=TRUE pip install --no-build-isolation --no-deps causal-conv1d
+   ```
+
+   `/health` (with the key) reports `"fast_path": true` when both are in use,
+   and the service logs `clef_slow_path` at start when they are not. Point
+   `TRITON_CACHE_DIR` at local disk; kernels are compiled on first use.
+
+2. **Leave the cuDNN attention backend off** (the default here). PyTorch's
+   cuDNN attention re-plans for every new input length, which added about
+   1.2 s to the first request at each length. Real requests almost all differ
+   in length, so that was 1.2 s on nearly every request.
+
+3. **One request per forward pass** (`CLEF_MAX_BATCH=1`, the default). The
+   model's cost is close to linear in tokens, so a batch of requests padded to
+   the longest costs as much as running them one after another, and padded
+   batches of mixed lengths sometimes stalled for about 10 s. Batching only
+   paid off for many short requests of the same length (about 2x).
 
 **Check it with a real request, not just `/health`.** A model server can be
 "healthy" and fail every inference (we hit exactly that with another decision

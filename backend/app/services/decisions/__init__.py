@@ -102,7 +102,7 @@ async def get_decisions_config(db) -> dict:
         value = raw.get(f"decisions.{name}")
         return default if value is None else value
 
-    return {
+    cfg = {
         "enabled": bool(get("enabled", False)),
         "default_model": get("default_model", DEFAULT_MODEL),
         # Only models whose chat template and tokenizer this scoring recipe has
@@ -125,6 +125,34 @@ async def get_decisions_config(db) -> dict:
         "permutations": _checked_setting("permutations", parse_permutations(get("permutations", {}))),
         "temperature": _checked_setting("temperature", parse_temperature(get("temperature", {}))),
     }
+    # What answers instead when a model is not working: model name -> model name.
+    cfg["fallbacks"] = _checked_setting(
+        "fallbacks", parse_fallbacks(get("fallbacks", {}), [*cfg["allowed_models"], *cfg["upstreams"]]))
+    return cfg
+
+
+def parse_fallbacks(raw, known) -> tuple[dict, list]:
+    """Validate ``decisions.fallbacks``: ``{model: fallback model}``, both of
+    them names this server offers, one hop only. Returns (valid entries,
+    problems); a bad entry is dropped, never guessed at."""
+    if raw in (None, "", {}):
+        return {}, []
+    if not isinstance(raw, dict):
+        return {}, ["fallbacks must be a JSON object of model name -> fallback model name"]
+    known = set(known)
+    out, problems = {}, []
+    for name, target in raw.items():
+        if not isinstance(name, str) or not isinstance(target, str):
+            problems.append(f"{str(name)[:60]}: model names must be strings")
+        elif name not in known:
+            problems.append(f"{name[:60]}: not a decisions model on this server")
+        elif target not in known:
+            problems.append(f"{name[:60]}: fallback '{target[:60]}' is not a decisions model on this server")
+        elif target == name:
+            problems.append(f"{name[:60]}: a model cannot fall back to itself")
+        else:
+            out[name] = target
+    return out, problems
 
 
 def _checked_setting(name: str, parsed: tuple) -> dict:

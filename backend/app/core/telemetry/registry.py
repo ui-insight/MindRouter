@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.telemetry.adapters.decision import DecisionAdapter
 from backend.app.core.telemetry.adapters.dlp import DlpAdapter
 from backend.app.core.telemetry.adapters.ollama import OllamaAdapter
 from backend.app.core.telemetry.adapters.sidecar_client import SidecarClient
@@ -64,6 +65,30 @@ def health_status_transition(
     if failures >= threshold:
         return BackendStatus.UNHEALTHY
     return None
+
+
+def normalize_server_url(url: str) -> str:
+    """A server root in one spelling: lower-case scheme and host, no default
+    port, no trailing slash. Unparseable input comes back stripped, unchanged."""
+    from urllib.parse import urlsplit
+
+    raw = (url or "").strip()
+    try:
+        parts = urlsplit(raw)
+        host = (parts.hostname or "").lower()
+        if not parts.scheme or not host:
+            return raw.rstrip("/")
+        scheme = parts.scheme.lower()
+        port = parts.port
+        if port is None or port == {"https": 443, "http": 80}.get(scheme):
+            netloc = host
+        else:
+            netloc = f"{host}:{port}"
+        if ":" in host:                       # IPv6 literal
+            netloc = netloc.replace(host, f"[{host}]", 1)
+        return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
+    except ValueError:
+        return raw.rstrip("/")
 
 
 class BackendRegistry:
@@ -576,6 +601,39 @@ class BackendRegistry:
                 continue
         return random.choice(available) if available else None
 
+    async def decision_server_state(
+        self, url: str, db: Optional[AsyncSession] = None
+    ) -> tuple[Optional[int], Optional[str]]:
+        """Is the decision server at ``url`` registered as a backend, and can
+        it take a request now?
+
+        Returns ``(backend id, None)`` when it is usable, ``(backend id,
+        reason)`` when it is not (down, disabled or draining by an admin, or
+        its circuit is open), and ``(None, None)`` when no backend with engine
+        ``decision`` has that URL: an unmonitored upstream, dialed as before.
+        A just-registered backend (status unknown) is usable.
+
+        URLs are compared by scheme, host (case-insensitively), port (the
+        scheme's default counts as given) and path, so ``https://Host/`` and
+        ``https://host:443`` are the same server. Pass the request's own
+        ``db`` session to avoid taking a second pooled connection.
+        """
+        wanted = normalize_server_url(url)
+        if db is not None:
+            servers = await crud.get_decision_servers(db)
+        else:
+            async with get_async_db_context() as own:
+                servers = await crud.get_decision_servers(own)
+        for backend_id, backend_url, backend_status in servers:
+            if normalize_server_url(backend_url or "") != wanted:
+                continue
+            if backend_status in (BackendStatus.UNHEALTHY, BackendStatus.DISABLED, BackendStatus.DRAINING):
+                return backend_id, backend_status.value
+            if not await self.is_backend_available(backend_id):
+                return backend_id, "circuit open"
+            return backend_id, None
+        return None, None
+
     async def model_exists(self, model_name: str) -> bool:
         """Check if a model is available on any healthy backend."""
         backends = await self.get_backends_with_model(model_name)
@@ -969,7 +1027,7 @@ class BackendRegistry:
                     throughput_score=throughput,
                 )
 
-    def _create_adapter(self, backend: Backend) -> OllamaAdapter | VLLMAdapter | DlpAdapter:
+    def _create_adapter(self, backend: Backend) -> OllamaAdapter | VLLMAdapter | DlpAdapter | DecisionAdapter:
         """Create the appropriate adapter for a backend."""
         timeout = self._settings.backend_health_timeout
 
@@ -980,6 +1038,9 @@ class BackendRegistry:
             # deliberately discovers ZERO models, so it stays out of routing
             # and the model catalog while remaining a fleet member for status.
             return DlpAdapter(backend.url, timeout=timeout)
+        elif backend.engine == BackendEngine.DECISION:
+            # A System One decision server (Clef, Laya): /health, zero models.
+            return DecisionAdapter(backend.url, timeout=timeout)
         else:
             # Both vLLM and diffusion backends expose OpenAI-compatible
             # /v1/models and /health endpoints, so VLLMAdapter works for both.

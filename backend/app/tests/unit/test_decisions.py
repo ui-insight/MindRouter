@@ -165,6 +165,9 @@ def _fake_registry(backends, aliases=None, open_circuits=()):
     reg.get_backends_with_model = AsyncMock(
         side_effect=lambda model_name: [b for b in backends if getattr(b.status, "value", b.status) == "healthy"])
     reg.is_backend_available = AsyncMock(side_effect=lambda bid: bid not in open_circuits)
+    # No decision server is registered as a backend unless a test says so.
+    reg.decision_server_state = AsyncMock(return_value=(None, None))
+    reg.report_live_failure, reg.report_live_success = AsyncMock(), AsyncMock()
     reg.resolve_alias = MagicMock(side_effect=lambda m: ((aliases or {}).get(m, m), None))
 
     async def _pick(model_name, *, engine=None, multimodal=False):
@@ -1168,7 +1171,7 @@ class TestSettings:
         assert cfg == {"enabled": False, "default_model": "qwen/qwen3.8-27b", "allowed_models": ["qwen/qwen3.8-27b"],
                        "max_state_chars": 32_000, "fanout": 8, "backend_concurrency": 4, "upstreams": {},
                        "permutations": {"noul": 1, "choice": 2, "score": 1},
-                       "temperature": {"noul": 1.35, "choice": 1.05, "score": 1.45}}
+                       "temperature": {"noul": 1.35, "choice": 1.05, "score": 1.45}, "fallbacks": {}}
         db.execute.assert_awaited_once()   # one query for every decisions.* key, not one per key
 
     async def test_rows_are_json_decoded_and_upstreams_parsed(self):
@@ -1840,3 +1843,284 @@ class TestImagesOnUpstreams:
             await _call({**_WITH_IMAGE, "images": ["https://example.com/x.png"]})
         assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "images", 0]
         e.value.mocks[1].create_request.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# 12. fallback to a configured alternative, and monitored decision servers
+# --------------------------------------------------------------------------
+
+from backend.app.services.decisions import parse_fallbacks  # noqa: E402
+
+_CLEF = up.Upstream(name="clef", url="https://aspen4.example.edu:8001/", api_key="k", model="clef", images=True)
+_CLEF_ANSWER = {"answers": {"escalate": {"type": "noul", "noul": 0.9}}, "usage": {"input_tokens": 40, "output_tokens": 0}}
+_FB_CFG = {"default_model": "clef", "upstreams": {"clef": _CLEF}, "fallbacks": {"clef": "qwen3.8-27b"}}
+
+
+def _clef_backend(error=None):
+    ub = _upstream_backend(answer=up._checked("clef", _CLEF_ANSWER, _BODY["questions"]))
+    if error is not None:
+        ub.answer = AsyncMock(side_effect=error)
+    return ub
+
+
+def _monitored(state):
+    reg = _fake_registry([])
+    reg.decision_server_state = AsyncMock(return_value=state)
+    return reg
+
+
+class TestFallbackSetting:
+    def test_valid_entries_and_each_kind_of_bad_one(self):
+        known = ["clef", "qwen/qwen3.8-27b"]
+        assert parse_fallbacks({"clef": "qwen/qwen3.8-27b"}, known) == ({"clef": "qwen/qwen3.8-27b"}, [])
+        assert parse_fallbacks({}, known) == ({}, []) and parse_fallbacks(None, known) == ({}, [])
+        for bad in ({"laya": "clef"}, {"clef": "gpt-4"}, {"clef": "clef"}, {"clef": 3}, ["clef"]):
+            good, problems = parse_fallbacks(bad, known)
+            assert good == {} and problems, bad
+
+    def test_a_bad_entry_does_not_drop_the_good_ones(self):
+        good, problems = parse_fallbacks({"clef": "q", "q": "nope"}, ["clef", "q"])
+        assert good == {"clef": "q"} and len(problems) == 1
+
+
+class TestFallback:
+    async def test_working_model_answers_and_nothing_mentions_a_fallback(self):
+        ub = _clef_backend()
+        result, backend, crud, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub)
+        assert result["model"] == "clef" and "fallback" not in result["metadata"]
+        backend.decide.assert_not_awaited()
+        assert crud.create_request.await_count == 1
+
+    @pytest.mark.parametrize("status_code", [502, 503, 504])
+    async def test_a_failing_model_is_answered_by_its_alternative(self, status_code):
+        ub = _clef_backend(DecisionBackendError("decision upstream unreachable", status_code))
+        result, backend, crud, quota, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub)
+        assert result["model"] == "qwen3.8-27b"                       # the model that actually answered
+        assert result["metadata"]["fallback"] == {"requested": "clef", "reason": "decision upstream unreachable"}
+        assert result["answers"] == {"escalate": {"type": "noul", "noul": 0.8}}
+        ub.answer.assert_awaited_once(); backend.decide.assert_awaited_once()
+        # Two audit rows: the failed try on clef, then the answer, each under its own model.
+        models = [c.kwargs["model"] for c in crud.create_request.call_args_list]
+        assert models == ["clef", "qwen3.8-27b"]
+        assert crud.update_request_failed.await_count == 1 and crud.update_request_completed.await_count == 1
+        second = crud.create_request.call_args_list[1].kwargs["parameters"]
+        assert second["fallback_from"] == "clef" and "fallback_from" not in crud.create_request.call_args_list[0].kwargs["parameters"]
+        quota.assert_awaited_once()                                    # one request, one quota check
+
+    async def test_the_callers_own_mistake_is_not_retried_elsewhere(self):
+        refused = so.SystemOneValidationError([{"loc": ["body", "questions"], "msg": "no", "type": "value_error"}], "refused")
+        ub = _clef_backend(refused)
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub)
+        assert e.value.status_code == 422
+        e.value.mocks[0].decide.assert_not_awaited()
+
+    async def test_a_crash_in_our_own_code_is_not_hidden_by_a_fallback(self):
+        ub = _clef_backend(RuntimeError("bug"))
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub)
+        assert e.value.status_code == 500
+        e.value.mocks[0].decide.assert_not_awaited()
+
+    async def test_without_a_configured_alternative_the_error_stands(self):
+        ub = _clef_backend(DecisionBackendError("decision upstream unreachable", 502))
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg={**_FB_CFG, "fallbacks": {}}, upstream_backend=ub)
+        assert e.value.status_code == 502
+
+    async def test_when_the_alternative_fails_too_its_error_is_returned(self):
+        ub = _clef_backend(DecisionBackendError("decision upstream unreachable", 502))
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub, outcome=DecisionBackendError("no healthy vLLM backend", 503))
+        assert e.value.status_code == 503
+        crud = e.value.mocks[1]
+        assert crud.create_request.await_count == 2 and crud.update_request_failed.await_count == 2   # no third try
+
+    async def test_an_alternative_that_cannot_take_the_request_is_not_used(self):
+        # 21 options: fine for Clef, more than letter scoring allows. The fallback cannot answer this.
+        body = {**_BODY, "questions": {"pick": {"type": "choice", "instructions": "Which?",
+                                                 "criteria": {f"o{i}": None for i in range(21)}}}}
+        ub = _clef_backend(DecisionBackendError("decision upstream unreachable", 502))
+        with pytest.raises(HTTPException) as e:
+            await _call(body, cfg=_FB_CFG, upstream_backend=ub)
+        assert e.value.status_code == 502                               # Clef's error, not a 422 about options
+        e.value.mocks[0].decide.assert_not_awaited()
+
+    async def test_whatever_goes_wrong_preparing_the_alternative_the_original_error_stands(self):
+        # Primary is the vLLM model and fails; preparing the alternative (clef) blows up unexpectedly.
+        cfg = {**_FB_CFG, "default_model": "qwen3.8-27b", "fallbacks": {"qwen3.8-27b": "clef"}}
+        with patch.object(api, "_invalid", side_effect=RuntimeError("unexpected")):
+            body = {**_BODY, "images": [_data_url()]}
+            blind_clef = up.Upstream(name="clef", url="https://h:8001", api_key="k", model="clef", images=False)
+            with pytest.raises(HTTPException) as e:
+                await _call(body, cfg={**cfg, "upstreams": {"clef": blind_clef}}, upstream_backend=_clef_backend(),
+                            registry=_fake_registry([_vllm_backend(model="qwen3.8-27b", sees_images=True)]),
+                            outcome=DecisionBackendError("backend 502", 502))
+        assert e.value.status_code == 502                                # the vLLM model's error, not a raw RuntimeError
+
+    async def test_images_are_never_sent_to_an_alternative_that_cannot_see(self):
+        # Clef is down and the request has an image; the alternative is a blind chat model.
+        # The caller must get Clef's error, not a 422 about a model they never named.
+        body = {**_BODY, "images": [_data_url()]}
+        ub = _clef_backend(DecisionBackendError("decision upstream unreachable", 502))
+        with pytest.raises(HTTPException) as e:
+            await _call(body, cfg=_FB_CFG, upstream_backend=ub,
+                        registry=_fake_registry([_vllm_backend(model="qwen3.8-27b", sees_images=False)]))
+        assert e.value.status_code == 502
+        e.value.mocks[0].decide.assert_not_awaited()
+
+    async def test_images_go_to_an_alternative_that_can_see(self):
+        body = {**_BODY, "images": [_data_url()]}
+        ub = _clef_backend(DecisionBackendError("decision upstream unreachable", 502))
+        result, backend, *_ = await _call(body, cfg=_FB_CFG, upstream_backend=ub,
+                                          registry=_fake_registry([_vllm_backend(model="qwen3.8-27b", sees_images=True)]))
+        assert result["model"] == "qwen3.8-27b" and backend.decide.call_args.args[0].images == body["images"]
+
+    async def test_a_blind_model_asked_directly_is_422_before_any_row(self):
+        body = {**_BODY, "images": [_data_url()]}
+        with pytest.raises(HTTPException) as e:
+            await _call(body, registry=_fake_registry([_vllm_backend(model="qwen3.8-27b", sees_images=False)]))
+        assert e.value.status_code == 422 and e.value.detail[0]["loc"] == ["body", "images"]
+        e.value.mocks[1].create_request.assert_not_awaited()
+
+    async def test_the_setting_may_name_a_model_an_alias_points_at(self):
+        cfg = {**_FB_CFG, "default_model": "decider", "fallbacks": {"qwen3.8-27b": "clef"}}
+        reg = _fake_registry([], aliases={"decider": "qwen3.8-27b"})
+        result, *_ = await _call(_BODY, cfg=cfg, upstream_backend=_clef_backend(), registry=reg,
+                                 outcome=DecisionBackendError("backend 502", 502))
+        assert result["model"] == "clef" and result["metadata"]["fallback"]["requested"] == "decider"
+
+    async def test_fallback_works_in_the_other_direction_too(self):
+        cfg = {**_FB_CFG, "default_model": "qwen3.8-27b", "fallbacks": {"qwen3.8-27b": "clef"}}
+        ub = _clef_backend()
+        result, backend, *_ = await _call(_BODY, cfg=cfg, upstream_backend=ub, outcome=DecisionBackendError("backend 502", 502))
+        assert result["model"] == "clef" and result["metadata"]["fallback"]["requested"] == "qwen3.8-27b"
+
+    async def test_a_model_with_no_healthy_replica_falls_back_before_any_work(self):
+        cfg = {**_FB_CFG, "default_model": "qwen3.8-27b", "fallbacks": {"qwen3.8-27b": "clef"}}
+        ub = _clef_backend()
+        result, backend, crud, *_ = await _call(_BODY, cfg=cfg, upstream_backend=ub, availability="unavailable")
+        assert result["model"] == "clef" and result["metadata"]["fallback"]["reason"] == "no healthy replica"
+        backend.decide.assert_not_awaited()
+        assert crud.create_request.await_count == 1                     # nothing was tried on the dead model
+
+
+class TestMonitoredDecisionServer:
+    async def test_a_server_known_to_be_down_is_skipped_without_dialing(self):
+        ub = _clef_backend()
+        result, backend, crud, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub,
+                                                registry=_monitored((42, "unhealthy")))
+        ub.answer.assert_not_awaited()                                  # no timeout spent on a dead server
+        assert result["model"] == "qwen3.8-27b"
+        assert result["metadata"]["fallback"] == {"requested": "clef", "reason": "unhealthy"}
+        assert crud.create_request.await_count == 1
+
+    async def test_a_failing_alternative_is_not_tried_twice(self):
+        # Clef is known down, so the alternative is already answering; when it fails there is nothing left.
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg=_FB_CFG, upstream_backend=_clef_backend(), registry=_monitored((42, "unhealthy")),
+                        outcome=DecisionBackendError("backend 502", 502))
+        assert e.value.status_code == 502
+        backend, crud = e.value.mocks[0], e.value.mocks[1]
+        assert backend.decide.await_count == 1 and crud.create_request.await_count == 1
+
+    async def test_down_with_no_alternative_is_503_with_retry_after(self):
+        ub = _clef_backend()
+        with pytest.raises(HTTPException) as e:
+            await _call(_BODY, cfg={**_FB_CFG, "fallbacks": {}}, upstream_backend=ub, registry=_monitored((42, "disabled")))
+        assert e.value.status_code == 503 and "disabled" in e.value.detail and e.value.headers["Retry-After"]
+        ub.answer.assert_not_awaited()
+        e.value.mocks[1].create_request.assert_not_awaited()
+
+    async def test_requests_are_recorded_against_the_registered_backend(self):
+        reg = _monitored((42, None))
+        result, _, crud, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=_clef_backend(), registry=reg)
+        assert result["model"] == "clef"
+        assert crud.update_request_started.call_args.kwargs["backend_id"] == 42
+        assert crud.update_request_completed.call_args.kwargs["backend_id"] == 42
+        reg.report_live_success.assert_awaited_once_with(42)
+
+    async def test_live_failures_count_against_its_circuit_but_busy_does_not(self):
+        for status_code, counted in ((502, True), (504, True), (503, False)):
+            reg = _monitored((42, None))
+            ub = _clef_backend(DecisionBackendError("x", status_code))
+            await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub, registry=reg)
+            assert reg.report_live_failure.await_count == (1 if counted else 0), status_code
+
+    async def test_an_unregistered_upstream_is_dialed_as_before(self):
+        reg = _monitored((None, None))
+        result, _, crud, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=_clef_backend(), registry=reg)
+        assert result["model"] == "clef" and crud.update_request_started.call_args.kwargs["backend_id"] is None
+        reg.report_live_success.assert_not_awaited()
+
+    async def test_a_failed_lookup_dials_the_server_instead_of_failing_the_request(self):
+        reg = _fake_registry([])
+        reg.decision_server_state = AsyncMock(side_effect=TimeoutError("pool exhausted"))
+        ub = _clef_backend()
+        result, _, crud, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=ub, registry=reg)
+        assert result["model"] == "clef" and "fallback" not in result["metadata"]
+        ub.answer.assert_awaited_once()
+
+    async def test_the_lookup_uses_the_requests_own_session(self):
+        reg = _monitored((42, None))
+        db = MagicMock(commit=AsyncMock(), rollback=AsyncMock())
+        await _call(_BODY, cfg=_FB_CFG, upstream_backend=_clef_backend(), registry=reg, db=db)
+        assert reg.decision_server_state.call_args.args == (_CLEF.url, db)
+
+    async def test_bookkeeping_failure_never_fails_the_request(self):
+        reg = _monitored((42, None))
+        reg.report_live_success = AsyncMock(side_effect=RuntimeError("db down"))
+        result, *_ = await _call(_BODY, cfg=_FB_CFG, upstream_backend=_clef_backend(), registry=reg)
+        assert result["model"] == "clef"
+
+
+class TestDecisionServerState:
+    """The registry lookup itself, against stub backend rows."""
+
+    async def _state(self, rows, url, open_circuits=(), db="request-session"):
+        from backend.app.core.telemetry import registry as registry_mod
+        from backend.app.core.telemetry.registry import BackendRegistry
+        from backend.app.db.models import BackendStatus
+
+        servers = [(i, u, BackendStatus(s)) for i, u, s in rows]
+        reg = MagicMock()
+        reg.is_backend_available = AsyncMock(side_effect=lambda bid: bid not in open_circuits)
+        lookup = AsyncMock(return_value=servers)
+        with patch.object(registry_mod.crud, "get_decision_servers", lookup):
+            state = await BackendRegistry.decision_server_state(reg, url, db)
+        if db is not None:
+            lookup.assert_awaited_once_with(db)             # the caller's session, no second connection
+        return state
+
+    async def test_states(self):
+        url = "https://aspen4.example.edu:8001"
+        assert await self._state([], url) == (None, None)
+        assert await self._state([(9, "https://other:8001", "healthy")], url) == (None, None)
+        assert await self._state([(9, url + "/", "healthy")], url) == (9, None)          # trailing slash ignored
+        assert await self._state([(9, url, "unknown")], url + "/") == (9, None)          # just registered: usable
+        for status_ in ("unhealthy", "disabled", "draining"):
+            assert await self._state([(9, url, status_)], url) == (9, status_)
+        assert await self._state([(9, url, "healthy")], url, open_circuits={9}) == (9, "circuit open")
+
+    async def test_the_same_server_spelled_differently_still_matches(self):
+        # A mismatch here would mean a disabled server is still dialed, silently.
+        registered = "https://aspen4.example.edu:8001"
+        for spelling in ("https://Aspen4.Example.EDU:8001/", "HTTPS://aspen4.example.edu:8001"):
+            assert await self._state([(9, registered, "disabled")], spelling) == (9, "disabled")
+        assert await self._state([(9, "https://h", "disabled")], "https://h:443/") == (9, "disabled")
+        assert await self._state([(9, "http://h:80/", "disabled")], "http://h") == (9, "disabled")
+        assert await self._state([(9, "https://h:8001", "disabled")], "https://h:8002") == (None, None)
+        assert await self._state([(9, "https://h:8001", "disabled")], "http://h:8001") == (None, None)
+
+    async def test_without_a_session_it_opens_its_own(self):
+        from backend.app.core.telemetry import registry as registry_mod
+
+        class _Ctx:
+            async def __aenter__(self):
+                return "own-session"
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch.object(registry_mod, "get_async_db_context", lambda: _Ctx()):
+            assert await self._state([(9, "https://h:8001", "healthy")], "https://h:8001", db=None) == (9, None)
