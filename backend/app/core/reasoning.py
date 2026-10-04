@@ -10,7 +10,8 @@ Why a translation table exists at all: the models do not agree on names.
 gpt-oss takes ``low``/``medium``/``high`` and cannot switch thinking off;
 Qwen3.8 takes ``low``/``medium``/``xhigh`` and defaults to ``xhigh``, the most
 expensive level, when thinking is on and no level is given; GLM-5.3 takes
-``low``/``high``/``max`` and, like gpt-oss, cannot switch off; Qwen3.5/3.6,
+``low``/``high``/``max`` and, like gpt-oss, cannot switch off; Kimi K3 takes
+the same three names but does have an off switch; Qwen3.5/3.6,
 Gemma 4, Nemotron and MiMo have an on/off switch and no levels.  Forwarding a client's
 level name verbatim therefore produced a vLLM 400 whenever the client and the
 model disagreed (``high`` on Qwen3.8, ``xhigh`` on gpt-oss), and a bare
@@ -49,7 +50,7 @@ _BUDGET_TIERS: Tuple[Tuple[int, str], ...] = (
 # gateway level they mean. The catalog publishes each family's native names
 # and the chat page sends them back verbatim, so every native name must be
 # accepted here. Qwen3.8's and gpt-oss's names all coincide with gateway
-# names; GLM-5.3's top level is ``max``.
+# names; GLM-5.3's and Kimi K3's top level is ``max``.
 LEVEL_ALIASES: dict[str, str] = {"max": "xhigh"}
 
 
@@ -187,6 +188,27 @@ _GLM5 = ReasoningProfile(
 )
 
 
+# Kimi K3 (Moonshot): an on/off switch (``enable_thinking``) AND levels. Its
+# template takes ``thinking_effort`` in ``low``/``high``/``max``, defaulting to
+# ``max``; vLLM's Kimi K3 support fills it from the top-level
+# ``reasoning_effort``. Any other name is a 400 from vLLM ("Kimi K3 supports
+# thinking_effort values: low, high, max"), so ``medium`` must never be
+# forwarded. (Measured 2026-10-04 on Kimi-K3 NVFP4, vLLM 0.31.0rc2.)
+_KIMI_K3 = ReasoningProfile(
+    family="kimi-k3",
+    toggleable=True,
+    levels=("low", "high", "max"),
+    default_level="max",
+    level_map={
+        "minimal": "low",
+        "low": "low",
+        "medium": "high",
+        "high": "high",
+        "xhigh": "max",
+    },
+)
+
+
 def _toggle_only(family: str) -> ReasoningProfile:
     return ReasoningProfile(family=family, toggleable=True)
 
@@ -208,6 +230,9 @@ _NAME_RULES: Tuple[Tuple[str, ReasoningProfile], ...] = (
     ("glm5", _GLM5),
     # MiMo-V2.6 (Xiaomi): ChatML-style ``enable_thinking`` switch, no levels.
     ("mimo", _toggle_only("mimo")),
+    # Only K3: earlier Kimi models have different templates.
+    ("kimi-k3", _KIMI_K3),
+    ("kimi_k3", _KIMI_K3),
 )
 
 

@@ -378,15 +378,15 @@ Reasoning is one setting with two parts: a **switch** (`think: true/false`) and 
 
 **Levels.** The gateway vocabulary is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`. It is translated to what the model understands:
 
-| Gateway level | Qwen3.8 (`low`/`medium`/`xhigh`) | gpt-oss (`low`/`medium`/`high`) | GLM 5.3 (`low`/`high`/`max`) | Qwen3.5/3.6, Gemma 4, Nemotron, MiMo (switch only) |
-|---|---|---|---|---|
-| `none` | thinking off | `low` (cannot switch off) | `low` (cannot switch off) | thinking off |
-| `minimal`, `low` | `low` | `low` | `low` | on, level ignored |
-| `medium` | `medium` | `medium` | `high` | on, level ignored |
-| `high` | `xhigh` | `high` | `high` | on, level ignored |
-| `xhigh` | `xhigh` | `high` | `max` | on, level ignored |
+| Gateway level | Qwen3.8 (`low`/`medium`/`xhigh`) | gpt-oss (`low`/`medium`/`high`) | GLM 5.3 (`low`/`high`/`max`) | Kimi K3 (`low`/`high`/`max`) | Qwen3.5/3.6, Gemma 4, Nemotron, MiMo (switch only) |
+|---|---|---|---|---|---|
+| `none` | thinking off | `low` (cannot switch off) | `low` (cannot switch off) | thinking off | thinking off |
+| `minimal`, `low` | `low` | `low` | `low` | `low` | on, level ignored |
+| `medium` | `medium` | `medium` | `high` | `high` | on, level ignored |
+| `high` | `xhigh` | `high` | `high` | `high` | on, level ignored |
+| `xhigh` | `xhigh` | `high` | `max` | `max` | on, level ignored |
 
-A family's own level name is also accepted where it is not already a gateway word (GLM 5.3's `max` means `xhigh`), because `/v1/models` publishes native names and the chat page sends them back. A level outside the vocabulary is rejected with a 400 that names the accepted values. A level a family cannot express is accepted and dropped, never rejected. **When thinking is on and no level is given**, the admin setting `reasoning.default_effort` (Admin -> Settings, default `medium`) is sent on models that have levels; set it blank to fall back to each model's own default (Qwen3.8's is `xhigh` and GLM 5.3's is `max`, their most expensive). Each model's switch, native levels and default are published on `/v1/models` under `reasoning` (see below).
+A family's own level name is also accepted where it is not already a gateway word (GLM 5.3's and Kimi K3's `max` means `xhigh`), because `/v1/models` publishes native names and the chat page sends them back. A level outside the vocabulary is rejected with a 400 that names the accepted values. A level a family cannot express is accepted and dropped, never rejected. **When thinking is on and no level is given**, the admin setting `reasoning.default_effort` (Admin -> Settings, default `medium`) is sent on models that have levels; set it blank to fall back to each model's own default (Qwen3.8's is `xhigh` and GLM 5.3's is `max`, their most expensive). Each model's switch, native levels and default are published on `/v1/models` under `reasoning` (see below).
 
 **Sampling guard rails.** Some RL-trained models (GLM 5.3 Flash, MiMo 2.6 Flash) degenerate under greedy decoding: at `temperature: 0` they loop inside a think block or a tool call until `max_tokens`, and their vendors publish `temperature 1.0 / top_p 0.95`. The admin setting `sampling.policies` (Admin -> Settings -> Sampling Guard Rails) maps a catalog model name, or `"*"`, to `{"min_temperature": <0..2>, "max_tokens": <int>}`. After routing, a request's `temperature` below the floor is raised to it (an unset temperature is left to the backend), and a `max_tokens` above the cap, or unset, is lowered to it. The change is logged (`sampling_policy_applied`) and never rejected; it applies to every dialect because it runs on the canonical request.
 

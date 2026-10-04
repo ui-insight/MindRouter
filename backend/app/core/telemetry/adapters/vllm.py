@@ -241,13 +241,14 @@ class VLLMAdapter:
                     x in model_lower
                     for x in ["llava", "vision", "vl", "multimodal",
                               "qwen3.5", "qwen3.6", "gemma3", "gemma-3", "gemma4", "gemma-4",
-                              "dots"]  # dots.OCR / dots.mocr are vision/OCR models
+                              "dots",      # dots.OCR / dots.mocr are vision/OCR models
+                              "kimi-k3"]   # Kimi K3 is text + image
                 )
 
                 # Auto-detect thinking support for known model families
                 supports_thinking = any(
                     x in model_lower
-                    for x in ["qwen3", "gpt-oss", "deepseek-r1"]
+                    for x in ["qwen3", "gpt-oss", "deepseek-r1", "kimi-k3"]
                 )
 
                 # Auto-detect tool calling support
@@ -255,7 +256,7 @@ class VLLMAdapter:
                 # (can't detect from API), so use model family heuristics
                 supports_tools = any(
                     x in model_lower
-                    for x in ["qwen3", "qwen2.5", "gpt-oss", "llama3", "llama4", "gemma"]
+                    for x in ["qwen3", "qwen2.5", "gpt-oss", "llama3", "llama4", "gemma", "kimi-k3"]
                 )
 
                 # Try to extract parameter count
