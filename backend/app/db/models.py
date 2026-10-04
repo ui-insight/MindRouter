@@ -76,6 +76,16 @@ class BackendEngine(str, PyEnum):
     # its adapter discovers zero models, so it is never eligible for inference
     # routing and never appears in the model catalog. Health path is /healthz.
     DLP = "dlp"
+    # System One decision server (migration 087): Clef behind clef_service,
+    # Laya. Like DLP it is a fleet member for status + GPU telemetry and
+    # discovers NO models, so it never takes chat traffic. /v1/systemone
+    # reaches it through decisions.upstreams (matched by URL). Health: /health.
+    DECISION = "decision"
+
+
+# Engines that serve no chat models: fleet members for status and telemetry
+# only, never routable and never in the model catalog.
+MODELLESS_ENGINES = (BackendEngine.DLP, BackendEngine.DECISION)
 
 
 class BackendStatus(str, PyEnum):

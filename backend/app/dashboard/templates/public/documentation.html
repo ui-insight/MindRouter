@@ -79,6 +79,7 @@
                 <li class="nav-item"><a class="nav-link" href="#tool-calling">Tool Calling</a></li>
                 <li class="nav-item"><a class="nav-link" href="#ocr">Document OCR</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-search">Web Search</a></li>
+                <li class="nav-item"><a class="nav-link" href="#decisions-api">Decisions (System One)</a></li>
                 <li class="nav-item"><a class="nav-link" href="#mcp-servers">MCP Servers</a></li>
                 <li class="nav-item"><a class="nav-link" href="#agent-skills">Agent Skills</a></li>
                 <li class="nav-item"><a class="nav-link" href="#request-id">Request ID</a></li>
@@ -339,6 +340,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/ocr</code></td><td>API Key</td><td><a href="#ocr">OCR</a> images/PDFs/Office docs to markdown or JSON (multipart)</td></tr>
                         <tr><td>POST</td><td><code>/v1/ocrmd</code></td><td>API Key</td><td>Same OCR pipeline as <code>/v1/ocr</code>, returns raw <code>text/markdown</code></td></tr>
                         <tr><td>POST</td><td><code>/v1/search</code></td><td>API Key</td><td><a href="#web-search">Web search</a> via the configured provider (also served at <code>/api/search</code>)</td></tr>
+                        <tr><td>POST</td><td><code>/v1/systemone</code></td><td>API Key</td><td><a href="#decisions-api">Decisions (System One)</a>: typed yes/no, choice and score answers with probabilities, text and images (also served at <code>/v1/decisions</code>; TypeSafe/Jev compatible)</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/generations</code></td><td>API Key</td><td><a href="#image-generation">Image generation</a> (diffusion models; requires per-account enablement)</td></tr>
                         <tr><td>POST</td><td><code>/v1/images/edits</code></td><td>API Key</td><td><a href="#image-edits">Image-to-image / reference edit</a> (multipart)</td></tr>
                         <tr><td>POST</td><td><code>/v1/moderations</code></td><td>API Key</td><td>Check text against the image content policy without generating, in the <strong>standard OpenAI moderations shape</strong> &mdash; <code>moderations.create()</code> parses it. <code>input</code> accepts a string or up to 4 strings; a rejected input reports <code>flagged: true</code> with the explanation in the <code>policy_reason</code> extension field (the OpenAI category booleans are always false &mdash; verdicts come from the institutional policy, not that taxonomy). The <code>policy_category</code> extension field distinguishes <code>"policy"</code> (a real content violation) from <code>"unclear"</code> (the input is simply not a usable image description, e.g. a follow-up like &ldquo;make it red&rdquo;) &mdash; both are flagged, but only the first should be shown to a user as a policy problem. MindRouter extension <code>context: "prompt"|"edit"</code> selects the edit-aware judge template (pass via <code>extra_body</code> in the SDK). Rate-limited and recorded like other endpoints.</td></tr>
@@ -1783,9 +1785,11 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                         <tr><td><strong>Video</strong> (<code>video</code>)</td><td><code>GET /health</code> (fallback: <code>GET /v1/models</code>)</td><td><code>GET /v1/models</code></td><td><code>GET /metrics</code> when the server exposes it; otherwise sidecar GPU data only</td></tr>
                         <tr><td><strong>TTS</strong> (<code>tts</code>)</td><td><code>GET /health</code> (fallback: <code>GET /v1/models</code>)</td><td><code>GET /v1/models</code></td><td>Sidecar GPU data only</td></tr>
                         <tr><td><strong>STT</strong> (<code>stt</code>)</td><td><code>GET /health</code> (fallback: <code>GET /v1/models</code>)</td><td><code>GET /v1/models</code></td><td>Sidecar GPU data only</td></tr>
+                        <tr><td><strong>DLP</strong> (<code>dlp</code>)</td><td><code>GET /healthz</code> (must report warm)</td><td>None: serves no models, never routable</td><td>Sidecar GPU data only</td></tr>
+                        <tr><td><strong>Decision server</strong> (<code>decision</code>)</td><td><code>GET /health</code> (must report <code>ok</code>)</td><td>None: serves no chat models; reached through <a href="#decisions-api">the decisions API</a></td><td>Sidecar GPU data only</td></tr>
                     </tbody>
                 </table>
-                <p>The <code>BackendEngine</code> enum has exactly these six values. The registry builds an <code>OllamaAdapter</code> for <code>ollama</code> backends and a <code>VLLMAdapter</code> for every other engine, so diffusion, video and voice servers must expose the same OpenAI-compatible <code>/health</code> and <code>/v1/models</code> surface as vLLM. Discovery then assigns modality by engine before looking at the model name: every model found on a <code>diffusion</code> backend becomes <code>IMAGE_GENERATION</code>, every model on a <code>video</code> backend becomes <code>VIDEO_GENERATION</code>, every model on a <code>tts</code> backend becomes <code>TTS</code>, and every model on an <code>stt</code> backend becomes <code>STT</code>.</p>
+                <p>The <code>BackendEngine</code> enum has exactly these eight values. The registry builds an <code>OllamaAdapter</code> for <code>ollama</code> backends and a <code>DlpAdapter</code> for <code>dlp</code>, a <code>DecisionAdapter</code> for <code>decision</code>, and a <code>VLLMAdapter</code> for every other engine, so diffusion, video and voice servers must expose the same OpenAI-compatible <code>/health</code> and <code>/v1/models</code> surface as vLLM. Discovery then assigns modality by engine before looking at the model name: every model found on a <code>diffusion</code> backend becomes <code>IMAGE_GENERATION</code>, every model on a <code>video</code> backend becomes <code>VIDEO_GENERATION</code>, every model on a <code>tts</code> backend becomes <code>TTS</code>, and every model on an <code>stt</code> backend becomes <code>STT</code>.</p>
                 <p><strong>Registering a voice backend (2.9.10+).</strong> <code>tts</code> and <code>stt</code> were added by migration 072 so speech services join the registry like any other backend, gaining health checks, circuit breakers and load balancing. Both reference implementations already speak the required surface &mdash; Kokoro advertises <code>kokoro</code>/<code>tts-1</code>/<code>tts-1-hd</code> and speaches advertises its whisper model &mdash; so no adapter work is needed. Register through the admin API (<code>POST /api/admin/backends/register</code> with <code>"engine": "tts"</code> or <code>"stt"</code>); the Admin &rarr; Backends form does not yet offer these engines. Until a voice backend is registered, requests continue to use the single <code>voice.tts_url</code> / <code>voice.stt_url</code> values on Admin &rarr; Voice Config, which remain the fallback. The upstream credential still comes from <code>voice.tts_api_key</code> / <code>voice.stt_api_key</code> &mdash; <code>backends</code> has no per-backend credential column.</p>
 
                 <h3>Registration</h3>
@@ -2115,6 +2119,203 @@ for r in results:
                     <li><strong>Test search</strong> &mdash; Inline test with live results preview</li>
                 </ul>
                 <p>Settings are stored in the <code>app_config</code> table (keys prefixed with <code>search.*</code>) and take effect immediately.</p>
+            </section>
+
+            <hr>
+
+            <!-- Decisions API (System One) -->
+            <section id="decisions-api">
+                {% raw %}
+                <h2><i class="bi bi-ui-checks"></i> Decisions API (System One)</h2>
+                <p><span class="badge bg-warning text-dark">Experimental</span> <code>POST /v1/systemone</code> (alias <code>POST /v1/decisions</code>) answers <strong>typed questions about a piece of content</strong> and returns a probability for each answer, without generating any text. You send one <code>state</code> (the content to judge: a message, a record, a transcript, optionally images) and a set of named questions; you get back one typed answer per question. It is built for routing, triage, classification, guardrails and scoring, where you want a number you can threshold rather than prose you have to parse.</p>
+                <p>The wire format is <strong>TypeSafe's System One API</strong> (the format its Jev models use), so TypeSafe's SDK and any Jev client work unchanged with a MindRouter API key. The answers come from models MindRouter runs, not from TypeSafe.</p>
+
+                <h3>Quick Example</h3>
+<pre><code>curl -X POST https://mindrouter.uidaho.edu/v1/systemone \
+  -H "Authorization: Bearer $MINDROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "Customer: my card was charged twice for one order and I want one charge refunded today.",
+    "questions": {
+      "refund": {"type": "noul", "instructions": "Is the customer asking for a refund?"},
+      "topic":  {"type": "choice", "instructions": "What is this about?",
+                 "criteria": {"billing": "Charges, refunds, invoices",
+                              "shipping": "Delivery problems",
+                              "login": "Account access"}},
+      "anger":  {"type": "score", "instructions": "How upset is the customer?",
+                 "criteria": ["calm", "annoyed", "furious"]}
+    }
+  }'</code></pre>
+                <p><strong>Response:</strong></p>
+<pre><code>{
+  "model": "clef",
+  "answers": {
+    "refund": {"type": "noul", "noul": 0.9893},
+    "topic": {
+      "type": "choice",
+      "choice": "billing",
+      "probabilities": {"billing": 0.99, "shipping": 0.0057, "login": 0.0043},
+      "confidence": 0.985
+    },
+    "anger": {
+      "type": "score",
+      "score": 0.9084,
+      "legend": {"0": "calm", "1": "annoyed", "2": "furious"},
+      "probabilities": {"0": 0.185, "1": 0.7217, "2": 0.0934},
+      "confidence": 0.5824
+    }
+  },
+  "usage": {"input_tokens": 332, "output_tokens": 0},
+  "id": "dec-5a6c88803c184713aca8b8aa",
+  "metadata": {"backend": "systemone_upstream", "upstream_model": "clef", "truncated": false}
+}</code></pre>
+
+                <h3>Question Types</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Type</th><th>Asks</th><th><code>criteria</code></th><th>Answer</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>noul</code></td><td>A yes/no question</td><td>Optional: <code>{"true": "...", "false": "..."}</code> describing what yes and no mean</td><td><code>noul</code>: the probability the answer is yes (0&ndash;1)</td></tr>
+                        <tr><td><code>choice</code></td><td>Pick one option from a set you define</td><td>Required: an object mapping each option id to its description (or <code>null</code>)</td><td><code>choice</code>: the chosen option id; <code>probabilities</code> per option; <code>confidence</code></td></tr>
+                        <tr><td><code>score</code></td><td>Rate on an ordered rubric</td><td>Required: an array of level descriptions, lowest first</td><td><code>score</code>: the probability-weighted level (0 to levels&minus;1); <code>legend</code>; <code>probabilities</code> per level; <code>confidence</code></td></tr>
+                    </tbody>
+                </table>
+                <p><code>confidence</code> is 0 when the model is spread evenly across the options and 1 when it is certain. It is computed the same way for every model: for a choice, <code>(n &times; top probability &minus; 1) / (n &minus; 1)</code>; for a score, one minus the expected distance from the most likely level, relative to a uniform spread.</p>
+
+                <h3>Request Body</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>state</code></td><td>string, object or array</td><td><em>required</em></td><td>The content to evaluate. Structured data (records, chat logs) is accepted as JSON. Limited to 32,000 characters by default.</td></tr>
+                        <tr><td><code>questions</code></td><td>object</td><td><em>required</em></td><td>1 to 32 questions, keyed by an id of your choosing (letters, digits, <code>_</code>, <code>.</code>, <code>-</code>). Each has <code>type</code>, <code>instructions</code> and, per the table above, <code>criteria</code>.</td></tr>
+                        <tr><td><code>model</code></td><td>string</td><td>server default</td><td>Which model answers. See <em>Models</em> below.</td></tr>
+                        <tr><td><code>images</code></td><td>array</td><td>none</td><td>Up to 4 images the model looks at before the state. See <em>Images</em> below.</td></tr>
+                        <tr><td><code>permutations</code></td><td>int (1 or 2)</td><td>per type</td><td>Letter-scoring models only: <code>2</code> also scores the options in reverse order and averages, removing position bias at twice the cost. The default already does this for <code>choice</code>.</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Models</h3>
+                <p>The <code>model</code> field chooses how the answer is produced. Two kinds are offered; the administrator decides which is the default.</p>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th></th><th><code>clef</code></th><th><code>qwen/qwen3.8-27b</code></th></tr></thead>
+                    <tbody>
+                        <tr><td>What it is</td><td>Cloudflare's Clef, a 27B model post-trained for decisions, running as its own server</td><td>A regular chat model, asked each question with a one-token answer whose probabilities are read off</td></tr>
+                        <tr><td>Accuracy (2,000-decision public benchmark)</td><td>0.726</td><td>0.713</td></tr>
+                        <tr><td>Best at</td><td>Yes/no questions; many questions about one long state (it reads the state once)</td><td>Choice questions; high request volume (several replicas)</td></tr>
+                        <tr><td>Tokens billed</td><td>The state once, plus the questions</td><td>The state once per question (twice for a choice)</td></tr>
+                        <tr><td>Choice options</td><td>Up to 255</td><td>Up to 20</td></tr>
+                        <tr><td>Long states</td><td>Cut to fit 16,384 tokens; reported in <code>metadata.truncated</code></td><td>Up to the server's character limit</td></tr>
+                        <tr><td>Images</td><td>Yes</td><td>Yes</td></tr>
+                    </tbody>
+                </table>
+                <ul>
+                    <li><strong>Omitting <code>model</code></strong>, or sending <code>jev-latest</code> or <code>jev-preview</code> (what TypeSafe's SDK sends), selects the server's default.</li>
+                    <li>Any other name is refused with a 422 that lists the models offered. A request is never silently answered by a model you did not ask for, with one exception: fallback.</li>
+                    <li><strong>Fallback.</strong> The administrator can name an alternative for a model. If the model you asked for is down, unreachable, timing out or busy, the alternative answers instead. The response always says so: <code>model</code> is the model that actually answered, and <code>metadata.fallback</code> is <code>{"requested": "clef", "reason": "..."}</code>. If your results must come from one specific model, check <code>model</code> in the response.</li>
+                    <li>To list the models offered, call <code>GET /v1/models</code> with the header <code>X-TypeSafe-SDK</code> (the SDK does this); it returns TypeSafe's list shape instead of the OpenAI one.</li>
+                </ul>
+
+                <h3>Images</h3>
+                <p>Add <code>images</code> to have the model look at up to 4 images before the state. Each item is either a base64 data URL (<code>"data:image/png;base64,..."</code>) or an object <code>{"content_type": "image/png", "base64": "..."}</code>. PNG, JPEG or WebP; 4 MiB and 16 megapixels each, 8 MiB in total. Remote URLs are not accepted: MindRouter does not fetch on a caller's behalf. This is the same field Cloudflare publishes for Clef, so a request written for it works here.</p>
+<pre><code>import base64, os, requests
+
+with open("receipt.png", "rb") as f:
+    image = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+resp = requests.post(
+    "https://mindrouter.uidaho.edu/v1/systemone",
+    headers={"Authorization": f"Bearer {os.environ['MINDROUTER_API_KEY']}"},
+    json={
+        "state": "A photo submitted with an expense claim.",
+        "images": [image],
+        "questions": {
+            "is_receipt": {"type": "noul", "instructions": "Is this a photo of a receipt?"},
+            "legibility": {"type": "score", "instructions": "How legible is the text?",
+                           "criteria": ["Unreadable", "Partly readable", "Clearly readable"]},
+        },
+    },
+    timeout=60,
+)
+resp.raise_for_status()
+answers = resp.json()["answers"]
+print(answers["is_receipt"]["noul"], answers["legibility"]["score"])   # e.g. 0.97 1.94</code></pre>
+                <p>Every image is checked before any model sees it (it must be a readable file of the type it claims, within the limits). A model that cannot see refuses the request with a 422 rather than answering from the text alone.</p>
+
+                <h3>SDK Usage (Python)</h3>
+                <p>TypeSafe's own SDK works as is. Point it at MindRouter and give it your MindRouter key:</p>
+<pre><code>pip install typesafe-sdk
+export TYPESAFE_BASE_URL=https://mindrouter.uidaho.edu
+export TYPESAFE_API_KEY=$MINDROUTER_API_KEY</code></pre>
+<pre><code>from typesafe_sdk import TypeSafeClient
+
+with TypeSafeClient() as client:
+    result = client.system_one(
+        "Hi, we were billed twice for March. Please refund the duplicate today or we will cancel.",
+        {
+            "department": {"type": "choice", "instructions": "Which team should handle this?",
+                           "criteria": {"billing": "Payments, invoicing, refunds",
+                                        "technical": "Bugs, outages", "sales": None}},
+            "urgency": {"type": "score", "instructions": "How urgent is this?",
+                        "criteria": ["Can wait", "This week", "Today"]},
+            "churn_risk": {"type": "noul", "instructions": "Does the user threaten to leave?"},
+        },
+    )
+    print(result.model)                             # which model answered, e.g. "clef"
+    print(result.choices["department"].choice)      # "billing"
+    print(result.scores["urgency"].score)           # 1.96 on a 0-2 rubric
+    print(result.nouls["churn_risk"].noul)          # 0.99
+
+    # A specific model instead of the default:
+    result = client.system_one(state, questions, model="qwen/qwen3.8-27b")</code></pre>
+                <p>The SDK has no field for images; send those with a plain HTTP request as shown above.</p>
+
+                <h3>Response Fields</h3>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Field</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>model</code></td><td>The model that answered (after resolving the default, an alias or a fallback)</td></tr>
+                        <tr><td><code>answers</code></td><td>One entry per question id, shaped by its type (see <em>Question Types</em>)</td></tr>
+                        <tr><td><code>usage</code></td><td><code>input_tokens</code> and <code>output_tokens</code>: what the request cost against your quota</td></tr>
+                        <tr><td><code>id</code></td><td>The request id, also returned in the <code>x-typesafe-request-id</code> header</td></tr>
+                        <tr><td><code>metadata</code></td><td>MindRouter extras (ignored by TypeSafe's SDK): <code>backend</code> (how it was answered), <code>fallback</code> when another model answered, <code>truncated</code> and <code>state_tokens_dropped</code> when the state was cut to fit, and per-question diagnostics for letter-scoring models</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Errors</h3>
+                <p>Error bodies use the FastAPI shape that TypeSafe's API and SDK use. A validation error names the exact field:</p>
+<pre><code>{"detail": [{"loc": ["body", "questions", "urgency", "score", "criteria"],
+             "msg": "Field required", "type": "missing"}]}</code></pre>
+                <table class="table table-sm table-bordered">
+                    <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>401</code></td><td>Missing or invalid MindRouter API key</td></tr>
+                        <tr><td><code>404</code></td><td>The decisions API is disabled on this server</td></tr>
+                        <tr><td><code>422</code></td><td>Invalid request: a malformed question, a model not offered here, a state over the limit, an invalid image, or images sent to a model that cannot see</td></tr>
+                        <tr><td><code>429</code></td><td>Token quota or requests-per-minute limit</td></tr>
+                        <tr><td><code>502</code></td><td>The model's server failed and no fallback could answer. Nothing is charged.</td></tr>
+                        <tr><td><code>503</code></td><td>The model is unavailable or busy and no fallback could answer. <code>Retry-After</code> is set where known.</td></tr>
+                    </tbody>
+                </table>
+                <p>TypeSafe's SDK retries 429 and 5xx with backoff by default.</p>
+
+                <h3>Metering and Privacy</h3>
+                <ul>
+                    <li>Each request is recorded like any other (model, token counts, timing, status) and charged against your token quota using the counts in <code>usage</code>. A failed request is charged nothing.</li>
+                    <li><strong>The state, the question text and images are never stored or logged.</strong> The audit record keeps only the request's shape: how many questions of which types, the state's length and the number of images.</li>
+                    <li>When a fallback answers, the failed attempt and the answer are recorded separately, each under its own model.</li>
+                </ul>
+
+                <h3>Administration</h3>
+                <p>Everything is under <strong>Admin &rarr; Settings &rarr; Decisions</strong> and takes effect immediately:</p>
+                <ul>
+                    <li><strong>Enable</strong> the API (off by default; a disabled API answers 404).</li>
+                    <li><strong>Default model</strong>: what <code>jev-latest</code> or a missing <code>model</code> resolves to.</li>
+                    <li><strong>vLLM models</strong>: chat models that may be letter-scored, by catalog name.</li>
+                    <li><strong>Upstream servers</strong>: decision models that run as their own System One server, as JSON: <code>{"clef": {"url": "https://host:8001", "api_key": "...", "model": "clef", "images": true}}</code>. Keys are never shown back.</li>
+                    <li><strong>Fallbacks</strong>: <code>{"clef": "qwen/qwen3.8-27b"}</code> makes <code>qwen/qwen3.8-27b</code> answer when <code>clef</code> is not working. One hop only. A fallback is not used when the request does not fit it (for example more than 20 choice options on a letter-scoring model).</li>
+                </ul>
+                <p><strong>Monitoring a decision server.</strong> Register the server on <strong>Admin &rarr; Backends</strong> with engine <em>Decision server</em>, the same URL as its upstream entry, and its node and GPU. It then appears on the backends page with health status, GPU telemetry from the node's sidecar and health alerts, like any other backend, and it never receives chat traffic. Its health is used by the decisions API: a server that is unhealthy, disabled or draining is skipped at once (straight to the fallback, or a 503), instead of each caller waiting for a timeout. Disabling the backend is therefore how to take a decision server out of service for maintenance.</p>
+                <p>Cloudflare publishes Clef as weights and a Python function, not a server; <code>clef_service/</code> in the MindRouter repository is the server used here. Full reference, benchmark method and results: <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/decisions-api.md">docs/decisions-api.md</a>.</p>
+                {% endraw %}
             </section>
 
             <hr>
@@ -3119,6 +3320,12 @@ Hello from MindRouter!</code></pre>
                         <tr><td><code>catalog.enrich_model</code></td><td>string</td><td><code>""</code></td><td>Model name used for LLM enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.enrich_api_key</code></td><td>string</td><td><code>""</code></td><td>API key for internal MindRouter enrichment calls</td><td>Site Settings</td></tr>
                         <tr><td><code>catalog.brave_api_key</code></td><td>string</td><td><code>""</code></td><td>Brave Search API key for enrichment (overrides env var)</td><td>Site Settings</td></tr>
+                        <tr><td><code>decisions.enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable the <a href="#decisions-api">decisions API</a> (<code>/v1/systemone</code>)</td><td>Site Settings</td></tr>
+                        <tr><td><code>decisions.default_model</code></td><td>string</td><td><code>"qwen/qwen3.8-27b"</code></td><td>Model used for <code>jev-latest</code> or a missing <code>model</code>: a vLLM model or an upstream name</td><td>Site Settings</td></tr>
+                        <tr><td><code>decisions.allowed_models</code></td><td>JSON array</td><td><code>["qwen/qwen3.8-27b"]</code></td><td>vLLM chat models that may be letter-scored</td><td>Site Settings</td></tr>
+                        <tr><td><code>decisions.upstreams</code></td><td>JSON object</td><td><code>{}</code></td><td>Decision models served by their own System One server: name &rarr; <code>url</code>, <code>api_key</code>, <code>model</code>, <code>images</code>, <code>timeout</code></td><td>Site Settings</td></tr>
+                        <tr><td><code>decisions.fallbacks</code></td><td>JSON object</td><td><code>{}</code></td><td>Model that answers instead when a decisions model is not working: name &rarr; name</td><td>Site Settings</td></tr>
+                        <tr><td><code>decisions.permutations</code> / <code>decisions.temperature</code></td><td>JSON object</td><td>per type</td><td>Letter-scoring tuning: option orders averaged and probability temperature, per question type</td><td>Site Settings</td></tr>
                         <tr><td><code>search.enabled</code></td><td>bool</td><td><code>true</code></td><td>Enable/disable the <code>/v1/search</code> API</td><td>Search</td></tr>
                         <tr><td><code>search.provider</code></td><td>string</td><td><code>"brave"</code></td><td>Active search provider: <code>brave</code> or <code>searxng</code></td><td>Search</td></tr>
                         <tr><td><code>search.max_results</code></td><td>int</td><td><code>10</code></td><td>Default max results per search (clients can override up to 50)</td><td>Search</td></tr>

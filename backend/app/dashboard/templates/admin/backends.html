@@ -57,6 +57,7 @@
                                     <option value="ollama">Ollama</option>
                                     <option value="vllm">vLLM</option>
                                     <option value="dlp">DLP (GLiNER)</option>
+                                    <option value="decision">Decision server (System One)</option>
                                 </select>
                             </div>
                         </div>
@@ -189,6 +190,7 @@
                                             <option value="ollama" {% if item.backend.engine.value == 'ollama' %}selected{% endif %}>Ollama</option>
                                             <option value="vllm" {% if item.backend.engine.value == 'vllm' %}selected{% endif %}>vLLM</option>
                                             <option value="dlp" {% if item.backend.engine.value == 'dlp' %}selected{% endif %}>DLP (GLiNER)</option>
+                                            <option value="decision" {% if item.backend.engine.value == 'decision' %}selected{% endif %}>Decision server (System One)</option>
                                         </select>
                                     </div>
                                 </div>

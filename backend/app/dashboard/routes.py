@@ -5831,6 +5831,7 @@ async def admin_settings(
             "decisions_upstream_names": sorted(decisions_cfg["upstreams"]),
             "decisions_permutations_json": json.dumps(decisions_cfg["permutations"]),
             "decisions_temperature_json": json.dumps(decisions_cfg["temperature"]),
+            "decisions_fallbacks_json": json.dumps(decisions_cfg["fallbacks"]) if decisions_cfg["fallbacks"] else "",
             "auto_enrich": auto_enrich,
             "enrich_model": enrich_model,
             "enrich_api_key": enrich_api_key,
@@ -6019,6 +6020,21 @@ async def admin_settings_post(
                     f"Decisions: {', '.join(clash)} cannot be both a vLLM model and an upstream server"),
                 status_code=302,
             )
+        # What answers instead when a model is not working: model -> model, both offered here.
+        raw_fallbacks = form.get("decisions_fallbacks", "").strip()
+        try:
+            submitted_fallbacks = json.loads(raw_fallbacks) if raw_fallbacks else {}
+        except ValueError:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus("Decisions: fallbacks must be valid JSON"), status_code=302,
+            )
+        from backend.app.services.decisions import parse_fallbacks
+        fallbacks, fallback_problems = parse_fallbacks(submitted_fallbacks, [*allowed, *upstreams])
+        if fallback_problems:
+            return RedirectResponse(
+                url="/admin/settings?error=" + quote_plus("Decisions fallbacks: " + "; ".join(fallback_problems)[:300]),
+                status_code=302,
+            )
         if not default_model or default_model not in [*allowed, *upstreams]:
             return RedirectResponse(
                 url="/admin/settings?error=" + quote_plus(
@@ -6046,11 +6062,15 @@ async def admin_settings_post(
             db, "decisions.temperature", tuning["temperature"],
             description="Temperature applied to each question type's probabilities (letter scoring on vLLM models)",
         )
+        await crud.set_config(
+            db, "decisions.fallbacks", fallbacks,
+            description="Model that answers instead when a decisions model is not working: name -> name",
+        )
         await crud.log_admin_action(
             db, user_id=user_id, action="settings.set_decisions", entity_type="config",
             # Names only: an upstream entry carries a credential.
             detail=(f"enabled={enabled} default={default_model} vllm={allowed} upstreams={sorted(upstreams)} "
-                    f"permutations={tuning['permutations']} temperature={tuning['temperature']}"),
+                    f"permutations={tuning['permutations']} temperature={tuning['temperature']} fallbacks={fallbacks}"),
             ip_address=_ip,
         )
         await db.commit()

@@ -14,8 +14,9 @@
 
 """Backend adapters for telemetry collection."""
 
+from backend.app.core.telemetry.adapters.decision import DecisionAdapter
 from backend.app.core.telemetry.adapters.dlp import DlpAdapter
 from backend.app.core.telemetry.adapters.ollama import OllamaAdapter
 from backend.app.core.telemetry.adapters.vllm import VLLMAdapter
 
-__all__ = ["DlpAdapter", "OllamaAdapter", "VLLMAdapter"]
+__all__ = ["DecisionAdapter", "DlpAdapter", "OllamaAdapter", "VLLMAdapter"]

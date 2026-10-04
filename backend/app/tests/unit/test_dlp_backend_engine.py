@@ -327,7 +327,10 @@ class TestDlpRoutingExclusionStructural:
     def test_get_backends_with_model_excludes_dlp_structurally(self):
         crud = self._src("backend/app/db/crud.py")
         block = crud.split("async def get_backends_with_model", 1)[1].split("async def ", 1)[0]
-        assert "Backend.engine != BackendEngine.DLP" in block
+        # Every model-less engine (DLP, decision servers) is excluded, by the shared tuple.
+        assert "Backend.engine.notin_(MODELLESS_ENGINES)" in block
+        models = self._src("backend/app/db/models.py")
+        assert "MODELLESS_ENGINES = (BackendEngine.DLP, BackendEngine.DECISION)" in models
 
     def test_update_backend_prunes_models_on_engine_change(self):
         crud = self._src("backend/app/db/crud.py")
@@ -337,5 +340,5 @@ class TestDlpRoutingExclusionStructural:
     def test_catalog_loops_skip_dlp(self):
         models_api = self._src("backend/app/api/models_api.py")
         health = self._src("backend/app/api/health.py")
-        assert "BackendEngine.DLP" in models_api
-        assert "BackendEngine.DLP" in health
+        assert "backend.engine in MODELLESS_ENGINES" in models_api
+        assert "backend.engine in MODELLESS_ENGINES" in health

@@ -7,7 +7,7 @@
 > MindRouter-specific `metadata` block may change. Measured on our fleet in
 > [Benchmarks](#benchmarks).
 
-Last updated: 2026-10-04 (release 2.9.85)
+Last updated: 2026-10-04 (release 2.9.86)
 
 ## What it is
 
@@ -38,6 +38,50 @@ with TypeSafeClient() as client:                       # model defaults to "jev-
     print(res.model, res.nouls["is_urgent"].noul)
 ```
 
+The same request with `curl`, and with an image (the `images` field is
+Cloudflare Clef's extension; see Request):
+
+```bash
+curl -X POST https://mindrouter.uidaho.edu/v1/systemone \
+  -H "Authorization: Bearer $MINDROUTER_API_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "state": "Customer: my card was charged twice for one order and I want one charge refunded today.",
+    "questions": {
+      "refund": {"type": "noul", "instructions": "Is the customer asking for a refund?"},
+      "topic":  {"type": "choice", "instructions": "What is this about?",
+                 "criteria": {"billing": "Charges, refunds, invoices", "shipping": "Delivery problems", "login": "Account access"}},
+      "anger":  {"type": "score", "instructions": "How upset is the customer?", "criteria": ["calm", "annoyed", "furious"]}
+    }
+  }'
+```
+
+```python
+import base64, os, requests
+
+with open("receipt.png", "rb") as f:
+    image = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+
+resp = requests.post(
+    "https://mindrouter.uidaho.edu/v1/systemone",
+    headers={"Authorization": f"Bearer {os.environ['MINDROUTER_API_KEY']}"},
+    json={
+        "state": "A photo submitted with an expense claim.",
+        "images": [image],
+        "questions": {
+            "is_receipt": {"type": "noul", "instructions": "Is this a photo of a receipt?"},
+            "legibility": {"type": "score", "instructions": "How legible is the text?",
+                           "criteria": ["Unreadable", "Partly readable", "Clearly readable"]},
+        },
+    },
+    timeout=60,
+)
+answers = resp.json()["answers"]
+print(answers["is_receipt"]["noul"], answers["legibility"]["score"])
+```
+
+The in-app Documentation page (`/documentation#decisions-api`) has the same
+examples with a full response.
+
 **The wire is Jev's; the model is not.** Answers come from whichever model the
 request's `model` field selects (below). Thresholds tuned against TypeSafe's
 Jev do not carry over. The response's `model` field always names the model
@@ -55,9 +99,38 @@ The `model` field decides how an answer is produced.
 
 Anything else, including a pinned TypeSafe version such as `jev-1.13.0`, is
 refused with 422 on `model` rather than silently answered by a different
-model. `GET /v1/models` lists the accepted names in TypeSafe's shape for
+model. The one case where another model answers is a configured **fallback**
+(below), and the response says so. `GET /v1/models` lists the accepted names in TypeSafe's shape for
 callers that send the SDK's `X-TypeSafe-SDK` header (everyone else gets the
 normal OpenAI model list).
+
+### Fallback
+
+`decisions.fallbacks` names an alternative for a model, e.g.
+`{"clef": "qwen/qwen3.8-27b"}`. When the model that was asked for is not
+working, the alternative answers the request instead of the caller getting an
+error:
+
+* **Known to be down** (a monitored decision server that is unhealthy,
+  disabled or draining, or a vLLM model with no healthy replica): the
+  alternative is used at once, with nothing spent on the dead model.
+* **Fails while answering** (unreachable, timeout, invalid reply, busy; HTTP
+  502/503/504 from the model's side): the failed attempt is recorded, then the
+  alternative answers.
+
+The response always tells the caller: `model` is the model that actually
+answered and `metadata.fallback` is `{"requested": "clef", "reason": "..."}`.
+A caller that needs one specific model should check `model`.
+
+Rules: one hop only (the alternative's own fallback is not followed). A
+request error (422) is never retried elsewhere, and neither is an unexpected
+failure in MindRouter itself. The alternative is not used when the request
+does not fit it (more than 20 choice options on a letter-scoring model, images
+to a model that cannot see): the original error is returned instead. When a
+fallback answers after a failed attempt there are two audit rows, the failed
+one and the answer, each under its own model; quota is charged once, for the
+answer. `mindrouter_decisions_fallbacks_total{requested,answered_by}` counts
+them and the log event is `decision_fallback`.
 
 How the two kinds differ:
 
@@ -69,7 +142,7 @@ How the two kinds differ:
 | Model passes per request | One per question (two for a `choice`) | Clef: one for the whole request |
 | State size | `decisions.max_state_chars`, then the model's context (large) | `decisions.max_state_chars`, then the upstream's (Clef: 16,384 tokens as deployed; Laya: 512–1,024). A cut state is reported in `metadata.truncated`. |
 | Cost | One 1-token forward pass per question on a 27B model; state prefix-cached after the first | One small encoder pass |
-| Routing | A healthy, circuit-closed replica chosen per request | A fixed URL; not health-checked |
+| Routing | A healthy, circuit-closed replica chosen per request | A fixed URL. Health-checked when the server is also registered as a backend with engine `decision` (see Monitoring a decision server) |
 
 ## Request
 
@@ -188,8 +261,8 @@ its SDK parses.
 | `422` | Invalid request. `detail` is a list of `{loc, msg, type}` with `loc` starting at `body`, e.g. `["body", "questions", "urgency", "score", "criteria"]`. Also: `model` not offered here, state over the server's limit, an invalid image or images sent to a model that cannot see, more than 20 choice options on a vLLM model, text that is not valid Unicode (an unpaired surrogate) or a non-finite number anywhere in the body, or the upstream model rejecting the content. |
 | `429` | Token quota or requests-per-minute limit |
 | `500` | Unexpected failure (the request is still recorded as failed) |
-| `502` | The model's server failed or returned an invalid reply. Nothing is charged. |
-| `503` | Model unavailable, no healthy replica, or the upstream is busy. `Retry-After` is set where known. |
+| `502` | The model's server failed or returned an invalid reply, and no fallback could answer. Nothing is charged. |
+| `503` | Model unavailable, no healthy replica, or the upstream is busy or known to be down, and no fallback could answer. `Retry-After` is set where known. |
 
 TypeSafe's SDK retries 429 and 5xx with backoff by default. A disabled API is
 404 rather than 503 so that it is not retried.
@@ -228,6 +301,7 @@ Admin → Settings → "Decisions API (System One)", or `app_config`:
 | `decisions.permutations` | `{"noul": 1, "choice": 2, "score": 1}` | Option orders scored and averaged per question type on vLLM models (1 or 2). A request's own `permutations` overrides it. |
 | `decisions.temperature` | `{"noul": 1.35, "choice": 1.05, "score": 1.45}` | Temperature applied to each question type's probabilities on vLLM models (0.2–5; `1` is off; above 1 softens). Fitted on Qwen3.8-27B; refit if you change the model. |
 | `decisions.upstreams` | `{}` | Upstream System One servers: `{"clef": {"url": "https://host:8004", "api_key": "…", "model": "clef", "images": true, "timeout": 30}}`. `model` is the name sent upstream (`null` omits it; Laya then picks a checkpoint by language). `images: true` marks an upstream that accepts the `images` extension. |
+| `decisions.fallbacks` | `{}` | Model that answers instead when a model is not working: `{"clef": "qwen/qwen3.8-27b"}`. Both names must be offered here; one hop only. |
 | `decisions.max_state_chars` | `32000` | Ceiling on the rendered state (hard cap 64,000) |
 | `decisions.fanout` | `8` | Concurrent scoring calls per request (vLLM models) |
 | `decisions.backend_concurrency` | `4` | Concurrent calls to one backend or upstream across all requests, per app worker process. With 8 workers the worst case on one replica is 32. |
@@ -254,6 +328,37 @@ Prometheus: `mindrouter_decisions_requests_total{model,backend,status}`,
 `mindrouter_decisions_latency_seconds{model}`,
 `mindrouter_decisions_tokens_total{model,type=prompt|scoring|cached}`. Log
 event `decision_request`.
+
+### Monitoring a decision server
+
+An upstream is only a URL in a setting; by itself nothing watches it. To have
+it monitored, register the same URL as a backend with engine **`decision`**
+(Admin → Backends → Register, or `POST /api/admin/backends/register` with
+`"engine": "decision"`), on its node and GPU:
+
+```bash
+curl -X POST https://mindrouter.example.edu/api/admin/backends/register \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "aspen4-gpu1-clef", "url": "https://aspen4.example.edu:8001",
+       "engine": "decision", "node_id": 9, "gpu_indices": [1], "max_concurrent": 1}'
+```
+
+It is then a fleet member like the DLP scan service: health-polled
+(`GET /health`, which must report `"status": "ok"`; `"loading"` is not
+healthy), shown on the backends page with status and the GPU telemetry from
+the node's sidecar, included in health alerts, and covered by a circuit
+breaker. It discovers no models, so it never takes chat traffic and never
+appears in the model catalog.
+
+The decisions API uses that status. Before dialing an upstream it looks for a
+`decision` backend with the same URL: if that backend is unhealthy, disabled,
+draining or its circuit is open, the request goes straight to the fallback (or
+is refused with 503 and `Retry-After`) instead of waiting for a timeout. Live
+failures (502/504) count against the circuit; "busy" (503) does not. Requests
+are recorded against the backend's id. **Disabling the backend is how to take
+a decision server out of service**: with a fallback configured, callers keep
+getting answers. An upstream with no matching backend behaves as before:
+dialed every time, not monitored.
 
 ### Adding Clef as an upstream
 
@@ -307,12 +412,18 @@ fine-tuned on that benchmark; measure before relying on it
 * **No scheduler slot.** Scoring calls go straight to a replica and do not
   count against `max_concurrent`; `decisions.backend_concurrency` and the
   per-user RPM limit bound the load instead.
-* **Upstreams are not registered backends.** No health polling, circuit
-  breaker or GPU telemetry; a broken upstream returns 502 until fixed, and it
-  does not appear in the backend list. Making them a backend engine is the
-  natural next step and needs a migration.
-* **No retry within a request.** One failing call fails the request; clients
-  should retry (TypeSafe's SDK does).
+* **An upstream is monitored only if it is also registered as a backend**
+  (engine `decision`, same URL; see Monitoring a decision server). Without
+  that there is no health polling, circuit breaker or GPU telemetry, and a
+  broken upstream costs each caller a timeout before the fallback answers.
+* **One upstream URL per model name.** Several instances of a decision server
+  are not load-balanced by MindRouter.
+* **No retry within a model.** One failing call fails that model's attempt;
+  the configured fallback, if any, then answers. Without one, clients should
+  retry (TypeSafe's SDK does).
+* **A fallback is a different model.** Its numbers differ and its limits
+  differ; thresholds tuned on one do not carry over exactly. `model` in the
+  response says which answered.
 * **Position bias** on vLLM models: letter readouts favour positions.
   Averaging over reversed options cancels most of it and is on by default for
   `choice` questions only, where it raised accuracy from 0.643 to 0.718; it

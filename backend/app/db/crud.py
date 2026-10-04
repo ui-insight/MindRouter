@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.db.models import (
+    MODELLESS_ENGINES,
     AdminAuditLog,
     ApiKey,
     App,
@@ -1847,9 +1848,9 @@ async def get_backends_with_model(
             and_(
                 Model.name == model_name,
                 Backend.status == BackendStatus.HEALTHY,
-                # Model-less engines (DLP) serve no inference and must never be
-                # routable, even if a stale Model row survives an engine change.
-                Backend.engine != BackendEngine.DLP,
+                # Model-less engines (DLP, decision servers) serve no chat inference and
+                # must never be routable, even if a stale Model row survives an engine change.
+                Backend.engine.notin_(MODELLESS_ENGINES),
             )
         )
     )
@@ -1874,9 +1875,9 @@ async def model_is_configured(db: AsyncSession, model_name: str) -> bool:
         .where(
             and_(
                 Model.name == model_name,
-                # Mirror the routable-model filter: DLP engines serve no
+                # Mirror the routable-model filter: model-less engines serve no
                 # inference, so a stale Model row there is not "configured".
-                Backend.engine != BackendEngine.DLP,
+                Backend.engine.notin_(MODELLESS_ENGINES),
             )
         )
         .limit(1)
