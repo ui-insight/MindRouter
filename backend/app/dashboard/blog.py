@@ -400,6 +400,12 @@ async def admin_blog_edit(
     smtp_config = await email_service.get_smtp_config(db)
     smtp_ready = email_service.is_smtp_configured(smtp_config)
     blog_email_log = await crud.get_blog_email_log(db, post_id)
+    # How many people each audience reaches (after blog opt-outs), shown beside the choice.
+    blog_audience_counts = {}
+    if smtp_ready and post.is_published:
+        for name in crud.EMAIL_AUDIENCES:
+            blog_audience_counts[name] = len(
+                await crud.get_emailable_users(db, exclude_blog_optout=True, audience=name))
 
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
@@ -412,6 +418,8 @@ async def admin_blog_edit(
             "active": "blog",
             "smtp_ready": smtp_ready,
             "blog_email_log": blog_email_log,
+            "blog_audience_counts": blog_audience_counts,
+            "audience_labels": crud.EMAIL_AUDIENCE_LABELS,
             "success": success,
             "error": error,
         },
@@ -578,12 +586,20 @@ async def admin_blog_website_unpublish(
 async def admin_blog_send_email(
     request: Request,
     post_id: int,
+    audience: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Send blog post as email to all users (excluding opt-outs)."""
+    """Send blog post as email to the chosen audience (excluding opt-outs)."""
     user, redirect = await _require_admin(request, db)
     if redirect:
         return redirect
+
+    # Chosen every time, never defaulted (see crud.EMAIL_AUDIENCES).
+    if audience not in crud.EMAIL_AUDIENCES:
+        return RedirectResponse(
+            f"/admin/blog/{post_id}/edit?error=Choose+an+audience:+everyone,+or+direct+MindRouter+users+only",
+            status_code=302,
+        )
 
     post = await crud.get_blog_post_by_id(db, post_id)
     if not post or not post.is_published:
@@ -593,7 +609,7 @@ async def admin_blog_send_email(
     if not email_service.is_smtp_configured(smtp_config):
         return RedirectResponse(f"/admin/blog/{post_id}/edit?error=SMTP+not+configured", status_code=302)
 
-    users = await crud.get_emailable_users(db, exclude_blog_optout=True)
+    users = await crud.get_emailable_users(db, exclude_blog_optout=True, audience=audience)
     if not users:
         return RedirectResponse(f"/admin/blog/{post_id}/edit?error=No+recipients", status_code=302)
 
@@ -615,7 +631,7 @@ async def admin_blog_send_email(
     log = await crud.create_email_log(
         db, subject=subject, sent_by=user.id,
         recipient_count=len(users), body_preview=post.title,
-        blog_post_id=post.id,
+        blog_post_id=post.id, audience=audience,
     )
     await db.commit()
 

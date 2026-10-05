@@ -123,24 +123,41 @@
                     <div class="alert alert-info small mb-3">
                         <i class="bi bi-info-circle me-1"></i>
                         This post was emailed on {{ blog_email_log.created_at|localtime }}
-                        ({{ blog_email_log.success_count }}/{{ blog_email_log.recipient_count }} delivered).
+                        ({{ blog_email_log.success_count }}/{{ blog_email_log.recipient_count }} delivered{% if blog_email_log.audience %}, to {{ audience_labels.get(blog_email_log.audience, blog_email_log.audience)|lower }}{% endif %}).
                     </div>
                     {% endif %}
 
-                    <div class="d-flex gap-2 align-items-center">
-                        <form method="post" action="/admin/blog/{{ post.id }}/send-email" class="d-inline"
-                              onsubmit="return confirm('Send this blog post as email to all subscribed users?');">
+                    <form method="post" action="/admin/blog/{{ post.id }}/send-email" id="blogEmailForm"
+                          onsubmit="var a = this.querySelector('input[name=audience]:checked'); if (!a) { return false; } return confirm('Send this blog post as email to ' + a.dataset.label + '?');">
+                        <label class="form-label fw-bold small mb-1">Audience <span class="text-danger">*</span></label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="audience" id="blogAudienceAll" value="all" required
+                                   data-label="everyone ({{ blog_audience_counts.get('all', 0) }} people)">
+                            <label class="form-check-label" for="blogAudienceAll">
+                                <strong>Everyone</strong> <span class="text-muted">({{ blog_audience_counts.get('all', 0) }})</span>
+                                <span class="form-text">&mdash; includes people whose account exists only because they use a registered app such as VandalChat</span>
+                            </label>
+                        </div>
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="radio" name="audience" id="blogAudienceDirect" value="direct" required
+                                   data-label="direct MindRouter users only ({{ blog_audience_counts.get('direct', 0) }} people)">
+                            <label class="form-check-label" for="blogAudienceDirect">
+                                <strong>Direct MindRouter users only</strong> <span class="text-muted">({{ blog_audience_counts.get('direct', 0) }})</span>
+                                <span class="form-text">&mdash; only people who have signed in to MindRouter itself</span>
+                            </label>
+                        </div>
+                        <div class="d-flex gap-2 align-items-center">
                             <button type="submit" class="btn btn-primary btn-sm">
                                 <i class="bi bi-send me-1"></i>{{ 'Re-send' if blog_email_log else 'Send' }} as Email
                             </button>
-                        </form>
-                        <button type="button" class="btn btn-outline-secondary btn-sm" id="blogTestEmailBtn">
-                            <i class="bi bi-envelope-check me-1"></i>Send Test
-                        </button>
-                        <span id="blogTestResult" class="small"></span>
-                    </div>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="blogTestEmailBtn">
+                                <i class="bi bi-envelope-check me-1"></i>Send Test
+                            </button>
+                            <span id="blogTestResult" class="small"></span>
+                        </div>
+                    </form>
                     <div class="form-text mt-1">
-                        Sends to all users with email addresses (excluding those who opted out of blog emails).
+                        An audience must be chosen each time. Either way, people who opted out of blog emails are left out. The test email goes only to you.
                     </div>
                 </div>
             </div>

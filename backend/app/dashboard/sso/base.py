@@ -146,6 +146,7 @@ async def find_or_create_sso_user(
         if profile.college:
             user.college = profile.college
         user.last_login_at = datetime.now(timezone.utc)
+        user.last_direct_login_at = user.last_login_at   # an SSO web sign-in is a direct one
         await db.flush()
         return user
 
@@ -180,6 +181,7 @@ async def find_or_create_sso_user(
     user.sso_provider = profile.provider
     user.sso_subject = profile.subject
     user.last_login_at = datetime.now(timezone.utc)
+    user.last_direct_login_at = user.last_login_at
     await db.flush()
 
     await crud.create_quota(db=db, user_id=user.id, rpm_limit=group.rpm_limit)
