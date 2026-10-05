@@ -1908,6 +1908,9 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
 
                 <h3>Mid-Stream Error Behavior</h3>
                 <p>Once streaming has begun and the first chunk has been sent to the client, a backend failure <strong>terminates the SSE stream immediately</strong> with no error event. The client receives an abrupt end-of-stream. Retries are not possible after the first chunk because the response format has already been committed.</p>
+                            <h3>Silence Limits on a Stream</h3>
+                <p>A streamed response is watched for silence with two separate limits. Before the <strong>first byte</strong> arrives the limit is <code>BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT</code> (180 s): a backend that says nothing at all is treated as hung, and the request is retried on another replica. Once the stream <strong>has started</strong>, the limit is <code>BACKEND_STREAM_IDLE_TIMEOUT</code> (600 s). The second is longer on purpose: some model servers send a tool call only when it is complete (Kimi K3 on vLLM does), so an agent writing a large file through one tool call produces minutes of silence in the middle of a healthy response. A stream that exceeds either limit ends with an error that says which one was hit.</p>
+                <p>Two other timeouts can cut a silent stream first: a node's own proxy in front of a backend (commonly <code>proxy_read_timeout 300s</code>), and the front proxy between clients and MindRouter (720 s in the shipped <code>nginx/nginx.conf</code>). Raise the node proxy's value for backends that serve such models.</p>
             </section>
 
             <hr>
@@ -3683,7 +3686,8 @@ Hello from MindRouter!</code></pre>
                     <tbody>
                         <tr><td><code>MAX_REQUEST_SIZE</code></td><td>int</td><td><code>52428800</code></td><td><strong>Inert.</strong> Defined in <code>settings.py</code> but nothing in the application reads it, so the app enforces no global body limit. The effective limit is the reverse proxy's <code>client_max_body_size</code> (<code>50m</code> in <code>nginx/nginx.conf</code>); raise that, not this.</td></tr>
                         <tr><td><code>BACKEND_REQUEST_TIMEOUT</code></td><td>int</td><td><code>300</code></td><td>Total request timeout (seconds)</td></tr>
-                        <tr><td><code>BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT</code></td><td>int</td><td><code>180</code></td><td>Per-attempt timeout (seconds, high for large model prefills)</td></tr>
+                        <tr><td><code>BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT</code></td><td>int</td><td><code>180</code></td><td>Per-attempt timeout (seconds, high for large model prefills). For a streamed response this bounds the wait for the first byte only</td></tr>
+                        <tr><td><code>BACKEND_STREAM_IDLE_TIMEOUT</code></td><td>int</td><td><code>600</code></td><td>How long a stream may stay silent after it has started (seconds). Keep it below the front proxy's <code>proxy_read_timeout</code> (720 s)</td></tr>
                         <tr><td><code>BACKEND_RETRY_MAX_ATTEMPTS</code></td><td>int</td><td><code>3</code></td><td>Max total retry attempts</td></tr>
                         <tr><td><code>STRUCTURED_OUTPUT_RETRY_ON_INVALID</code></td><td>bool</td><td><code>true</code></td><td>Retry on invalid structured output</td></tr>
                     </tbody>

@@ -2182,7 +2182,8 @@ Colors, organization name, and logo selections are `branding.*` rows in `app_con
 |----------|------|---------|-------------|
 | `MAX_REQUEST_SIZE` | int | `52428800` | Defined in `settings.py`, but **nothing in the application reads it** -- the app enforces no global body limit. The real ceiling is the reverse proxy: `client_max_body_size 50m` in the bundled `nginx/nginx.conf`, which is what returns `413` |
 | `BACKEND_REQUEST_TIMEOUT` | int | `300` | Total request timeout (seconds) |
-| `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds) |
+| `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds). For a streamed response this bounds the wait for the **first byte** only |
+| `BACKEND_STREAM_IDLE_TIMEOUT` | int | `600` | How long a stream may stay silent **after it has started** (seconds). Longer than the first-byte limit because a model whose server sends a tool call only once it is complete (Kimi K3 on vLLM) is silent for as long as the call takes to write. Keep it below the front proxy's `proxy_read_timeout` (720 s); a node's own proxy in front of a backend may cut the connection sooner |
 | `BACKEND_RETRY_MAX_ATTEMPTS` | int | `3` | Max total retry attempts |
 | `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | Intended to retry on a different backend when a response fails structured-output JSON validation |
 | `THINKING_OFF_BY_DEFAULT` | bool | `true` | Gateway policy: reasoning/thinking is forced **off** unless the client opts in with a switch (`think: true`, `thinking: {type: "enabled"}`) or a level (`reasoning_effort`, `reasoning.effort`, `chat_template_kwargs.reasoning_effort`, `thinking.budget_tokens`). Applies to families with a switch (Qwen, Gemma 4, Nemotron); gpt-oss has none and is left to its default. Set `false` to restore per-model launch defaults |

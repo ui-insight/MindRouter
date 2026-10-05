@@ -273,6 +273,15 @@ class Settings(BaseSettings):
     max_request_size: int = 52428800  # 50MB
     backend_request_timeout: int = 300
     backend_request_timeout_per_attempt: int = 180
+    # How long a backend's STREAM may stay silent once it has started sending.
+    # Longer than the per-attempt value above, which still bounds the wait for
+    # the first byte (a backend that says nothing at all is hung, and can be
+    # retried elsewhere). Mid-stream silence is usually a model writing a tool
+    # call that its server only sends once complete (Kimi K3 on vLLM): several
+    # minutes for a large file. Keep it below the front proxy's
+    # proxy_read_timeout (720 s in nginx/nginx.conf), and note that a node's
+    # own proxy in front of the backend may cut the connection sooner.
+    backend_stream_idle_timeout: int = 600
     backend_retry_max_attempts: int = 3
     # Per-attempt ceiling for diffusion (image) backends. Image jobs are long
     # and legitimately variable (n x steps x size), so they get their own

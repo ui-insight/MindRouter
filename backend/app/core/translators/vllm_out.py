@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import orjson
 import structlog
 
+from backend.app.core.text_stream import Utf8StreamDecoder
 from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
     CanonicalChatResponse,
@@ -440,8 +441,11 @@ class VLLMOutTranslator:
         in_think = False
         think_tag_buf = ""  # buffer for partial tag matching
 
+        # A character split across two network chunks must not fail the stream.
+        decoder = Utf8StreamDecoder()
+
         async for chunk_bytes in openai_stream:
-            buffer += chunk_bytes.decode("utf-8")
+            buffer += decoder.feed(chunk_bytes)
 
             # Process complete SSE messages
             while "\n\n" in buffer or "\r\n\r\n" in buffer:
