@@ -161,7 +161,7 @@ class TestSilenceLimits:
         from backend.app.services.inference import limit_stream_silence
 
         stream = _timed([(0, b"role"), (0.25, b"the whole tool call"), (0, b"done")])
-        got = [c async for c in limit_stream_silence(stream, 0.05, 1.0)]
+        got = [c async for c in limit_stream_silence(stream, 0.05, 5.0)]
         assert got == [b"role", b"the whole tool call", b"done"]
 
     async def test_silence_beyond_the_idle_limit_is_a_timeout_that_says_so(self):
@@ -247,11 +247,71 @@ class TestBackendStream:
                 pass
         assert e.value.response.status_code == 503 and e.value.response.json() == {"error": "loading"}
 
+    async def test_an_error_status_whose_body_stalls_fails_at_the_first_byte_limit(self):
+        # Without its own bound this waited for the long mid-stream limit, holding the backend slot.
+        async def handler(request):
+            return httpx.Response(502, content=_timed([(5, b"never")]))
+
+        svc, _ = _service(first=0.1, idle=30.0, handler=handler)
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(httpx.ReadTimeout) as e:
+            async with svc._backend_stream("http://backend/x", {}):
+                pass
+        assert asyncio.get_running_loop().time() - started < 2.0
+        assert "HTTP 502" in str(e.value)
+
+    @pytest.mark.parametrize("how", ["finished", "left early", "failed"])
+    async def test_the_response_is_always_closed(self, how):
+        # Closing is what tells the backend to stop generating for a caller who has gone.
+        closed = []
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"a"
+                yield b"b"
+
+            async def aclose(self):
+                closed.append(True)
+
+        async def handler(request):
+            return httpx.Response(200, stream=Body())
+
+        svc, _ = _service(handler=handler)
+        try:
+            async with svc._backend_stream("http://backend/x", {}) as body:
+                async for _ in body:
+                    if how == "left early":
+                        break
+                    if how == "failed":
+                        raise RuntimeError("consumer error")
+        except RuntimeError:
+            pass
+        assert closed == [True]
+
+    def test_the_real_client_factory_honours_the_read_timeout(self):
+        # _backend_stream asks for idle + 30 s; if the factory ignored it, streams would
+        # again be cut at the 180 s per-attempt value in production.
+        from backend.app.services.inference import InferenceService
+
+        svc = InferenceService.__new__(InferenceService)
+        svc._settings = MagicMock(backend_request_timeout_per_attempt=180, backend_stream_idle_timeout=600)
+        assert InferenceService._make_inference_client(svc, read_timeout=630.0).timeout.read == 630.0
+        assert InferenceService._make_inference_client(svc).timeout.read == 180.0        # everything else unchanged
+
+    async def test_the_stream_asks_the_factory_for_the_idle_limit_plus_a_margin(self):
+        async def handler(request):
+            return httpx.Response(200, content=b"a")
+
+        svc, seen = _service(first=180, idle=600, handler=handler)
+        async with svc._backend_stream("http://backend/x", {}) as body:
+            assert [c async for c in body] == [b"a"]
+        assert seen["read_timeout"] == 630.0
+
     async def test_the_idle_limit_is_never_shorter_than_the_first_byte_limit(self):
         async def handler(request):
-            return httpx.Response(200, content=_timed([(0, b"a"), (0.15, b"b")]))
+            return httpx.Response(200, content=_timed([(0, b"a"), (0.1, b"b")]))
 
-        svc, _ = _service(first=0.3, idle=0.01, handler=handler)          # misconfigured: idle < first
+        svc, _ = _service(first=1.5, idle=0.01, handler=handler)          # misconfigured: idle < first
         async with svc._backend_stream("http://backend/x", {}) as body:
             assert [c async for c in body] == [b"a", b"b"]
 
@@ -290,6 +350,12 @@ class TestBackendStream:
 
 
 class TestSetting:
+    def test_the_orphan_sweep_allows_for_one_long_silence(self):
+        src = (_REPO / "backend/app/core/scheduler/routing.py").read_text()
+        block = src[src.index("max_lifetime_s = ("):]
+        block = block[: block.index(")")]
+        assert "settings.backend_stream_idle_timeout" in block
+
     def test_default_and_how_it_is_configured(self):
         import re
 

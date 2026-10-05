@@ -2699,7 +2699,18 @@ class InferenceService:
                 ) from None
             try:
                 if response.status_code >= 400:
-                    await response.aread()
+                    # The error body is still "before the first byte" as far
+                    # as the caller is concerned: a backend (or a proxy in
+                    # front of it) that sends an error status and then stalls
+                    # must not hold the slot for the long mid-stream limit.
+                    try:
+                        async with asyncio.timeout(first):
+                            await response.aread()
+                    except TimeoutError:
+                        raise httpx.ReadTimeout(
+                            f"backend sent HTTP {response.status_code} but no error body within {first:.0f}s",
+                            request=http_request,
+                        ) from None
                     response.raise_for_status()
                 yield limit_stream_silence(response.aiter_bytes(), first, idle, http_request)
             finally:
