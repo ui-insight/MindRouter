@@ -147,6 +147,8 @@ async def images_page(
             "max_width": max_width,
             "max_height": max_height,
             "has_api_key": has_api_key,
+            # Show the "Transparent background" option only when it can work.
+            "transparent_enabled": bool(await crud.get_config_json(db, "img.transparent_enabled", False)),
         },
     )
 
@@ -372,6 +374,16 @@ async def images_api_generate(
                 content={"error": {"message": f"reference image exceeds {max_bytes // 1024 // 1024}MB", "type": "invalid_request_error"}},
             )
 
+    from backend.app.services.image_matting import parse_background
+
+    try:
+        background = parse_background(body.get("background"))
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
+        )
+
     canonical = CanonicalImageRequest(
         model=body["model"],
         prompt=prompt,
@@ -383,6 +395,7 @@ async def images_api_generate(
         seed=body.get("seed"),
         image=images_b64,
         strength=body.get("strength"),
+        background=background,
     )
 
     if body.get("_policy_verdict"):

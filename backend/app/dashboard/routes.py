@@ -5275,6 +5275,7 @@ async def admin_images_config(
     """Admin image generation configuration page."""
     from sqlalchemy import select, func
     from backend.app.db.models import Modality, User as UserModel
+    from backend.app.services import image_matting as _image_matting
     from backend.app.services import image_watermark as _image_watermark
 
     user_id = get_session_user_id(request)
@@ -5394,6 +5395,13 @@ async def admin_images_config(
                 db, "img.watermark_text", _image_watermark.WATERMARK_DEFAULT_TEXT
             ),
             "watermark_max_chars": _image_watermark.WATERMARK_MAX_CHARS,
+            "transparent_enabled": await crud.get_config_json(db, "img.transparent_enabled", False),
+            "matting_url": await crud.get_config_json(db, "img.matting_url", ""),
+            # Only whether a key is stored; the key itself never reaches the page.
+            "matting_key_set": bool(await crud.get_config_json(db, "img.matting_api_key", "")),
+            "matting_timeout": int(_image_matting.clean_timeout(
+                await crud.get_config_json(db, "img.matting_timeout", _image_matting.DEFAULT_TIMEOUT)
+            )),
             "judge_model": await crud.get_config_json(db, "img.judge_model", ""),
             "judge_model_secondary": await crud.get_config_json(db, "img.judge_model_secondary", ""),
             "enabled_by_default": default_enabled,
@@ -5463,6 +5471,32 @@ async def admin_images_config_post(
                 status_code=302,
             )
 
+        # Transparent backgrounds (the matting server). Validated BEFORE any
+        # write, like the fields above. Turning the feature on needs a URL;
+        # a blank key field keeps the stored key.
+        from backend.app.services import image_matting as _image_matting
+
+        transparent_on = "transparent_enabled" in form
+        matting_url = (form.get("matting_url") or "").strip().rstrip("/")
+        matting_error = None
+        if matting_url:
+            matting_error = _image_matting.validate_server_url(matting_url)
+        elif transparent_on:
+            matting_error = "Transparent backgrounds need a matting server URL."
+        raw_timeout = (form.get("matting_timeout") or "").strip()
+        try:
+            matting_timeout = int(raw_timeout) if raw_timeout else int(_image_matting.DEFAULT_TIMEOUT)
+        except (TypeError, ValueError):
+            matting_timeout = 0
+        if not matting_error and not 1 <= matting_timeout <= int(_image_matting.MAX_TIMEOUT):
+            matting_error = (
+                f"Matting timeout must be 1 to {int(_image_matting.MAX_TIMEOUT)} seconds."
+            )
+        if matting_error:
+            return RedirectResponse(
+                url=f"/admin/images-config?error={_qp(matting_error)}", status_code=302
+            )
+
         wm_on = "watermark_enabled" in form
         wm_text = (form.get("watermark_text") or "").strip()
         if wm_on or wm_text:
@@ -5472,6 +5506,14 @@ async def admin_images_config_post(
                     url=f"/admin/images-config?error={_qp(wm_error)}", status_code=302
                 )
             await crud.set_config(db, "img.watermark_text", wm_text)
+        await crud.set_config(db, "img.transparent_enabled", transparent_on)
+        await crud.set_config(db, "img.matting_url", matting_url)
+        await crud.set_config(db, "img.matting_timeout", matting_timeout)
+        matting_key = (form.get("matting_api_key") or "").strip()
+        if "matting_api_key_clear" in form:
+            await crud.set_config(db, "img.matting_api_key", "")
+        elif matting_key:
+            await crud.set_config(db, "img.matting_api_key", matting_key)
         await crud.set_config(db, "img.quota_tokens_per_image", quota_per_image)
         await crud.set_config(db, "img.watermark_enabled", wm_on)
 
@@ -5519,6 +5561,8 @@ async def admin_images_config_post(
                 "enabled": "enabled" in form,
                 "enabled_by_default": "enabled_by_default" in form,
                 "model": form.get("default_model"),
+                "transparent_backgrounds": transparent_on,
+                "matting_url": matting_url,
             },
             ip_address=_ip,
         )

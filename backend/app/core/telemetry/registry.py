@@ -67,6 +67,22 @@ def health_status_transition(
     return None
 
 
+async def _monitored_state(servers, url: str, is_available) -> tuple[Optional[int], Optional[str]]:
+    """Find ``url`` among ``servers`` ((id, url, status) rows of one model-less
+    engine) and say whether it can take a request: ``(id, None)`` usable,
+    ``(id, reason)`` not, ``(None, None)`` not registered."""
+    wanted = normalize_server_url(url)
+    for backend_id, backend_url, backend_status in servers:
+        if normalize_server_url(backend_url or "") != wanted:
+            continue
+        if backend_status in (BackendStatus.UNHEALTHY, BackendStatus.DISABLED, BackendStatus.DRAINING):
+            return backend_id, backend_status.value
+        if not await is_available(backend_id):
+            return backend_id, "circuit open"
+        return backend_id, None
+    return None, None
+
+
 def normalize_server_url(url: str) -> str:
     """A server root in one spelling: lower-case scheme and host, no default
     port, no trailing slash. Unparseable input comes back stripped, unchanged."""
@@ -618,21 +634,24 @@ class BackendRegistry:
         ``https://host:443`` are the same server. Pass the request's own
         ``db`` session to avoid taking a second pooled connection.
         """
-        wanted = normalize_server_url(url)
         if db is not None:
             servers = await crud.get_decision_servers(db)
         else:
             async with get_async_db_context() as own:
                 servers = await crud.get_decision_servers(own)
-        for backend_id, backend_url, backend_status in servers:
-            if normalize_server_url(backend_url or "") != wanted:
-                continue
-            if backend_status in (BackendStatus.UNHEALTHY, BackendStatus.DISABLED, BackendStatus.DRAINING):
-                return backend_id, backend_status.value
-            if not await self.is_backend_available(backend_id):
-                return backend_id, "circuit open"
-            return backend_id, None
-        return None, None
+        return await _monitored_state(servers, url, self.is_backend_available)
+
+    async def matting_server_state(
+        self, url: str, db: Optional[AsyncSession] = None
+    ) -> tuple[Optional[int], Optional[str]]:
+        """The same question as ``decision_server_state``, for the matting
+        server at ``url`` (a backend with engine ``matting``)."""
+        if db is not None:
+            servers = await crud.get_matting_servers(db)
+        else:
+            async with get_async_db_context() as own:
+                servers = await crud.get_matting_servers(own)
+        return await _monitored_state(servers, url, self.is_backend_available)
 
     async def model_exists(self, model_name: str) -> bool:
         """Check if a model is available on any healthy backend."""
@@ -1038,8 +1057,9 @@ class BackendRegistry:
             # deliberately discovers ZERO models, so it stays out of routing
             # and the model catalog while remaining a fleet member for status.
             return DlpAdapter(backend.url, timeout=timeout)
-        elif backend.engine == BackendEngine.DECISION:
-            # A System One decision server (Clef, Laya): /health, zero models.
+        elif backend.engine in (BackendEngine.DECISION, BackendEngine.MATTING):
+            # A System One decision server (Clef, Laya) or the matting server:
+            # the same contract, GET /health with a status word, zero models.
             return DecisionAdapter(backend.url, timeout=timeout)
         else:
             # Both vLLM and diffusion backends expose OpenAI-compatible

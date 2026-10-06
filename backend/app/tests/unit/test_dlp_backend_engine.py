@@ -330,7 +330,7 @@ class TestDlpRoutingExclusionStructural:
         # Every model-less engine (DLP, decision servers) is excluded, by the shared tuple.
         assert "Backend.engine.notin_(MODELLESS_ENGINES)" in block
         models = self._src("backend/app/db/models.py")
-        assert "MODELLESS_ENGINES = (BackendEngine.DLP, BackendEngine.DECISION)" in models
+        assert "MODELLESS_ENGINES = (BackendEngine.DLP, BackendEngine.DECISION, BackendEngine.MATTING)" in models
 
     def test_update_backend_prunes_models_on_engine_change(self):
         crud = self._src("backend/app/db/crud.py")
