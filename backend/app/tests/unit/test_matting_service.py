@@ -329,17 +329,26 @@ class TestBusyAndFailure:
             stuck.start()
             seen = None
             for _ in range(500):
-                seen = c.get("/health").json()
-                if seen == {"status": "unhealthy"}:
+                seen = c.get("/health")
+                if seen.status_code != 200:
                     break
                 threading.Event().wait(0.01)
-            assert seen == {"status": "unhealthy"}
-            detail = c.get("/health", headers=AUTH).json()
-            assert detail["status"] == "unhealthy" and detail["stall_seconds"] == 0
+            # Said twice: a status code for anything that reads those, the word for MindRouter's check.
+            assert seen.status_code == 503 and seen.json() == {"status": "unhealthy"}
+            detail = c.get("/health", headers=AUTH)
+            assert detail.status_code == 503 and detail.json()["status"] == "unhealthy"
+            assert detail.json()["stall_seconds"] == 0 and detail.json()["queue_depth"] == 1
+            # A new picture is refused at once, not queued behind the stuck one.
+            started = time.monotonic()
+            refused = c.post("/v1/matte", content=_picture(), headers=AUTH)
+            assert refused.status_code == 503 and refused.headers["retry-after"] == "30"
+            assert time.monotonic() - started < 1.0 and c.app.state.worker.queue_depth() == 1
+            assert c.post("/v1/matte", content=_picture()).status_code == 401      # the key is still checked first
             blocker.set()
             stuck.join(timeout=5)
             assert results[0].status_code == 200
-            assert c.get("/health").json() == {"status": "ok"}             # and it recovers by itself
+            assert c.get("/health").status_code == 200                              # and it recovers by itself
+            assert c.post("/v1/matte", content=_picture(), headers=AUTH).status_code == 200
 
     def test_a_picture_within_the_limit_is_not_a_stall(self, engine_box):
         blocker = threading.Event()

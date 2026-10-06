@@ -363,9 +363,9 @@ How it works, and what follows from it:
 - **`"opaque"` and `"auto"`** return the ordinary picture, with
   `has_alpha: false`. So does any value the server does not recognise (a
   misspelling, say): it is never an error, and `background: "opaque"` in the
-  response tells you the picture is not transparent. Leave the field out and
-  the response is exactly what it was before this option existed (no
-  `background`, no `has_alpha`).
+  response tells you the picture is not transparent. Leave the field out (or
+  send `null`, `""` or `false`) and the response is exactly what it was
+  before this option existed (no `background`, no `has_alpha`).
 - **Edits:** the cut-out is applied to the edited result. Removing the
   background of an uploaded picture without redrawing it is not offered.
 - **Watermark.** The file you receive still carries the invisible watermark
@@ -449,7 +449,7 @@ All of these are admin-tunable config keys. Shipped defaults in parentheses.
 | `img.transparent_enabled` | `false` | Allow `background: "transparent"`. Off → opaque picture, `has_alpha: false`. |
 | `img.matting_url` | `""` | Base URL of the matting (background-removal) server, `matting_service/`. Register the same URL on Admin → Backends (engine *Matting server*) to have it health-checked. |
 | `img.matting_api_key` | `""` | The matting server's bearer key. Never shown again once saved. |
-| `img.matting_timeout` | `30` | Seconds allowed for the cut-out of one response, all its images together (1 to 100). When it runs out the remaining images come back opaque. |
+| `img.matting_timeout` | `30` | Seconds allowed for the cut-out of one response, all its images together (1 to 100). When it runs out the remaining images come back opaque. A request that has already run for most of the front proxy's limit gets less, or no cut-out at all. |
 | `img.policy` | `""` | Policy text; empty disables the judge. |
 | `img.judge_model` | `""` | Primary judge model. |
 | `img.judge_model_secondary` | `""` | Fallback judge model. |

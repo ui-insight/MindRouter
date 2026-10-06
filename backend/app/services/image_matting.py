@@ -46,7 +46,7 @@ Config (app_config, editable on /admin/images-config, read per request):
 import asyncio
 import base64
 import io
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -76,6 +76,11 @@ BACKGROUNDS = (BACKGROUND_TRANSPARENT, BACKGROUND_OPAQUE, BACKGROUND_AUTO)
 # keeps a slow matting server from turning a finished image into a 504.
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 100.0
+# Seconds one image request may have run, from its first moment, by the time
+# its cut-out ends. That ceiling alone is not enough: 600 s is the budget of
+# ONE generation attempt, and a request can wait for a free worker and retry
+# before it gets here. The cut-out is given only what is left of this.
+REQUEST_BUDGET = 690.0
 
 # A matte is never exactly 0 or 255 over a flat area. Values this close to
 # either end are snapped to it, so the background is really gone and the
@@ -102,6 +107,7 @@ OUTCOME_FAILED = "failed"                  # the server is sick: unreachable, 5x
 OUTCOME_BUSY = "busy"                      # the server is loaded, not sick: queue full (503) or too slow
 OUTCOME_REJECTED = "rejected"              # the server refused THIS request (4xx): wrong key, picture too large
 OUTCOME_ERROR = "error"                    # something went wrong on the gateway's side
+OUTCOME_OUT_OF_TIME = "out_of_time"        # not attempted: the response's time limit was already used up
 OUTCOME_NO_SUBJECT = "no_subject"          # the matte kept (almost) nothing
 OUTCOME_NOTHING_REMOVED = "nothing_removed"  # the matte kept everything
 
@@ -119,20 +125,26 @@ class MattingError(Exception):
 def parse_background(value: Any) -> Optional[str]:
     """The caller's ``background`` value, lower-cased, or None when absent.
 
-    A value that is not one of BACKGROUNDS is read as ``"auto"``, never
-    refused. Before this option existed the field was ignored, so a client
-    that sends something else (``"white"``, ``true``) has working requests
-    today; they must keep working. Such a caller gets the ordinary picture,
-    and ``background: "opaque"`` in the response says what that was.
+    Nothing is ever refused. Before this option existed the field was
+    ignored, so a client that sends something else has working requests
+    today, and they must keep working:
+
+    - null, an empty string and any other empty value (``false``, ``0``,
+      ``[]``) count as absent: the response is exactly what it was.
+    - anything else that is not one of BACKGROUNDS (``"white"``, a
+      misspelling) is read as ``"auto"``: the ordinary picture, and
+      ``background: "opaque"`` in the response says what that was. What was
+      actually sent is logged, since the audit row will say ``auto``.
     """
-    if value is None:
-        return None
     if isinstance(value, str):
         cleaned = value.strip().lower()
         if not cleaned:
             return None
         if cleaned in BACKGROUNDS:
             return cleaned
+    elif not value:
+        return None
+    logger.info("image_background_value_not_recognised", sent=repr(value)[:60])
     return BACKGROUND_AUTO
 
 
@@ -175,23 +187,27 @@ def validate_server_url(url: str) -> Optional[str]:
 
 
 def validate_api_key(key: str) -> Optional[str]:
-    """Return an error message for a key that cannot be sent as a bearer
-    token, or None. A pasted smart quote or non-breaking space would
-    otherwise fail every request with nothing to say why."""
-    if not isinstance(key, str) or not key or len(key) > 512 or not all(33 <= ord(ch) <= 126 for ch in key):
-        return "Matting server key must be 1 to 512 printable ASCII characters with no spaces."
+    """Return an error message for a key that cannot be sent in an HTTP
+    header, or None. A pasted smart quote or non-breaking space would
+    otherwise fail every request with nothing to say why. A space inside
+    the key is fine (the matting server accepts any key it was given)."""
+    if (not isinstance(key, str) or not key or key != key.strip() or len(key) > 512
+            or not all(32 <= ord(ch) <= 126 for ch in key)):
+        return "Matting server key must be 1 to 512 printable ASCII characters."
     return None
 
 
 def clean_timeout(value: Any) -> float:
-    """A timeout in seconds within (0, MAX_TIMEOUT], or the default."""
+    """A timeout in seconds within (0, MAX_TIMEOUT]. A value above the
+    ceiling is brought down to it (someone wanted a long limit); anything
+    that is not a positive number becomes the default."""
     try:
         seconds = float(value)
     except (TypeError, ValueError):
         return DEFAULT_TIMEOUT
-    if isinstance(value, bool) or not 0 < seconds <= MAX_TIMEOUT:
+    if isinstance(value, bool) or not seconds > 0:
         return DEFAULT_TIMEOUT
-    return seconds
+    return min(seconds, MAX_TIMEOUT)
 
 
 async def load_config(db: Any) -> MattingConfig:
@@ -202,12 +218,16 @@ async def load_config(db: Any) -> MattingConfig:
     url = await crud.get_config_json(db, "img.matting_url", "")
     key = await crud.get_config_json(db, "img.matting_api_key", "")
     timeout = await crud.get_config_json(db, "img.matting_timeout", DEFAULT_TIMEOUT)
+    key = key.strip() if isinstance(key, str) else ""
+    if key and validate_api_key(key) is not None:
+        # Sent as no key, so the server answers 401 ("rejected") instead of
+        # every image failing on an encoding error. Say why, once per request.
+        logger.warning("image_matting_stored_key_unusable_sending_none")
+        key = ""
     return MattingConfig(
         enabled=enabled,
         url=url.strip().rstrip("/") if isinstance(url, str) else "",
-        # A stored key that cannot be a header value is sent as no key: the
-        # server answers 401 ("rejected"), which names the problem.
-        api_key=key.strip() if isinstance(key, str) and validate_api_key(key.strip()) is None else None,
+        api_key=key or None,
         timeout=clean_timeout(timeout),
     )
 
@@ -265,21 +285,26 @@ async def fetch_matte(
     image_bytes: bytes,
     config: MattingConfig,
     client: Optional[httpx.AsyncClient] = None,
+    timeout: Optional[float] = None,
 ) -> bytes:
     """Ask the matting server for the matte of one picture (PNG bytes back).
 
     The whole exchange, waiting in the server's queue included, gets
-    ``config.timeout`` seconds; httpx's own read timeout only bounds the gap
-    between two bytes, which a slow drip would never trip. Raises
-    MattingError for any failure; its text never includes the reply body.
+    ``timeout`` seconds (default: ``config.timeout``; a later image of a
+    response is given what the earlier ones left). httpx's own read timeout
+    only bounds the gap between two bytes, which a slow drip would never
+    trip. Raises MattingError for any failure; its text never includes the
+    reply body.
     """
+    limit = config.timeout if timeout is None else timeout
     own = client is None
     if own:
         client = new_client(config)
     try:
-        return await asyncio.wait_for(_request_matte(client, image_bytes, config), timeout=config.timeout)
+        return await asyncio.wait_for(_request_matte(client, image_bytes, config), timeout=limit)
     except asyncio.TimeoutError:
-        raise MattingError(f"no matte within {config.timeout:g} s", OUTCOME_BUSY) from None
+        left = "" if limit >= config.timeout else f" (what was left of the {config.timeout:g} s limit)"
+        raise MattingError(f"no matte within {limit:.1f} s{left}", OUTCOME_BUSY) from None
     finally:
         if own:
             await client.aclose()
@@ -394,6 +419,7 @@ async def make_transparent(
     b64_image: str,
     config: MattingConfig,
     client: Optional[httpx.AsyncClient] = None,
+    timeout: Optional[float] = None,
 ) -> Tuple[str, str]:
     """Cut out one base64 picture: ``(base64 PNG, outcome)``.
 
@@ -406,7 +432,7 @@ async def make_transparent(
         logger.warning("image_matting_picture_not_base64")
         return b64_image, OUTCOME_ERROR
     try:
-        matte = await fetch_matte(raw, config, client=client)
+        matte = await fetch_matte(raw, config, client=client, timeout=timeout)
         cut, outcome = await asyncio.to_thread(attach_matte, raw, matte)
         if cut is None:
             logger.info("image_matting_not_applied", outcome=outcome)
@@ -441,12 +467,21 @@ _SERVER_ANSWERED = (OUTCOME_TRANSPARENT, OUTCOME_NO_SUBJECT, OUTCOME_NOTHING_REM
 
 
 async def _cut_out_all(
-    pictures: List[Any], config: MattingConfig, registry: Any
+    pictures: List[Any], config: MattingConfig, registry: Any, budget: Optional[float] = None
 ) -> List[Tuple[str, Optional[str]]]:
     """Cut out every image of one response. One ``(outcome, cut-out)`` per
-    image; the cut-out is base64 PNG for OUTCOME_TRANSPARENT and None otherwise."""
+    image; the cut-out is base64 PNG for OUTCOME_TRANSPARENT and None otherwise.
+
+    ``budget`` is how many seconds the request can still afford (None = no
+    limit beyond ``config.timeout``).
+    """
     if not config.usable:
         return [(OUTCOME_DISABLED, None)] * len(pictures)
+    allowed = config.timeout if budget is None else min(config.timeout, budget)
+    if allowed <= 0:
+        # The request has already run so long that even starting would risk
+        # the front proxy cutting off a finished picture.
+        return [(OUTCOME_OUT_OF_TIME, None)] * len(pictures)
 
     # A matting server registered as a backend (engine "matting") is
     # health-polled; when it is known to be down, do not dial it.
@@ -467,7 +502,7 @@ async def _cut_out_all(
     dialed: List[str] = []          # outcomes of the pictures actually sent to the server
     # One deadline for the whole response: n images do not get n timeouts.
     clock = asyncio.get_running_loop().time
-    deadline = clock() + config.timeout
+    deadline = clock() + allowed
     async with new_client(config) as client:
         for picture in pictures:
             if dialed and dialed[-1] in _STOP_DIALING:
@@ -478,11 +513,13 @@ async def _cut_out_all(
                 continue
             remaining = deadline - clock()
             if remaining <= 0:
-                results.append((OUTCOME_BUSY, None))        # the earlier images used the time
+                # The earlier images (the server's answers, or attaching
+                # them here) used the time. Nobody in particular is to blame.
+                results.append((OUTCOME_OUT_OF_TIME, None))
                 continue
             # An entry with no bytes (url only) comes back as OUTCOME_ERROR
             # without the server being asked.
-            cut, outcome = await make_transparent(picture, replace(config, timeout=remaining), client=client)
+            cut, outcome = await make_transparent(picture, config, client=client, timeout=remaining)
             dialed.append(outcome)
             results.append((outcome, cut if outcome == OUTCOME_TRANSPARENT else None))
 
@@ -502,12 +539,14 @@ async def apply_background(
     response: Dict[str, Any],
     config: Optional[MattingConfig],
     registry: Any = None,
+    budget: Optional[float] = None,
 ) -> None:
     """Answer the caller's ``background`` on a finished image response, in place.
 
     Does nothing when the caller did not send the field. Otherwise every
     image gets ``has_alpha`` and the response gets ``background`` (what was
-    produced: ``"transparent"`` only when every image is). Never raises.
+    produced: ``"transparent"`` only when every image is). ``budget`` caps
+    the seconds spent (see REQUEST_BUDGET). Never raises.
     """
     if background is None:
         return
@@ -516,7 +555,7 @@ async def apply_background(
     if background == BACKGROUND_TRANSPARENT:
         try:
             results = await _cut_out_all(
-                [item.get("b64_json") for item in items], config or MattingConfig(), registry)
+                [item.get("b64_json") for item in items], config or MattingConfig(), registry, budget)
         except Exception as error:
             logger.error("image_background_failed_returning_opaque_images", error_type=type(error).__name__)
             results = [(OUTCOME_ERROR, None)] * len(items)
