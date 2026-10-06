@@ -25,8 +25,10 @@ pixels are the subject.
 - One inference thread with a bounded queue in front: beyond
   `MATTING_MAX_QUEUE` waiting pictures the answer is `503` with `Retry-After`.
 - A caller that disconnects while waiting is dropped from the queue.
-- `GET /health`: `{"status": "ok"}` for anyone (`"loading"` while the weights
-  load); model, device, queue depth and counts with the key.
+- `GET /health`: `{"status": "ok"}` for anyone; model, device, queue depth and
+  counts with the key. The port opens only once the model is loaded, so a
+  server that is still starting refuses connections (MindRouter's health
+  check reads that as down, which is right).
 - The picture's type is read from its own first bytes, its size from its
   header before any pixel is decoded (`MATTING_MAX_PIXELS`), and its length
   while reading (`MATTING_MAX_BODY_BYTES`, 413 above it).
@@ -117,6 +119,16 @@ front of the port, as for the other node services.
    skips it (returning opaque pictures) while it is unhealthy, disabled,
    draining or its circuit is open. Without this registration the server is
    simply dialed on every request.
+
+The URL is the server's address only (`https://host:port`), not the
+`/v1/matte` endpoint. Only sickness counts against the circuit breaker
+(unreachable, 5xx other than 503, a reply that is not a matte of the
+picture); a full queue, a slow answer and a refused request (wrong key,
+picture over `MATTING_MAX_PIXELS`) do not.
+
+**Rolling MindRouter back** past the release that added the `matting` engine
+(2.9.90, migration 089): delete the matting backend row first. An older
+release cannot load a backend whose engine it does not know.
 
 ## Tests
 

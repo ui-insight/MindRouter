@@ -46,7 +46,7 @@ Config (app_config, editable on /admin/images-config, read per request):
 import asyncio
 import base64
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -77,9 +77,15 @@ MAX_TIMEOUT = 300.0
 # subject is really solid.
 ALPHA_FLOOR = 4
 ALPHA_CEILING = 251
-# Below this share of visible pixels the model found no subject; a picture
-# that is all background is not a cut-out.
-MIN_VISIBLE_FRACTION = 0.002
+# A cut-out needs a subject and a background. Below this share of solid
+# (fully opaque) pixels the model found no subject: a faint haze over the
+# whole picture is not one. Below this share of removed (fully transparent)
+# pixels nothing worth calling a background was taken away.
+MIN_SOLID_FRACTION = 0.002
+MIN_REMOVED_FRACTION = 0.002
+# The largest reply read from the matting server. A greyscale PNG matte of a
+# 2048 x 2048 picture is a few megabytes at most.
+MAX_MATTE_BYTES = 16 * 1024 * 1024
 # Pixels of context kept round the edge band: the larger blur window.
 _EDGE_MARGIN = 96
 
@@ -87,19 +93,22 @@ _EDGE_MARGIN = 96
 OUTCOME_TRANSPARENT = "transparent"
 OUTCOME_DISABLED = "disabled"              # the feature is off or has no server
 OUTCOME_UNAVAILABLE = "unavailable"        # the server is registered and known to be down
-OUTCOME_FAILED = "failed"                  # the server could not be reached or answered wrongly
-OUTCOME_BUSY = "busy"                      # the server's queue was full (503): load, not sickness
+OUTCOME_FAILED = "failed"                  # the server is sick: unreachable, 5xx, or a wrong answer
+OUTCOME_BUSY = "busy"                      # the server is loaded, not sick: queue full (503) or too slow
+OUTCOME_REJECTED = "rejected"              # the server refused THIS request (4xx): wrong key, picture too large
+OUTCOME_ERROR = "error"                    # something went wrong on the gateway's side
 OUTCOME_NO_SUBJECT = "no_subject"          # the matte kept (almost) nothing
 OUTCOME_NOTHING_REMOVED = "nothing_removed"  # the matte kept everything
 
 
 class MattingError(Exception):
-    """The matting server could not give a usable matte. ``busy`` marks a 503:
-    the server is working but its queue is full."""
+    """The matting server gave no usable matte. ``outcome`` says whose fault
+    that was (OUTCOME_FAILED, OUTCOME_BUSY or OUTCOME_REJECTED); only
+    OUTCOME_FAILED counts against the server's circuit breaker."""
 
-    def __init__(self, message: str, busy: bool = False):
+    def __init__(self, message: str, outcome: str = OUTCOME_FAILED):
         super().__init__(message)
-        self.busy = busy
+        self.outcome = outcome
 
 
 def parse_background(value: Any) -> Optional[str]:
@@ -123,8 +132,10 @@ def parse_background(value: Any) -> Optional[str]:
 class MattingConfig:
     enabled: bool = False
     url: str = ""
-    api_key: Optional[str] = None
-    timeout: float = DEFAULT_TIMEOUT
+    # Kept out of repr(), so the key cannot reach a log or a traceback that
+    # prints local variables.
+    api_key: Optional[str] = field(default=None, repr=False)
+    timeout: float = DEFAULT_TIMEOUT       # seconds allowed per picture, start to finish
 
     @property
     def usable(self) -> bool:
@@ -132,18 +143,26 @@ class MattingConfig:
 
 
 def validate_server_url(url: str) -> Optional[str]:
-    """Return an error message for an unusable matting server URL, or None."""
+    """Return an error message for an unusable matting server URL, or None.
+
+    The URL is the server's base address: scheme, host and optional port,
+    nothing else. Refusing a path catches the commonest mistake, pasting the
+    endpoint (``.../v1/matte``) instead of the server.
+    """
     from urllib.parse import urlsplit
 
+    if not isinstance(url, str) or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
+        return "Matting server URL must not contain spaces or control characters."
     try:
         parts = urlsplit(url)
-        host = parts.hostname
+        host, _ = parts.hostname, parts.port       # .port raises for a port that is not a number in range
     except ValueError:
-        return "Matting server URL is not a valid URL."
+        return "Matting server URL is not a valid URL (check the port)."
     if parts.scheme not in ("http", "https") or not host:
         return "Matting server URL must start with http:// or https:// and name a host."
-    if parts.username or parts.password or parts.query or parts.fragment:
-        return "Matting server URL must be the server's base address only (no credentials, query or fragment)."
+    if parts.username or parts.password or parts.query or parts.fragment or parts.path not in ("", "/"):
+        return ("Matting server URL must be the server's base address only, like https://host:port "
+                "(no path, credentials, query or fragment).")
     return None
 
 
@@ -178,6 +197,51 @@ async def load_config(db: Any) -> MattingConfig:
 # The matting server
 # ---------------------------------------------------------------------------
 
+def new_client(config: MattingConfig) -> httpx.AsyncClient:
+    """The HTTP client for the matting server: this request's timeouts and the
+    cluster's internal TLS setting (the same one the health check uses)."""
+    from backend.app.settings import get_settings
+
+    verify = bool(getattr(get_settings(), "internal_tls_verify", True))
+    timeout = httpx.Timeout(connect=10.0, read=config.timeout, write=config.timeout, pool=10.0)
+    return httpx.AsyncClient(timeout=timeout, verify=verify)
+
+
+async def _request_matte(client: httpx.AsyncClient, image_bytes: bytes, config: MattingConfig) -> bytes:
+    headers = {"Content-Type": "image/png"}
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
+    try:
+        async with client.stream("POST", f"{config.url}/v1/matte", content=image_bytes, headers=headers) as response:
+            status = response.status_code
+            if status != 200:
+                # 503 is "queue full"; other 4xx are about this request (wrong
+                # key, picture too large for the server); the rest is sickness.
+                outcome = OUTCOME_BUSY if status == 503 else OUTCOME_REJECTED if 400 <= status < 500 else OUTCOME_FAILED
+                raise MattingError(f"matting server returned HTTP {status}", outcome)
+            declared = response.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > MAX_MATTE_BYTES:
+                raise MattingError("matting server reply is too large")
+            chunks, size = [], 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > MAX_MATTE_BYTES:
+                    raise MattingError("matting server reply is too large")
+                chunks.append(chunk)
+    except httpx.ConnectTimeout as error:
+        raise MattingError(f"matting server unreachable: {type(error).__name__}") from error
+    except httpx.TimeoutException as error:
+        # Connected, then too slow: the picture outran the wait (a queue
+        # behind other pictures, usually). That is load, not sickness.
+        raise MattingError(f"matting server too slow: {type(error).__name__}", OUTCOME_BUSY) from error
+    except httpx.HTTPError as error:
+        raise MattingError(f"matting server unreachable: {type(error).__name__}") from error
+    body = b"".join(chunks)
+    if not body.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise MattingError("matting server did not return a PNG")
+    return body
+
+
 async def fetch_matte(
     image_bytes: bytes,
     config: MattingConfig,
@@ -185,32 +249,21 @@ async def fetch_matte(
 ) -> bytes:
     """Ask the matting server for the matte of one picture (PNG bytes back).
 
-    Raises MattingError for any failure. The error text never includes the
-    server's reply body.
+    The whole exchange, waiting in the server's queue included, gets
+    ``config.timeout`` seconds; httpx's own read timeout only bounds the gap
+    between two bytes, which a slow drip would never trip. Raises
+    MattingError for any failure; its text never includes the reply body.
     """
-    from backend.app.settings import get_settings
-
-    headers = {"Content-Type": "image/png"}
-    if config.api_key:
-        headers["Authorization"] = f"Bearer {config.api_key}"
     own = client is None
     if own:
-        verify = bool(getattr(get_settings(), "internal_tls_verify", True))
-        timeout = httpx.Timeout(connect=10.0, read=config.timeout, write=config.timeout, pool=10.0)
-        client = httpx.AsyncClient(timeout=timeout, verify=verify)
+        client = new_client(config)
     try:
-        response = await client.post(f"{config.url}/v1/matte", content=image_bytes, headers=headers)
-    except httpx.HTTPError as error:
-        raise MattingError(f"matting server unreachable: {type(error).__name__}") from error
+        return await asyncio.wait_for(_request_matte(client, image_bytes, config), timeout=config.timeout)
+    except asyncio.TimeoutError:
+        raise MattingError(f"no matte within {config.timeout:g} s", OUTCOME_BUSY) from None
     finally:
         if own:
             await client.aclose()
-    if response.status_code != 200:
-        raise MattingError(f"matting server returned HTTP {response.status_code}",
-                           busy=response.status_code == 503)
-    if not response.content.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise MattingError("matting server did not return a PNG")
-    return response.content
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +319,9 @@ def attach_matte(image_bytes: bytes, matte_bytes: bytes) -> Tuple[Optional[bytes
     """Cut a picture out with its matte.
 
     Returns ``(RGBA PNG bytes, OUTCOME_TRANSPARENT)``, or ``(None, outcome)``
-    when the matte leaves nothing worth returning (no subject found, or
-    nothing removed). Raises MattingError when the matte does not belong to
-    the picture. Runs in a worker thread.
+    when the matte is not a cut-out (no solid subject, or no background
+    removed). Raises MattingError when the matte does not belong to the
+    picture. Runs in a worker thread.
     """
     import numpy as np
     from PIL import Image
@@ -277,18 +330,22 @@ def attach_matte(image_bytes: bytes, matte_bytes: bytes) -> Tuple[Optional[bytes
         with Image.open(io.BytesIO(image_bytes)) as opened:
             picture = opened.convert("RGB")
         with Image.open(io.BytesIO(matte_bytes), formats=["PNG"]) as opened:
+            # From the header, BEFORE any pixel is decoded: a small file can
+            # declare an enormous picture, and the server's reply is not trusted.
+            if opened.size != picture.size:
+                raise MattingError("matte and picture are not the same size")
             matte = opened.convert("L")
+    except MattingError:
+        raise
     except Exception as error:
         raise MattingError(f"could not decode the picture or its matte: {type(error).__name__}") from None
-    if matte.size != picture.size:
-        raise MattingError("matte and picture are not the same size")
 
     alpha = np.asarray(matte, dtype=np.uint8).copy()
     alpha[alpha <= ALPHA_FLOOR] = 0
     alpha[alpha >= ALPHA_CEILING] = 255
-    if np.count_nonzero(alpha) < MIN_VISIBLE_FRACTION * alpha.size:
+    if np.count_nonzero(alpha == 255) < MIN_SOLID_FRACTION * alpha.size:
         return None, OUTCOME_NO_SUBJECT
-    if alpha.min() == 255:
+    if np.count_nonzero(alpha == 0) < MIN_REMOVED_FRACTION * alpha.size:
         return None, OUTCOME_NOTHING_REMOVED
 
     pixels = np.asarray(picture, dtype=np.uint8).copy()
@@ -322,10 +379,14 @@ async def make_transparent(
     """Cut out one base64 picture: ``(base64 PNG, outcome)``.
 
     Fails OPEN: for any outcome other than OUTCOME_TRANSPARENT the ORIGINAL
-    picture is returned unchanged. Never raises.
+    picture is returned unchanged. Never raises (cancellation passes through).
     """
     try:
         raw = base64.b64decode(b64_image)
+    except Exception:
+        logger.warning("image_matting_picture_not_base64")
+        return b64_image, OUTCOME_ERROR
+    try:
         matte = await fetch_matte(raw, config, client=client)
         cut, outcome = await asyncio.to_thread(attach_matte, raw, matte)
         if cut is None:
@@ -333,11 +394,12 @@ async def make_transparent(
             return b64_image, outcome
         return base64.b64encode(cut).decode("ascii"), outcome
     except MattingError as error:
-        logger.warning("image_matting_failed_returning_opaque_image", reason=str(error))
-        return b64_image, OUTCOME_BUSY if error.busy else OUTCOME_FAILED
-    except Exception:
-        logger.exception("image_matting_failed_returning_opaque_image")
-    return b64_image, OUTCOME_FAILED
+        logger.warning("image_matting_failed_returning_opaque_image", reason=str(error), outcome=error.outcome)
+        return b64_image, error.outcome
+    except Exception as error:
+        # Type only: a traceback could print local variables.
+        logger.error("image_matting_failed_returning_opaque_image", error_type=type(error).__name__)
+    return b64_image, OUTCOME_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +413,12 @@ async def _report(report: Any, backend_id: int) -> None:
         await report(backend_id)
     except Exception:
         logger.warning("image_matting_circuit_report_failed", backend_id=backend_id)
+
+
+# After one of these the server is not asked again within the same response.
+_STOP_DIALING = (OUTCOME_FAILED, OUTCOME_BUSY, OUTCOME_REJECTED)
+# The server returned a matte that fitted the picture: it is working.
+_SERVER_ANSWERED = (OUTCOME_TRANSPARENT, OUTCOME_NO_SUBJECT, OUTCOME_NOTHING_REMOVED)
 
 
 async def _cut_out_all(
@@ -376,30 +444,29 @@ async def _cut_out_all(
             logger.info("image_matting_server_unavailable", backend_id=monitor_id, reason=problem)
             return [(OUTCOME_UNAVAILABLE, None)] * len(pictures)
 
-    from backend.app.settings import get_settings
-
     results: List[Tuple[str, Optional[str]]] = []
     dialed: List[str] = []          # outcomes of the pictures actually sent to the server
-    verify = bool(getattr(get_settings(), "internal_tls_verify", True))
-    timeout = httpx.Timeout(connect=10.0, read=config.timeout, write=config.timeout, pool=10.0)
-    async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
+    async with new_client(config) as client:
         for picture in pictures:
-            if dialed and dialed[-1] in (OUTCOME_FAILED, OUTCOME_BUSY):
-                # The server just failed or said it is full: do not make the
-                # caller wait out the same answer for every remaining image.
+            if dialed and dialed[-1] in _STOP_DIALING:
+                # The server just failed, said it is full, or refused the
+                # request: do not make the caller wait out the same answer
+                # for every remaining image.
                 results.append((dialed[-1], None))
                 continue
-            if not isinstance(picture, str) or not picture:
-                results.append((OUTCOME_FAILED, None))     # nothing to cut out (a url-only entry)
-                continue
+            # An entry with no bytes (url only) comes back as OUTCOME_ERROR
+            # without the server being asked.
             cut, outcome = await make_transparent(picture, config, client=client)
             dialed.append(outcome)
             results.append((outcome, cut if outcome == OUTCOME_TRANSPARENT else None))
 
+    # Only sickness counts against the server's circuit breaker. Busy, slow,
+    # and a refusal of one request (wrong key, picture too large) do not:
+    # three of those must not switch transparency off for everybody.
     if monitor_id is not None and registry is not None:
         if OUTCOME_FAILED in dialed:
             await _report(registry.report_live_failure, monitor_id)
-        elif any(outcome != OUTCOME_BUSY for outcome in dialed):
+        elif any(outcome in _SERVER_ANSWERED for outcome in dialed):
             await _report(registry.report_live_success, monitor_id)
     return results
 
@@ -424,9 +491,9 @@ async def apply_background(
         try:
             results = await _cut_out_all(
                 [item.get("b64_json") for item in items], config or MattingConfig(), registry)
-        except Exception:
-            logger.exception("image_background_failed_returning_opaque_images")
-            results = [(OUTCOME_FAILED, None)] * len(items)
+        except Exception as error:
+            logger.error("image_background_failed_returning_opaque_images", error_type=type(error).__name__)
+            results = [(OUTCOME_ERROR, None)] * len(items)
         for outcome, _ in results:
             IMAGE_BACKGROUNDS.labels(outcome=outcome).inc()
     # Pictures are replaced only here, after everything that can fail, so

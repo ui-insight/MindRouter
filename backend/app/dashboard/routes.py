@@ -5473,13 +5473,18 @@ async def admin_images_config_post(
 
         # Transparent backgrounds (the matting server). Validated BEFORE any
         # write, like the fields above. Turning the feature on needs a URL;
-        # a blank key field keeps the stored key.
+        # a blank key field keeps the stored key. A form that does not carry
+        # this card at all (a tab opened before the card existed) leaves
+        # these settings alone instead of reading "absent" as "off".
         from backend.app.services import image_matting as _image_matting
 
+        matting_posted = "matting_settings" in form
         transparent_on = "transparent_enabled" in form
         matting_url = (form.get("matting_url") or "").strip().rstrip("/")
         matting_error = None
-        if matting_url:
+        if not matting_posted:
+            pass
+        elif matting_url:
             matting_error = _image_matting.validate_server_url(matting_url)
         elif transparent_on:
             matting_error = "Transparent backgrounds need a matting server URL."
@@ -5488,7 +5493,7 @@ async def admin_images_config_post(
             matting_timeout = int(raw_timeout) if raw_timeout else int(_image_matting.DEFAULT_TIMEOUT)
         except (TypeError, ValueError):
             matting_timeout = 0
-        if not matting_error and not 1 <= matting_timeout <= int(_image_matting.MAX_TIMEOUT):
+        if matting_posted and not matting_error and not 1 <= matting_timeout <= int(_image_matting.MAX_TIMEOUT):
             matting_error = (
                 f"Matting timeout must be 1 to {int(_image_matting.MAX_TIMEOUT)} seconds."
             )
@@ -5506,14 +5511,15 @@ async def admin_images_config_post(
                     url=f"/admin/images-config?error={_qp(wm_error)}", status_code=302
                 )
             await crud.set_config(db, "img.watermark_text", wm_text)
-        await crud.set_config(db, "img.transparent_enabled", transparent_on)
-        await crud.set_config(db, "img.matting_url", matting_url)
-        await crud.set_config(db, "img.matting_timeout", matting_timeout)
-        matting_key = (form.get("matting_api_key") or "").strip()
-        if "matting_api_key_clear" in form:
-            await crud.set_config(db, "img.matting_api_key", "")
-        elif matting_key:
-            await crud.set_config(db, "img.matting_api_key", matting_key)
+        if matting_posted:
+            await crud.set_config(db, "img.transparent_enabled", transparent_on)
+            await crud.set_config(db, "img.matting_url", matting_url)
+            await crud.set_config(db, "img.matting_timeout", matting_timeout)
+            matting_key = (form.get("matting_api_key") or "").strip()
+            if "matting_api_key_clear" in form:
+                await crud.set_config(db, "img.matting_api_key", "")
+            elif matting_key:
+                await crud.set_config(db, "img.matting_api_key", matting_key)
         await crud.set_config(db, "img.quota_tokens_per_image", quota_per_image)
         await crud.set_config(db, "img.watermark_enabled", wm_on)
 
@@ -5561,8 +5567,8 @@ async def admin_images_config_post(
                 "enabled": "enabled" in form,
                 "enabled_by_default": "enabled_by_default" in form,
                 "model": form.get("default_model"),
-                "transparent_backgrounds": transparent_on,
-                "matting_url": matting_url,
+                **({"transparent_backgrounds": transparent_on, "matting_url": matting_url}
+                   if matting_posted else {}),
             },
             ip_address=_ip,
         )

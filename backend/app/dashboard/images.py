@@ -216,6 +216,17 @@ async def images_api_generate(
     body = await request.json()
 
     from backend.app.core.canonical_schemas import CanonicalImageRequest
+    from backend.app.services.image_matting import parse_background
+
+    # `background` (transparent | opaque | auto): refused here, before the
+    # policy judge runs, the same as on the API path.
+    try:
+        background = parse_background(body.get("background"))
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
+        )
 
     # Load config for defaults/guardrails
     enabled = await crud.get_config_json(db, "img.enabled", True)
@@ -373,16 +384,6 @@ async def images_api_generate(
                 status_code=400,
                 content={"error": {"message": f"reference image exceeds {max_bytes // 1024 // 1024}MB", "type": "invalid_request_error"}},
             )
-
-    from backend.app.services.image_matting import parse_background
-
-    try:
-        background = parse_background(body.get("background"))
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
-        )
 
     canonical = CanonicalImageRequest(
         model=body["model"],

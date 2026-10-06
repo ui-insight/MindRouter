@@ -726,7 +726,7 @@ with open("idaho.png", "wb") as f:
                 <ul>
                     <li><strong>Describe the subject, not the transparency.</strong> The image model only draws opaque pictures (asked for a "transparent background" it paints a checkerboard). The background is removed afterwards by a separate background-removal model, so a plain background in the prompt gives the cleanest edge.</li>
                     <li><strong>Check <code>has_alpha</code>.</strong> Transparency never fails a request: if the feature is off, the background-removal server is unavailable, or no subject is found, you receive the ordinary opaque picture with <code>"has_alpha": false</code> and <code>"background": "opaque"</code>. With <code>n</code> &gt; 1 each image has its own <code>has_alpha</code>.</li>
-                    <li>The image is always returned as <code>b64_json</code>. Thin smoke, glows and drop shadows usually go with the background.</li>
+                    <li>A cut-out is always returned as <code>b64_json</code>, whatever <code>response_format</code> says. Thin smoke, glows and drop shadows usually go with the background.</li>
                     <li>Requests that do not send <code>background</code> get exactly the response shown earlier, without the two extra fields.</li>
                 </ul>
 

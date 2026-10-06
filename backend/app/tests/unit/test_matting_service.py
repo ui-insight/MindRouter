@@ -14,18 +14,21 @@
 # seconds / coverage headers), what is refused before the
 # model runs (empty, not an image, a type that lies about
 # itself, too many pixels, too many bytes), the bounded queue
-# (503), a model failure answered 500 without its text, a
-# matte of the wrong shape, the settings read from the
-# environment, and the deployment files.
+# (503), one picture on the model at a time, a caller who
+# leaves while waiting, a model failure answered 500 without
+# its text, a matte of the wrong shape, the settings read
+# from the environment, and the deployment files.
 #
 ############################################################
 
 """Unit tests for the matting service."""
 
+import asyncio
 import io
 import logging
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -132,12 +135,17 @@ class TestStartAndAuth:
         assert detail["queue_depth"] == 0 and detail["max_queue"] == 16
         assert detail["stats"]["requests"] == 0
 
-    def test_health_says_loading_until_the_model_is_built(self, engine_box):
-        app = server.create_app(_config())       # lifespan not entered: nothing loaded yet
+    def test_the_model_is_loaded_during_start_up_before_anything_is_served(self, engine_box):
+        # uvicorn opens the port only after start-up, so there is no
+        # "loading" answer: a server that is starting refuses connections.
+        app = server.create_app(_config())
         worker = app.state.worker
-        assert worker.ready is False
+        assert worker.ready is False and "engine" not in engine_box
         with TestClient(app) as c:
-            assert worker.ready is True and c.get("/health").json() == {"status": "ok"}
+            assert worker.ready is True and worker.engine is engine_box["engine"]
+            assert c.get("/health").json() == {"status": "ok"}
+        source = (_SERVICE / "server.py").read_text()
+        assert '"loading"' not in source.split("def create_app", 1)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +252,70 @@ class TestBusyAndFailure:
         assert results[0].status_code == 200
         assert worker.stats.rejected_busy == 1 and worker.queue_depth() == 0
 
+    def test_the_model_sees_one_picture_at_a_time(self, engine_box):
+        box = {"now": 0, "most": 0}
+        real = FakeEngine.matte
+
+        def counted(self, image):
+            box["now"] += 1
+            box["most"] = max(box["most"], box["now"])
+            time.sleep(0.05)
+            try:
+                return real(self, image)
+            finally:
+                box["now"] -= 1
+
+        results = []
+        with TestClient(server.create_app(_config())) as c:
+            engine_box["engine"].matte = counted.__get__(engine_box["engine"])
+            threads = [threading.Thread(
+                target=lambda: results.append(c.post("/v1/matte", content=_picture(), headers=AUTH).status_code))
+                for _ in range(6)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            assert c.app.state.worker._executor._max_workers == 1
+        assert results == [200] * 6 and box["most"] == 1
+
+    async def test_a_caller_who_leaves_while_waiting_frees_its_work(self):
+        class Gone:
+            async def is_disconnected(self):
+                return True
+
+        class Here:
+            async def is_disconnected(self):
+                return False
+
+        cancelled = asyncio.Event()
+
+        async def work():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        with pytest.raises(server.ClientGone):
+            await server._unless_disconnected(Gone(), work(), poll_seconds=0.01)
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+        async def quick():
+            await asyncio.sleep(0.03)
+            return "matte"
+
+        assert await server._unless_disconnected(Here(), quick(), poll_seconds=0.01) == "matte"
+
+    def test_a_caller_who_left_is_answered_499(self, engine_box, monkeypatch):
+        async def gone(request, work, poll_seconds=0.25):
+            work.close()
+            raise server.ClientGone()
+
+        monkeypatch.setattr(server, "_unless_disconnected", gone)
+        with TestClient(server.create_app(_config())) as c:
+            assert c.post("/v1/matte", content=_picture(), headers=AUTH).status_code == 499
+            assert c.get("/health", headers=AUTH).json()["stats"]["failed"] == 0
+
     def test_a_model_failure_is_500_and_its_text_goes_nowhere(self, engine_box, caplog):
         engine_box["kwargs"] = {"fail": RuntimeError(f"CUDA error near {SECRET}")}
         with caplog.at_level(logging.DEBUG), TestClient(server.create_app(_config())) as c:
@@ -325,3 +397,6 @@ class TestDeploymentFiles:
         source = (_SERVICE / "server.py").read_text()
         assert "factory = MODEL_FACTORY or BiRefNetEngine" in source
         assert 'kwargs["revision"] = config.revision' in source
+        # A repository id with no pinned commit runs whatever code is there today: say so at start.
+        engine = source.split("class BiRefNetEngine", 1)[1].split("def matte", 1)[0]
+        assert "elif not os.path.isdir(config.model):" in engine and "matting_model_revision_not_pinned" in engine

@@ -354,8 +354,9 @@ How it works, and what follows from it:
   ordinary opaque picture with `has_alpha: false` and `background: "opaque"`.
   With `n` > 1 each image has its own `has_alpha`; the top-level `background`
   is `"transparent"` only when every image is.
-- **The response always carries the bytes.** With `background: "transparent"`
-  the image comes back as `b64_json` whatever `response_format` says.
+- **A cut-out always comes back as bytes.** When transparency is switched on,
+  a `background: "transparent"` request returns `b64_json` whatever
+  `response_format` says.
 - **The whole subject is kept, soft things are not.** Thin smoke, glows and
   drop shadows usually go with the background; glass keeps its outline but is
   not see-through.

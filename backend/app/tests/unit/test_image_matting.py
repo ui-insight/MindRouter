@@ -13,23 +13,30 @@
 # out, that every fully opaque and fully transparent pixel
 # keeps its colour so the watermark survives in the file,
 # that edge pixels lose the old background's colour, the two
-# "not a cut-out" cases, a matte that does not fit); the call
-# to the matting server; failing open at every level; the
-# response fields; the health lookup and circuit reports for a
-# registered server; the request path (b64 forced, cut-out
-# after completion, nothing changes for callers who do not
-# send the field); both endpoints and the playground; the
-# admin settings; the engine, the migration and the docs.
+# "not a cut-out" cases, a matte that does not fit or claims
+# an enormous size); the call to the matting server (a reply
+# that is too large or never finishes, and whose fault each
+# failure is); failing open at every level; the response
+# fields; the health lookup and circuit reports for a
+# registered server (only sickness is reported); the request
+# path (b64 forced, cut-out after completion, cancellation,
+# nothing changes for callers who do not send the field);
+# both endpoints and the playground; the admin settings form
+# driven for real; the engine, the migration and the docs.
 #
 ############################################################
 
 """Transparent backgrounds for generated images."""
 
 import ast
+import asyncio
 import base64
 import importlib.util
 import io
 import re
+import struct
+import time
+import zlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -169,26 +176,56 @@ class TestAttachMatte:
         alpha = _open(im.attach_matte(_png(picture), _png(matte))[0])[0, :, 3]
         assert alpha.tolist() == [0, 0, 0, im.ALPHA_FLOOR + 1, 128, im.ALPHA_CEILING - 1, 255, 255]
 
-    def test_a_matte_that_keeps_nothing_is_not_a_cut_out(self):
+    def test_without_a_solid_subject_it_is_not_a_cut_out(self):
         picture = _noise((100, 100))
-        assert im.attach_matte(_png(picture), _png(Image.new("L", (100, 100), 0))) == (None, im.OUTCOME_NO_SUBJECT)
+        blank = Image.new("L", (100, 100), 0)
+        assert im.attach_matte(_png(picture), _png(blank)) == (None, im.OUTCOME_NO_SUBJECT)
         assert im.attach_matte(_png(picture), _png(Image.new("L", (100, 100), im.ALPHA_FLOOR))) == \
             (None, im.OUTCOME_NO_SUBJECT)
-        speck = Image.new("L", (100, 100), 0)
-        speck.paste(255, (0, 0, 4, 4))            # 16 of 10,000 pixels: under the 0.2 % floor
+        # A faint haze over everything, or a ghost of a blob: visible pixels, but nothing solid.
+        haze = Image.fromarray(np.random.default_rng(5).integers(5, 31, (100, 100), dtype=np.uint8), "L")
+        assert im.attach_matte(_png(picture), _png(haze))[1] == im.OUTCOME_NO_SUBJECT
+        ghost = blank.copy()
+        ghost.paste(20, (10, 10, 60, 60))
+        assert im.attach_matte(_png(picture), _png(ghost))[1] == im.OUTCOME_NO_SUBJECT
+        speck = blank.copy()
+        speck.paste(255, (0, 0, 4, 4))            # 16 solid pixels of 10,000: under the 0.2 % floor
         assert im.attach_matte(_png(picture), _png(speck))[1] == im.OUTCOME_NO_SUBJECT
         speck.paste(255, (0, 0, 5, 5))            # 25 of 10,000: a small subject is still a subject
         assert im.attach_matte(_png(picture), _png(speck))[1] == im.OUTCOME_TRANSPARENT
 
-    def test_a_matte_that_removes_nothing_is_not_a_cut_out(self):
-        picture = _noise((20, 20))
-        assert im.attach_matte(_png(picture), _png(Image.new("L", (20, 20), 255))) == \
-            (None, im.OUTCOME_NOTHING_REMOVED)
-        assert im.attach_matte(_png(picture), _png(Image.new("L", (20, 20), im.ALPHA_CEILING)))[1] == \
+    def test_without_a_removed_background_it_is_not_a_cut_out(self):
+        picture = _noise((100, 100))
+        full = Image.new("L", (100, 100), 255)
+        assert im.attach_matte(_png(picture), _png(full)) == (None, im.OUTCOME_NOTHING_REMOVED)
+        assert im.attach_matte(_png(picture), _png(Image.new("L", (100, 100), im.ALPHA_CEILING)))[1] == \
             im.OUTCOME_NOTHING_REMOVED
-        one = Image.new("L", (20, 20), 255)
-        one.putpixel((3, 3), 0)                   # a single removed pixel is real transparency
-        assert im.attach_matte(_png(picture), _png(one))[1] == im.OUTCOME_TRANSPARENT
+        # One softened pixel, or a sliver removed: the picture still looks opaque.
+        dent = full.copy()
+        dent.putpixel((3, 3), 200)
+        assert im.attach_matte(_png(picture), _png(dent))[1] == im.OUTCOME_NOTHING_REMOVED
+        sliver = full.copy()
+        sliver.paste(0, (0, 0, 19, 1))            # 19 removed pixels of 10,000: under the 0.2 % floor
+        assert im.attach_matte(_png(picture), _png(sliver))[1] == im.OUTCOME_NOTHING_REMOVED
+        sliver.paste(0, (0, 0, 20, 1))
+        assert im.attach_matte(_png(picture), _png(sliver))[1] == im.OUTCOME_TRANSPARENT
+
+    def test_a_small_file_claiming_an_enormous_matte_is_refused_from_its_header(self, monkeypatch):
+        # 22,000 x 22,000 declared in a few hundred bytes. Decoding it would
+        # take about 480 MB, so the size is compared before any pixel is read.
+        # Pillow's own bomb guard does not cover this: the OCR service raises
+        # its limit process-wide (services/ocr.py), which is mimicked here.
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 256_000_000)
+        bomb = PNG + chunk(b"IHDR", struct.pack(">IIBBBBB", 22000, 22000, 8, 0, 0, 0, 0)) \
+            + chunk(b"IDAT", zlib.compress(b"\x00" * 4096)) + chunk(b"IEND", b"")
+        started = time.monotonic()
+        with pytest.warns(Image.DecompressionBombWarning), pytest.raises(im.MattingError) as error:
+            im.attach_matte(_png(_noise((64, 64))), bomb)
+        assert str(error.value) == "matte and picture are not the same size"
+        assert time.monotonic() - started < 1.0
 
     def test_a_hard_matte_changes_no_colour_at_all(self):
         picture, matte = _noise(), _half_matte()
@@ -251,15 +288,19 @@ class TestFetchMatte:
             await im.fetch_matte(b"x", im.MattingConfig(enabled=True, url=URL), client=client)
         assert seen["auth"] is None
 
-    @pytest.mark.parametrize("status,busy", [(503, True), (500, False), (502, False), (401, False), (422, False)])
-    async def test_a_refusal_is_an_error_that_says_whether_the_server_was_only_busy(self, status, busy):
+    @pytest.mark.parametrize("status,outcome", [
+        (503, im.OUTCOME_BUSY),                                   # queue full: load
+        (500, im.OUTCOME_FAILED), (502, im.OUTCOME_FAILED), (504, im.OUTCOME_FAILED),   # sickness
+        (401, im.OUTCOME_REJECTED), (413, im.OUTCOME_REJECTED), (422, im.OUTCOME_REJECTED),   # this request
+    ])
+    async def test_a_refusal_is_an_error_that_says_whose_fault_it_was(self, status, outcome):
         async def handler(request):
             return httpx.Response(status, json={"detail": "SECRET-BODY"})
 
         async with _client(handler) as client:
             with pytest.raises(im.MattingError) as error:
                 await im.fetch_matte(b"x", CONFIG, client=client)
-        assert error.value.busy is busy and str(error.value) == f"matting server returned HTTP {status}"
+        assert error.value.outcome == outcome and str(error.value) == f"matting server returned HTTP {status}"
         assert "SECRET" not in str(error.value)
 
     async def test_a_200_that_is_not_a_png_is_an_error(self):
@@ -267,34 +308,109 @@ class TestFetchMatte:
             return httpx.Response(200, content=b"<html>proxy error</html>")
 
         async with _client(handler) as client:
-            with pytest.raises(im.MattingError):
+            with pytest.raises(im.MattingError) as error:
                 await im.fetch_matte(b"x", CONFIG, client=client)
+        assert error.value.outcome == im.OUTCOME_FAILED
 
-    @pytest.mark.parametrize("exc", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
-    async def test_unreachable_or_slow_is_an_error_naming_the_kind(self, exc):
+    @pytest.mark.parametrize("exc,outcome", [
+        (httpx.ConnectError("refused"), im.OUTCOME_FAILED),
+        (httpx.ConnectTimeout("no route"), im.OUTCOME_FAILED),
+        (httpx.RemoteProtocolError("closed"), im.OUTCOME_FAILED),
+        # Connected, then slow: the picture outran the wait. Not sickness.
+        (httpx.ReadTimeout("slow"), im.OUTCOME_BUSY), (httpx.WriteTimeout("slow"), im.OUTCOME_BUSY),
+        (httpx.PoolTimeout("slow"), im.OUTCOME_BUSY),
+    ])
+    async def test_unreachable_is_sickness_and_slow_is_not(self, exc, outcome):
         async def handler(request):
             raise exc
 
         async with _client(handler) as client:
             with pytest.raises(im.MattingError) as error:
                 await im.fetch_matte(b"x", CONFIG, client=client)
-        assert type(exc).__name__ in str(error.value) and error.value.busy is False
+        assert type(exc).__name__ in str(error.value) and error.value.outcome == outcome
 
-    async def test_its_own_client_follows_the_timeout_and_tls_settings(self, monkeypatch):
+    @pytest.mark.parametrize("declared", [True, False])
+    async def test_a_reply_over_the_size_limit_is_dropped_not_buffered(self, monkeypatch, declared):
+        monkeypatch.setattr(im, "MAX_MATTE_BYTES", 1000)
+        sent = {"chunks": 0}
+
+        async def body():
+            for _ in range(50):
+                sent["chunks"] += 1
+                yield PNG + b"x" * 92                    # 100 bytes a time, 5,000 in all
+
+        async def handler(request):
+            headers = {"content-length": "5000"} if declared else {}
+            return httpx.Response(200, content=body(), headers=headers)
+
+        async with _client(handler) as client:
+            with pytest.raises(im.MattingError) as error:
+                await im.fetch_matte(b"x", CONFIG, client=client)
+        assert str(error.value) == "matting server reply is too large"
+        assert sent["chunks"] <= (1 if declared else 11)    # stopped at the limit, not read to the end
+
+    async def test_a_reply_at_the_size_limit_is_accepted(self, monkeypatch):
+        matte = _png(Image.new("L", (4, 4), 9))
+        monkeypatch.setattr(im, "MAX_MATTE_BYTES", len(matte))
+
+        async def handler(request):
+            return httpx.Response(200, content=matte)
+
+        async with _client(handler) as client:
+            assert await im.fetch_matte(b"x", CONFIG, client=client) == matte
+
+    async def test_a_reply_that_drips_forever_is_cut_off_at_the_timeout(self):
+        # One byte every 50 ms never trips a per-read timeout; the whole
+        # exchange has a deadline of its own.
+        async def body():
+            yield PNG
+            while True:
+                await asyncio.sleep(0.05)
+                yield b"x"
+
+        async def handler(request):
+            return httpx.Response(200, content=body())
+
+        config = im.MattingConfig(enabled=True, url=URL, timeout=0.3)
+        started = time.monotonic()
+        async with _client(handler) as client:
+            with pytest.raises(im.MattingError) as error:
+                await im.fetch_matte(b"x", config, client=client)
+        assert 0.25 < time.monotonic() - started < 2.0
+        assert error.value.outcome == im.OUTCOME_BUSY and str(error.value) == "no matte within 0.3 s"
+
+    async def test_a_server_that_never_answers_is_cut_off_at_the_timeout(self):
+        async def handler(request):
+            await asyncio.sleep(30)
+            return httpx.Response(200, content=_png(Image.new("L", (2, 2))))
+
+        started = time.monotonic()
+        async with _client(handler) as client:
+            with pytest.raises(im.MattingError) as error:
+                await im.fetch_matte(b"x", im.MattingConfig(enabled=True, url=URL, timeout=0.2), client=client)
+        assert time.monotonic() - started < 2.0 and error.value.outcome == im.OUTCOME_BUSY
+
+    def test_the_real_client_follows_the_timeout_and_tls_settings(self, monkeypatch):
         import backend.app.settings as settings_mod
 
-        made = {}
+        for setting in (True, False):
+            made = {}
+            monkeypatch.setattr(settings_mod, "get_settings", lambda: MagicMock(internal_tls_verify=setting))
+            monkeypatch.setattr(im.httpx, "AsyncClient", lambda **kwargs: made.update(kwargs) or "client")
+            assert im.new_client(im.MattingConfig(enabled=True, url=URL, timeout=7.0)) == "client"
+            assert made["verify"] is setting
+            assert (made["timeout"].read, made["timeout"].write, made["timeout"].connect) == (7.0, 7.0, 10.0)
 
-        class Recording(httpx.AsyncClient):
-            def __init__(self, **kwargs):
-                made.update(kwargs)
-                super().__init__(transport=httpx.MockTransport(
-                    lambda request: httpx.Response(200, content=_png(Image.new("L", (2, 2))))))
+    async def test_without_a_client_it_makes_one_and_closes_it(self, monkeypatch):
+        made = []
 
-        monkeypatch.setattr(settings_mod, "get_settings", lambda: MagicMock(internal_tls_verify=False))
-        monkeypatch.setattr(im.httpx, "AsyncClient", Recording)
-        await im.fetch_matte(b"x", im.MattingConfig(enabled=True, url=URL, timeout=7.0))
-        assert made["verify"] is False and made["timeout"].read == 7.0
+        def factory(config):
+            made.append(_client(lambda request: httpx.Response(200, content=_png(Image.new("L", (2, 2))))))
+            return made[-1]
+
+        monkeypatch.setattr(im, "new_client", factory)
+        assert (await im.fetch_matte(b"x", CONFIG)).startswith(PNG)
+        assert len(made) == 1 and made[0].is_closed
 
 
 class TestMakeTransparent:
@@ -313,7 +429,8 @@ class TestMakeTransparent:
         out = _open(base64.b64decode(cut))
         assert out.shape == (80, 96, 4) and out[0, 0, 3] == 255 and out[0, 95, 3] == 0
 
-    @pytest.mark.parametrize("status,outcome", [(503, im.OUTCOME_BUSY), (500, im.OUTCOME_FAILED)])
+    @pytest.mark.parametrize("status,outcome", [(503, im.OUTCOME_BUSY), (500, im.OUTCOME_FAILED),
+                                                (401, im.OUTCOME_REJECTED), (422, im.OUTCOME_REJECTED)])
     async def test_a_server_failure_returns_the_original_picture(self, status, outcome):
         original = _b64(_noise())
         async with self._server(status=status) as client:
@@ -332,10 +449,28 @@ class TestMakeTransparent:
             raise RuntimeError("anything at all")
 
         async with _client(handler) as client:
+            # The gateway's own trouble is "error": it says nothing about the server.
             assert await im.make_transparent("not-base64!!!", CONFIG, client=client) == \
-                ("not-base64!!!", im.OUTCOME_FAILED)
+                ("not-base64!!!", im.OUTCOME_ERROR)
+            assert await im.make_transparent(None, CONFIG, client=client) == (None, im.OUTCOME_ERROR)
             original = _b64(_noise())
+            assert await im.make_transparent(original, CONFIG, client=client) == (original, im.OUTCOME_ERROR)
+
+    async def test_a_matte_that_does_not_fit_is_the_servers_failure(self):
+        original = _b64(_noise())
+        async with self._server(Image.new("L", (5, 5), 128)) as client:
             assert await im.make_transparent(original, CONFIG, client=client) == (original, im.OUTCOME_FAILED)
+
+    async def test_cancellation_is_not_swallowed(self):
+        async def handler(request):
+            await asyncio.sleep(30)
+
+        async with _client(handler) as client:
+            task = asyncio.ensure_future(im.make_transparent(_b64(_noise()), CONFIG, client=client))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +489,7 @@ def _registry(state=(None, None)):
 def server(monkeypatch):
     """A stand-in matting server for apply_background. ``box["replies"]`` is
     what each call gets, in order (a matte image, or an HTTP status)."""
-    box = {"replies": [], "calls": 0}
+    box = {"replies": [], "calls": 0, "configs": []}
 
     async def handler(request):
         box["calls"] += 1                      # counted first: a call is a call, whatever it gets back
@@ -362,10 +497,15 @@ def server(monkeypatch):
         reply = replies[min(box["calls"], len(replies)) - 1]
         if isinstance(reply, int):
             return httpx.Response(reply)
+        if isinstance(reply, BaseException):
+            raise reply
         return httpx.Response(200, content=_png(reply))
 
-    real = httpx.AsyncClient
-    monkeypatch.setattr(im.httpx, "AsyncClient", lambda **kwargs: real(transport=httpx.MockTransport(handler)))
+    def factory(config):
+        box["configs"].append(config)
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(im, "new_client", factory)
     return box
 
 
@@ -408,6 +548,7 @@ class TestApplyBackground:
         registry.report_live_success.assert_awaited_once_with(7)
         registry.report_live_failure.assert_not_awaited()
         assert _count(im.OUTCOME_TRANSPARENT) == before + 1
+        assert server["configs"] == [CONFIG]            # one client for the response, built from the settings
 
     @pytest.mark.parametrize("config", [None, im.MattingConfig(), im.MattingConfig(enabled=False, url=URL),
                                         im.MattingConfig(enabled=True, url="")])
@@ -467,14 +608,40 @@ class TestApplyBackground:
         registry.report_live_failure.assert_awaited_once_with(7)
         registry.report_live_success.assert_not_awaited()
 
-    async def test_a_busy_server_is_neither_sick_nor_well(self, server):
-        server["replies"] = [503]
+    @pytest.mark.parametrize("reply,outcome", [
+        (503, im.OUTCOME_BUSY),                             # queue full
+        (httpx.ReadTimeout("slow"), im.OUTCOME_BUSY),       # the picture outran the wait behind others
+        (401, im.OUTCOME_REJECTED),                         # wrong key: a settings problem
+        (422, im.OUTCOME_REJECTED), (413, im.OUTCOME_REJECTED),   # picture too large for the server
+    ])
+    async def test_load_and_refusals_never_open_the_circuit(self, server, reply, outcome):
+        # Three "failures" mark a backend unhealthy for everyone. A queue, a
+        # slow answer or a refused request must not count as one.
+        server["replies"] = [reply]
         registry, response = _registry((7, None)), _response(2)
-        before = _count(im.OUTCOME_BUSY)
+        before = _count(outcome)
         await im.apply_background("transparent", response, CONFIG, registry)
-        assert server["calls"] == 1 and _count(im.OUTCOME_BUSY) == before + 2
+        assert server["calls"] == 1 and _count(outcome) == before + 2     # and the rest are not dialed
+        assert response["background"] == "opaque"
         registry.report_live_failure.assert_not_awaited()
         registry.report_live_success.assert_not_awaited()
+
+    @pytest.mark.parametrize("reply", [500, 502, 504, httpx.ConnectError("refused"),
+                                       Image.new("L", (5, 5), 128)])     # last: a matte that does not fit
+    async def test_sickness_is_reported(self, server, reply):
+        server["replies"] = [reply]
+        registry = _registry((7, None))
+        await im.apply_background("transparent", _response(), CONFIG, registry)
+        registry.report_live_failure.assert_awaited_once_with(7)
+
+    @pytest.mark.parametrize("matte", [Image.new("L", (96, 80), 0), Image.new("L", (96, 80), 255)])
+    async def test_a_matte_that_is_not_a_cut_out_still_shows_the_server_is_well(self, server, matte):
+        server["replies"] = [matte]
+        registry, response = _registry((7, None)), _response()
+        await im.apply_background("transparent", response, CONFIG, registry)
+        assert response["background"] == "opaque"
+        registry.report_live_success.assert_awaited_once_with(7)
+        registry.report_live_failure.assert_not_awaited()
 
     async def test_a_failure_after_a_success_is_still_a_failure(self, server):
         server["replies"] = [_half_matte(), 500]
@@ -500,9 +667,11 @@ class TestApplyBackground:
         server["replies"] = [_half_matte()]
         response = {"created": 1, "data": [{"url": "/images/x.png"}]}
         registry = _registry((7, None))
+        before = _count(im.OUTCOME_ERROR)
         await im.apply_background("transparent", response, CONFIG, registry)
         assert response["data"][0] == {"url": "/images/x.png", "has_alpha": False}
         assert response["background"] == "opaque" and server["calls"] == 0
+        assert _count(im.OUTCOME_ERROR) == before + 1
         # The server was never asked, so this says nothing about its health.
         registry.report_live_failure.assert_not_awaited()
         registry.report_live_success.assert_not_awaited()
@@ -527,7 +696,9 @@ class TestApplyBackground:
         monkeypatch.setattr(im, "_cut_out_all", explode)
         response = _response(2)
         originals = [item["b64_json"] for item in response["data"]]
+        before = _count(im.OUTCOME_ERROR)
         await im.apply_background("transparent", response, CONFIG, _registry())
+        assert _count(im.OUTCOME_ERROR) == before + 2
         assert [item["b64_json"] for item in response["data"]] == originals
         assert [item["has_alpha"] for item in response["data"]] == [False, False]
         assert response["background"] == "opaque"
@@ -576,10 +747,22 @@ class TestConfig:
     def test_a_base_address_is_a_valid_server_url(self, url):
         assert im.validate_server_url(url) is None
 
-    @pytest.mark.parametrize("url", ["aspen4:8005", "ftp://h/x", "https://", "https://user:pw@h:1", "https://h/?a=1",
-                                     "https://h/#x", "https://[bad"])
+    @pytest.mark.parametrize("url", [
+        "aspen4:8005", "ftp://h/x", "https://", "https://user:pw@h:1", "https://h/?a=1", "https://h/#x",
+        "https://[bad", "javascript:alert(1)",
+        "https://h:notaport", "https://h:99999",                      # a port that is not one
+        "https://ho st", "https://h\r\nX: y", "https://h\t", " https://h",   # spaces and control characters
+        "https://m:18006/v1/matte", "https://m:18006/x",              # the endpoint pasted instead of the server
+    ])
     def test_anything_else_is_refused(self, url):
         assert im.validate_server_url(url)
+
+    def test_a_trailing_slash_is_still_the_base_address(self):
+        assert im.validate_server_url("https://h:8005/") is None
+
+    def test_the_key_is_not_in_the_settings_repr(self):
+        assert "matting-key" not in repr(CONFIG) and "matting-key" not in str(CONFIG)
+        assert CONFIG.api_key == "matting-key"
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +924,29 @@ class TestImageGeneration:
         assert out["data"][0]["b64_json"] and order == ["generated", "completed"]
         svc._fail_request.assert_not_awaited()                         # completed stays completed
 
+    async def test_a_caller_who_leaves_during_the_cut_out_leaves_a_completed_request(self, monkeypatch, server):
+        # The picture was generated and the row completed; a disconnect now
+        # must not flip it to failed.
+        svc, _ = _service(monkeypatch, {})
+        svc._matting_config = CONFIG
+        order, response = [], _response()
+        self._wire(svc, response, order)
+        started = asyncio.Event()
+
+        async def slow(*args, **kwargs):
+            started.set()
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(im, "apply_background", slow)
+        task = asyncio.ensure_future(svc.image_generation(
+            _image_request(background="transparent"), MagicMock(id=1), MagicMock(id=2), MagicMock()))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert order == ["generated", "completed"]
+        svc._fail_request.assert_not_awaited()
+
     async def test_the_requested_background_is_kept_in_the_audit_row(self):
         source = (_APP / "services" / "inference.py").read_text()
         line = next(l for l in source.splitlines() if '"num_inference_steps", "guidance_scale", "seed"' in l)
@@ -833,7 +1039,8 @@ class TestEndpoints:
         assert 'parse_background(body.get("background"))' in body
         assert "background=background," in body
         parse = body.index("parse_background(")
-        assert "status_code=400" in body[parse:body.index("canonical = CanonicalImageRequest(")]
+        # Refused before the policy judge is asked, as on the API path.
+        assert "status_code=400" in body[parse:body.index("evaluate_prompt")]
 
 
 class TestPlayground:
@@ -848,6 +1055,8 @@ class TestPlayground:
         html = (_APP / "dashboard" / "templates" / "user" / "images.html").read_text()
         assert "if (wantTransparent) body.background = 'transparent';" in html
         assert "imgData.has_alpha === true" in html and "background could not be removed" in html
+        # The checkerboard backdrop only for a picture that really has transparency.
+        assert "resultImg.classList.toggle('has-alpha', imgData.has_alpha === true);" in html
         # Without the checkbox on the page (feature off) nothing is sent.
         assert "!!(transparentBox && transparentBox.checked)" in html
 
@@ -855,6 +1064,111 @@ class TestPlayground:
 # ---------------------------------------------------------------------------
 # admin settings, the engine, the migration, the docs
 # ---------------------------------------------------------------------------
+
+_FORM = {"action": "save_config", "quota_tokens_per_image": "1000", "watermark_enabled": "on",
+         "watermark_text": "UIMR-AI", "enabled": "on", "default_model": "m", "default_size": "1024x1024",
+         "allowed_sizes": "", "policy": "", "judge_model": "", "judge_model_secondary": ""}
+_CARD = {"matting_settings": "1", "matting_url": "https://m:8010", "matting_api_key": "", "matting_timeout": "30"}
+
+
+async def _save(fields):
+    """POST the admin image settings form for real; returns (redirect, {setting: written value}, audit)."""
+    from unittest.mock import patch
+
+    from starlette.datastructures import FormData
+
+    import backend.app.dashboard.routes as routes
+    from backend.app.services import feature_access
+
+    writes = {}
+
+    async def set_config(db, key, value, description=None):
+        writes[key] = value
+
+    request = MagicMock()
+    request.form = AsyncMock(return_value=FormData({**_FORM, **fields}))
+    db = MagicMock()
+    db.commit = AsyncMock()
+    admin = MagicMock()
+    admin.group.is_admin = True
+    with patch.object(routes, "get_session_user_id", return_value=1), \
+            patch.object(routes.crud, "get_user_by_id", AsyncMock(return_value=admin)), \
+            patch.object(routes.crud, "set_config", set_config), \
+            patch.object(routes.crud, "log_admin_action", AsyncMock()) as audit, \
+            patch.object(routes, "get_client_ip", return_value="10.0.0.1"), \
+            patch.object(feature_access, "refresh_feature_access_cache", AsyncMock()):
+        response = await routes.admin_images_config_post(request, db)
+    return response.headers["location"], writes, (audit.await_args.kwargs if audit.await_args else None)
+
+
+def _matting(writes):
+    return {key: value for key, value in writes.items() if "matting" in key or "transparent" in key}
+
+
+class TestAdminForm:
+    async def test_switching_it_on_stores_the_switch_the_url_and_the_timeout(self):
+        location, writes, audit = await _save({**_CARD, "transparent_enabled": "on", "matting_url": " https://m:8010/ ",
+                                               "matting_timeout": "45"})
+        assert "success" in location
+        assert _matting(writes) == {"img.transparent_enabled": True, "img.matting_url": "https://m:8010",
+                                    "img.matting_timeout": 45}
+        assert audit["after_value"]["transparent_backgrounds"] is True
+        assert audit["after_value"]["matting_url"] == "https://m:8010"
+
+    async def test_switching_it_off_keeps_the_url(self):
+        _, writes, _ = await _save(_CARD)
+        assert _matting(writes) == {"img.transparent_enabled": False, "img.matting_url": "https://m:8010",
+                                    "img.matting_timeout": 30}
+
+    async def test_a_blank_key_field_keeps_the_stored_key(self):
+        _, writes, _ = await _save({**_CARD, "transparent_enabled": "on"})
+        assert "img.matting_api_key" not in writes
+
+    async def test_a_new_key_is_stored_trimmed_and_not_put_in_the_audit_log(self):
+        _, writes, audit = await _save({**_CARD, "matting_api_key": "  s3cret-key  "})
+        assert writes["img.matting_api_key"] == "s3cret-key"
+        assert "s3cret" not in repr(audit)
+
+    async def test_remove_the_stored_key(self):
+        _, writes, _ = await _save({**_CARD, "matting_api_key_clear": "on"})
+        assert writes["img.matting_api_key"] == ""
+        _, writes, _ = await _save({**_CARD, "matting_api_key_clear": "on", "matting_api_key": "typed-too"})
+        assert writes["img.matting_api_key"] == ""            # "remove" wins over a typed value
+
+    @pytest.mark.parametrize("fields,needle", [
+        ({"transparent_enabled": "on", "matting_url": ""}, "need+a+matting+server+URL"),
+        ({"matting_url": "m:8010"}, "http"),
+        ({"matting_url": "https://m:notaport"}, "port"),
+        ({"matting_url": "https://m:8010/v1/matte"}, "base+address"),
+        ({"matting_url": "https://a:b@m"}, "base+address"),
+        ({"matting_url": "https://ho st"}, "spaces"),
+        ({"matting_timeout": "0"}, "timeout"), ({"matting_timeout": "301"}, "timeout"),
+        ({"matting_timeout": "30.5"}, "timeout"), ({"matting_timeout": "soon"}, "timeout"),
+    ])
+    async def test_a_bad_value_is_refused_and_nothing_at_all_is_saved(self, fields, needle):
+        location, writes, audit = await _save({**_CARD, **fields})
+        assert "error=" in location and needle in location
+        assert writes == {} and audit is None
+
+    async def test_a_blank_timeout_means_the_default(self):
+        _, writes, _ = await _save({**_CARD, "matting_timeout": ""})
+        assert writes["img.matting_timeout"] == 30
+
+    async def test_a_form_without_the_card_leaves_these_settings_alone(self):
+        # A tab opened before this card existed: "absent" must not be read as "off".
+        location, writes, audit = await _save({})
+        assert "success" in location and _matting(writes) == {}
+        assert writes["img.enabled"] is True                 # the rest of the form still saves
+        assert "transparent_backgrounds" not in audit["after_value"]
+
+    async def test_a_bad_watermark_text_still_saves_nothing_of_this_card(self):
+        location, writes, _ = await _save({**_CARD, "transparent_enabled": "on", "watermark_text": "waytoolongtext"})
+        assert "error=" in location and writes == {}
+
+    async def test_a_hostile_url_is_not_reflected_into_the_redirect(self):
+        location, writes, _ = await _save({**_CARD, "matting_url": 'https://h/"><script>alert(1)</script>'})
+        assert "script" not in location and writes == {}
+
 
 class TestAdminSettings:
     def _segments(self):
@@ -875,8 +1189,8 @@ class TestAdminSettings:
 
     def test_the_form_has_every_field(self):
         html = (_APP / "dashboard" / "templates" / "admin" / "images_config.html").read_text()
-        for name in ("transparent_enabled", "matting_url", "matting_api_key", "matting_api_key_clear",
-                     "matting_timeout"):
+        for name in ("matting_settings", "transparent_enabled", "matting_url", "matting_api_key",
+                     "matting_api_key_clear", "matting_timeout"):
             assert f'name="{name}"' in html, name
 
     def test_bad_values_are_refused_before_anything_is_written(self):

@@ -33,7 +33,9 @@ Endpoints
 ``POST /v1/matte``  body = the image bytes (PNG, JPEG or WebP) -> ``image/png``,
                     an 8-bit greyscale matte of the same size: 255 = subject,
                     0 = background (bearer key)
-``GET  /health``    liveness for anyone; details with the bearer key
+``GET  /health``    liveness for anyone; details with the bearer key. The port
+                    opens only once the model is loaded, so a server that is
+                    still starting refuses connections rather than answering
 
 The reply is only the matte, never a recoloured picture: the gateway attaches
 it to its own (watermarked) pixels, so this server cannot change what the
@@ -158,6 +160,9 @@ class BiRefNetEngine:
         kwargs: Dict[str, Any] = {"trust_remote_code": True}
         if config.revision:
             kwargs["revision"] = config.revision
+        elif not os.path.isdir(config.model):
+            logger.warning("matting_model_revision_not_pinned model=%s: the repository's code runs in this "
+                           "process; set MATTING_REVISION to the commit that was reviewed", config.model)
         model = AutoModelForImageSegmentation.from_pretrained(config.model, **kwargs)
         self.half = bool(config.half and config.device.startswith("cuda"))
         # The published weights are stored in half precision; say which one
@@ -377,10 +382,11 @@ def create_app(config: ServiceConfig):
 
     @app.get("/health")
     async def health(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-        status = "ok" if worker.ready else "loading"
+        # Reachable only once the model is loaded: uvicorn finishes start-up
+        # (the load) before it opens the port.
         if not authorized(authorization):
-            return {"status": status}      # liveness only without the key
-        return {"status": status, "model": config.served_name, "source": config.model,
+            return {"status": "ok"}        # liveness only without the key
+        return {"status": "ok", "model": config.served_name, "source": config.model,
                 "revision": config.revision, "device": getattr(worker.engine, "device", None),
                 "half": getattr(worker.engine, "half", None), "side": config.side,
                 "max_pixels": config.max_pixels, "queue_depth": worker.queue_depth(),
@@ -400,8 +406,6 @@ def create_app(config: ServiceConfig):
             image = open_image(raw, config.max_pixels)
         except BadRequest as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
-        if not worker.ready:
-            raise HTTPException(status_code=503, detail="model is loading", headers={"Retry-After": "10"})
 
         try:
             result, seconds = await _unless_disconnected(request, worker.matte(image))
