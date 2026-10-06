@@ -17,6 +17,7 @@
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, NamedTuple, Optional, Set, Tuple
 
@@ -47,6 +48,7 @@ from backend.app.core.canonical_schemas import (
 from backend.app.core.scheduler.policy import get_scheduler
 from backend.app.core.scheduler.queue import Job, JobModality
 from backend.app.core.stream_coalesce import StreamCoalescer
+from backend.app.core.text_stream import Utf8StreamDecoder
 from backend.app.core.telemetry.registry import get_registry
 from backend.app.core.translators import DiffusionOutTranslator, OllamaOutTranslator, VLLMOutTranslator
 from backend.app.core.translators.vllm_out import (
@@ -380,6 +382,37 @@ def _isolated_db_session():
     return isolated_async_session()
 
 
+async def limit_stream_silence(
+    byte_iter: AsyncIterator[bytes],
+    first_byte_timeout: float,
+    idle_timeout: float,
+    http_request: Optional[httpx.Request] = None,
+) -> AsyncIterator[bytes]:
+    """Pass a backend's byte stream through, raising ``httpx.ReadTimeout`` if
+    it stays silent too long: ``first_byte_timeout`` before anything has
+    arrived, ``idle_timeout`` between chunks after that.
+
+    Only the wait for the backend is timed. Time the consumer spends between
+    chunks (a slow client) does not count, and a cancellation from outside
+    (the client went away) passes through untouched.
+    """
+    iterator = byte_iter.__aiter__()
+    limit, started = first_byte_timeout, False
+    while True:
+        try:
+            async with asyncio.timeout(limit):
+                chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            where = "mid-stream (stream idle limit)" if started else "before its first byte"
+            raise httpx.ReadTimeout(
+                f"backend sent nothing for {limit:.0f}s {where}", request=http_request
+            ) from None
+        yield chunk
+        limit, started = idle_timeout, True
+
+
 class InferenceService:
     """
     Handles inference request processing.
@@ -422,7 +455,7 @@ class InferenceService:
             )
         return self._http_client
 
-    def _make_inference_client(self) -> httpx.AsyncClient:
+    def _make_inference_client(self, read_timeout: Optional[float] = None) -> httpx.AsyncClient:
         """Create a dedicated HTTP client for a single inference request.
 
         Unlike the shared pool client, this client is meant to be closed
@@ -430,11 +463,17 @@ class InferenceService:
         the underlying TCP connection, which signals vLLM to abort any
         in-progress generation — preventing orphaned requests from
         occupying backend slots after MindRouter gives up.
+
+        ``read_timeout`` overrides the per-attempt read timeout; streaming
+        passes a longer one and enforces its own silence limits
+        (see ``_backend_stream``).
         """
+        if read_timeout is None:
+            read_timeout = float(self._settings.backend_request_timeout_per_attempt)
         return httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=10.0,
-                read=float(self._settings.backend_request_timeout_per_attempt),
+                read=read_timeout,
                 write=10.0,
                 pool=10.0,
             ),
@@ -2628,6 +2667,55 @@ class InferenceService:
 
         return result
 
+    @asynccontextmanager
+    async def _backend_stream(self, url: str, payload: Dict[str, Any]):
+        """POST to a backend and stream the reply under two silence limits.
+
+        * Before the first byte: ``backend_request_timeout_per_attempt``. A
+          backend that says nothing at all is hung, and at this point the
+          request can still be retried on another replica.
+        * After the stream has started: ``backend_stream_idle_timeout``,
+          which is longer. A model that buffers a whole tool call before
+          sending it (Kimi K3 on vLLM does) is silent for as long as the call
+          takes to write: several minutes for a large file. One limit for
+          both cut those requests off at the first-byte value.
+
+        Yields the byte iterator. A limit that is hit raises
+        ``httpx.ReadTimeout`` with a message saying which one, so the retry
+        logic treats it as before and the audit row is not left blank.
+        """
+        first = float(self._settings.backend_request_timeout_per_attempt)
+        idle = max(float(self._settings.backend_stream_idle_timeout), first)
+        # httpx's own read timeout sits just above ours, so ours fires first
+        # (with a clear message) and httpx's remains a backstop.
+        async with self._make_inference_client(read_timeout=idle + 30.0) as client:
+            http_request = client.build_request("POST", url, json=payload)
+            try:
+                async with asyncio.timeout(first):
+                    response = await client.send(http_request, stream=True)
+            except TimeoutError:
+                raise httpx.ReadTimeout(
+                    f"backend sent no response within {first:.0f}s", request=http_request
+                ) from None
+            try:
+                if response.status_code >= 400:
+                    # The error body is still "before the first byte" as far
+                    # as the caller is concerned: a backend (or a proxy in
+                    # front of it) that sends an error status and then stalls
+                    # must not hold the slot for the long mid-stream limit.
+                    try:
+                        async with asyncio.timeout(first):
+                            await response.aread()
+                    except TimeoutError:
+                        raise httpx.ReadTimeout(
+                            f"backend sent HTTP {response.status_code} but no error body within {first:.0f}s",
+                            request=http_request,
+                        ) from None
+                    response.raise_for_status()
+                yield limit_stream_silence(response.aiter_bytes(), first, idle, http_request)
+            finally:
+                await response.aclose()
+
     async def _proxy_stream_request(
         self,
         request: CanonicalChatRequest,
@@ -2648,24 +2736,19 @@ class InferenceService:
 
         payload["stream"] = True
 
-        async with self._make_inference_client() as client:
-            async with client.stream("POST", url, json=payload) as response:
-                if response.status_code >= 400:
-                    await response.aread()
-                    response.raise_for_status()
-
-                if backend.engine == BackendEngine.OLLAMA:
-                    async for chunk in OllamaOutTranslator.translate_chat_stream(
-                        response.aiter_bytes(), request.request_id, request.model
-                    ):
-                        yield chunk
-                else:
-                    thinking_enabled = request.think if request.think is not None else True
-                    async for chunk in VLLMOutTranslator.translate_chat_stream(
-                        response.aiter_bytes(), request.request_id, request.model,
-                        thinking_enabled=thinking_enabled,
-                    ):
-                        yield chunk
+        async with self._backend_stream(url, payload) as body:
+            if backend.engine == BackendEngine.OLLAMA:
+                async for chunk in OllamaOutTranslator.translate_chat_stream(
+                    body, request.request_id, request.model
+                ):
+                    yield chunk
+            else:
+                thinking_enabled = request.think if request.think is not None else True
+                async for chunk in VLLMOutTranslator.translate_chat_stream(
+                    body, request.request_id, request.model,
+                    thinking_enabled=thinking_enabled,
+                ):
+                    yield chunk
 
     async def _proxy_embedding_request(
         self,
@@ -2954,41 +3037,37 @@ class InferenceService:
             payload["stream"] = True
             url = f"{backend.url}/v1/chat/completions"
 
-        async with self._make_inference_client() as client:
-            async with client.stream("POST", url, json=payload) as response:
-                if response.status_code >= 400:
-                    await response.aread()
-                    response.raise_for_status()
+        async with self._backend_stream(url, payload) as body:
+            buffer = ""
+            decoder = Utf8StreamDecoder()   # a character split across chunks must not fail the stream
+            async for chunk_bytes in body:
+                buffer += decoder.feed(chunk_bytes)
 
-                buffer = ""
-                async for chunk_bytes in response.aiter_bytes():
-                    buffer += chunk_bytes.decode()
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
 
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
-                        if not line:
+                    # Handle SSE format from vLLM
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            return
+                        try:
+                            data = json.loads(data_str)
+                            # Convert OpenAI chunk to Ollama format
+                            thinking_enabled = request.think if request.think is not None else True
+                            ollama_chunk = self._openai_chunk_to_ollama(data, thinking_enabled=thinking_enabled)
+                            yield ollama_chunk
+                        except json.JSONDecodeError:
                             continue
-
-                        # Handle SSE format from vLLM
-                        if line.startswith("data:"):
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                return
-                            try:
-                                data = json.loads(data_str)
-                                # Convert OpenAI chunk to Ollama format
-                                thinking_enabled = request.think if request.think is not None else True
-                                ollama_chunk = self._openai_chunk_to_ollama(data, thinking_enabled=thinking_enabled)
-                                yield ollama_chunk
-                            except json.JSONDecodeError:
-                                continue
-                        else:
-                            # Native Ollama format
-                            try:
-                                yield json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
+                    else:
+                        # Native Ollama format
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
 
     def _openai_chunk_to_ollama(
         self, openai_chunk: Dict, thinking_enabled: bool = True,

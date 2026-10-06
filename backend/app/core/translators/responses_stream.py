@@ -53,6 +53,7 @@ import json
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+from backend.app.core.text_stream import Utf8StreamDecoder
 from backend.app.core.translators.responses_in import (
     ResponsesInTranslator,
     ResponsesRequestContext,
@@ -386,14 +387,11 @@ async def stream_round(
     events — they accumulate in ``st.suppressed_calls`` for a hosted-tool
     orchestrator to execute between rounds.
     """
+    decoder = Utf8StreamDecoder()
     async for chunk_bytes in inner:
         # After the terminal condition is known we still drain the
         # inner generator (harvesting late usage) so its cleanup runs.
-        chunk_str = (
-            chunk_bytes.decode("utf-8")
-            if isinstance(chunk_bytes, bytes)
-            else chunk_bytes
-        )
+        chunk_str = decoder.feed(chunk_bytes)
 
         for line in chunk_str.strip().split("\n"):
             line = line.strip()

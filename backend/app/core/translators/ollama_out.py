@@ -18,6 +18,7 @@ import json
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
+from backend.app.core.text_stream import Utf8StreamDecoder
 from backend.app.core.canonical_schemas import (
     CanonicalChatRequest,
     CanonicalChatResponse,
@@ -273,9 +274,10 @@ class OllamaOutTranslator:
             CanonicalStreamChunk objects
         """
         buffer = ""
+        decoder = Utf8StreamDecoder()   # a character split across chunks must not fail the stream
 
         async for chunk_bytes in ollama_stream:
-            buffer += chunk_bytes.decode("utf-8")
+            buffer += decoder.feed(chunk_bytes)
 
             # Process complete lines
             while "\n" in buffer:

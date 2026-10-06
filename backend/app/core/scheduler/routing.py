@@ -564,20 +564,29 @@ class BackendRouter:
     async def _gc_stale_jobs(self) -> None:
         """Garbage-collect stale jobs and correct queue depth counters.
 
-        Jobs older than the maximum possible request lifetime (routing timeout
-        + per-attempt timeout * max attempts + margin) are orphans whose
-        completion/failure callbacks were never invoked.  Evicting them and
-        decrementing their backend queue depth prevents phantom queue buildup.
+        Jobs older than the maximum plausible request lifetime (routing timeout
+        + per-attempt timeout * max attempts + one full mid-stream silence +
+        margin) are orphans whose completion/failure callbacks were never
+        invoked.  Evicting them and decrementing their backend queue depth
+        prevents phantom queue buildup.
+
+        The bound is on age, not on activity, so a stream that is still
+        generating past it (a very long answer) is evicted too and its backend
+        is over-admitted by one until it finishes. Counting the stream idle
+        limit keeps a stream that survived one long silence, which the gateway
+        now deliberately allows, from being treated as an orphan for that.
         """
         try:
             from backend.app.settings import get_settings
             settings = get_settings()
 
             # Maximum plausible lifetime: route wait + all retry attempts
+            # + one mid-stream silence at its limit
             max_lifetime_s = (
                 settings.backend_request_timeout  # route_timeout default
                 + settings.backend_request_timeout_per_attempt
                   * settings.backend_retry_max_attempts
+                + settings.backend_stream_idle_timeout
                 + 60  # margin
             )
 
