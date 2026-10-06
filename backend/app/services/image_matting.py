@@ -67,7 +67,8 @@ IMAGE_BACKGROUNDS = Counter(
 # server choose; here that is opaque, which is what the model draws.
 BACKGROUND_TRANSPARENT = "transparent"
 BACKGROUND_OPAQUE = "opaque"
-BACKGROUNDS = (BACKGROUND_TRANSPARENT, BACKGROUND_OPAQUE, "auto")
+BACKGROUND_AUTO = "auto"
+BACKGROUNDS = (BACKGROUND_TRANSPARENT, BACKGROUND_OPAQUE, BACKGROUND_AUTO)
 
 # Seconds allowed for the cut-out of ONE RESPONSE (all of its images). The
 # cut-out runs after generation, and generation may already have used its
@@ -118,8 +119,11 @@ class MattingError(Exception):
 def parse_background(value: Any) -> Optional[str]:
     """The caller's ``background`` value, lower-cased, or None when absent.
 
-    Raises ValueError for anything that is not one of BACKGROUNDS, so an
-    unknown value is refused instead of silently ignored.
+    A value that is not one of BACKGROUNDS is read as ``"auto"``, never
+    refused. Before this option existed the field was ignored, so a client
+    that sends something else (``"white"``, ``true``) has working requests
+    today; they must keep working. Such a caller gets the ordinary picture,
+    and ``background: "opaque"`` in the response says what that was.
     """
     if value is None:
         return None
@@ -129,7 +133,7 @@ def parse_background(value: Any) -> Optional[str]:
             return None
         if cleaned in BACKGROUNDS:
             return cleaned
-    raise ValueError("'background' must be one of: " + ", ".join(BACKGROUNDS))
+    return BACKGROUND_AUTO
 
 
 @dataclass(frozen=True)

@@ -70,7 +70,7 @@ Generate one or more images from a text prompt. Request body is **JSON**
 | `num_inference_steps` | integer | no | `img.default_steps` (`20`) | Diffusion steps. Clamped to `img.max_steps` (default `50`). |
 | `guidance_scale` | float | no | `img.default_guidance_scale` (`3.5`) | Classifier-free guidance strength. |
 | `seed` | integer | no | `null` | Fixed seed for reproducibility. Omit for random. |
-| `background` | string | no | `null` | `"transparent"`, `"opaque"` or `"auto"` (OpenAI's field). `"transparent"` returns a PNG with the background removed; see [Transparent backgrounds](#transparent-backgrounds). Any other value → 400. |
+| `background` | string | no | `null` | `"transparent"`, `"opaque"` or `"auto"` (OpenAI's field). `"transparent"` returns a PNG with the background removed; see [Transparent backgrounds](#transparent-backgrounds). Any other value is treated as `"auto"` (never an error). |
 | `user` | string | no | `null` | Opaque end-user identifier for your own auditing. |
 
 > Defaults shown in parentheses are the shipped fallback values. An
@@ -361,8 +361,11 @@ How it works, and what follows from it:
   drop shadows usually go with the background; glass keeps its outline but is
   not see-through.
 - **`"opaque"` and `"auto"`** return the ordinary picture, with
-  `has_alpha: false`. Leave the field out and the response is exactly what it
-  was before this option existed (no `background`, no `has_alpha`).
+  `has_alpha: false`. So does any value the server does not recognise (a
+  misspelling, say): it is never an error, and `background: "opaque"` in the
+  response tells you the picture is not transparent. Leave the field out and
+  the response is exactly what it was before this option existed (no
+  `background`, no `has_alpha`).
 - **Edits:** the cut-out is applied to the edited result. Removing the
   background of an uploaded picture without redrawing it is not offered.
 - **Watermark.** The file you receive still carries the invisible watermark
@@ -462,7 +465,7 @@ oversized/too-many reference images, are **rejected with 400**.
 
 | HTTP | When |
 |------|------|
-| 400 | Invalid JSON body; missing `prompt`; unknown `background` value; disallowed `size`; dimensions over max; > 4 reference images; non-image upload; reference image over size cap; **content-policy denial** (`content_policy_violation`). |
+| 400 | Invalid JSON body; missing `prompt`; disallowed `size`; dimensions over max; > 4 reference images; non-image upload; reference image over size cap; **content-policy denial** (`content_policy_violation`). |
 | 401 | Missing / invalid API key. |
 | 403 | Image generation not enabled for your account. |
 | 404 | `model` does not resolve to a known image model (`model_not_found`). |

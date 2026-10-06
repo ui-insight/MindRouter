@@ -98,11 +98,19 @@ class TestParseBackground:
     def test_accepted(self, value, expected):
         assert im.parse_background(value) == expected
 
-    @pytest.mark.parametrize("value", ["clear", "white", "none", "true", True, False, 1, 0, [], {}, ["transparent"]])
-    def test_anything_else_is_refused_and_says_what_is_allowed(self, value):
-        with pytest.raises(ValueError) as error:
-            im.parse_background(value)
-        assert str(error.value) == "'background' must be one of: transparent, opaque, auto"
+    @pytest.mark.parametrize("value", ["clear", "white", "none", "true", "transparant", True, False, 1, 0, [], {},
+                                       ["transparent"]])
+    def test_anything_else_is_read_as_auto_never_refused(self, value):
+        # The field used to be ignored, so a client sending some other value
+        # has working requests today. They must keep working.
+        assert im.parse_background(value) == "auto"
+
+    async def test_an_unrecognised_value_gets_the_ordinary_picture_and_is_told_so(self, server):
+        response = _response()
+        original = response["data"][0]["b64_json"]
+        await im.apply_background(im.parse_background("transparant"), response, CONFIG, _registry((7, None)))
+        assert response["background"] == "opaque" and server["calls"] == 0
+        assert response["data"][0]["b64_json"] == original and response["data"][0]["has_alpha"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1081,18 +1089,11 @@ class TestEndpoints:
         canonical, _ = await self._prepare(monkeypatch, params)
         assert canonical.background == carried
 
-    @pytest.mark.parametrize("value", ["clear", "none", True, 5])
-    async def test_an_unknown_value_is_400_before_the_policy_judge_runs(self, monkeypatch, value):
-        from fastapi import HTTPException
-
-        judged = []
-        monkeypatch.setattr("backend.app.services.image_policy.evaluate_prompt",
-                            AsyncMock(side_effect=lambda **kw: judged.append(kw)))
-        with pytest.raises(HTTPException) as error:
-            await self._prepare(monkeypatch, {"prompt": "a hedgehog", "background": value})
-        assert error.value.status_code == 400
-        assert error.value.detail == "'background' must be one of: transparent, opaque, auto"
-        assert judged == []
+    @pytest.mark.parametrize("value", ["clear", "none", "transparant", True, 5, ["transparent"]])
+    async def test_an_unknown_value_does_not_fail_the_request(self, monkeypatch, value):
+        # 2.9.89 ignored the field entirely; a request that worked then must not become a 400.
+        canonical, judged = await self._prepare(monkeypatch, {"prompt": "a hedgehog", "background": value})
+        assert canonical.background == "auto" and judged == ["a hedgehog"]
 
     def test_the_edits_form_takes_the_field_and_passes_it_on(self):
         import inspect
@@ -1104,17 +1105,17 @@ class TestEndpoints:
         source = inspect.getsource(api.image_edits)
         assert '"background": background,' in source
 
-    def test_the_playground_takes_the_field_and_refuses_an_unknown_value(self):
+    def test_the_playground_takes_the_field_and_never_refuses_a_value(self):
         source = (_APP / "dashboard" / "images.py").read_text()
         tree = ast.parse(source)
         generate = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                         and n.name == "images_api_generate")
         body = ast.get_source_segment(source, generate)
-        assert 'parse_background(body.get("background"))' in body
+        assert 'background = parse_background(body.get("background"))' in body
         assert "background=background," in body
-        parse = body.index("parse_background(")
-        # Refused before the policy judge is asked, as on the API path.
-        assert "status_code=400" in body[parse:body.index("evaluate_prompt")]
+        # Nothing about the value is an error: no branch between reading it and loading the settings.
+        between = body[body.index("background = parse_background("):body.index("# Load config for defaults/guardrails")]
+        assert "return" not in between and "except" not in between
 
 
 class TestPlayground:
@@ -1366,6 +1367,12 @@ class TestEngine:
 
 
 class TestDocs:
+    def test_the_docs_do_not_promise_an_error_for_an_unknown_value(self):
+        text = (_REPO / "docs" / "images-api.md").read_text()
+        assert "unknown `background` value" not in text and 'treated as `"auto"` (never an error)' in text
+        html = (_APP / "dashboard" / "templates" / "public" / "documentation.html").read_text()
+        assert "any other value is a 400" not in html
+
     def test_the_api_reference_documents_the_field_and_the_response(self):
         text = (_REPO / "docs" / "images-api.md").read_text()
         for needle in ("`background`", '"transparent"', "`has_alpha`", "img.transparent_enabled",

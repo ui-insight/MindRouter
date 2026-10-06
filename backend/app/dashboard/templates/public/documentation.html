@@ -635,7 +635,7 @@ max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
                         <tr><td><code>num_inference_steps</code></td><td>int</td><td>20</td><td>Diffusion steps (quality/latency tradeoff); values above the server cap (default 50) are silently clamped</td></tr>
                         <tr><td><code>guidance_scale</code></td><td>float</td><td>3.5</td><td>Prompt-adherence strength (FLUX-specific)</td></tr>
                         <tr><td><code>seed</code></td><td>int</td><td>random</td><td>Fix for reproducible generations</td></tr>
-                        <tr><td><code>background</code></td><td>string</td><td>&mdash;</td><td><code>"transparent"</code> returns a PNG with the background removed &mdash; see <a href="#image-transparent">Transparent backgrounds</a>. <code>"opaque"</code> and <code>"auto"</code> return the ordinary picture; any other value is a 400.</td></tr>
+                        <tr><td><code>background</code></td><td>string</td><td>&mdash;</td><td><code>"transparent"</code> returns a PNG with the background removed &mdash; see <a href="#image-transparent">Transparent backgrounds</a>. <code>"opaque"</code>, <code>"auto"</code> and any value the server does not recognise return the ordinary picture (never an error).</td></tr>
                         <tr><td><code>quality</code>, <code>style</code></td><td>string</td><td>&mdash;</td><td>OpenAI-compatible fields, passed through to the backend</td></tr>
                     </tbody>
                 </table>
