@@ -284,8 +284,12 @@ below the lowest in the list, which it cannot exceed, and the question's
 `label_mass` is near 1 (the normal case; on qwen3.8-27b the letters left out
 together held at most 0.0001 of the probability) the answer and its
 probabilities are unaffected. When `label_mass` is low the model did not
-want to answer with a letter at all; the answer is still the likeliest
-option, but the probabilities of the options that were left out are rough.
+want to answer with a letter at all, and the probabilities of the options
+that were left out are rough. A `noul` or a single-order `choice` still
+reports the option the model picked; a `score` (an average over its levels)
+and a `choice` averaged over two option orders are computed from those
+rough probabilities and can be off. Treat a result with `complete: false`
+and a low `label_mass` as unreliable.
 
 **Why not `logprob_token_ids`** (which returns exactly the letters, and was
 used until 2.9.90): vLLM does not handle that field under speculative

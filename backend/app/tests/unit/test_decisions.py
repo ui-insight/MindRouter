@@ -587,8 +587,10 @@ class TestVLLMLogprobsBackend:
         fake_http.handler = handler
         return seen
 
-    @pytest.mark.parametrize("fail", [500, 502, 503, 504, httpx.ConnectError("refused"),
-                                      httpx.ConnectTimeout("no route")])
+    @pytest.mark.parametrize("fail", [
+        500, 502, 503, 504, httpx.ConnectError("refused"), httpx.ConnectTimeout("no route"),
+        # The replica dropped the connection mid-request: restarted or killed.
+        httpx.ReadError("reset by peer"), httpx.WriteError("broken pipe"), httpx.RemoteProtocolError("cut")])
     async def test_a_sick_replica_is_retried_once_on_another(self, fake_http, fail):
         seen = self._failing(fake_http, fail)
         _, out = await self._decide(_req(), backends=self._replicas())
@@ -600,7 +602,8 @@ class TestVLLMLogprobsBackend:
         # The labels are looked up on the replica that is asked, not carried over.
         assert {u.split("/tokenize")[0] for u, _ in fake_http.calls if u.endswith("/tokenize")} == set(seen)
 
-    @pytest.mark.parametrize("fail", [503, 500, httpx.ConnectError("refused"), httpx.ConnectTimeout("no route")])
+    @pytest.mark.parametrize("fail", [503, 500, httpx.ConnectError("refused"), httpx.ConnectTimeout("no route"),
+                                      httpx.ReadError("reset by peer"), httpx.RemoteProtocolError("cut")])
     async def test_a_replica_that_is_down_fails_at_the_tokenizer_and_is_retried_too(self, fake_http, fail):
         # Looking up the letter tokens is the first thing asked of a replica,
         # so a dead one never reaches the scoring call. (Found by running the
@@ -655,6 +658,38 @@ class TestVLLMLogprobsBackend:
         (c,) = out.results
         assert c.answer == "shipping" and c.complete is False
         assert c.likelihoods["shipping"] > max(v for k, v in c.likelihoods.items() if k != "shipping")
+
+    async def test_a_transport_error_logs_its_cause(self, fake_http, monkeypatch):
+        # "certificate verify failed", "Name or service not known" and
+        # "Connection refused" are all ConnectError; the text tells them apart
+        # and never contains the request.
+        log = MagicMock()
+        monkeypatch.setattr(vl, "logger", log)
+        self._failing(fake_http, httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate has expired"),
+                      only_first=False)
+        with pytest.raises(DecisionBackendError):
+            await self._decide(_req(), backends=self._replicas(1))
+        call = next(c for c in log.warning.call_args_list if c.args == ("decision_backend_unreachable",))
+        assert call.kwargs == {"backend_id": 10, "error": "ConnectError",
+                               "detail": "[SSL: CERTIFICATE_VERIFY_FAILED] certificate has expired"}
+        assert "Ticket" not in repr(log.mock_calls)                    # nothing of the request's state
+
+    @pytest.mark.parametrize("usage", [["x"], "n/a", None, {"prompt_tokens": "n/a", "completion_tokens": None,
+                                                           "prompt_tokens_details": ["x"]},
+                                       {"prompt_tokens": float("nan"), "prompt_tokens_details": {"cached_tokens": "?"}}])
+    async def test_a_usage_block_of_the_wrong_shape_costs_the_counts_not_the_answer(self, fake_http, usage):
+        base = _default_handler()
+
+        def handler(url, body):
+            reply = base(url, body)
+            if not url.endswith("/tokenize"):
+                reply._payload["usage"] = usage
+            return reply
+
+        fake_http.handler = handler
+        _, out = await self._decide(_req())
+        assert out.results[1].answer == "bug"
+        assert out.usage.prompt_tokens == 0 and out.usage.scoring_tokens == 0 and out.usage.cached_tokens is None
 
     async def test_a_reply_of_the_wrong_shape_is_a_502_not_a_crash(self, fake_http):
         def handler(url, body):
@@ -763,7 +798,8 @@ class TestVLLMLogprobsBackend:
                 await backend.decide(_req(), "qwen3.8-27b", fanout=8)
         assert seen == ["https://node10:8002"]
 
-    @pytest.mark.parametrize("fail", [400, 404, 422, httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("cut")])
+    @pytest.mark.parametrize("fail", [400, 404, 422, httpx.ReadTimeout("slow"), httpx.WriteTimeout("slow"),
+                                      httpx.PoolTimeout("slow")])
     async def test_what_would_fail_anywhere_or_already_waited_is_not_sent_round_again(self, fake_http, fail):
         seen = self._failing(fake_http, fail, only_first=False)
         with pytest.raises(DecisionBackendError) as e:

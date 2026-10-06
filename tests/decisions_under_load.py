@@ -34,6 +34,19 @@
 # only in the gateway log (decision_backend_retry_on_another_replica).
 #
 ############################################################
+"""Live regression check: System One decisions on a vLLM chat model WHILE chat
+completions run on the same model. Not a unit test; needs a deployed MindRouter.
+
+For each kind of load (plain, json = structured output, thinking) it starts
+--loaders chat completions on --model, then sends --decisions yes/no decisions
+and as many 4-option choice decisions to the same model. One character per
+decision: "." answered, "X" failed (an answer by the fallback model counts as
+failed). --control names a decision model on other hardware, for comparison.
+
+Exit status: 0 every decision on --model was answered; 1 some failed;
+2 inconclusive (no key, or the chat load mostly did not run, so the decisions
+ran on an idle model). Set MINDROUTER_API_KEY.
+"""
 from __future__ import annotations
 
 import argparse
@@ -120,7 +133,8 @@ async def phase(client: httpx.AsyncClient, args, name: str) -> tuple[int, int]:
     await asyncio.gather(*loaders, return_exceptions=True)
     ok_load = sum(1 for s in done if s == 200)
     print(f"  load={name:<8} chat completions finished meanwhile: {ok_load} of {len(done)} ok", flush=True)
-    return failures, ok_load
+    # "Loaded" means the load really ran: most of its requests went through.
+    return failures, ok_load if ok_load * 2 >= max(1, len(done)) else 0
 
 
 async def main() -> int:
@@ -154,8 +168,8 @@ async def main() -> int:
         print(f"\nFAIL: {failures} decision(s) on {args.model} failed while chat completions were running on it")
         return 1
     if unloaded:
-        print(f"\nINCONCLUSIVE: no chat completion succeeded under load {', '.join(unloaded)}, so those decisions "
-              f"ran on an idle model. Check the key's rate limit and that {args.model} takes chat requests.")
+        print(f"\nINCONCLUSIVE: most chat completions failed under load {', '.join(unloaded)}, so those decisions "
+              f"ran on a model that was not loaded. Check the key's rate limit and that {args.model} takes chat requests.")
         return 2
     print(f"\nPASS: every decision on {args.model} was answered while chat completions were running on it")
     return 0

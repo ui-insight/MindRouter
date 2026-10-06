@@ -33,9 +33,12 @@ For every (question, option order) we POST one ``/v1/chat/completions`` with
   is not in the list is given a value one nat below the lowest that is (its
   true value cannot be higher) and the decision is flagged
   ``complete=false``. How much that approximation matters depends on
-  ``label_mass``: near 1 it is negligible; when the model did not want to
+  ``label_mass``: near 1 it is negligible. When the model did not want to
   answer with a letter (low ``label_mass``) the floored labels carry real
-  weight and the probabilities, though not the answer, are rough.
+  weight: the probabilities are rough, and what is computed from them (a
+  ``score``'s expected value, a ``choice`` averaged over two option orders)
+  can differ from the exact result. The label the sampler picked is still
+  the likeliest in its own view.
 
 ``logprob_token_ids`` IS NOT SENT, although it returns exactly the labels and
 was used until 2.9.90. vLLM does not handle it under speculative decoding
@@ -105,6 +108,12 @@ _MAX_REPLICAS = 2
 # A replica answering one of these is not working for this request; another
 # replica may be. 4xx are about the request and would fail anywhere.
 _RETRY_STATUSES = frozenset({500, 502, 503, 504})
+# Transport failures that mean the replica itself is gone or going: it could
+# not be reached, or it dropped the connection (restarted, killed). A read or
+# write TIMEOUT is not here: that request already waited its minute on this
+# replica and is not sent round again.
+_REPLICA_GONE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.WriteError,
+                 httpx.RemoteProtocolError)
 
 
 class _ReplicaFailed(DecisionBackendError):
@@ -179,11 +188,15 @@ class VLLMLogprobsBackend:
         cached: int | None = None
         for (qi, order), (readout, usage) in zip(views, scored, strict=True):
             per_q.setdefault(qi, []).append((order, readout))
-            prompt_tokens += int(usage.get("prompt_tokens") or 0)
-            scoring_tokens += int(usage.get("completion_tokens") or 0)
-            c = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+            # The answer is already in hand: a usage block of the wrong shape
+            # costs the token counts, not the request.
+            usage = usage if isinstance(usage, dict) else {}
+            prompt_tokens += _count(usage.get("prompt_tokens")) or 0
+            scoring_tokens += _count(usage.get("completion_tokens")) or 0
+            details = usage.get("prompt_tokens_details")
+            c = _count(details.get("cached_tokens")) if isinstance(details, dict) else None
             if c is not None:
-                cached = (cached or 0) + int(c)
+                cached = (cached or 0) + c
 
         results = [
             _to_result(q, combine(len(q.options), [o for o, _ in per_q[qi]], [r for _, r in per_q[qi]]))
@@ -248,15 +261,13 @@ class VLLMLogprobsBackend:
                     raise DecisionBackendError("the model could not read the request's images", 422) from e
                 kind = _ReplicaFailed if status in _RETRY_STATUSES else DecisionBackendError
                 raise kind(f"decision backend returned HTTP {status}", 502) from e
-            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                # Nothing was sent: the replica is down, and asking another costs nothing.
-                logger.warning("decision_backend_unreachable", backend_id=backend.id, error=type(e).__name__)
-                raise _ReplicaFailed("decision backend unreachable", 502) from e
             except httpx.HTTPError as e:
-                # Includes a read timeout: the request already waited its
-                # minute here, so it is not sent round again.
-                logger.warning("decision_backend_unreachable", backend_id=backend.id, error=type(e).__name__)
-                raise DecisionBackendError("decision backend unreachable", 502) from e
+                # A transport error's text names the cause (refused, DNS, an
+                # expired certificate) and never quotes the request.
+                logger.warning("decision_backend_unreachable", backend_id=backend.id, error=type(e).__name__,
+                               detail=str(e)[:200])
+                kind = _ReplicaFailed if isinstance(e, _REPLICA_GONE) else DecisionBackendError
+                raise kind("decision backend unreachable", 502) from e
             except (ValueError, KeyError, TypeError, AttributeError) as e:
                 # A reply that is not the JSON shape we read (resp.json() raises
                 # ValueError on a non-JSON body, e.g. a proxy error page).
@@ -326,9 +337,9 @@ class VLLMLogprobsBackend:
             # This is the first thing asked of a replica, so a replica that is
             # down fails HERE. Down or answering 5xx: another replica may do.
             status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
-            sick = status in _RETRY_STATUSES or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+            sick = status in _RETRY_STATUSES or isinstance(e, _REPLICA_GONE)
             logger.warning("decision_backend_tokenizer_failed", url_host=httpx.URL(url).host, status=status,
-                           error=type(e).__name__)
+                           error=type(e).__name__, detail=None if status else str(e)[:200])
             kind = _ReplicaFailed if sick else DecisionBackendError
             raise kind("decision backend tokenizer unreachable", 502) from e
         self._label_ids[key] = ids
@@ -396,6 +407,13 @@ def _token_id(entry: dict, label_ids: Sequence[int]) -> int | None:
         if len(tok) == 1 and 0 <= idx < len(label_ids):
             return label_ids[idx]
     return None
+
+
+def _count(value: Any) -> int | None:
+    """A token count from a usage block, or None when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return int(value)
 
 
 def _number(value: Any) -> float | None:
