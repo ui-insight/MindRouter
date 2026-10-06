@@ -24,7 +24,14 @@
 # --control names a decision model that does not share those replicas
 # (default "clef"; "" to skip) and is shown for comparison only.
 #
-# Exit status: 0 when every decision on --model was answered, 1 otherwise.
+# Exit status: 0 when every decision on --model was answered, 1 when any
+# failed, 2 when the run proves nothing (no key, or a kind of load under
+# which not one chat completion succeeded: the decisions then ran on an
+# idle model, which is exactly what this check exists not to do).
+#
+# What it cannot see: the gateway retries a failed replica once on another
+# replica, and the response does not say so. A failure masked that way shows
+# only in the gateway log (decision_backend_retry_on_another_replica).
 #
 ############################################################
 from __future__ import annotations
@@ -58,9 +65,14 @@ async def load(client: httpx.AsyncClient, args, extra: dict, stop: asyncio.Event
             r = await client.post(f"{args.base_url}/v1/chat/completions", headers=args.headers, timeout=180, json={
                 "model": args.model, "max_tokens": 700, **extra,
                 "messages": [{"role": "user", "content": "List twelve trees with one sentence about each."}]})
-            done.append(r.status_code)
+            status = r.status_code
         except httpx.HTTPError:
-            done.append(0)
+            status = 0
+        done.append(status)
+        if status != 200:
+            # A refused request returns at once (rate limit, bad parameter):
+            # without a pause this loop would hammer the gateway.
+            await asyncio.sleep(2.0)
 
 
 async def decide(client: httpx.AsyncClient, args, model: str, kind: str) -> tuple[bool, str]:
@@ -71,15 +83,21 @@ async def decide(client: httpx.AsyncClient, args, model: str, kind: str) -> tupl
         return False, type(e).__name__
     if r.status_code != 200:
         return False, f"HTTP {r.status_code} {r.text[:120]}"
-    body = r.json()
-    answered_by = body.get("model", "")
+    try:
+        body = r.json()
+        answer = body["answers"]["q"]
+    except (ValueError, KeyError, TypeError):
+        return False, "HTTP 200 without an answer to the question"
     if (body.get("metadata") or {}).get("fallback"):
         # Answered, but by the fallback model: the model under test did not.
-        return False, f"answered by fallback {answered_by}"
+        return False, f"answered by fallback {body.get('model', '')}"
+    if not isinstance(answer, dict) or answer.get("type") != kind:
+        return False, "HTTP 200 with an answer of the wrong shape"
     return True, ""
 
 
-async def phase(client: httpx.AsyncClient, args, name: str) -> int:
+async def phase(client: httpx.AsyncClient, args, name: str) -> tuple[int, int]:
+    """(decisions on --model that failed, chat completions that succeeded meanwhile)."""
     stop, done = asyncio.Event(), []
     loaders = [asyncio.create_task(load(client, args, LOADS[name], stop, done)) for _ in range(args.loaders)]
     await asyncio.sleep(args.warmup)
@@ -102,7 +120,7 @@ async def phase(client: httpx.AsyncClient, args, name: str) -> int:
     await asyncio.gather(*loaders, return_exceptions=True)
     ok_load = sum(1 for s in done if s == 200)
     print(f"  load={name:<8} chat completions finished meanwhile: {ok_load} of {len(done)} ok", flush=True)
-    return failures
+    return failures, ok_load
 
 
 async def main() -> int:
@@ -116,6 +134,8 @@ async def main() -> int:
     p.add_argument("--pause", type=float, default=0.5, help="seconds between decisions")
     p.add_argument("--warmup", type=float, default=4.0, help="seconds of load before the first decision")
     args = p.parse_args()
+    if args.decisions < 1 or args.loaders < 1:
+        p.error("--decisions and --loaders must be at least 1")
     key = os.environ.get("MINDROUTER_API_KEY") or os.environ.get("MR_KEY")
     if not key:
         print("set MINDROUTER_API_KEY", file=sys.stderr)
@@ -123,13 +143,22 @@ async def main() -> int:
     args.headers = {"Authorization": f"Bearer {key}"}
     args.base_url = args.base_url.rstrip("/")
 
-    failures = 0
+    failures, unloaded = 0, []
     async with httpx.AsyncClient() as client:
         for name in (LOADS if args.load == "all" else [args.load]):
-            failures += await phase(client, args, name)
-    print(f"\n{'PASS' if not failures else 'FAIL'}: {failures} decision(s) on {args.model} failed while chat "
-          f"completions were running on it")
-    return 0 if not failures else 1
+            failed, ok_load = await phase(client, args, name)
+            failures += failed
+            if not ok_load:
+                unloaded.append(name)
+    if failures:
+        print(f"\nFAIL: {failures} decision(s) on {args.model} failed while chat completions were running on it")
+        return 1
+    if unloaded:
+        print(f"\nINCONCLUSIVE: no chat completion succeeded under load {', '.join(unloaded)}, so those decisions "
+              f"ran on an idle model. Check the key's rate limit and that {args.model} takes chat requests.")
+        return 2
+    print(f"\nPASS: every decision on {args.model} was answered while chat completions were running on it")
+    return 0
 
 
 if __name__ == "__main__":

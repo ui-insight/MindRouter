@@ -328,7 +328,7 @@ class TestParseReadout:
         ids = _label_ids(3)
         r = vl.parse_readout(_chat_reply(ids, [-0.1, -2.0, -9.0], 0, drop=(2,)), ids)
         assert r.complete is False
-        assert r.logprobs == [-0.1, -2.0, -2.0]      # no likelier than the least likely token returned
+        assert r.logprobs == [-0.1, -2.0, -3.0]      # one nat below the least likely token returned
 
     def test_a_missing_label_takes_the_lowest_value_in_the_list_label_or_not(self):
         # The list is the raw top 20: other tokens sit in it too. A label that
@@ -337,7 +337,64 @@ class TestParseReadout:
         reply = _chat_reply(ids, [-0.05, -4.0, -99.0, -99.0], 0, drop=(2, 3),
                             others=[(9001, -3.0), (9002, -7.5), (9003, -11.25)])
         r = vl.parse_readout(reply, ids)
-        assert r.logprobs == [-0.05, -4.0, -11.25, -11.25] and r.complete is False and r.sampled == 0
+        assert r.logprobs == [-0.05, -4.0, -12.25, -12.25] and r.complete is False and r.sampled == 0
+
+    def test_the_answer_stays_the_answer_when_it_is_the_only_label_seen(self):
+        # The model did not want to reply with a letter: 20 other tokens fill
+        # the list and the sampled label sits below all of them. The other
+        # labels must stay strictly below it, or every option ties and the
+        # reported answer becomes whichever comes first.
+        ids = _label_ids(4)
+        reply = _chat_reply(ids, [-9.0, -9.0, -7.0, -9.0], 2, drop=(0, 1, 2, 3),
+                            others=[(9000 + i, -0.5 - 0.2 * i) for i in range(20)])
+        r = vl.parse_readout(reply, ids)
+        assert r.sampled == 2 and r.complete is False
+        assert r.logprobs == [-8.0, -8.0, -7.0, -8.0]
+        assert max(range(4), key=r.logprobs.__getitem__) == 2
+
+    @pytest.mark.parametrize("top", [None, [], "absent"])
+    def test_without_a_list_the_sampled_label_still_wins(self, top):
+        ids = _label_ids(3)
+        reply = _chat_reply(ids, [-0.4, -2.0, -3.0], 1)
+        entry = reply["choices"][0]["logprobs"]["content"][0]
+        if top == "absent":
+            del entry["top_logprobs"]
+        else:
+            entry["top_logprobs"] = top
+        r = vl.parse_readout(reply, ids)
+        assert r.logprobs == [-3.0, -2.0, -3.0] and r.sampled == 1 and r.complete is False
+
+    def test_two_tokens_for_one_letter_count_as_the_likelier(self):
+        # Bare-letter form: a second, unlikely token that also decodes to "A".
+        ids = _label_ids(2)
+        reply = _chat_reply(ids, [-0.1, -2.3], 0, as_ids=False)
+        reply["choices"][0]["logprobs"]["content"][0]["top_logprobs"].append({"token": "A", "logprob": -7.0})
+        assert vl.parse_readout(reply, ids).logprobs == [-0.1, -2.3]
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), True, "x", None])
+    def test_a_label_whose_value_is_not_a_finite_number_counts_as_missing(self, bad):
+        ids = _label_ids(3)
+        reply = _chat_reply(ids, [-0.2, -1.8, -4.0], 0)
+        entry = reply["choices"][0]["logprobs"]["content"][0]
+        next(t for t in entry["top_logprobs"] if t["token"] == f"token_id:{ids[2]}")["logprob"] = bad
+        r = vl.parse_readout(reply, ids)
+        assert r.logprobs == [-0.2, -1.8, -2.8] and r.complete is False        # floored, never NaN or 1.0
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, None])
+    def test_a_sampled_value_that_is_not_a_finite_number_is_not_read(self, bad):
+        # The sampled label is not in the list and its own value is unusable:
+        # it is floored like any other missing label.
+        ids = _label_ids(2)
+        reply = _chat_reply(ids, [-0.3, -1.2], 0, drop=(0,))
+        reply["choices"][0]["logprobs"]["content"][0]["logprob"] = bad
+        r = vl.parse_readout(reply, ids)
+        assert r.logprobs == [-2.2, -1.2] and r.sampled == 0 and r.complete is False
+
+    @pytest.mark.parametrize("content", [["junk"], [None], [42]])
+    def test_a_logprob_entry_that_is_not_an_object_is_a_backend_error(self, content):
+        with pytest.raises(DecisionBackendError) as e:
+            vl.parse_readout({"choices": [{"logprobs": {"content": content}}]}, _label_ids(2))
+        assert e.value.status_code == 502
 
     def test_tokens_that_are_not_labels_are_never_read_as_labels(self):
         ids = _label_ids(2)
@@ -483,7 +540,7 @@ class TestVLLMLogprobsBackend:
         assert c.answer == "o0" and c.complete is False
         assert sum(c.likelihoods.values()) == pytest.approx(1.0)
         assert c.likelihoods["o0"] > 0.9 and c.likelihoods["o1"] == pytest.approx(math.exp(-3.5) / sum(
-            math.exp(v) for v in [-0.05, -3.5, -4.0, -6.0, -7.0] + [-22.0] * 15))
+            math.exp(v) for v in [-0.05, -3.5, -4.0, -6.0, -7.0] + [-23.0] * 15))
         assert max(c.likelihoods[f"o{i}"] for i in range(5, 20)) < 1e-8      # the bound, not a guess
 
     async def test_no_vllm_backend_is_503(self, fake_http):
@@ -581,6 +638,106 @@ class TestVLLMLogprobsBackend:
             await self._decide(_req(), backends=self._replicas())
         assert len(seen) == 1 and e.value.status_code == 502
         assert str(e.value) == "decision backend tokenizer unreachable"
+
+    async def test_an_answer_outside_the_top_list_is_still_the_answer_on_the_wire(self, fake_http):
+        # End to end through combine(): the option the sampler picked, not the first one.
+        ids = _label_ids(4)
+
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return _default_handler()(url, body)
+            return _FakeResponse(_chat_reply(ids, [-9.0, -9.0, -7.0, -9.0], 2, drop=(0, 1, 2, 3),
+                                             others=[(9000 + i, -0.5 - 0.2 * i) for i in range(20)]))
+
+        fake_http.handler = handler
+        _, out = await self._decide(_req(questions=[
+            {"id": "c", "type": "choice", "question": "?", "options": ["billing", "access", "shipping", "other"]}]))
+        (c,) = out.results
+        assert c.answer == "shipping" and c.complete is False
+        assert c.likelihoods["shipping"] > max(v for k, v in c.likelihoods.items() if k != "shipping")
+
+    async def test_a_reply_of_the_wrong_shape_is_a_502_not_a_crash(self, fake_http):
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return _default_handler()(url, body)
+            return _FakeResponse({"choices": ["not an object"]})
+
+        fake_http.handler = handler
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(), backends=self._replicas())
+        assert e.value.status_code == 502 and "malformed" in str(e.value)
+
+    async def test_a_busy_or_rate_limited_replica_is_not_a_reason_to_try_another(self, fake_http):
+        seen = self._failing(fake_http, 429, only_first=False)
+        with pytest.raises(DecisionBackendError):
+            await self._decide(_req(), backends=self._replicas())
+        assert len(seen) == 1
+
+    async def test_each_replica_has_its_own_concurrency_gate(self, fake_http):
+        seen = self._failing(fake_http, 500)
+        backend, out = await self._decide(_req(), backends=self._replicas())
+        first, second = (int(h.split("node")[1].split(":")[0]) for h in seen)
+        assert set(backend._backend_gates) == {first, second}
+        assert backend._backend_gates[first][1] is not backend._backend_gates[second][1]
+        assert all(gate._value == limit for limit, gate in backend._backend_gates.values())     # all released
+
+    async def test_a_retry_with_images_goes_to_a_replica_that_sees_and_takes_the_images(self, fake_http):
+        seen = self._failing(fake_http, 500)
+        sighted = [_vllm_backend(id=20 + i, sees_images=True) for i in range(2)]
+        blind = [_vllm_backend(id=30 + i, sees_images=False) for i in range(4)]
+        plan = so.parse_request(_WITH_IMAGE)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry([*blind, *sighted])):
+            out = await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert {int(h.split("node")[1].split(":")[0]) for h in seen} == {20, 21} and out.backend_id in (20, 21)
+        chat = [(u, b) for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        on_second = [b for u, b in chat if u.startswith(seen[1])]
+        assert on_second and all(b["messages"][0]["content"][0]["type"] == "image_url" for b in on_second)
+
+    async def test_with_images_a_blind_replica_is_not_a_second_choice(self, fake_http):
+        seen = self._failing(fake_http, 500, only_first=False)
+        plan = so.parse_request(_WITH_IMAGE)
+        backend = vl.VLLMLogprobsBackend()
+        replicas = [_vllm_backend(id=20, sees_images=True), _vllm_backend(id=30, sees_images=False)]
+        with patch.object(vl, "get_registry", return_value=_fake_registry(replicas)):
+            with pytest.raises(DecisionBackendError) as e:
+                await backend.decide(plan.decision_request, "qwen/qwen3.8-27b", fanout=4)
+        assert seen == ["https://node20:8002"] and e.value.status_code == 502     # 502, not "does not accept images"
+
+    async def test_a_failed_lookup_for_another_replica_keeps_the_502(self, fake_http):
+        # A database error while looking for a second replica must not turn
+        # the first replica's 502 into a crash: a 502 can still fall back to another model.
+        self._failing(fake_http, 500, only_first=False)
+        registry = _fake_registry(self._replicas())
+        real_pick = registry.pick_available_backend
+
+        async def pick(model_name, *, engine=None, multimodal=False, exclude=()):
+            if exclude:
+                raise RuntimeError("pool exhausted")
+            return await real_pick(model_name, engine=engine, multimodal=multimodal)
+
+        registry.pick_available_backend = pick
+        with patch.object(vl, "get_registry", return_value=registry):
+            with pytest.raises(DecisionBackendError) as e:
+                await vl.VLLMLogprobsBackend().decide(_req(), "qwen3.8-27b", fanout=8)
+        assert e.value.status_code == 502 and str(e.value) == "decision backend returned HTTP 500"
+
+    async def test_the_second_replica_is_the_one_the_lookup_returned(self, fake_http):
+        # One lookup, and its result is used: asking twice leaves a gap in
+        # which the replica can disappear (and, with images, a misleading 422).
+        seen = self._failing(fake_http, 500)
+        registry = _fake_registry(self._replicas())
+        real_pick, lookups = registry.pick_available_backend, []
+
+        async def pick(model_name, *, engine=None, multimodal=False, exclude=()):
+            lookups.append(set(exclude))
+            return await real_pick(model_name, engine=engine, multimodal=multimodal, exclude=exclude)
+
+        registry.pick_available_backend = pick
+        with patch.object(vl, "get_registry", return_value=registry):
+            out = await vl.VLLMLogprobsBackend().decide(_req(), "qwen3.8-27b", fanout=8)
+        first = int(seen[0].split("node")[1].split(":")[0])
+        assert lookups == [set(), {first}] and out.backend_id == int(seen[1].split("node")[1].split(":")[0])
 
     async def test_at_most_two_replicas_are_tried(self, fake_http):
         seen = self._failing(fake_http, 500, only_first=False)

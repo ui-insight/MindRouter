@@ -278,11 +278,14 @@ distribution, renormalized, is the answer. A `noul` is a two-option question
 (yes/no); a `score` lists its levels as options.
 
 With about 8 options or more, the least likely letters can fall outside the
-top 20 (other tokens take the places). Such a letter is given the lowest
-value in the list, which it cannot exceed, and the question's `complete` is
-`false`. Measured on qwen3.8-27b, the letters left out together held at
-most 0.0001 of the probability, so the answer and its probabilities are
-unaffected in practice.
+top 20 (other tokens take the places). Such a letter is given a value just
+below the lowest in the list, which it cannot exceed, and the question's
+`complete` is `false`. Read `complete` together with `label_mass`: when
+`label_mass` is near 1 (the normal case; on qwen3.8-27b the letters left out
+together held at most 0.0001 of the probability) the answer and its
+probabilities are unaffected. When `label_mass` is low the model did not
+want to answer with a letter at all; the answer is still the likeliest
+option, but the probabilities of the options that were left out are rough.
 
 **Why not `logprob_token_ids`** (which returns exactly the letters, and was
 used until 2.9.90): vLLM does not handle that field under speculative
@@ -445,9 +448,13 @@ fine-tuned on that benchmark; measure before relying on it
   broken upstream costs each caller a timeout before the fallback answers.
 * **One upstream URL per model name.** Several instances of a decision server
   are not load-balanced by MindRouter.
-* **No retry within a model.** One failing call fails that model's attempt;
-  the configured fallback, if any, then answers. Without one, clients should
-  retry (TypeSafe's SDK does).
+* **One retry within a vLLM model, none for an upstream.** A vLLM model's
+  request is tried on one other replica when the first answers 5xx or cannot
+  be reached; an upstream decision server has one URL and no second try.
+  After that the configured fallback, if any, answers. Without one, clients
+  should retry (TypeSafe's SDK does). Nothing in the response says that a
+  second replica answered; the gateway log does
+  (`decision_backend_retry_on_another_replica`).
 * **A fallback is a different model.** Its numbers differ and its limits
   differ; thresholds tuned on one do not carry over exactly. `model` in the
   response says which answered.

@@ -30,8 +30,12 @@ For every (question, option order) we POST one ``/v1/chat/completions`` with
   asks for a letter, so the labels that matter are in it: measured on
   qwen3.8-27b, the labels left out of the top 20 (it happens from about 8
   options up) together held at most 0.0001 of the probability. A label that
-  is not in the list is given the lowest value that is (it cannot be higher)
-  and the decision is flagged ``complete=false``.
+  is not in the list is given a value one nat below the lowest that is (its
+  true value cannot be higher) and the decision is flagged
+  ``complete=false``. How much that approximation matters depends on
+  ``label_mass``: near 1 it is negligible; when the model did not want to
+  answer with a letter (low ``label_mass``) the floored labels carry real
+  weight and the probabilities, though not the answer, are rough.
 
 ``logprob_token_ids`` IS NOT SENT, although it returns exactly the labels and
 was used until 2.9.90. vLLM does not handle it under speculative decoding
@@ -68,6 +72,7 @@ Label tokens are looked up once per (backend, model) through the server's
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Sequence
 from typing import Any
 
@@ -149,18 +154,24 @@ class VLLMLogprobsBackend:
 
         # A replica that answers 5xx or cannot be reached is not the whole
         # model: try one other replica before failing the request.
-        tried: set[int] = set()
+        backend = await self._pick_backend(model, needs_vision=bool(images))
+        tried = {backend.id}
         while True:
-            backend = await self._pick_backend(model, needs_vision=bool(images), exclude=tried)
-            tried.add(backend.id)
             try:
                 scored = await self._score_views(
                     backend, request, model, views, images, fanout, backend_concurrency)
                 break
             except _ReplicaFailed as failure:
-                if len(tried) >= _MAX_REPLICAS or not await self._has_another(model, bool(images), tried):
+                other = None
+                if len(tried) < _MAX_REPLICAS:
+                    other = await self._another_replica(model, bool(images), tried)
+                if other is None:
+                    # The first replica's failure is the answer (502), so the
+                    # API layer can still hand the request to a fallback model.
                     raise DecisionBackendError(str(failure), failure.status_code) from failure
                 logger.warning("decision_backend_retry_on_another_replica", failed_backend_id=backend.id)
+                backend = other
+                tried.add(backend.id)
 
         # Regroup per question and fold the views back into the original order.
         per_q: dict[int, list[tuple[list[int], LabelReadout]]] = {}
@@ -246,20 +257,25 @@ class VLLMLogprobsBackend:
                 # minute here, so it is not sent round again.
                 logger.warning("decision_backend_unreachable", backend_id=backend.id, error=type(e).__name__)
                 raise DecisionBackendError("decision backend unreachable", 502) from e
-            except (ValueError, KeyError, TypeError) as e:
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
                 # A reply that is not the JSON shape we read (resp.json() raises
                 # ValueError on a non-JSON body, e.g. a proxy error page).
                 logger.warning("decision_backend_bad_reply", backend_id=backend.id, error=type(e).__name__)
                 raise DecisionBackendError("decision backend returned a malformed reply", 502) from e
 
-    async def _has_another(self, model: str, needs_vision: bool, tried: set[int]) -> bool:
-        return await get_registry().pick_available_backend(
-            model, engine=BackendEngine.VLLM, multimodal=needs_vision, exclude=tried) is not None
+    async def _another_replica(self, model: str, needs_vision: bool, tried: set[int]):
+        """A replica to retry on, or None when there is none. Never raises: a
+        failed lookup must not turn the first replica's 502 into a crash."""
+        try:
+            return await get_registry().pick_available_backend(
+                model, engine=BackendEngine.VLLM, multimodal=needs_vision, exclude=tried)
+        except Exception as e:
+            logger.warning("decision_backend_retry_lookup_failed", error=type(e).__name__)
+            return None
 
-    async def _pick_backend(self, model: str, needs_vision: bool = False, exclude: set[int] | frozenset[int] = frozenset()):
-        """A random healthy, circuit-closed vLLM backend serving ``model``,
-        not one of ``exclude``; with ``needs_vision``, one whose copy of the
-        model takes images.
+    async def _pick_backend(self, model: str, needs_vision: bool = False):
+        """A random healthy, circuit-closed vLLM backend serving ``model``;
+        with ``needs_vision``, one whose copy of the model takes images.
 
         Mirrors the direct-to-backend precedents (image_policy, dlp_worker):
         no scheduler slot is taken; ``_backend_gate`` bounds the load instead.
@@ -267,7 +283,7 @@ class VLLMLogprobsBackend:
         """
         registry = get_registry()
         backend = await registry.pick_available_backend(
-            model, engine=BackendEngine.VLLM, multimodal=needs_vision, exclude=exclude)
+            model, engine=BackendEngine.VLLM, multimodal=needs_vision)
         if backend is None and needs_vision and await registry.pick_available_backend(model, engine=BackendEngine.VLLM):
             # The model is up; it just cannot see. The caller's request to fix.
             raise DecisionBackendError(f"model '{model}' does not accept images", 422)
@@ -382,6 +398,13 @@ def _token_id(entry: dict, label_ids: Sequence[int]) -> int | None:
     return None
 
 
+def _number(value: Any) -> float | None:
+    """A finite log-probability, or None (not a number, a bool, NaN, inf)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
 def parse_readout(data: dict, label_ids: Sequence[int]) -> LabelReadout:
     """Turn one chat-completion response into per-label raw logprobs."""
     try:
@@ -391,27 +414,35 @@ def parse_readout(data: dict, label_ids: Sequence[int]) -> LabelReadout:
     except (KeyError, IndexError, TypeError) as e:
         raise DecisionBackendError("decision backend returned no logprobs", 502) from e
 
+    if not isinstance(entry, dict):
+        raise DecisionBackendError("decision backend returned no logprobs", 502)
+
     values: dict[int, float] = {}
     returned: list[float] = []       # every token in the list, label or not
     for t in entry.get("top_logprobs") or []:
-        if not isinstance(t, dict) or isinstance(t.get("logprob"), bool) \
-                or not isinstance(t.get("logprob"), (int, float)):
+        value = _number(t.get("logprob")) if isinstance(t, dict) else None
+        if value is None:
             continue
-        returned.append(float(t["logprob"]))
+        returned.append(value)
         tid = _token_id(t, label_ids)
         if tid is not None and tid in label_ids:
-            values[tid] = float(t["logprob"])
+            # Two tokens can decode to the same letter; the likelier one counts.
+            values[tid] = max(value, values.get(tid, value))
     sampled_id = _token_id(entry, label_ids)
-    if sampled_id in label_ids and isinstance(entry.get("logprob"), (int, float)):
-        values.setdefault(sampled_id, float(entry["logprob"]))
+    sampled_value = _number(entry.get("logprob"))
+    if sampled_id in label_ids and sampled_value is not None:
+        values.setdefault(sampled_id, sampled_value)
     if not values:
         raise DecisionBackendError("decision backend returned no label logprobs", 502)
 
     # A label that is not in the list is no likelier than the least likely
-    # token that is. That bound is used as its value: it is tiny (the list
-    # is the server's top 20), and it never ranks a missing label above one
-    # that was returned.
-    floor = min([*returned, *values.values()])
+    # token that is, nor than the label the sampler picked (the sampler takes
+    # the likeliest allowed label). Its value is set one nat below that
+    # bound: tiny when the labels hold the probability (the usual case), and
+    # always strictly below every label that was returned, so a missing
+    # label never ties with the answer, even when the answer itself is the
+    # only label seen (the model did not want to reply with a letter).
+    floor = min([*returned, *values.values()]) - 1.0
     logprobs, complete = [], True
     for tid in label_ids:
         if tid in values:
