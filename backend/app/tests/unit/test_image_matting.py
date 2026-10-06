@@ -98,11 +98,38 @@ class TestParseBackground:
     def test_accepted(self, value, expected):
         assert im.parse_background(value) == expected
 
-    @pytest.mark.parametrize("value", ["clear", "white", "none", "true", True, False, 1, 0, [], {}, ["transparent"]])
-    def test_anything_else_is_refused_and_says_what_is_allowed(self, value):
-        with pytest.raises(ValueError) as error:
-            im.parse_background(value)
-        assert str(error.value) == "'background' must be one of: transparent, opaque, auto"
+    @pytest.mark.parametrize("value", ["clear", "white", "none", "true", "transparant", True, 1, ["transparent"],
+                                       {"type": "transparent"}])
+    def test_anything_else_is_read_as_auto_never_refused(self, value):
+        # The field used to be ignored, so a client sending some other value
+        # has working requests today. They must keep working.
+        assert im.parse_background(value) == "auto"
+
+    @pytest.mark.parametrize("value", [False, 0, [], {}, 0.0])
+    def test_an_empty_value_of_any_kind_counts_as_absent(self, value):
+        # `false` means "no", not "some background I did not spell right":
+        # such a caller gets the response it always got, with no new fields.
+        assert im.parse_background(value) is None
+
+    def test_what_was_actually_sent_is_logged_because_the_audit_row_will_say_auto(self, monkeypatch):
+        log = MagicMock()
+        monkeypatch.setattr(im, "logger", log)
+        im.parse_background("transparant")
+        log.info.assert_called_once_with("image_background_value_not_recognised", sent="'transparant'")
+        log.reset_mock()
+        im.parse_background("x" * 500)
+        assert len(log.info.call_args.kwargs["sent"]) == 60          # a caller cannot fill the log
+        log.reset_mock()
+        for known in ("transparent", "auto", None, "", False):
+            im.parse_background(known)
+        log.info.assert_not_called()
+
+    async def test_an_unrecognised_value_gets_the_ordinary_picture_and_is_told_so(self, server):
+        response = _response()
+        original = response["data"][0]["b64_json"]
+        await im.apply_background(im.parse_background("transparant"), response, CONFIG, _registry((7, None)))
+        assert response["background"] == "opaque" and server["calls"] == 0
+        assert response["data"][0]["b64_json"] == original and response["data"][0]["has_alpha"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +406,17 @@ class TestFetchMatte:
         assert 0.25 < time.monotonic() - started < 2.0
         assert error.value.outcome == im.OUTCOME_BUSY and str(error.value) == "no matte within 0.3 s"
 
+    async def test_a_later_image_is_given_what_is_left_and_the_message_says_so(self):
+        async def handler(request):
+            await asyncio.sleep(30)
+
+        started = time.monotonic()
+        async with _client(handler) as client:
+            with pytest.raises(im.MattingError) as error:
+                await im.fetch_matte(b"x", CONFIG, client=client, timeout=0.2)      # CONFIG allows 30 s
+        assert time.monotonic() - started < 2.0
+        assert str(error.value) == "no matte within 0.2 s (what was left of the 30 s limit)"
+
     async def test_a_server_that_never_answers_is_cut_off_at_the_timeout(self):
         async def handler(request):
             await asyncio.sleep(30)
@@ -489,10 +527,12 @@ def _registry(state=(None, None)):
 def server(monkeypatch):
     """A stand-in matting server for apply_background. ``box["replies"]`` is
     what each call gets, in order (a matte image, or an HTTP status)."""
-    box = {"replies": [], "calls": 0, "configs": []}
+    box = {"replies": [], "calls": 0, "configs": [], "delay": 0.0}
 
     async def handler(request):
         box["calls"] += 1                      # counted first: a call is a call, whatever it gets back
+        if box["delay"]:
+            await asyncio.sleep(box["delay"])
         replies = box["replies"] or [500]
         reply = replies[min(box["calls"], len(replies)) - 1]
         if isinstance(reply, int):
@@ -653,6 +693,90 @@ class TestApplyBackground:
         registry.report_live_failure.assert_awaited_once_with(7)
         registry.report_live_success.assert_not_awaited()
 
+    async def test_the_time_limit_is_for_the_whole_response_not_for_each_image(self, server):
+        # Four images, 0.25 s each, 0.6 s allowed in all: two are cut out, the
+        # third runs out of time, the fourth is not even sent.
+        server["replies"], server["delay"] = [_half_matte()], 0.25
+        config = im.MattingConfig(enabled=True, url=URL, timeout=0.6)
+        registry, response = _registry((7, None)), _response(4)
+        before = _count(im.OUTCOME_BUSY)
+        started = time.monotonic()
+        await im.apply_background("transparent", response, config, registry)
+        elapsed = time.monotonic() - started
+        assert [item["has_alpha"] for item in response["data"]] == [True, True, False, False]
+        assert 0.55 < elapsed < 1.2 and server["calls"] == 3
+        assert _count(im.OUTCOME_BUSY) == before + 2
+        registry.report_live_failure.assert_not_awaited()             # slow is not sick
+        registry.report_live_success.assert_awaited_once_with(7)
+
+    async def test_time_used_up_between_two_images_is_load_not_sickness(self, server, monkeypatch):
+        # The first image is answered in time, but attaching its matte runs
+        # past the limit. The second is then not sent at all, and nobody is blamed.
+        server["replies"] = [_half_matte()]
+        real = im.attach_matte
+
+        def slow_attach(picture, matte):
+            time.sleep(0.3)
+            return real(picture, matte)
+
+        monkeypatch.setattr(im, "attach_matte", slow_attach)
+        config = im.MattingConfig(enabled=True, url=URL, timeout=0.2)
+        registry, response = _registry((7, None)), _response(2)
+        before = (_count(im.OUTCOME_OUT_OF_TIME), _count(im.OUTCOME_BUSY), _count(im.OUTCOME_FAILED))
+        await im.apply_background("transparent", response, config, registry)
+        assert [item["has_alpha"] for item in response["data"]] == [True, False]
+        assert server["calls"] == 1
+        # Not "busy": the server answered promptly; the time went elsewhere.
+        assert (_count(im.OUTCOME_OUT_OF_TIME), _count(im.OUTCOME_BUSY), _count(im.OUTCOME_FAILED)) == \
+            (before[0] + 1, before[1], before[2])
+        registry.report_live_failure.assert_not_awaited()
+        registry.report_live_success.assert_awaited_once_with(7)
+
+    @pytest.mark.parametrize("budget", [0, -5.0])
+    async def test_a_request_that_has_already_used_its_time_gets_no_cut_out_at_all(self, server, budget):
+        # It waited for a worker, or was retried: starting a cut-out now could
+        # get a finished, billed picture cut off by the front proxy.
+        server["replies"] = [_half_matte()]
+        registry, response = _registry((7, None)), _response(2)
+        before = _count(im.OUTCOME_OUT_OF_TIME)
+        await im.apply_background("transparent", response, CONFIG, registry, budget)
+        assert server["calls"] == 0 and response["background"] == "opaque"
+        assert [item["has_alpha"] for item in response["data"]] == [False, False]
+        assert _count(im.OUTCOME_OUT_OF_TIME) == before + 2
+        registry.matting_server_state.assert_not_awaited()
+        registry.report_live_failure.assert_not_awaited()
+
+    async def test_a_request_with_little_time_left_gets_only_that(self, server):
+        server["replies"], server["delay"] = [_half_matte()], 0.6
+        registry, response = _registry((7, None)), _response()
+        started = time.monotonic()
+        await im.apply_background("transparent", response, CONFIG, registry, 0.2)      # CONFIG allows 30 s
+        assert time.monotonic() - started < 0.55 and response["background"] == "opaque"
+        registry.report_live_failure.assert_not_awaited()
+
+    async def test_plenty_of_time_left_changes_nothing(self, server):
+        server["replies"] = [_half_matte()]
+        response = _response()
+        await im.apply_background("transparent", response, CONFIG, _registry((7, None)), 600.0)
+        assert response["background"] == "transparent"
+        # ...and it does not lengthen the configured limit either.
+        server["delay"] = 0.6
+        response, started = _response(), time.monotonic()
+        await im.apply_background("transparent", response, im.MattingConfig(enabled=True, url=URL, timeout=0.2),
+                                  _registry((7, None)), 600.0)
+        assert time.monotonic() - started < 0.55 and response["background"] == "opaque"
+
+    async def test_each_response_leaves_a_log_line_with_its_outcomes(self, server, monkeypatch):
+        server["replies"] = [_half_matte(), 500]
+        log = MagicMock()
+        monkeypatch.setattr(im, "logger", log)
+        await im.apply_background("transparent", _response(3), CONFIG, _registry((7, None)))
+        log.info.assert_any_call("image_background_outcome",
+                                 outcomes=[im.OUTCOME_TRANSPARENT, im.OUTCOME_FAILED, im.OUTCOME_FAILED])
+        log.reset_mock()
+        await im.apply_background("opaque", _response(), CONFIG, _registry())
+        assert not any(call.args[:1] == ("image_background_outcome",) for call in log.info.call_args_list)
+
     async def test_has_alpha_is_per_image(self, server):
         server["replies"] = [_half_matte(), Image.new("L", (96, 80), 255), _half_matte()]
         registry, response = _registry((7, None)), _response(3)
@@ -738,10 +862,53 @@ class TestConfig:
                                                 "img.matting_api_key": None, "img.matting_timeout": "soon"})
         assert config.url == "" and config.api_key is None and config.timeout == 30.0
 
-    @pytest.mark.parametrize("value,expected", [(5, 5.0), ("12", 12.0), (300, 300.0), (0, 30.0), (-1, 30.0),
-                                                (301, 30.0), (None, 30.0), ("x", 30.0), (True, 30.0)])
+    @pytest.mark.parametrize("value,expected", [(5, 5.0), ("12", 12.0), (100, 100.0), (0, 30.0), (-1, 30.0),
+                                                (None, 30.0), ("x", 30.0), (True, 30.0),
+                                                # above the ceiling: someone wanted a long limit, so the ceiling
+                                                (101, 100.0), (300, 100.0), ("250", 100.0), (float("inf"), 100.0),
+                                                # not a number at all, or one no float can hold
+                                                (float("nan"), 30.0), (10 ** 400, 30.0)])
     def test_clean_timeout(self, value, expected):
         assert im.clean_timeout(value) == expected
+
+    def test_the_longest_cut_out_still_fits_inside_the_front_proxys_limit(self):
+        # Generation may use its whole budget before the cut-out starts; the
+        # two together must stay under the gateway nginx's proxy_read_timeout.
+        from backend.app.settings import Settings
+
+        generation = Settings.model_fields["backend_image_request_timeout"].default
+        assert generation + im.MAX_TIMEOUT < 720
+        # ...and since a request can also wait for a worker and retry, the
+        # cut-out is held to a budget counted from the request's first moment.
+        assert im.DEFAULT_TIMEOUT < im.MAX_TIMEOUT < im.REQUEST_BUDGET < 720
+
+    @pytest.mark.parametrize("key", ["abc", "k" * 512, "a-b_c.d~e!f", "0123456789abcdef" * 4,
+                                     "pass phrase 1"])        # a space inside is a legal header value
+    def test_a_key_that_can_be_sent(self, key):
+        assert im.validate_api_key(key) is None
+
+    @pytest.mark.parametrize("key", ["", "k" * 513, " leading", "trailing ", "tab\tkey", "smart\u201cquote",
+                                     "nbsp\u00a0key", "caf\u00e9", "line\nbreak", None, 5])
+    def test_a_key_that_cannot(self, key):
+        assert im.validate_api_key(key)
+
+    async def test_a_stored_key_that_cannot_be_sent_is_treated_as_no_key_and_says_so(self, monkeypatch):
+        # No key means a 401 from the server, which is counted as "rejected"
+        # and stops the dialing: a clearer signal than an encoding error on every image.
+        log = MagicMock()
+        monkeypatch.setattr(im, "logger", log)
+        config = await self._load(monkeypatch, {"img.transparent_enabled": True, "img.matting_url": URL,
+                                                "img.matting_api_key": "smart\u201cquote"})
+        assert config.api_key is None and config.usable is True
+        log.warning.assert_called_once_with("image_matting_stored_key_unusable_sending_none")
+        assert "smart" not in repr(log.mock_calls)                   # the key itself is never logged
+
+    async def test_a_usable_stored_key_is_kept_without_comment(self, monkeypatch):
+        log = MagicMock()
+        monkeypatch.setattr(im, "logger", log)
+        config = await self._load(monkeypatch, {"img.matting_url": URL, "img.matting_api_key": " pass phrase 1 "})
+        assert config.api_key == "pass phrase 1"
+        log.warning.assert_not_called()
 
     @pytest.mark.parametrize("url", ["https://aspen4.hpc.uidaho.edu:8005", "http://127.0.0.1:18006"])
     def test_a_base_address_is_a_valid_server_url(self, url):
@@ -924,6 +1091,50 @@ class TestImageGeneration:
         assert out["data"][0]["b64_json"] and order == ["generated", "completed"]
         svc._fail_request.assert_not_awaited()                         # completed stays completed
 
+    async def test_the_cut_out_is_given_what_the_request_has_left(self, monkeypatch, server):
+        svc, _ = _service(monkeypatch, {})
+        svc._matting_config = CONFIG
+        seen = {}
+
+        async def applied(background, response, config, registry, budget):
+            seen["budget"] = budget
+
+        monkeypatch.setattr(im, "apply_background", applied)
+        request = _image_request(background="transparent")
+        await svc._apply_image_background(request, _response(), time.monotonic() - 100.0)
+        assert im.REQUEST_BUDGET - 101.0 < seen["budget"] <= im.REQUEST_BUDGET - 100.0
+        await svc._apply_image_background(request, _response(), time.monotonic() - 800.0)
+        assert seen["budget"] < 0                                     # nothing left: no cut-out is attempted
+
+    async def test_a_request_that_ran_long_returns_its_picture_without_a_cut_out(self, monkeypatch, server):
+        server["replies"] = [_half_matte()]
+        svc, _ = _service(monkeypatch, {})
+        svc._matting_config = CONFIG
+        svc._registry = _registry((7, None))
+        response = _response()
+        await svc._apply_image_background(_image_request(background="transparent"), response,
+                                          time.monotonic() - im.REQUEST_BUDGET - 1)
+        assert server["calls"] == 0 and response["background"] == "opaque"
+        assert response["data"][0]["has_alpha"] is False
+
+    async def test_the_clock_starts_before_quota_and_queueing(self, monkeypatch, server):
+        svc, _ = _service(monkeypatch, {})
+        order, response = [], _response()
+        self._wire(svc, response, order)
+        seen = {}
+
+        async def slow_quota(*args, **kwargs):
+            await asyncio.sleep(0.2)
+
+        async def applied(request, response, started=None):
+            seen["waited"] = time.monotonic() - started
+
+        svc._check_quota = slow_quota
+        svc._apply_image_background = applied
+        await svc.image_generation(_image_request(background="transparent"), MagicMock(id=1), MagicMock(id=2),
+                                   MagicMock())
+        assert seen["waited"] >= 0.2
+
     async def test_a_caller_who_leaves_during_the_cut_out_leaves_a_completed_request(self, monkeypatch, server):
         # The picture was generated and the row completed; a disconnect now
         # must not flip it to failed.
@@ -1007,18 +1218,11 @@ class TestEndpoints:
         canonical, _ = await self._prepare(monkeypatch, params)
         assert canonical.background == carried
 
-    @pytest.mark.parametrize("value", ["clear", "none", True, 5])
-    async def test_an_unknown_value_is_400_before_the_policy_judge_runs(self, monkeypatch, value):
-        from fastapi import HTTPException
-
-        judged = []
-        monkeypatch.setattr("backend.app.services.image_policy.evaluate_prompt",
-                            AsyncMock(side_effect=lambda **kw: judged.append(kw)))
-        with pytest.raises(HTTPException) as error:
-            await self._prepare(monkeypatch, {"prompt": "a hedgehog", "background": value})
-        assert error.value.status_code == 400
-        assert error.value.detail == "'background' must be one of: transparent, opaque, auto"
-        assert judged == []
+    @pytest.mark.parametrize("value", ["clear", "none", "transparant", True, 5, ["transparent"]])
+    async def test_an_unknown_value_does_not_fail_the_request(self, monkeypatch, value):
+        # 2.9.89 ignored the field entirely; a request that worked then must not become a 400.
+        canonical, judged = await self._prepare(monkeypatch, {"prompt": "a hedgehog", "background": value})
+        assert canonical.background == "auto" and judged == ["a hedgehog"]
 
     def test_the_edits_form_takes_the_field_and_passes_it_on(self):
         import inspect
@@ -1030,17 +1234,17 @@ class TestEndpoints:
         source = inspect.getsource(api.image_edits)
         assert '"background": background,' in source
 
-    def test_the_playground_takes_the_field_and_refuses_an_unknown_value(self):
+    def test_the_playground_takes_the_field_and_never_refuses_a_value(self):
         source = (_APP / "dashboard" / "images.py").read_text()
         tree = ast.parse(source)
         generate = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                         and n.name == "images_api_generate")
         body = ast.get_source_segment(source, generate)
-        assert 'parse_background(body.get("background"))' in body
+        assert 'background = parse_background(body.get("background"))' in body
         assert "background=background," in body
-        parse = body.index("parse_background(")
-        # Refused before the policy judge is asked, as on the API path.
-        assert "status_code=400" in body[parse:body.index("evaluate_prompt")]
+        # Nothing about the value is an error: no branch between reading it and loading the settings.
+        between = body[body.index("background = parse_background("):body.index("# Load config for defaults/guardrails")]
+        assert "return" not in between and "except" not in between
 
 
 class TestPlayground:
@@ -1142,13 +1346,28 @@ class TestAdminForm:
         ({"matting_url": "https://m:8010/v1/matte"}, "base+address"),
         ({"matting_url": "https://a:b@m"}, "base+address"),
         ({"matting_url": "https://ho st"}, "spaces"),
-        ({"matting_timeout": "0"}, "timeout"), ({"matting_timeout": "301"}, "timeout"),
+        ({"matting_timeout": "0"}, "timeout"), ({"matting_timeout": "101"}, "timeout"),
         ({"matting_timeout": "30.5"}, "timeout"), ({"matting_timeout": "soon"}, "timeout"),
+        ({"matting_api_key": "smart\u201cquote"}, "printable+ASCII"),
+        ({"matting_api_key": "tab\tinside"}, "printable+ASCII"),
     ])
     async def test_a_bad_value_is_refused_and_nothing_at_all_is_saved(self, fields, needle):
         location, writes, audit = await _save({**_CARD, **fields})
         assert "error=" in location and needle in location
         assert writes == {} and audit is None
+
+    async def test_the_longest_allowed_timeout_is_accepted(self):
+        _, writes, _ = await _save({**_CARD, "matting_timeout": str(int(im.MAX_TIMEOUT))})
+        assert writes["img.matting_timeout"] == int(im.MAX_TIMEOUT)
+
+    async def test_a_bad_typed_key_does_not_matter_when_the_key_is_being_removed(self):
+        location, writes, _ = await _save({**_CARD, "matting_api_key_clear": "on",
+                                           "matting_api_key": "smart\u201cquote"})
+        assert "success" in location and writes["img.matting_api_key"] == ""
+
+    async def test_a_key_with_a_space_inside_is_saved(self):
+        _, writes, _ = await _save({**_CARD, "matting_api_key": " pass phrase 1 "})
+        assert writes["img.matting_api_key"] == "pass phrase 1"
 
     async def test_a_blank_timeout_means_the_default(self):
         _, writes, _ = await _save({**_CARD, "matting_timeout": ""})
@@ -1282,6 +1501,12 @@ class TestEngine:
 
 
 class TestDocs:
+    def test_the_docs_do_not_promise_an_error_for_an_unknown_value(self):
+        text = (_REPO / "docs" / "images-api.md").read_text()
+        assert "unknown `background` value" not in text and 'treated as `"auto"` (never an error)' in text
+        html = (_APP / "dashboard" / "templates" / "public" / "documentation.html").read_text()
+        assert "any other value is a 400" not in html
+
     def test_the_api_reference_documents_the_field_and_the_response(self):
         text = (_REPO / "docs" / "images-api.md").read_text()
         for needle in ("`background`", '"transparent"', "`has_alpha`", "img.transparent_enabled",
@@ -1293,6 +1518,17 @@ class TestDocs:
     def test_the_in_app_documentation_mentions_it_for_both_endpoints(self):
         html = (_APP / "dashboard" / "templates" / "public" / "documentation.html").read_text()
         assert html.count("<code>background</code>") >= 2 and "has_alpha" in html
+
+    def test_both_engine_references_list_every_engine(self):
+        from backend.app.db.models import BackendEngine
+
+        html = (_APP / "dashboard" / "templates" / "public" / "documentation.html").read_text()
+        markdown = (_REPO / "docs" / "index.md").read_text()
+        for engine in BackendEngine:
+            assert f"(<code>{engine.value}</code>)</td>" in html, engine.value
+            assert f"(`{engine.value}`) |" in markdown, engine.value
+        words = {8: "eight", 9: "nine", 10: "ten"}[len(BackendEngine)]
+        assert f"exactly these {words} values" in html and f"exactly these {words} values" in markdown
 
     def test_the_test_manifest_lists_both_new_files(self):
         manifest = (_REPO / "TESTING.md").read_text()

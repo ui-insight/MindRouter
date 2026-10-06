@@ -316,6 +316,68 @@ class TestBusyAndFailure:
             assert c.post("/v1/matte", content=_picture(), headers=AUTH).status_code == 499
             assert c.get("/health", headers=AUTH).json()["stats"]["failed"] == 0
 
+    def test_a_picture_stuck_on_the_model_turns_health_unhealthy(self, engine_box):
+        # A hung inference thread behind a live web server would otherwise
+        # look healthy for ever. MindRouter's health check reads this word.
+        blocker = threading.Event()
+        engine_box["kwargs"] = {"blocker": blocker}
+        results = []
+        with TestClient(server.create_app(_config(stall_seconds=0))) as c:
+            assert c.get("/health").json() == {"status": "ok"}             # idle is not stalled
+            stuck = threading.Thread(
+                target=lambda: results.append(c.post("/v1/matte", content=_picture(), headers=AUTH)))
+            stuck.start()
+            seen = None
+            for _ in range(500):
+                seen = c.get("/health")
+                if seen.status_code != 200:
+                    break
+                threading.Event().wait(0.01)
+            # Said twice: a status code for anything that reads those, the word for MindRouter's check.
+            assert seen.status_code == 503 and seen.json() == {"status": "unhealthy"}
+            detail = c.get("/health", headers=AUTH)
+            assert detail.status_code == 503 and detail.json()["status"] == "unhealthy"
+            assert detail.json()["stall_seconds"] == 0 and detail.json()["queue_depth"] == 1
+            # A new picture is refused at once, not queued behind the stuck one.
+            started = time.monotonic()
+            refused = c.post("/v1/matte", content=_picture(), headers=AUTH)
+            assert refused.status_code == 503 and refused.headers["retry-after"] == "30"
+            assert time.monotonic() - started < 1.0 and c.app.state.worker.queue_depth() == 1
+            assert c.post("/v1/matte", content=_picture()).status_code == 401      # the key is still checked first
+            blocker.set()
+            stuck.join(timeout=5)
+            assert results[0].status_code == 200
+            assert c.get("/health").status_code == 200                              # and it recovers by itself
+            assert c.post("/v1/matte", content=_picture(), headers=AUTH).status_code == 200
+
+    def test_a_picture_within_the_limit_is_not_a_stall(self, engine_box):
+        blocker = threading.Event()
+        engine_box["kwargs"] = {"blocker": blocker}
+        with TestClient(server.create_app(_config(stall_seconds=60))) as c:
+            busy = threading.Thread(target=lambda: c.post("/v1/matte", content=_picture(), headers=AUTH))
+            busy.start()
+            worker = c.app.state.worker
+            for _ in range(500):
+                if worker._running_since is not None:
+                    break
+                threading.Event().wait(0.01)
+            assert worker._running_since is not None and c.get("/health").json() == {"status": "ok"}
+            blocker.set()
+            busy.join(timeout=5)
+            assert worker._running_since is None
+
+    def test_the_stall_clock_stops_when_the_model_fails(self, engine_box):
+        engine_box["kwargs"] = {"fail": RuntimeError("x")}
+        with TestClient(server.create_app(_config(stall_seconds=0))) as c:
+            assert c.post("/v1/matte", content=_picture(), headers=AUTH).status_code == 500
+            assert c.app.state.worker._running_since is None
+            assert c.get("/health").json() == {"status": "ok"}
+
+    def test_the_health_word_is_one_the_gateways_check_reads_as_down(self):
+        from backend.app.core.telemetry.adapters.decision import NOT_READY
+
+        assert "unhealthy" in NOT_READY
+
     def test_a_model_failure_is_500_and_its_text_goes_nowhere(self, engine_box, caplog):
         engine_box["kwargs"] = {"fail": RuntimeError(f"CUDA error near {SECRET}")}
         with caplog.at_level(logging.DEBUG), TestClient(server.create_app(_config())) as c:
@@ -354,15 +416,16 @@ class TestSettings:
         for name, value in {"MATTING_MODEL": "/models/birefnet", "MATTING_REVISION": " abc123 ",
                             "MATTING_SERVED_NAME": "cutout", "MATTING_DEVICE": "cuda:1", "MATTING_HALF": "0",
                             "MATTING_PORT": "18123", "MATTING_API_KEY": " k ", "MATTING_MAX_QUEUE": "3",
-                            "MATTING_MAX_PIXELS": "1048576"}.items():
+                            "MATTING_MAX_PIXELS": "1048576", "MATTING_STALL_SECONDS": "20"}.items():
             monkeypatch.setenv(name, value)
         config = ServiceConfig.from_env()
         assert (config.model, config.revision, config.served_name) == ("/models/birefnet", "abc123", "cutout")
         assert (config.device, config.half, config.port) == ("cuda:1", False, 18123)
         assert (config.api_key, config.max_queue, config.max_pixels) == ("k", 3, 1048576)
+        assert config.stall_seconds == 20 and ServiceConfig().stall_seconds == 60
 
     @pytest.mark.parametrize("name,value", [("MATTING_PORT", "http"), ("MATTING_MAX_QUEUE", "0"),
-                                            ("MATTING_SIDE", "32")])
+                                            ("MATTING_SIDE", "32"), ("MATTING_STALL_SECONDS", "1")])
     def test_a_bad_number_stops_the_service_at_start(self, monkeypatch, name, value):
         monkeypatch.setenv(name, value)
         with pytest.raises(SystemExit):

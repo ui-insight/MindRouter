@@ -29,6 +29,19 @@ pixels are the subject.
   counts with the key. The port opens only once the model is loaded, so a
   server that is still starting refuses connections (MindRouter's health
   check reads that as down, which is right).
+- A stuck model is visible. If one picture has been on the model longer than
+  `MATTING_STALL_SECONDS`:
+  - `POST /v1/matte` answers `503` at once instead of queueing behind it, so
+    callers get their opaque picture immediately rather than after their
+    time limit. This works whether or not the server is registered.
+  - `GET /health` answers `503` with `{"status": "unhealthy"}`. MindRouter
+    marks the registered backend unhealthy and stops sending pictures.
+
+  Both clear by themselves if the picture finishes. A thread that never
+  comes back needs `systemctl restart`: the process is still alive, so
+  `Restart=on-failure` does not fire. Without any of this a hung inference
+  thread behind a live web server would look healthy, and every transparent
+  request would wait out its full timeout.
 - The picture's type is read from its own first bytes, its size from its
   header before any pixel is decoded (`MATTING_MAX_PIXELS`), and its length
   while reading (`MATTING_MAX_BODY_BYTES`, 413 above it).
@@ -50,6 +63,7 @@ pixels are the subject.
 | `MATTING_MAX_QUEUE` | `16` | Waiting pictures before 503 |
 | `MATTING_MAX_BODY_BYTES` | `12582912` | Request body limit, 12 MiB (413 above it) |
 | `MATTING_MAX_PIXELS` | `4194304` | Largest picture, 2048 x 2048 (422 above it) |
+| `MATTING_STALL_SECONDS` | `60` | A picture on the model longer than this means the model is stuck: `/health` and `/v1/matte` answer 503. Raise it if a CPU deployment is this slow |
 
 ## The model
 

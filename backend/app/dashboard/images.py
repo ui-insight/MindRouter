@@ -218,15 +218,9 @@ async def images_api_generate(
     from backend.app.core.canonical_schemas import CanonicalImageRequest
     from backend.app.services.image_matting import parse_background
 
-    # `background` (transparent | opaque | auto): refused here, before the
-    # policy judge runs, the same as on the API path.
-    try:
-        background = parse_background(body.get("background"))
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
-        )
+    # `background` (transparent | opaque | auto); anything else is read as
+    # "auto", the same as on the API path.
+    background = parse_background(body.get("background"))
 
     # Load config for defaults/guardrails
     enabled = await crud.get_config_json(db, "img.enabled", True)

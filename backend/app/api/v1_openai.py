@@ -719,14 +719,12 @@ async def _prepare_image_canonical(
             detail="'prompt' is required",
         )
 
-    # `background` (OpenAI's field): transparent | opaque | auto. Checked
-    # before the policy judge runs, so a misspelt value costs nothing.
+    # `background` (OpenAI's field): transparent | opaque | auto. Anything
+    # else is read as "auto", never refused: the field used to be ignored,
+    # and requests that worked then must keep working.
     from backend.app.services.image_matting import parse_background
 
-    try:
-        background = parse_background(params.get("background"))
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    background = parse_background(params.get("background"))
 
     # ── Load config defaults and guardrails ──────────────────────
     default_model = await crud.get_config_json(db, "img.default_model", "black-forest-labs/FLUX.2-dev")

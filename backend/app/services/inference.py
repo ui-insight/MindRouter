@@ -1229,6 +1229,7 @@ class InferenceService:
         http_request: Request,
     ) -> Dict[str, Any]:
         """Handle image generation request."""
+        started = time.monotonic()
         await self._check_quota(user, api_key)
 
         db_request = await self._create_request_record(
@@ -1260,7 +1261,7 @@ class InferenceService:
             # `background: "transparent"`: cut the finished picture(s) out.
             # After completion on purpose, so the diffusion worker's slot is
             # already free while the matting server works.
-            await self._apply_image_background(request, response)
+            await self._apply_image_background(request, response, started)
 
             return response
 
@@ -2931,12 +2932,15 @@ class InferenceService:
         return canonical.model_dump(exclude_none=True, by_alias=True)
 
     async def _apply_image_background(
-        self, request: CanonicalImageRequest, response: Dict[str, Any]
+        self, request: CanonicalImageRequest, response: Dict[str, Any], started: Optional[float] = None
     ) -> None:
         """Answer the caller's ``background`` field on a finished response.
 
         Fails open like the watermark: whatever goes wrong here, the caller
         still gets the (opaque) picture, with ``has_alpha: false``.
+        ``started`` is when the request began (time.monotonic): a request
+        that waited for a worker or was retried has less time left before
+        the front proxy gives up, and the cut-out gets only that.
         """
         background = getattr(request, "background", None)
         if background is None:
@@ -2944,8 +2948,11 @@ class InferenceService:
         try:
             from backend.app.services import image_matting
 
+            budget = None
+            if started is not None:
+                budget = image_matting.REQUEST_BUDGET - (time.monotonic() - started)
             await image_matting.apply_background(
-                background, response, getattr(self, "_matting_config", None), self._registry
+                background, response, getattr(self, "_matting_config", None), self._registry, budget
             )
         except Exception:
             logger.exception("image_background_step_failed")

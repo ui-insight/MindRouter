@@ -35,7 +35,10 @@ Endpoints
                     0 = background (bearer key)
 ``GET  /health``    liveness for anyone; details with the bearer key. The port
                     opens only once the model is loaded, so a server that is
-                    still starting refuses connections rather than answering
+                    still starting refuses connections rather than answering.
+                    HTTP 503 with ``"status": "unhealthy"`` when one picture
+                    has been on the model longer than MATTING_STALL_SECONDS;
+                    ``/v1/matte`` then answers 503 at once
 
 The reply is only the matte, never a recoloured picture: the gateway attaches
 it to its own (watermarked) pixels, so this server cannot change what the
@@ -113,6 +116,10 @@ class ServiceConfig:
     max_queue: int = 16                  # pictures waiting; beyond this the answer is 503
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     max_pixels: int = DEFAULT_MAX_PIXELS
+    # A picture takes a fraction of a second on a GPU and seconds on a CPU.
+    # One that has been on the model this long means the model is stuck;
+    # /health then says "unhealthy" so the gateway stops sending pictures.
+    stall_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "ServiceConfig":
@@ -130,6 +137,7 @@ class ServiceConfig:
             max_queue=_env_int("MATTING_MAX_QUEUE", cls.max_queue),
             max_body_bytes=_env_int("MATTING_MAX_BODY_BYTES", cls.max_body_bytes, 1024),
             max_pixels=_env_int("MATTING_MAX_PIXELS", cls.max_pixels, 4096),
+            stall_seconds=_env_int("MATTING_STALL_SECONDS", cls.stall_seconds, 5),
         )
 
 
@@ -263,6 +271,7 @@ class Worker:
         self.engine: Any = None
         self.stats = Stats()
         self._waiting = 0
+        self._running_since: Optional[float] = None    # when the picture now on the model started
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="matting-infer")
 
     @property
@@ -271,6 +280,13 @@ class Worker:
 
     def queue_depth(self) -> int:
         return self._waiting
+
+    def stalled(self) -> bool:
+        """True when one picture has been on the model longer than
+        ``stall_seconds``: the inference thread is stuck (a GPU fault, a
+        deadlock) while this event loop still answers."""
+        since = self._running_since
+        return since is not None and time.monotonic() - since > self.config.stall_seconds
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -294,7 +310,11 @@ class Worker:
 
     def _timed(self, image: Any) -> Tuple[Any, float]:
         started = time.monotonic()
-        matte = self.engine.matte(image)
+        self._running_since = started
+        try:
+            matte = self.engine.matte(image)
+        finally:
+            self._running_since = None
         if matte.size != image.size or matte.mode != "L":
             raise RuntimeError("engine returned a matte of the wrong shape")
         return matte, time.monotonic() - started
@@ -354,7 +374,7 @@ def _coverage(matte: Any) -> float:
 
 def create_app(config: ServiceConfig):
     from fastapi import FastAPI, Header, HTTPException, Request
-    from fastapi.responses import Response
+    from fastapi.responses import JSONResponse, Response
 
     if not config.api_key and not config.allow_no_auth:
         raise SystemExit("MATTING_API_KEY is not set. Set it, or MATTING_ALLOW_NO_AUTH=1 to serve without a key.")
@@ -381,16 +401,22 @@ def create_app(config: ServiceConfig):
         return hmac.compare_digest(authorization[len("Bearer "):].strip().encode(), config.api_key.encode())
 
     @app.get("/health")
-    async def health(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    async def health(authorization: Optional[str] = Header(default=None)):
         # Reachable only once the model is loaded: uvicorn finishes start-up
-        # (the load) before it opens the port.
-        if not authorized(authorization):
-            return {"status": "ok"}        # liveness only without the key
-        return {"status": "ok", "model": config.served_name, "source": config.model,
+        # (the load) before it opens the port. A model stuck on a picture is
+        # reported twice over, for whoever is asking: HTTP 503 for anything
+        # that reads status codes, and the word MindRouter's check reads.
+        stalled = worker.stalled()
+        body: Dict[str, Any] = {"status": "unhealthy" if stalled else "ok"}
+        if authorized(authorization):      # liveness only without the key
+            body.update({
+                "model": config.served_name, "source": config.model,
                 "revision": config.revision, "device": getattr(worker.engine, "device", None),
                 "half": getattr(worker.engine, "half", None), "side": config.side,
                 "max_pixels": config.max_pixels, "queue_depth": worker.queue_depth(),
-                "max_queue": config.max_queue, "stats": worker.stats.as_dict()}
+                "max_queue": config.max_queue, "stall_seconds": config.stall_seconds,
+                "stats": worker.stats.as_dict()})
+        return JSONResponse(body, status_code=503 if stalled else 200)
 
     @app.post("/v1/matte")
     async def matte(request: Request, authorization: Optional[str] = Header(default=None)):
@@ -406,6 +432,13 @@ def create_app(config: ServiceConfig):
             image = open_image(raw, config.max_pixels)
         except BadRequest as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
+        if worker.stalled():
+            # Do not queue a picture behind one that is stuck: its caller
+            # would only wait out its own time limit. This is the signal
+            # that reaches every caller, registered for health polls or not.
+            worker.stats.rejected_busy += 1
+            raise HTTPException(status_code=503, detail="model is not answering",
+                                headers={"Retry-After": "30"})
 
         try:
             result, seconds = await _unless_disconnected(request, worker.matte(image))

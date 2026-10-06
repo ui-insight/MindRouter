@@ -70,7 +70,7 @@ Generate one or more images from a text prompt. Request body is **JSON**
 | `num_inference_steps` | integer | no | `img.default_steps` (`20`) | Diffusion steps. Clamped to `img.max_steps` (default `50`). |
 | `guidance_scale` | float | no | `img.default_guidance_scale` (`3.5`) | Classifier-free guidance strength. |
 | `seed` | integer | no | `null` | Fixed seed for reproducibility. Omit for random. |
-| `background` | string | no | `null` | `"transparent"`, `"opaque"` or `"auto"` (OpenAI's field). `"transparent"` returns a PNG with the background removed; see [Transparent backgrounds](#transparent-backgrounds). Any other value → 400. |
+| `background` | string | no | `null` | `"transparent"`, `"opaque"` or `"auto"` (OpenAI's field). `"transparent"` returns a PNG with the background removed; see [Transparent backgrounds](#transparent-backgrounds). Any other value is treated as `"auto"` (never an error). |
 | `user` | string | no | `null` | Opaque end-user identifier for your own auditing. |
 
 > Defaults shown in parentheses are the shipped fallback values. An
@@ -361,8 +361,14 @@ How it works, and what follows from it:
   drop shadows usually go with the background; glass keeps its outline but is
   not see-through.
 - **`"opaque"` and `"auto"`** return the ordinary picture, with
-  `has_alpha: false`. Leave the field out and the response is exactly what it
-  was before this option existed (no `background`, no `has_alpha`).
+  `has_alpha: false`. So does any value the server does not recognise (a
+  misspelling, say): it is never an error, and `background: "opaque"` in the
+  response tells you the picture is not transparent. Leave the field out (or
+  send an empty value: JSON `null`, `""` or `false`, or an empty form field)
+  and the response is exactly what it was before this option existed (no
+  `background`, no `has_alpha`). On the multipart edits endpoint every value
+  is text, so the word `false` there is an unrecognised value, not an empty
+  one.
 - **Edits:** the cut-out is applied to the edited result. Removing the
   background of an uploaded picture without redrawing it is not offered.
 - **Watermark.** The file you receive still carries the invisible watermark
@@ -446,7 +452,7 @@ All of these are admin-tunable config keys. Shipped defaults in parentheses.
 | `img.transparent_enabled` | `false` | Allow `background: "transparent"`. Off → opaque picture, `has_alpha: false`. |
 | `img.matting_url` | `""` | Base URL of the matting (background-removal) server, `matting_service/`. Register the same URL on Admin → Backends (engine *Matting server*) to have it health-checked. |
 | `img.matting_api_key` | `""` | The matting server's bearer key. Never shown again once saved. |
-| `img.matting_timeout` | `30` | Seconds allowed per picture for the cut-out (1 to 300). |
+| `img.matting_timeout` | `30` | Seconds allowed for the cut-out of one response, all its images together (1 to 100). When it runs out the remaining images come back opaque. A request that has already run for most of the front proxy's limit gets less, or no cut-out at all. |
 | `img.policy` | `""` | Policy text; empty disables the judge. |
 | `img.judge_model` | `""` | Primary judge model. |
 | `img.judge_model_secondary` | `""` | Fallback judge model. |
@@ -462,7 +468,7 @@ oversized/too-many reference images, are **rejected with 400**.
 
 | HTTP | When |
 |------|------|
-| 400 | Invalid JSON body; missing `prompt`; unknown `background` value; disallowed `size`; dimensions over max; > 4 reference images; non-image upload; reference image over size cap; **content-policy denial** (`content_policy_violation`). |
+| 400 | Invalid JSON body; missing `prompt`; disallowed `size`; dimensions over max; > 4 reference images; non-image upload; reference image over size cap; **content-policy denial** (`content_policy_violation`). |
 | 401 | Missing / invalid API key. |
 | 403 | Image generation not enabled for your account. |
 | 404 | `model` does not resolve to a known image model (`model_not_found`). |

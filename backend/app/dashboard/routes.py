@@ -5402,6 +5402,7 @@ async def admin_images_config(
             "matting_timeout": int(_image_matting.clean_timeout(
                 await crud.get_config_json(db, "img.matting_timeout", _image_matting.DEFAULT_TIMEOUT)
             )),
+            "matting_max_timeout": int(_image_matting.MAX_TIMEOUT),
             "judge_model": await crud.get_config_json(db, "img.judge_model", ""),
             "judge_model_secondary": await crud.get_config_json(db, "img.judge_model_secondary", ""),
             "enabled_by_default": default_enabled,
@@ -5497,6 +5498,9 @@ async def admin_images_config_post(
             matting_error = (
                 f"Matting timeout must be 1 to {int(_image_matting.MAX_TIMEOUT)} seconds."
             )
+        matting_key = (form.get("matting_api_key") or "").strip()
+        if matting_posted and not matting_error and matting_key and "matting_api_key_clear" not in form:
+            matting_error = _image_matting.validate_api_key(matting_key)
         if matting_error:
             return RedirectResponse(
                 url=f"/admin/images-config?error={_qp(matting_error)}", status_code=302
@@ -5515,7 +5519,6 @@ async def admin_images_config_post(
             await crud.set_config(db, "img.transparent_enabled", transparent_on)
             await crud.set_config(db, "img.matting_url", matting_url)
             await crud.set_config(db, "img.matting_timeout", matting_timeout)
-            matting_key = (form.get("matting_api_key") or "").strip()
             if "matting_api_key_clear" in form:
                 await crud.set_config(db, "img.matting_api_key", "")
             elif matting_key:
