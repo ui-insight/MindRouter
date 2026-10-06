@@ -272,10 +272,39 @@ TypeSafe's SDK retries 429 and 5xx with backoff by default. A disabled API is
 For each question MindRouter sends one chat completion to a replica of the
 model: a single user turn containing the state, the question and the options
 labelled `A.`, `B.`, …, with thinking off, `max_tokens=1`,
-`allowed_token_ids` restricted to the option letters and `logprob_token_ids`
-requesting each letter's log-probability. The reply's distribution over the
-letters, renormalized, is the answer. A `noul` is a two-option question
+`allowed_token_ids` restricted to the option letters and `top_logprobs=20`.
+The letters' log-probabilities are read out of that top-20 list; their
+distribution, renormalized, is the answer. A `noul` is a two-option question
 (yes/no); a `score` lists its levels as options.
+
+With about 8 options or more, the least likely letters can fall outside the
+top 20 (other tokens take the places). Such a letter is given a value just
+below the lowest in the list, which it cannot exceed, and the question's
+`complete` is `false`. Read `complete` together with `label_mass`: when
+`label_mass` is near 1 (the normal case; on qwen3.8-27b the letters left out
+together held at most 0.0001 of the probability) the answer and its
+probabilities are unaffected. When `label_mass` is low the model did not
+want to answer with a letter at all, and the probabilities of the options
+that were left out are rough. A `noul` or a single-order `choice` still
+reports the option the model picked; a `score` (an average over its levels)
+and a `choice` averaged over two option orders are computed from those
+rough probabilities and can be off. Treat a result with `complete: false`
+and a low `label_mass` as unreliable.
+
+**Why not `logprob_token_ids`** (which returns exactly the letters, and was
+used until 2.9.90): vLLM does not handle that field under speculative
+decoding, which every Qwen3.x replica here uses. Whenever another sequence
+in the same decoding step carried draft tokens, i.e. whenever the replica
+was serving anything else, vLLM answered HTTP 500 (`IndexError` in
+`_create_chat_logprobs`). On 2026-10-06 that made `/v1/systemone` on
+qwen/qwen3.8-27b fail for nearly every request while chat traffic was
+running, and never on an idle fleet. Seen on vLLM 0.29.0; the 0.31.0rc2
+sampler has the same gap. `tests/decisions_under_load.py` checks for it:
+run it after any change to the scoring request or a vLLM upgrade.
+
+If a replica answers 5xx or cannot be reached, the request is tried once on
+another replica of the same model before it fails (and before the model's
+configured fallback is used).
 
 This is the `separate` mode of
 [open-alternative-jev](https://github.com/ikermoel/open-alternative-jev)
@@ -285,8 +314,9 @@ the first question fills vLLM's prefix cache and the rest reuse it:
 MindRouter scores the first question alone, then the others concurrently.
 
 Requirements on the model: a chat template that honours
-`enable_thinking=false`, single-token capital letters, and vLLM ≥ 0.29 for
-`logprob_token_ids`. That is Qwen3.x on our fleet. It is not gpt-oss (Harmony
+`enable_thinking=false`, single-token capital letters, and a vLLM server
+that honours `allowed_token_ids` and returns 20 `top_logprobs` (the default
+`--max-logprobs`). That is Qwen3.x on our fleet. It is not gpt-oss (Harmony
 puts analysis text first) and not Ollama backends. Hence the allow-list.
 
 ## Operations
@@ -422,9 +452,13 @@ fine-tuned on that benchmark; measure before relying on it
   broken upstream costs each caller a timeout before the fallback answers.
 * **One upstream URL per model name.** Several instances of a decision server
   are not load-balanced by MindRouter.
-* **No retry within a model.** One failing call fails that model's attempt;
-  the configured fallback, if any, then answers. Without one, clients should
-  retry (TypeSafe's SDK does).
+* **One retry within a vLLM model, none for an upstream.** A vLLM model's
+  request is tried on one other replica when the first answers 5xx or cannot
+  be reached; an upstream decision server has one URL and no second try.
+  After that the configured fallback, if any, answers. Without one, clients
+  should retry (TypeSafe's SDK does). Nothing in the response says that a
+  second replica answered; the gateway log does
+  (`decision_backend_retry_on_another_replica`).
 * **A fallback is a different model.** Its numbers differ and its limits
   differ; thresholds tuned on one do not carry over exactly. `model` in the
   response says which answered.
