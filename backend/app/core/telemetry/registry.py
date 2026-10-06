@@ -17,7 +17,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Collection, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -587,6 +587,7 @@ class BackendRegistry:
         *,
         engine: Optional[BackendEngine] = None,
         multimodal: bool = False,
+        exclude: Collection[int] = (),
     ) -> Optional[Backend]:
         """A random healthy, circuit-closed backend serving ``model_name``.
 
@@ -597,13 +598,16 @@ class BackendRegistry:
         restricts to backends whose copy of the model takes images: the model
         row's ``supports_multimodal``, the same flag the scheduler routes on
         and the one an admin override sets (``Model.modality`` is only a
-        discovery-time name guess). Returns None when nothing qualifies, so
-        each caller keeps its own error wording.
+        discovery-time name guess). ``exclude`` holds backend ids not to pick
+        (a caller retrying after one replica failed). Returns None when
+        nothing qualifies, so each caller keeps its own error wording.
         """
         import random
 
         available: List[Backend] = []
         for b in await self.get_backends_with_model(model_name):
+            if b.id in exclude:
+                continue
             if engine is not None and b.engine != engine:
                 continue
             if multimodal and not any(

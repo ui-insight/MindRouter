@@ -20,6 +20,7 @@ import json
 import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -65,8 +66,11 @@ def _req(**over):
     return DecisionRequest.model_validate(body)
 
 
-def _chat_reply(label_ids, logprobs, sampled_idx, *, as_ids=True, prompt_tokens=100, cached=None, drop=()):
-    """A vLLM chat completion carrying label logprobs like 0.29 returns them."""
+def _chat_reply(label_ids, logprobs, sampled_idx, *, as_ids=True, prompt_tokens=100, cached=None, drop=(),
+                others=()):
+    """A vLLM chat completion carrying label logprobs like 0.29 returns them.
+    ``others`` are (token id, logprob) of tokens in the top list that are not
+    labels: the list is the model's raw top 20, whatever those tokens are."""
     def tok(i):
         return f"token_id:{label_ids[i]}" if as_ids else "ABCDEFGHIJKLMNOPQRST"[i]
 
@@ -74,7 +78,8 @@ def _chat_reply(label_ids, logprobs, sampled_idx, *, as_ids=True, prompt_tokens=
         {"token": tok(i), "logprob": lp, "bytes": None}
         for i, lp in enumerate(logprobs)
         if i not in drop
-    ]
+    ] + [{"token": f"token_id:{tid}", "logprob": lp, "bytes": None} for tid, lp in others]
+    top.sort(key=lambda t: -t["logprob"])
     usage = {"prompt_tokens": prompt_tokens, "completion_tokens": 1, "total_tokens": prompt_tokens + 1}
     if cached is not None:
         usage["prompt_tokens_details"] = {"cached_tokens": cached}
@@ -170,8 +175,9 @@ def _fake_registry(backends, aliases=None, open_circuits=()):
     reg.report_live_failure, reg.report_live_success = AsyncMock(), AsyncMock()
     reg.resolve_alias = MagicMock(side_effect=lambda m: ((aliases or {}).get(m, m), None))
 
-    async def _pick(model_name, *, engine=None, multimodal=False):
-        return await BackendRegistry.pick_available_backend(reg, model_name, engine=engine, multimodal=multimodal)
+    async def _pick(model_name, *, engine=None, multimodal=False, exclude=()):
+        return await BackendRegistry.pick_available_backend(
+            reg, model_name, engine=engine, multimodal=multimodal, exclude=exclude)
 
     reg.pick_available_backend = _pick
     return reg
@@ -322,7 +328,45 @@ class TestParseReadout:
         ids = _label_ids(3)
         r = vl.parse_readout(_chat_reply(ids, [-0.1, -2.0, -9.0], 0, drop=(2,)), ids)
         assert r.complete is False
-        assert r.logprobs[2] == pytest.approx(min(-0.1, -2.0) - 1.0)
+        assert r.logprobs == [-0.1, -2.0, -2.0]      # no likelier than the least likely token returned
+
+    def test_a_missing_label_takes_the_lowest_value_in_the_list_label_or_not(self):
+        # The list is the raw top 20: other tokens sit in it too. A label that
+        # is not there is below ALL of them, not just below the other labels.
+        ids = _label_ids(4)
+        reply = _chat_reply(ids, [-0.05, -4.0, -99.0, -99.0], 0, drop=(2, 3),
+                            others=[(9001, -3.0), (9002, -7.5), (9003, -11.25)])
+        r = vl.parse_readout(reply, ids)
+        assert r.logprobs == [-0.05, -4.0, -11.25, -11.25] and r.complete is False and r.sampled == 0
+
+    def test_tokens_that_are_not_labels_are_never_read_as_labels(self):
+        ids = _label_ids(2)
+        # A stray token outranks both labels; it must not become anyone's value.
+        r = vl.parse_readout(_chat_reply(ids, [-1.5, -2.5], 0, others=[(9001, -0.4)]), ids)
+        assert r.logprobs == [-1.5, -2.5] and r.complete is True
+
+    def test_a_reply_with_no_label_at_all_is_an_error_not_a_uniform_guess(self):
+        # A server that ignored allowed_token_ids: the list holds other tokens
+        # only and the sampled token is not a label. There is nothing to read.
+        ids = _label_ids(2)
+        reply = _chat_reply(ids, [-1.0, -2.0], 0, drop=(0, 1), others=[(9001, -0.1), (9002, -3.0)])
+        reply["choices"][0]["logprobs"]["content"][0]["token"] = "token_id:9001"
+        with pytest.raises(DecisionBackendError) as e:
+            vl.parse_readout(reply, ids)
+        assert e.value.status_code == 502 and "no label logprobs" in str(e.value)
+
+    def test_all_labels_present_among_other_tokens_is_complete(self):
+        ids = _label_ids(3)
+        r = vl.parse_readout(_chat_reply(ids, [-0.2, -3.0, -6.0], 0, others=[(9000 + i, -8.0 - i) for i in range(17)]), ids)
+        assert r.logprobs == [-0.2, -3.0, -6.0] and r.complete is True
+
+    def test_a_malformed_entry_in_the_list_is_skipped(self):
+        ids = _label_ids(2)
+        reply = _chat_reply(ids, [-0.3, -1.4], 0)
+        reply["choices"][0]["logprobs"]["content"][0]["top_logprobs"] += [
+            "junk", {"token": "token_id:9001"}, {"token": "token_id:9002", "logprob": True}, {"logprob": -50.0}]
+        r = vl.parse_readout(reply, ids)
+        assert r.logprobs == [-0.3, -1.4] and r.complete is True
 
     def test_no_logprobs_is_a_backend_error(self):
         with pytest.raises(DecisionBackendError) as e:
@@ -347,8 +391,12 @@ class TestVLLMLogprobsBackend:
         url, body = chat[1]
         assert url == "https://node7:8002/v1/chat/completions"
         assert body["max_tokens"] == 1 and body["temperature"] == 0.0 and body["stream"] is False
-        assert body["logprobs"] is True and body["top_logprobs"] == 3
-        assert body["allowed_token_ids"] == _label_ids(3) == body["logprob_token_ids"]
+        assert body["logprobs"] is True and body["allowed_token_ids"] == _label_ids(3)
+        # The server's whole top list, whatever the option count, and NOT
+        # logprob_token_ids: vLLM answers 500 to that field whenever another
+        # sequence in the batch carries draft tokens (speculative decoding),
+        # i.e. whenever the replica is doing anything else.
+        assert body["top_logprobs"] == 20 and "logprob_token_ids" not in body
         assert body["return_tokens_as_token_ids"] is True
         assert body["chat_template_kwargs"] == {"enable_thinking": False}
         assert body["messages"] == [{"role": "user", "content": render_turn(
@@ -406,6 +454,38 @@ class TestVLLMLogprobsBackend:
             await self._decide(_req())
         assert e.value.status_code == 400
 
+    async def test_no_request_ever_carries_logprob_token_ids(self, fake_http):
+        qs = [{"id": "b", "type": "boolean", "question": "?"},
+              {"id": "c", "type": "choice", "question": "?", "options": [f"o{i}" for i in range(20)]},
+              {"id": "s", "type": "scale", "question": "?", "min": 1, "max": 10}]
+        await self._decide(_req(questions=qs, permutations=2))
+        chat = [b for u, b in fake_http.calls if u.endswith("/v1/chat/completions")]
+        assert len(chat) == 6
+        assert all("logprob_token_ids" not in b and b["top_logprobs"] == 20 and b["max_tokens"] == 1 for b in chat)
+
+    async def test_twenty_options_with_labels_outside_the_top_list(self, fake_http):
+        # What a real replica returns for a 20-way choice: the likely labels,
+        # some other tokens, and the unlikely labels missing altogether.
+        ids = _label_ids(20)
+        scores = [-0.05, -3.5, -4.0, -6.0, -7.0] + [-30.0] * 15
+
+        def handler(url, body):
+            if url.endswith("/tokenize"):
+                return _default_handler()(url, body)
+            assert len(body["allowed_token_ids"]) == 20
+            return _FakeResponse(_chat_reply(ids, scores, 0, drop=range(5, 20),
+                                             others=[(9000 + i, -8.0 - i) for i in range(15)]))
+
+        fake_http.handler = handler
+        _, out = await self._decide(_req(questions=[
+            {"id": "c", "type": "choice", "question": "?", "options": [f"o{i}" for i in range(20)]}]))
+        (c,) = out.results
+        assert c.answer == "o0" and c.complete is False
+        assert sum(c.likelihoods.values()) == pytest.approx(1.0)
+        assert c.likelihoods["o0"] > 0.9 and c.likelihoods["o1"] == pytest.approx(math.exp(-3.5) / sum(
+            math.exp(v) for v in [-0.05, -3.5, -4.0, -6.0, -7.0] + [-22.0] * 15))
+        assert max(c.likelihoods[f"o{i}"] for i in range(5, 20)) < 1e-8      # the bound, not a guess
+
     async def test_no_vllm_backend_is_503(self, fake_http):
         from backend.app.db.models import BackendEngine
         with pytest.raises(DecisionBackendError) as e:
@@ -423,6 +503,143 @@ class TestVLLMLogprobsBackend:
         with pytest.raises(DecisionBackendError) as e:
             await self._decide(_req())
         assert e.value.status_code == 502
+
+    # ---- one sick replica is not the whole model
+
+    def _replicas(self, n=3):
+        return [_vllm_backend(id=10 + i, name=f"replica-{i}") for i in range(n)]
+
+    def _failing(self, fake_http, fail, *, only_first=True):
+        """Make the first replica that is asked (or every one) answer ``fail``:
+        an HTTP status, or an exception to raise on the scoring call."""
+        good, seen = _default_handler(), []
+
+        def handler(url, body):
+            host = url.split("/v1/")[0].split("/tokenize")[0]
+            if host not in seen:
+                seen.append(host)
+            if url.endswith("/tokenize"):
+                return good(url, body)
+            if not only_first or host == seen[0]:
+                if isinstance(fail, BaseException):
+                    raise fail
+                return _FakeResponse({"error": {"message": "SECRET PROMPT TEXT", "type": "InternalServerError",
+                                                "code": fail}}, status_code=fail)
+            return good(url, body)
+
+        fake_http.handler = handler
+        return seen
+
+    @pytest.mark.parametrize("fail", [500, 502, 503, 504, httpx.ConnectError("refused"),
+                                      httpx.ConnectTimeout("no route")])
+    async def test_a_sick_replica_is_retried_once_on_another(self, fake_http, fail):
+        seen = self._failing(fake_http, fail)
+        _, out = await self._decide(_req(), backends=self._replicas())
+        assert len(seen) == 2 and seen[0] != seen[1]                    # a different replica, never the same again
+        assert out.backend_id == int(seen[1].split("node")[1].split(":")[0])    # the answer is credited to the one that gave it
+        assert out.results[1].answer == "bug" and out.usage.backend_calls == 2
+        scored_on = {u.split("/v1/")[0] for u, _ in fake_http.calls if u.endswith("/v1/chat/completions")}
+        assert scored_on == set(seen)
+        # The labels are looked up on the replica that is asked, not carried over.
+        assert {u.split("/tokenize")[0] for u, _ in fake_http.calls if u.endswith("/tokenize")} == set(seen)
+
+    @pytest.mark.parametrize("fail", [503, 500, httpx.ConnectError("refused"), httpx.ConnectTimeout("no route")])
+    async def test_a_replica_that_is_down_fails_at_the_tokenizer_and_is_retried_too(self, fake_http, fail):
+        # Looking up the letter tokens is the first thing asked of a replica,
+        # so a dead one never reaches the scoring call. (Found by running the
+        # real code against a dead address: the scoring-only retry missed it.)
+        good, seen = _default_handler(), []
+
+        def handler(url, body):
+            host = url.split("/v1/")[0].split("/tokenize")[0]
+            if host not in seen:
+                seen.append(host)
+            if host == seen[0]:
+                assert url.endswith("/tokenize"), "a replica whose tokenizer failed must not be scored on"
+                if isinstance(fail, BaseException):
+                    raise fail
+                return _FakeResponse({"error": "x"}, status_code=fail)
+            return good(url, body)
+
+        fake_http.handler = handler
+        _, out = await self._decide(_req(), backends=self._replicas())
+        assert len(seen) == 2 and out.backend_id == int(seen[1].split("node")[1].split(":")[0])
+        assert out.results[1].answer == "bug"
+
+    @pytest.mark.parametrize("fail", [400, 404, httpx.ReadTimeout("slow")])
+    async def test_a_tokenizer_failure_that_is_not_sickness_is_not_retried(self, fake_http, fail):
+        seen = []
+
+        def handler(url, body):
+            seen.append(url)
+            if isinstance(fail, BaseException):
+                raise fail
+            return _FakeResponse({"error": "x"}, status_code=fail)
+
+        fake_http.handler = handler
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(), backends=self._replicas())
+        assert len(seen) == 1 and e.value.status_code == 502
+        assert str(e.value) == "decision backend tokenizer unreachable"
+
+    async def test_at_most_two_replicas_are_tried(self, fake_http):
+        seen = self._failing(fake_http, 500, only_first=False)
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(), backends=self._replicas(5))
+        assert len(seen) == 2 and e.value.status_code == 502
+        assert str(e.value) == "decision backend returned HTTP 500"
+        assert type(e.value) is DecisionBackendError                    # the private retry type does not leak
+
+    async def test_a_single_replica_fails_without_a_second_attempt(self, fake_http):
+        seen = self._failing(fake_http, 500, only_first=False)
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(), backends=self._replicas(1))
+        assert len(seen) == 1 and e.value.status_code == 502
+        assert sum(1 for u, _ in fake_http.calls if u.endswith("/v1/chat/completions")) == 1
+
+    async def test_a_replica_with_an_open_circuit_is_not_the_second_choice(self, fake_http):
+        seen = self._failing(fake_http, 500, only_first=False)
+        replicas = self._replicas(2)
+        backend = vl.VLLMLogprobsBackend()
+        with patch.object(vl, "get_registry", return_value=_fake_registry(replicas, open_circuits={11})):
+            with pytest.raises(DecisionBackendError):
+                await backend.decide(_req(), "qwen3.8-27b", fanout=8)
+        assert seen == ["https://node10:8002"]
+
+    @pytest.mark.parametrize("fail", [400, 404, 422, httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("cut")])
+    async def test_what_would_fail_anywhere_or_already_waited_is_not_sent_round_again(self, fake_http, fail):
+        seen = self._failing(fake_http, fail, only_first=False)
+        with pytest.raises(DecisionBackendError) as e:
+            await self._decide(_req(), backends=self._replicas())
+        assert len(seen) == 1 and e.value.status_code == 502
+
+    async def test_the_engines_error_class_is_logged_and_its_text_is_not(self, fake_http, monkeypatch):
+        log = MagicMock()
+        monkeypatch.setattr(vl, "logger", log)
+        seen = self._failing(fake_http, 500)
+        await self._decide(_req(), backends=self._replicas())
+        failed_id = int(seen[0].split("node")[1].split(":")[0])
+        log.warning.assert_any_call("decision_backend_http_error", backend_id=failed_id, status=500,
+                                    error_type="InternalServerError")
+        log.warning.assert_any_call("decision_backend_retry_on_another_replica", failed_backend_id=failed_id)
+        assert "SECRET" not in repr(log.mock_calls)
+
+    @pytest.mark.parametrize("body,expected", [
+        ({"error": {"message": "x", "type": "BadRequestError", "code": 400}}, "BadRequestError"),
+        ({"object": "error", "message": "x", "type": "invalid_request_error"}, "invalid_request_error"),
+        ({"error": {"message": "x"}}, None),
+        ({"error": {"type": "a prompt quoted here, with spaces"}}, None),       # not an identifier: not logged
+        ({"error": {"type": "x" * 65}}, None),
+        ({"error": {"type": 500}}, None),
+        ({"error": "cuda"}, None), ([1, 2], None), ("Internal Server Error", None),
+    ])
+    def test_error_type_is_a_short_identifier_or_nothing(self, body, expected):
+        assert vl._error_type(_FakeResponse(body)) == expected
+
+    def test_error_type_of_a_plain_text_500_is_nothing(self):
+        response = MagicMock()
+        response.json.side_effect = ValueError("not json")       # what an unhandled engine exception returns
+        assert vl._error_type(response) is None
 
     async def test_fanout_bounds_concurrent_scoring_calls(self, monkeypatch, fake_http):
         import asyncio

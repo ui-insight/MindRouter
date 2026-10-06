@@ -25,11 +25,23 @@ For every (question, option order) we POST one ``/v1/chat/completions`` with
 * ``max_tokens=1, temperature=0`` — one forward pass, no text generated;
 * ``allowed_token_ids=[A, B, ...]`` — the sampler may only pick a label, so
   the returned token IS the exact argmax over the options;
-* ``logprobs=true, logprob_token_ids=[A, B, ...]`` (vLLM >= 0.29) — the raw
-  log-probability of every label regardless of the server's ``--max-logprobs``
-  cap. ``top_logprobs`` is sent too, so an older server that ignores
-  ``logprob_token_ids`` still returns its top-20; labels missing from that
-  list are floored and the decision is flagged ``complete=false``.
+* ``logprobs=true, top_logprobs=20`` — the raw log-probability of the 20
+  likeliest next tokens. The labels are read out of that list. The prompt
+  asks for a letter, so the labels that matter are in it: measured on
+  qwen3.8-27b, the labels left out of the top 20 (it happens from about 8
+  options up) together held at most 0.0001 of the probability. A label that
+  is not in the list is given the lowest value that is (it cannot be higher)
+  and the decision is flagged ``complete=false``.
+
+``logprob_token_ids`` IS NOT SENT, although it returns exactly the labels and
+was used until 2.9.90. vLLM does not handle it under speculative decoding
+(MTP or a draft model, which every Qwen3.x replica here runs): as soon as any
+sequence in the same step carries draft tokens, i.e. whenever the replica is
+serving anything else, the reply fails with HTTP 500 (``IndexError`` in
+``_create_chat_logprobs``). Found 2026-10-06 on 0.29.0, where System One on
+qwen3.8-27b failed for nearly every request while chat traffic was running;
+the 0.31.0rc2 sampler has the same gap. Do not bring the field back without
+testing under concurrent chat load (``tests/decisions_under_load.py``).
 
 This is exactly what open-alternative-jev's vLLM backend does in its
 recommended ``separate`` mode (``label_scores_last``), minus the in-process
@@ -42,7 +54,9 @@ What is NOT available over HTTP (and why we do not need it)
 -----------------------------------------------------------
 * ``logprobs_mode=processed_logprobs`` is an engine flag, not a request
   field. We read RAW logprobs and renormalize over the labels ourselves,
-  which is the same number the processed path yields after masking.
+  which is the same number the processed path yields after masking. (Raw is
+  also why a label can fall outside the top 20: other tokens compete for the
+  places, even though the sampler may not pick them.)
 * The ``packed`` mode (all questions in one sequence, read via
   ``prompt_logprobs``) is possible over ``/v1/completions`` with token-id
   prompts, but the library itself measures ``separate`` as faster AND exact
@@ -75,9 +89,38 @@ from .scoring import LETTERS, LabelReadout, combine, option_orders, render_turn
 
 logger = get_logger(__name__)
 
-# vLLM's default --max-logprobs; the fallback path cannot see past it.
+# vLLM's default --max-logprobs: the most a server returns, and what is
+# always asked for (the labels are read out of this list).
 _TOP_LOGPROBS_CAP = 20
 _TOKEN_ID_PREFIX = "token_id:"
+# Replicas tried for one request: the first, and one other if the first is
+# sick. The request-level fallback to another MODEL (decisions.fallbacks)
+# comes after this, in the API layer.
+_MAX_REPLICAS = 2
+# A replica answering one of these is not working for this request; another
+# replica may be. 4xx are about the request and would fail anywhere.
+_RETRY_STATUSES = frozenset({500, 502, 503, 504})
+
+
+class _ReplicaFailed(DecisionBackendError):
+    """One replica could not score the request; another one might."""
+
+
+def _error_type(response: Any) -> str | None:
+    """The error's class as the engine names it (``error.type`` in vLLM's JSON
+    error body), or None. A short identifier only: an engine's error MESSAGE
+    can quote the prompt and is never logged."""
+    try:
+        body = response.json()
+    except Exception:
+        return None          # an unhandled engine exception is a plain-text 500
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error") if isinstance(body.get("error"), dict) else body
+    kind = error.get("type")
+    if isinstance(kind, str) and 0 < len(kind) <= 64 and kind.replace("_", "").replace(".", "").isalnum():
+        return kind
+    return None
 
 
 class VLLMLogprobsBackend:
@@ -97,60 +140,27 @@ class VLLMLogprobsBackend:
         self, request: DecisionRequest, model: str, *, fanout: int = 8, backend_concurrency: int = 4
     ) -> DecisionOutcome:
         images = list(request.images)
-        backend = await self._pick_backend(model, needs_vision=bool(images))
-        settings = get_settings()
-        timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
-        verify = bool(getattr(settings, "internal_tls_verify", True))
-        max_n = max(len(q.options) for q in request.questions)
-        backend_gate = self._backend_gate(backend.id, backend_concurrency)
 
-        async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
+        # One "view" per (question, option order).
+        views: list[tuple[int, list[int]]] = []
+        for qi, q in enumerate(request.questions):
+            for order in option_orders(len(q.options), q.permutations or request.permutations):
+                views.append((qi, order))
+
+        # A replica that answers 5xx or cannot be reached is not the whole
+        # model: try one other replica before failing the request.
+        tried: set[int] = set()
+        while True:
+            backend = await self._pick_backend(model, needs_vision=bool(images), exclude=tried)
+            tried.add(backend.id)
             try:
-                label_ids = await self._get_label_ids(client, backend.url, model, max_n)
-
-                # One "view" per (question, option order).
-                views: list[tuple[int, list[int]]] = []
-                for qi, q in enumerate(request.questions):
-                    for order in option_orders(len(q.options), q.permutations or request.permutations):
-                        views.append((qi, order))
-
-                request_gate = asyncio.Semaphore(max(1, fanout))
-
-                async def score(qi: int, order: list[int]) -> tuple[LabelReadout, dict]:
-                    q = request.questions[qi]
-                    shown = [q.options[k] for k in order]
-                    text = render_turn(q.question, shown, request.state)
-                    async with request_gate, backend_gate:
-                        return await self._score_one(
-                            client, backend.url, model, text, label_ids[: len(shown)], images)
-
-                # Every view starts with the same state. Score the first one on
-                # its own so it fills vLLM's prefix cache; the rest then hit the
-                # cache instead of each prefilling the whole state in parallel.
-                if (request.state or images) and len(views) > 1:
-                    first = await score(*views[0])
-                    rest = await _gather_or_cancel([score(qi, order) for qi, order in views[1:]])
-                    scored = [first, *rest]
-                else:
-                    scored = await _gather_or_cancel([score(qi, order) for qi, order in views])
-            except DecisionBackendError:
-                raise
-            except httpx.HTTPStatusError as e:
-                # Status only: an engine's error text can quote the prompt.
-                logger.warning("decision_backend_http_error", backend_id=backend.id, status=e.response.status_code)
-                if images and e.response.status_code == 400:
-                    # The gateway reads only an image's header; pixels the model
-                    # cannot decode (a cut-off file) are the caller's to fix.
-                    raise DecisionBackendError("the model could not read the request's images", 422) from e
-                raise DecisionBackendError(f"decision backend returned HTTP {e.response.status_code}", 502) from e
-            except httpx.HTTPError as e:
-                logger.warning("decision_backend_unreachable", backend_id=backend.id, error=str(e))
-                raise DecisionBackendError("decision backend unreachable", 502) from e
-            except (ValueError, KeyError, TypeError) as e:
-                # A reply that is not the JSON shape we read (resp.json() raises
-                # ValueError on a non-JSON body, e.g. a proxy error page).
-                logger.warning("decision_backend_bad_reply", backend_id=backend.id, error=str(e)[:300])
-                raise DecisionBackendError("decision backend returned a malformed reply", 502) from e
+                scored = await self._score_views(
+                    backend, request, model, views, images, fanout, backend_concurrency)
+                break
+            except _ReplicaFailed as failure:
+                if len(tried) >= _MAX_REPLICAS or not await self._has_another(model, bool(images), tried):
+                    raise DecisionBackendError(str(failure), failure.status_code) from failure
+                logger.warning("decision_backend_retry_on_another_replica", failed_backend_id=backend.id)
 
         # Regroup per question and fold the views back into the original order.
         per_q: dict[int, list[tuple[list[int], LabelReadout]]] = {}
@@ -179,9 +189,77 @@ class VLLMLogprobsBackend:
 
     # ---------------------------------------------------------------- internals
 
-    async def _pick_backend(self, model: str, needs_vision: bool = False):
-        """A random healthy, circuit-closed vLLM backend serving ``model``;
-        with ``needs_vision``, one whose copy of the model takes images.
+    async def _score_views(
+        self, backend: Any, request: DecisionRequest, model: str, views: list[tuple[int, list[int]]],
+        images: list[str], fanout: int, backend_concurrency: int,
+    ) -> list[tuple[LabelReadout, dict]]:
+        """Score every view on one replica. Raises _ReplicaFailed when this
+        replica is sick (another may answer) and DecisionBackendError when
+        the request would fail anywhere."""
+        settings = get_settings()
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+        verify = bool(getattr(settings, "internal_tls_verify", True))
+        max_n = max(len(q.options) for q in request.questions)
+        backend_gate = self._backend_gate(backend.id, backend_concurrency)
+
+        async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
+            try:
+                label_ids = await self._get_label_ids(client, backend.url, model, max_n)
+                request_gate = asyncio.Semaphore(max(1, fanout))
+
+                async def score(qi: int, order: list[int]) -> tuple[LabelReadout, dict]:
+                    q = request.questions[qi]
+                    shown = [q.options[k] for k in order]
+                    text = render_turn(q.question, shown, request.state)
+                    async with request_gate, backend_gate:
+                        return await self._score_one(
+                            client, backend.url, model, text, label_ids[: len(shown)], images)
+
+                # Every view starts with the same state. Score the first one on
+                # its own so it fills vLLM's prefix cache; the rest then hit the
+                # cache instead of each prefilling the whole state in parallel.
+                if (request.state or images) and len(views) > 1:
+                    first = await score(*views[0])
+                    rest = await _gather_or_cancel([score(qi, order) for qi, order in views[1:]])
+                    return [first, *rest]
+                return await _gather_or_cancel([score(qi, order) for qi, order in views])
+            except DecisionBackendError:
+                raise
+            except httpx.HTTPStatusError as e:
+                # Status and the engine's own error class only: an engine's
+                # error text can quote the prompt.
+                status = e.response.status_code
+                logger.warning("decision_backend_http_error", backend_id=backend.id, status=status,
+                               error_type=_error_type(e.response))
+                if images and status == 400:
+                    # The gateway reads only an image's header; pixels the model
+                    # cannot decode (a cut-off file) are the caller's to fix.
+                    raise DecisionBackendError("the model could not read the request's images", 422) from e
+                kind = _ReplicaFailed if status in _RETRY_STATUSES else DecisionBackendError
+                raise kind(f"decision backend returned HTTP {status}", 502) from e
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                # Nothing was sent: the replica is down, and asking another costs nothing.
+                logger.warning("decision_backend_unreachable", backend_id=backend.id, error=type(e).__name__)
+                raise _ReplicaFailed("decision backend unreachable", 502) from e
+            except httpx.HTTPError as e:
+                # Includes a read timeout: the request already waited its
+                # minute here, so it is not sent round again.
+                logger.warning("decision_backend_unreachable", backend_id=backend.id, error=type(e).__name__)
+                raise DecisionBackendError("decision backend unreachable", 502) from e
+            except (ValueError, KeyError, TypeError) as e:
+                # A reply that is not the JSON shape we read (resp.json() raises
+                # ValueError on a non-JSON body, e.g. a proxy error page).
+                logger.warning("decision_backend_bad_reply", backend_id=backend.id, error=type(e).__name__)
+                raise DecisionBackendError("decision backend returned a malformed reply", 502) from e
+
+    async def _has_another(self, model: str, needs_vision: bool, tried: set[int]) -> bool:
+        return await get_registry().pick_available_backend(
+            model, engine=BackendEngine.VLLM, multimodal=needs_vision, exclude=tried) is not None
+
+    async def _pick_backend(self, model: str, needs_vision: bool = False, exclude: set[int] | frozenset[int] = frozenset()):
+        """A random healthy, circuit-closed vLLM backend serving ``model``,
+        not one of ``exclude``; with ``needs_vision``, one whose copy of the
+        model takes images.
 
         Mirrors the direct-to-backend precedents (image_policy, dlp_worker):
         no scheduler slot is taken; ``_backend_gate`` bounds the load instead.
@@ -189,7 +267,7 @@ class VLLMLogprobsBackend:
         """
         registry = get_registry()
         backend = await registry.pick_available_backend(
-            model, engine=BackendEngine.VLLM, multimodal=needs_vision)
+            model, engine=BackendEngine.VLLM, multimodal=needs_vision, exclude=exclude)
         if backend is None and needs_vision and await registry.pick_available_backend(model, engine=BackendEngine.VLLM):
             # The model is up; it just cannot see. The caller's request to fix.
             raise DecisionBackendError(f"model '{model}' does not accept images", 422)
@@ -229,7 +307,14 @@ class VLLMLogprobsBackend:
                     )
                 ids.append(int(toks[0]))
         except httpx.HTTPError as e:
-            raise DecisionBackendError("decision backend tokenizer unreachable", 502) from e
+            # This is the first thing asked of a replica, so a replica that is
+            # down fails HERE. Down or answering 5xx: another replica may do.
+            status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+            sick = status in _RETRY_STATUSES or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+            logger.warning("decision_backend_tokenizer_failed", url_host=httpx.URL(url).host, status=status,
+                           error=type(e).__name__)
+            kind = _ReplicaFailed if sick else DecisionBackendError
+            raise kind("decision backend tokenizer unreachable", 502) from e
         self._label_ids[key] = ids
         return ids
 
@@ -251,8 +336,9 @@ class VLLMLogprobsBackend:
             "temperature": 0.0,
             "stream": False,
             "logprobs": True,
-            "top_logprobs": min(len(ids), _TOP_LOGPROBS_CAP),
-            "logprob_token_ids": ids,
+            # Always the server's full list, and never `logprob_token_ids`:
+            # see the module docstring (HTTP 500 under speculative decoding).
+            "top_logprobs": _TOP_LOGPROBS_CAP,
             "allowed_token_ids": ids,
             "return_tokens_as_token_ids": True,
             "chat_template_kwargs": {"enable_thinking": False},
@@ -306,17 +392,26 @@ def parse_readout(data: dict, label_ids: Sequence[int]) -> LabelReadout:
         raise DecisionBackendError("decision backend returned no logprobs", 502) from e
 
     values: dict[int, float] = {}
+    returned: list[float] = []       # every token in the list, label or not
     for t in entry.get("top_logprobs") or []:
+        if not isinstance(t, dict) or isinstance(t.get("logprob"), bool) \
+                or not isinstance(t.get("logprob"), (int, float)):
+            continue
+        returned.append(float(t["logprob"]))
         tid = _token_id(t, label_ids)
-        if tid is not None and isinstance(t.get("logprob"), (int, float)):
+        if tid is not None and tid in label_ids:
             values[tid] = float(t["logprob"])
     sampled_id = _token_id(entry, label_ids)
-    if sampled_id is not None and isinstance(entry.get("logprob"), (int, float)):
+    if sampled_id in label_ids and isinstance(entry.get("logprob"), (int, float)):
         values.setdefault(sampled_id, float(entry["logprob"]))
     if not values:
         raise DecisionBackendError("decision backend returned no label logprobs", 502)
 
-    floor = min(values.values()) - 1.0
+    # A label that is not in the list is no likelier than the least likely
+    # token that is. That bound is used as its value: it is tiny (the list
+    # is the server's top 20), and it never ranks a missing label above one
+    # that was returned.
+    floor = min([*returned, *values.values()])
     logprobs, complete = [], True
     for tid in label_ids:
         if tid in values:

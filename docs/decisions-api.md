@@ -272,10 +272,32 @@ TypeSafe's SDK retries 429 and 5xx with backoff by default. A disabled API is
 For each question MindRouter sends one chat completion to a replica of the
 model: a single user turn containing the state, the question and the options
 labelled `A.`, `B.`, …, with thinking off, `max_tokens=1`,
-`allowed_token_ids` restricted to the option letters and `logprob_token_ids`
-requesting each letter's log-probability. The reply's distribution over the
-letters, renormalized, is the answer. A `noul` is a two-option question
+`allowed_token_ids` restricted to the option letters and `top_logprobs=20`.
+The letters' log-probabilities are read out of that top-20 list; their
+distribution, renormalized, is the answer. A `noul` is a two-option question
 (yes/no); a `score` lists its levels as options.
+
+With about 8 options or more, the least likely letters can fall outside the
+top 20 (other tokens take the places). Such a letter is given the lowest
+value in the list, which it cannot exceed, and the question's `complete` is
+`false`. Measured on qwen3.8-27b, the letters left out together held at
+most 0.0001 of the probability, so the answer and its probabilities are
+unaffected in practice.
+
+**Why not `logprob_token_ids`** (which returns exactly the letters, and was
+used until 2.9.90): vLLM does not handle that field under speculative
+decoding, which every Qwen3.x replica here uses. Whenever another sequence
+in the same decoding step carried draft tokens, i.e. whenever the replica
+was serving anything else, vLLM answered HTTP 500 (`IndexError` in
+`_create_chat_logprobs`). On 2026-10-06 that made `/v1/systemone` on
+qwen/qwen3.8-27b fail for nearly every request while chat traffic was
+running, and never on an idle fleet. Seen on vLLM 0.29.0; the 0.31.0rc2
+sampler has the same gap. `tests/decisions_under_load.py` checks for it:
+run it after any change to the scoring request or a vLLM upgrade.
+
+If a replica answers 5xx or cannot be reached, the request is tried once on
+another replica of the same model before it fails (and before the model's
+configured fallback is used).
 
 This is the `separate` mode of
 [open-alternative-jev](https://github.com/ikermoel/open-alternative-jev)
@@ -285,8 +307,9 @@ the first question fills vLLM's prefix cache and the rest reuse it:
 MindRouter scores the first question alone, then the others concurrently.
 
 Requirements on the model: a chat template that honours
-`enable_thinking=false`, single-token capital letters, and vLLM ≥ 0.29 for
-`logprob_token_ids`. That is Qwen3.x on our fleet. It is not gpt-oss (Harmony
+`enable_thinking=false`, single-token capital letters, and a vLLM server
+that honours `allowed_token_ids` and returns 20 `top_logprobs` (the default
+`--max-logprobs`). That is Qwen3.x on our fleet. It is not gpt-oss (Harmony
 puts analysis text first) and not Ollama backends. Hence the allow-list.
 
 ## Operations
