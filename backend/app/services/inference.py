@@ -436,6 +436,9 @@ class InferenceService:
         # outbound request by _create_request_record after the ORIGINAL is
         # stored (so the audit trail + async alert path see the real text).
         self._pending_prompt_redactions: list = []
+        # Matting settings for a `background: "transparent"` image request,
+        # read by _proxy_image_request and used by _apply_image_background.
+        self._matting_config = None
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with per-attempt timeout."""
@@ -1254,6 +1257,11 @@ class InferenceService:
                 modality=Modality.IMAGE_GENERATION
             )
 
+            # `background: "transparent"`: cut the finished picture(s) out.
+            # After completion on purpose, so the diffusion worker's slot is
+            # already free while the matting server works.
+            await self._apply_image_background(request, response)
+
             return response
 
         except BaseException as e:
@@ -1577,7 +1585,7 @@ class InferenceService:
                 parameters[param] = getattr(request, param)
 
         # Image-specific parameters
-        for param in ["n", "size", "num_inference_steps", "guidance_scale", "seed"]:
+        for param in ["n", "size", "num_inference_steps", "guidance_scale", "seed", "background"]:
             if hasattr(request, param) and getattr(request, param) is not None:
                 parameters[param] = getattr(request, param)
         # Reasoning controls as the client sent them (the per-model
@@ -2870,12 +2878,31 @@ class InferenceService:
         if image_watermark.validate_watermark_text(wm_text) is not None:
             wm_text = image_watermark.WATERMARK_DEFAULT_TEXT
 
+        # Transparent background: read the matting settings now (the cut-out
+        # itself happens after completion, see _apply_image_background). The
+        # same fail-safe rule: a failed read means an opaque picture, never
+        # a failed one.
+        wants_alpha = getattr(request, "background", None) == "transparent"
+        if wants_alpha:
+            from backend.app.services import image_matting
+
+            try:
+                from backend.app.db.session import get_async_db_context
+
+                async with get_async_db_context() as matting_db:
+                    self._matting_config = await image_matting.load_config(matting_db)
+            except Exception:
+                logger.warning("matting_config_read_failed_returning_opaque_image")
+                self._matting_config = None
+            wants_alpha = bool(self._matting_config and self._matting_config.usable)
+
         # Watermarking needs the bytes, so force b64 from the backend. This
         # also closes the response_format="url" bypass: url mode returned a
         # RELATIVE link into the backend node's public static mount — dead
         # through the gateway AND an unmarked copy left on the node — so
-        # clients get b64_json entries whenever marking is on.
-        if wm_enabled:
+        # clients get b64_json entries whenever marking is on. A cut-out
+        # needs the bytes for the same reason.
+        if wm_enabled or wants_alpha:
             payload["response_format"] = "b64_json"
 
         # Image generation is slow and variable; the attempt budget is the
@@ -2902,6 +2929,30 @@ class InferenceService:
                     )
 
         return canonical.model_dump(exclude_none=True, by_alias=True)
+
+    async def _apply_image_background(
+        self, request: CanonicalImageRequest, response: Dict[str, Any]
+    ) -> None:
+        """Answer the caller's ``background`` field on a finished response.
+
+        Fails open like the watermark: whatever goes wrong here, the caller
+        still gets the (opaque) picture, with ``has_alpha: false``.
+        """
+        background = getattr(request, "background", None)
+        if background is None:
+            return
+        try:
+            from backend.app.services import image_matting
+
+            await image_matting.apply_background(
+                background, response, getattr(self, "_matting_config", None), self._registry
+            )
+        except Exception:
+            logger.exception("image_background_step_failed")
+            for item in response.get("data") or []:
+                if isinstance(item, dict):
+                    item.setdefault("has_alpha", False)
+            response.setdefault("background", "opaque")
 
     async def _proxy_ollama_chat(
         self,

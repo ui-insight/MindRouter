@@ -1581,6 +1581,15 @@ async def get_decision_servers(db: AsyncSession) -> list:
     return [(row[0], row[1], row[2]) for row in result.all()]
 
 
+async def get_matting_servers(db: AsyncSession) -> list:
+    """(id, url, status) of every backend with engine ``matting``. Lean on
+    purpose: the images path asks on each transparent-background request."""
+    result = await db.execute(
+        select(Backend.id, Backend.url, Backend.status).where(Backend.engine == BackendEngine.MATTING)
+    )
+    return [(row[0], row[1], row[2]) for row in result.all()]
+
+
 async def create_backend(
     db: AsyncSession,
     name: str,

@@ -497,6 +497,12 @@ class CanonicalImageRequest(BaseModel):
     image: Optional[List[str]] = None
     strength: Optional[float] = None
 
+    # "transparent" | "opaque" | "auto" (OpenAI's field), or None when the
+    # caller did not send it. Transparency is made after generation by a
+    # matting server (services/image_matting.py), never by the diffusion
+    # backend, so this is not forwarded to it.
+    background: Optional[str] = None
+
     # MindRouter metadata
     request_id: Optional[str] = None
     user_id: Optional[int] = None
@@ -524,12 +530,18 @@ class CanonicalImageData(BaseModel):
     url: Optional[str] = None
     b64_json: Optional[str] = None
     revised_prompt: Optional[str] = None
+    # Set only when the caller sent `background`: whether THIS image has
+    # transparent pixels.
+    has_alpha: Optional[bool] = None
 
 
 class CanonicalImageResponse(BaseModel):
     """Canonical image generation response."""
     created: int
     data: List[CanonicalImageData]
+    # Set only when the caller sent `background`: what was produced,
+    # "transparent" or "opaque" (OpenAI's response field).
+    background: Optional[str] = None
 
     # MindRouter additions
     backend_id: Optional[int] = None

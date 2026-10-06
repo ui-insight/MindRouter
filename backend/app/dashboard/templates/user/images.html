@@ -4,6 +4,15 @@
 
 {% block content %}
 <style>
+/* A picture with a transparent background is shown on a checkerboard. */
+img.has-alpha {
+    background-color: #fff;
+    background-image:
+        linear-gradient(45deg, #d9d9d9 25%, transparent 25%, transparent 75%, #d9d9d9 75%),
+        linear-gradient(45deg, #d9d9d9 25%, transparent 25%, transparent 75%, #d9d9d9 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 10px 10px;
+}
 /* ── Generation Animation ────────────────────────────── */
 @keyframes mr-shimmer {
     0% { background-position: -200% 0; }
@@ -271,6 +280,16 @@
                     <label class="form-label fw-semibold">Dimensions</label>
                     <div class="text-muted" id="dimensionPreview">1024 &times; 1024 &mdash; 1.0 MP</div>
                 </div>
+                {% if transparent_enabled %}
+                <div class="col-md-3">
+                    <label class="form-label fw-semibold d-block">Background</label>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="transparentBg">
+                        <label class="form-check-label" for="transparentBg">Transparent</label>
+                    </div>
+                    <div class="form-text">Describe the subject; the background is removed afterwards.</div>
+                </div>
+                {% endif %}
             </div>
             <input type="hidden" id="selectedSize" value="1024x1024">
 
@@ -666,6 +685,9 @@ async function generateImage() {
         response_format: 'b64_json',
     };
     if (seedVal) body.seed = parseInt(seedVal);
+    const transparentBox = document.getElementById('transparentBg');
+    const wantTransparent = !!(transparentBox && transparentBox.checked);
+    if (wantTransparent) body.background = 'transparent';
     // Reference-edit (img2img): attach the reference image when present.
     const isEdit = !!refImageB64;
     if (isEdit) body.image = [refImageB64];
@@ -732,11 +754,15 @@ async function generateImage() {
 
         const resultImg = document.getElementById('genResultImg');
         resultImg.src = imgSrc;
+        resultImg.classList.toggle('has-alpha', imgData.has_alpha === true);
         document.getElementById('downloadBtn').href = imgSrc;
         document.getElementById('genResultContainer').style.display = 'block';
 
         const elapsed = ((Date.now() - genStartTime) / 1000).toFixed(1);
-        document.getElementById('genMeta').textContent = `${size} | ${steps} steps | ${elapsed}s`;
+        let meta = `${size} | ${steps} steps | ${elapsed}s`;
+        // Transparency is best-effort: say plainly when it was not applied.
+        if (wantTransparent) meta += imgData.has_alpha === true ? ' | transparent background' : ' | background could not be removed';
+        document.getElementById('genMeta').textContent = meta;
 
         // Save to server for gallery
         saveToGallery(imgData.b64_json, prompt, DEFAULT_MODEL, size, steps, guidance);

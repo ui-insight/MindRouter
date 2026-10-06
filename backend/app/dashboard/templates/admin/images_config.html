@@ -173,6 +173,45 @@
                         </div>
                     </div>
 
+                    <!-- Transparent backgrounds (matting server) -->
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header"><h5 class="mb-0"><i class="bi bi-transparency"></i> Transparent Backgrounds</h5></div>
+                            <div class="card-body">
+                                <p class="text-muted small">A caller who sends <code>background: "transparent"</code> gets a PNG with the background removed. The image model cannot draw transparency, so the finished (and already watermarked) picture is sent to a <strong>matting server</strong> (<code>matting_service</code> on a GPU node), which marks the subject. This step is <strong>fail-open</strong>: if it is off, or the server is down or slow, the opaque picture is returned with <code>has_alpha: false</code>. Register the same URL on <a href="/admin/backends">Backends</a> with engine &ldquo;Matting server&rdquo; to have it health-checked.</p>
+                                <p class="text-muted small mb-3"><strong>Watermark:</strong> the delivered file still carries the whole watermark (hidden pixels keep their colour), but once a cut-out is placed on another background only the subject's pixels remain, and the mark usually cannot be read from them unless the subject fills most of the picture.</p>
+
+                                <input type="hidden" name="matting_settings" value="1">
+                                <div class="mb-3 form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="transparent_enabled" name="transparent_enabled" {% if transparent_enabled %}checked{% endif %}>
+                                    <label class="form-check-label" for="transparent_enabled">Allow transparent backgrounds</label>
+                                </div>
+
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <label for="matting_url" class="form-label">Matting Server URL</label>
+                                        <input type="text" class="form-control" id="matting_url" name="matting_url" value="{{ matting_url }}" placeholder="https://host:port" autocomplete="off">
+                                        <div class="form-text">The server's address only: no path.</div>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label for="matting_api_key" class="form-label">Server Key</label>
+                                        <input type="password" class="form-control" id="matting_api_key" name="matting_api_key" value="" autocomplete="new-password" placeholder="{% if matting_key_set %}(stored; leave blank to keep){% else %}bearer key{% endif %}">
+                                        {% if matting_key_set %}
+                                        <div class="form-check mt-1">
+                                            <input class="form-check-input" type="checkbox" id="matting_api_key_clear" name="matting_api_key_clear">
+                                            <label class="form-check-label small" for="matting_api_key_clear">Remove the stored key</label>
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="col-md-2 mb-3">
+                                        <label for="matting_timeout" class="form-label">Timeout (s)</label>
+                                        <input type="number" class="form-control" id="matting_timeout" name="matting_timeout" value="{{ matting_timeout }}" min="1" max="300">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- LLM Content Policy -->
                     <div class="col-12">
                         <div class="card border-warning">

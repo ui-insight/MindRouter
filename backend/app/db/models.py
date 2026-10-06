@@ -81,11 +81,16 @@ class BackendEngine(str, PyEnum):
     # discovers NO models, so it never takes chat traffic. /v1/systemone
     # reaches it through decisions.upstreams (matched by URL). Health: /health.
     DECISION = "decision"
+    # Matting (background-removal) server (migration 089): matting_service,
+    # which makes the alpha matte for `background: "transparent"` on the
+    # images API. Like DLP and DECISION it discovers NO models. The images
+    # path reaches it through img.matting_url (matched by URL). Health: /health.
+    MATTING = "matting"
 
 
 # Engines that serve no chat models: fleet members for status and telemetry
 # only, never routable and never in the model catalog.
-MODELLESS_ENGINES = (BackendEngine.DLP, BackendEngine.DECISION)
+MODELLESS_ENGINES = (BackendEngine.DLP, BackendEngine.DECISION, BackendEngine.MATTING)
 
 
 class BackendStatus(str, PyEnum):

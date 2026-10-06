@@ -635,6 +635,7 @@ max_tokens    = min(requested_max_tokens, remaining, 65536)</code></pre>
                         <tr><td><code>num_inference_steps</code></td><td>int</td><td>20</td><td>Diffusion steps (quality/latency tradeoff); values above the server cap (default 50) are silently clamped</td></tr>
                         <tr><td><code>guidance_scale</code></td><td>float</td><td>3.5</td><td>Prompt-adherence strength (FLUX-specific)</td></tr>
                         <tr><td><code>seed</code></td><td>int</td><td>random</td><td>Fix for reproducible generations</td></tr>
+                        <tr><td><code>background</code></td><td>string</td><td>&mdash;</td><td><code>"transparent"</code> returns a PNG with the background removed &mdash; see <a href="#image-transparent">Transparent backgrounds</a>. <code>"opaque"</code> and <code>"auto"</code> return the ordinary picture; any other value is a 400.</td></tr>
                         <tr><td><code>quality</code>, <code>style</code></td><td>string</td><td>&mdash;</td><td>OpenAI-compatible fields, passed through to the backend</td></tr>
                     </tbody>
                 </table>
@@ -709,6 +710,26 @@ with open("idaho.png", "wb") as f:
                 <p><strong>Error summary:</strong> <code>400</code> missing prompt / disallowed size / dimensions over limit / policy denial (<code>policy_violation</code>) / unusable prompt (<code>prompt_unclear</code>) &middot; <code>403</code> image generation not enabled for your account &middot; <code>404</code> unknown model &middot; <code>429</code> rate limit &middot; <code>503</code> image generation disabled or no healthy diffusion backend.</p>
                 <p><strong>Notes:</strong> generation is slow relative to chat (tens of seconds for high step counts &mdash; the gateway allows up to 5 minutes per attempt); request IDs use the <code>img-*</code> prefix; standard RPM rate limits apply.</p>
 
+                <h5 id="image-transparent">Transparent Backgrounds</h5>
+                <p>Add <code>"background": "transparent"</code> (the field OpenAI's Images API uses) to get a PNG whose background is transparent &mdash; an icon, emblem or cut-out subject that can sit on a coloured slide without a square round it. It works on <code>/v1/images/generations</code> and on <code>/v1/images/edits</code> (where it cuts out the edited result, not your upload).</p>
+                <pre><code>curl -X POST http://localhost:8000/v1/images/generations \
+  -H "Authorization: Bearer mr2_your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "a hedgehog, flat vector icon", "background": "transparent"}'</code></pre>
+                <pre><code>{
+  "created": 1759750000,
+  "background": "transparent",
+  "data": [
+    {"b64_json": "&lt;base64 PNG with an alpha channel&gt;", "has_alpha": true}
+  ]
+}</code></pre>
+                <ul>
+                    <li><strong>Describe the subject, not the transparency.</strong> The image model only draws opaque pictures (asked for a "transparent background" it paints a checkerboard). The background is removed afterwards by a separate background-removal model, so a plain background in the prompt gives the cleanest edge.</li>
+                    <li><strong>Check <code>has_alpha</code>.</strong> Transparency never fails a request: if the feature is off, the background-removal server is unavailable, or no subject is found, you receive the ordinary opaque picture with <code>"has_alpha": false</code> and <code>"background": "opaque"</code>. With <code>n</code> &gt; 1 each image has its own <code>has_alpha</code>.</li>
+                    <li>A cut-out is always returned as <code>b64_json</code>, whatever <code>response_format</code> says. Thin smoke, glows and drop shadows usually go with the background.</li>
+                    <li>Requests that do not send <code>background</code> get exactly the response shown earlier, without the two extra fields.</li>
+                </ul>
+
                 <h5 id="image-edits">Image-to-Image (Reference Edits)</h5>
                 <p><code>POST /v1/images/edits</code> edits a reference image &mdash; it preserves the image's composition and applies your prompt (FLUX.2 Klein reference-edit). Send <strong>multipart/form-data</strong>, not JSON.</p>
                 <table class="table table-bordered table-sm">
@@ -718,6 +739,7 @@ with open("idaho.png", "wb") as f:
                         <tr><td><code>prompt</code></td><td>string</td><td><em>required</em></td><td>The change to apply. Deictic references ("this man") are not auto-failed as ambiguous for edits, but the <strong>full content policy still applies</strong> to the described change and its result.</td></tr>
                         <tr><td><code>num_inference_steps</code></td><td>int</td><td><strong>8</strong></td><td>Edits default to 8 steps (vs 20 for generations) &mdash; cleaner reference edits</td></tr>
                         <tr><td><code>strength</code></td><td>float</td><td>&mdash;</td><td>Accepted for forward-compat but <strong>ignored</strong> by FLUX.2 Klein (a distilled model)</td></tr>
+                        <tr><td><code>background</code></td><td>string</td><td>&mdash;</td><td><code>"transparent"</code> cuts out the edited result &mdash; see <a href="#image-transparent">Transparent backgrounds</a></td></tr>
                         <tr><td><code>size</code>, <code>n</code>, <code>response_format</code>, <code>guidance_scale</code>, <code>seed</code>, <code>model</code></td><td>&mdash;</td><td>&mdash;</td><td>As in generations</td></tr>
                     </tbody>
                 </table>

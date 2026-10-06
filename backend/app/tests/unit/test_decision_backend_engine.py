@@ -151,7 +151,7 @@ class TestWiring:
         from backend.app.db.models import MODELLESS_ENGINES, BackendEngine
 
         assert BackendEngine.DECISION.value == "decision"
-        assert set(MODELLESS_ENGINES) == {BackendEngine.DLP, BackendEngine.DECISION}
+        assert set(MODELLESS_ENGINES) == {BackendEngine.DLP, BackendEngine.DECISION, BackendEngine.MATTING}
 
     def test_the_orm_enum_and_the_migration_agree(self):
         from backend.app.db.models import BackendEngine
@@ -164,7 +164,9 @@ class TestWiring:
         assert callable(module.upgrade) and callable(module.downgrade)
         assert "'decision'" in module.NEW_ENGINE and "'decision'" not in module.OLD_ENGINE
         # Same values, same order: a mismatch would make the ORM write a value the column rejects.
-        assert module.NEW_ENGINE == ",".join(f"'{e.value}'" for e in BackendEngine)
+        # Later migrations (089, matting) only append, so 087's list is the ORM enum's beginning.
+        orm = ",".join(f"'{e.value}'" for e in BackendEngine)
+        assert orm == module.NEW_ENGINE or orm.startswith(module.NEW_ENGINE + ",")
 
     def test_admin_can_register_and_edit_one(self):
         html = (_APP / "dashboard" / "templates" / "admin" / "backends.html").read_text()

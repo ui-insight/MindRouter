@@ -1,0 +1,45 @@
+############################################################
+# mindrouter - matting (background-removal) service
+# systemd unit TEMPLATE
+#
+# Placeholders to substitute before installing:
+#
+#   __REPO_DIR__   directory that contains the matting_service package
+#   __VENV_DIR__   venv with matting_service/requirements.txt installed
+#   __ENV_FILE__   env file with MATTING_API_KEY and the MATTING_* settings (chmod 600)
+#   __USER__       service account
+#   __GPU__        physical GPU index for this instance
+#   __HF_HOME__    HuggingFace cache that holds the model snapshot
+#
+# The model is small (about 1 GB of weights, a few GB of GPU memory at
+# 1024 x 1024), so it can share a card with another service.
+############################################################
+
+[Unit]
+Description=MindRouter matting service (background removal, GPU __GPU__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO_DIR__
+
+# MATTING_API_KEY and the MATTING_* settings. Keep it chmod 600: it holds the key.
+EnvironmentFile=__ENV_FILE__
+Environment=CUDA_VISIBLE_DEVICES=__GPU__
+Environment=HF_HOME=__HF_HOME__
+# Serve the snapshot already on disk; never reach out at start. The model's
+# code is executed at load, so it must be the copy that was reviewed.
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=__VENV_DIR__/bin/python -m matting_service
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

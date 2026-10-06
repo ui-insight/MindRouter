@@ -689,7 +689,7 @@ async def _prepare_image_canonical(
     ``/images/generations`` (txt2img) and ``/images/edits`` (img2img).
 
     ``params`` holds the generation knobs (model/prompt/n/size/quality/style/
-    response_format/num_inference_steps/guidance_scale/seed/user). When
+    response_format/num_inference_steps/guidance_scale/seed/user/background). When
     ``images_b64`` is set the returned canonical carries reference image(s) and
     is routed to the backend edits route downstream.
     """
@@ -718,6 +718,15 @@ async def _prepare_image_canonical(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="'prompt' is required",
         )
+
+    # `background` (OpenAI's field): transparent | opaque | auto. Checked
+    # before the policy judge runs, so a misspelt value costs nothing.
+    from backend.app.services.image_matting import parse_background
+
+    try:
+        background = parse_background(params.get("background"))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     # ── Load config defaults and guardrails ──────────────────────
     default_model = await crud.get_config_json(db, "img.default_model", "black-forest-labs/FLUX.2-dev")
@@ -887,6 +896,7 @@ async def _prepare_image_canonical(
             user=params.get("user"),
             image=images_b64 or None,
             strength=strength,
+            background=background,
             request_id=request_id,
             user_id=user.id,
             api_key_id=api_key.id,
@@ -995,6 +1005,7 @@ async def image_edits(
     num_inference_steps: Optional[int] = Form(None),
     guidance_scale: Optional[float] = Form(None),
     seed: Optional[int] = Form(None),
+    background: Optional[str] = Form(None),
     user_field: Optional[str] = Form(None, alias="user"),
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
@@ -1005,6 +1016,7 @@ async def image_edits(
     ``prompt``. The reference image(s) condition generation on the diffusion
     backend's ``/v1/images/edits`` route. FLUX.2 Klein edits are structure-
     preserving; ``strength`` is accepted for forward-compat but ignored.
+    ``background=transparent`` cuts out the EDITED picture, not the upload.
     """
     user, api_key = auth
 
@@ -1044,6 +1056,7 @@ async def image_edits(
         "guidance_scale": guidance_scale,
         "seed": seed,
         "user": user_field,
+        "background": background,
     }
     canonical = await _prepare_image_canonical(
         db=db, request=request, user=user, api_key=api_key,

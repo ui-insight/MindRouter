@@ -147,6 +147,8 @@ async def images_page(
             "max_width": max_width,
             "max_height": max_height,
             "has_api_key": has_api_key,
+            # Show the "Transparent background" option only when it can work.
+            "transparent_enabled": bool(await crud.get_config_json(db, "img.transparent_enabled", False)),
         },
     )
 
@@ -214,6 +216,17 @@ async def images_api_generate(
     body = await request.json()
 
     from backend.app.core.canonical_schemas import CanonicalImageRequest
+    from backend.app.services.image_matting import parse_background
+
+    # `background` (transparent | opaque | auto): refused here, before the
+    # policy judge runs, the same as on the API path.
+    try:
+        background = parse_background(body.get("background"))
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": str(exc), "type": "invalid_request_error"}},
+        )
 
     # Load config for defaults/guardrails
     enabled = await crud.get_config_json(db, "img.enabled", True)
@@ -383,6 +396,7 @@ async def images_api_generate(
         seed=body.get("seed"),
         image=images_b64,
         strength=body.get("strength"),
+        background=background,
     )
 
     if body.get("_policy_verdict"):

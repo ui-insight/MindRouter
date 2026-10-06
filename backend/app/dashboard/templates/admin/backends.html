@@ -58,6 +58,7 @@
                                     <option value="vllm">vLLM</option>
                                     <option value="dlp">DLP (GLiNER)</option>
                                     <option value="decision">Decision server (System One)</option>
+                                    <option value="matting">Matting server (transparent backgrounds)</option>
                                 </select>
                             </div>
                         </div>
@@ -191,6 +192,7 @@
                                             <option value="vllm" {% if item.backend.engine.value == 'vllm' %}selected{% endif %}>vLLM</option>
                                             <option value="dlp" {% if item.backend.engine.value == 'dlp' %}selected{% endif %}>DLP (GLiNER)</option>
                                             <option value="decision" {% if item.backend.engine.value == 'decision' %}selected{% endif %}>Decision server (System One)</option>
+                                            <option value="matting" {% if item.backend.engine.value == 'matting' %}selected{% endif %}>Matting server (transparent backgrounds)</option>
                                         </select>
                                     </div>
                                 </div>
