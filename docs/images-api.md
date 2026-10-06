@@ -446,7 +446,7 @@ All of these are admin-tunable config keys. Shipped defaults in parentheses.
 | `img.transparent_enabled` | `false` | Allow `background: "transparent"`. Off → opaque picture, `has_alpha: false`. |
 | `img.matting_url` | `""` | Base URL of the matting (background-removal) server, `matting_service/`. Register the same URL on Admin → Backends (engine *Matting server*) to have it health-checked. |
 | `img.matting_api_key` | `""` | The matting server's bearer key. Never shown again once saved. |
-| `img.matting_timeout` | `30` | Seconds allowed per picture for the cut-out (1 to 300). |
+| `img.matting_timeout` | `30` | Seconds allowed for the cut-out of one response, all its images together (1 to 100). When it runs out the remaining images come back opaque. |
 | `img.policy` | `""` | Policy text; empty disables the judge. |
 | `img.judge_model` | `""` | Primary judge model. |
 | `img.judge_model_secondary` | `""` | Fallback judge model. |

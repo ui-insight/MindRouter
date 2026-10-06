@@ -205,7 +205,8 @@
                                     </div>
                                     <div class="col-md-2 mb-3">
                                         <label for="matting_timeout" class="form-label">Timeout (s)</label>
-                                        <input type="number" class="form-control" id="matting_timeout" name="matting_timeout" value="{{ matting_timeout }}" min="1" max="300">
+                                        <input type="number" class="form-control" id="matting_timeout" name="matting_timeout" value="{{ matting_timeout }}" min="1" max="{{ matting_max_timeout }}">
+                                        <div class="form-text">For one request's cut-out, all its images.</div>
                                     </div>
                                 </div>
                             </div>

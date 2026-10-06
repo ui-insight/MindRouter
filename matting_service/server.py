@@ -35,7 +35,9 @@ Endpoints
                     0 = background (bearer key)
 ``GET  /health``    liveness for anyone; details with the bearer key. The port
                     opens only once the model is loaded, so a server that is
-                    still starting refuses connections rather than answering
+                    still starting refuses connections rather than answering.
+                    ``"status": "unhealthy"`` when one picture has been on
+                    the model longer than MATTING_STALL_SECONDS
 
 The reply is only the matte, never a recoloured picture: the gateway attaches
 it to its own (watermarked) pixels, so this server cannot change what the
@@ -113,6 +115,10 @@ class ServiceConfig:
     max_queue: int = 16                  # pictures waiting; beyond this the answer is 503
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     max_pixels: int = DEFAULT_MAX_PIXELS
+    # A picture takes a fraction of a second on a GPU and seconds on a CPU.
+    # One that has been on the model this long means the model is stuck;
+    # /health then says "unhealthy" so the gateway stops sending pictures.
+    stall_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "ServiceConfig":
@@ -130,6 +136,7 @@ class ServiceConfig:
             max_queue=_env_int("MATTING_MAX_QUEUE", cls.max_queue),
             max_body_bytes=_env_int("MATTING_MAX_BODY_BYTES", cls.max_body_bytes, 1024),
             max_pixels=_env_int("MATTING_MAX_PIXELS", cls.max_pixels, 4096),
+            stall_seconds=_env_int("MATTING_STALL_SECONDS", cls.stall_seconds, 5),
         )
 
 
@@ -263,6 +270,7 @@ class Worker:
         self.engine: Any = None
         self.stats = Stats()
         self._waiting = 0
+        self._running_since: Optional[float] = None    # when the picture now on the model started
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="matting-infer")
 
     @property
@@ -271,6 +279,13 @@ class Worker:
 
     def queue_depth(self) -> int:
         return self._waiting
+
+    def stalled(self) -> bool:
+        """True when one picture has been on the model longer than
+        ``stall_seconds``: the inference thread is stuck (a GPU fault, a
+        deadlock) while this event loop still answers."""
+        since = self._running_since
+        return since is not None and time.monotonic() - since > self.config.stall_seconds
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -294,7 +309,11 @@ class Worker:
 
     def _timed(self, image: Any) -> Tuple[Any, float]:
         started = time.monotonic()
-        matte = self.engine.matte(image)
+        self._running_since = started
+        try:
+            matte = self.engine.matte(image)
+        finally:
+            self._running_since = None
         if matte.size != image.size or matte.mode != "L":
             raise RuntimeError("engine returned a matte of the wrong shape")
         return matte, time.monotonic() - started
@@ -383,14 +402,17 @@ def create_app(config: ServiceConfig):
     @app.get("/health")
     async def health(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
         # Reachable only once the model is loaded: uvicorn finishes start-up
-        # (the load) before it opens the port.
+        # (the load) before it opens the port. "unhealthy" = the model is
+        # stuck on a picture; MindRouter's health check reads that word.
+        status = "unhealthy" if worker.stalled() else "ok"
         if not authorized(authorization):
-            return {"status": "ok"}        # liveness only without the key
-        return {"status": "ok", "model": config.served_name, "source": config.model,
+            return {"status": status}      # liveness only without the key
+        return {"status": status, "model": config.served_name, "source": config.model,
                 "revision": config.revision, "device": getattr(worker.engine, "device", None),
                 "half": getattr(worker.engine, "half", None), "side": config.side,
                 "max_pixels": config.max_pixels, "queue_depth": worker.queue_depth(),
-                "max_queue": config.max_queue, "stats": worker.stats.as_dict()}
+                "max_queue": config.max_queue, "stall_seconds": config.stall_seconds,
+                "stats": worker.stats.as_dict()}
 
     @app.post("/v1/matte")
     async def matte(request: Request, authorization: Optional[str] = Header(default=None)):

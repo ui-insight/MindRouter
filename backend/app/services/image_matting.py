@@ -40,13 +40,13 @@ Config (app_config, editable on /admin/images-config, read per request):
   img.transparent_enabled   bool, default False
   img.matting_url           base URL of the matting server
   img.matting_api_key       its bearer key
-  img.matting_timeout       seconds per picture, default 30
+  img.matting_timeout       seconds for one response's cut-out, default 30
 """
 
 import asyncio
 import base64
 import io
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -69,8 +69,12 @@ BACKGROUND_TRANSPARENT = "transparent"
 BACKGROUND_OPAQUE = "opaque"
 BACKGROUNDS = (BACKGROUND_TRANSPARENT, BACKGROUND_OPAQUE, "auto")
 
+# Seconds allowed for the cut-out of ONE RESPONSE (all of its images). The
+# cut-out runs after generation, and generation may already have used its
+# 600 s; the front proxy gives a request 720 s in all, so the ceiling here
+# keeps a slow matting server from turning a finished image into a 504.
 DEFAULT_TIMEOUT = 30.0
-MAX_TIMEOUT = 300.0
+MAX_TIMEOUT = 100.0
 
 # A matte is never exactly 0 or 255 over a flat area. Values this close to
 # either end are snapped to it, so the background is really gone and the
@@ -135,7 +139,7 @@ class MattingConfig:
     # Kept out of repr(), so the key cannot reach a log or a traceback that
     # prints local variables.
     api_key: Optional[str] = field(default=None, repr=False)
-    timeout: float = DEFAULT_TIMEOUT       # seconds allowed per picture, start to finish
+    timeout: float = DEFAULT_TIMEOUT       # seconds allowed for one response's cut-out, all images
 
     @property
     def usable(self) -> bool:
@@ -166,6 +170,15 @@ def validate_server_url(url: str) -> Optional[str]:
     return None
 
 
+def validate_api_key(key: str) -> Optional[str]:
+    """Return an error message for a key that cannot be sent as a bearer
+    token, or None. A pasted smart quote or non-breaking space would
+    otherwise fail every request with nothing to say why."""
+    if not isinstance(key, str) or not key or len(key) > 512 or not all(33 <= ord(ch) <= 126 for ch in key):
+        return "Matting server key must be 1 to 512 printable ASCII characters with no spaces."
+    return None
+
+
 def clean_timeout(value: Any) -> float:
     """A timeout in seconds within (0, MAX_TIMEOUT], or the default."""
     try:
@@ -188,7 +201,9 @@ async def load_config(db: Any) -> MattingConfig:
     return MattingConfig(
         enabled=enabled,
         url=url.strip().rstrip("/") if isinstance(url, str) else "",
-        api_key=(key.strip() or None) if isinstance(key, str) else None,
+        # A stored key that cannot be a header value is sent as no key: the
+        # server answers 401 ("rejected"), which names the problem.
+        api_key=key.strip() if isinstance(key, str) and validate_api_key(key.strip()) is None else None,
         timeout=clean_timeout(timeout),
     )
 
@@ -446,6 +461,9 @@ async def _cut_out_all(
 
     results: List[Tuple[str, Optional[str]]] = []
     dialed: List[str] = []          # outcomes of the pictures actually sent to the server
+    # One deadline for the whole response: n images do not get n timeouts.
+    clock = asyncio.get_running_loop().time
+    deadline = clock() + config.timeout
     async with new_client(config) as client:
         for picture in pictures:
             if dialed and dialed[-1] in _STOP_DIALING:
@@ -454,9 +472,13 @@ async def _cut_out_all(
                 # for every remaining image.
                 results.append((dialed[-1], None))
                 continue
+            remaining = deadline - clock()
+            if remaining <= 0:
+                results.append((OUTCOME_BUSY, None))        # the earlier images used the time
+                continue
             # An entry with no bytes (url only) comes back as OUTCOME_ERROR
             # without the server being asked.
-            cut, outcome = await make_transparent(picture, config, client=client)
+            cut, outcome = await make_transparent(picture, replace(config, timeout=remaining), client=client)
             dialed.append(outcome)
             results.append((outcome, cut if outcome == OUTCOME_TRANSPARENT else None))
 
@@ -496,6 +518,9 @@ async def apply_background(
             results = [(OUTCOME_ERROR, None)] * len(items)
         for outcome, _ in results:
             IMAGE_BACKGROUNDS.labels(outcome=outcome).inc()
+        # The metric is per worker process; this line (which carries the
+        # request id from the logging context) is the per-request record.
+        logger.info("image_background_outcome", outcomes=[outcome for outcome, _ in results])
     # Pictures are replaced only here, after everything that can fail, so
     # `has_alpha` always describes the bytes the caller receives.
     for index, item in enumerate(items):
