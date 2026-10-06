@@ -203,7 +203,7 @@ def clean_timeout(value: Any) -> float:
     that is not a positive number becomes the default."""
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):     # OverflowError: an integer too large for a float
         return DEFAULT_TIMEOUT
     if isinstance(value, bool) or not seconds > 0:
         return DEFAULT_TIMEOUT

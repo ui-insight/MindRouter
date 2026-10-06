@@ -865,7 +865,9 @@ class TestConfig:
     @pytest.mark.parametrize("value,expected", [(5, 5.0), ("12", 12.0), (100, 100.0), (0, 30.0), (-1, 30.0),
                                                 (None, 30.0), ("x", 30.0), (True, 30.0),
                                                 # above the ceiling: someone wanted a long limit, so the ceiling
-                                                (101, 100.0), (300, 100.0), ("250", 100.0)])
+                                                (101, 100.0), (300, 100.0), ("250", 100.0), (float("inf"), 100.0),
+                                                # not a number at all, or one no float can hold
+                                                (float("nan"), 30.0), (10 ** 400, 30.0)])
     def test_clean_timeout(self, value, expected):
         assert im.clean_timeout(value) == expected
 

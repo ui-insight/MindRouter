@@ -364,8 +364,11 @@ How it works, and what follows from it:
   `has_alpha: false`. So does any value the server does not recognise (a
   misspelling, say): it is never an error, and `background: "opaque"` in the
   response tells you the picture is not transparent. Leave the field out (or
-  send `null`, `""` or `false`) and the response is exactly what it was
-  before this option existed (no `background`, no `has_alpha`).
+  send an empty value: JSON `null`, `""` or `false`, or an empty form field)
+  and the response is exactly what it was before this option existed (no
+  `background`, no `has_alpha`). On the multipart edits endpoint every value
+  is text, so the word `false` there is an unrecognised value, not an empty
+  one.
 - **Edits:** the cut-out is applied to the edited result. Removing the
   background of an uploaded picture without redrawing it is not offered.
 - **Watermark.** The file you receive still carries the invisible watermark
