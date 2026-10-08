@@ -186,7 +186,15 @@ class LTXEngine:
         self._get_chunks = get_video_chunks_number
 
         if self.config.resident and self.config.warmup:
-            self._warm_up(log)
+            try:
+                self._warm_up(log)
+            except Exception:
+                # Not fatal: e.g. out of memory because the other model on this
+                # GPU is mid-render. Serve anyway; the first job pays the load.
+                log.warning("Warm-up render failed; the first job will load the weights.", exc_info=True)
+                import torch
+
+                torch.cuda.empty_cache()
 
     def _warm_up(self, log) -> None:  # pragma: no cover - requires GPU
         """Render one small clip so every component is loaded and cached before
@@ -209,8 +217,12 @@ class LTXEngine:
             except OSError:
                 pass
 
-    def _render(self, *, prompt, seed, width, height, num_frames, fps, images, dest_path) -> None:  # pragma: no cover
+    def _render(self, *, prompt, seed, width, height, num_frames, fps, images, dest_path,
+                on_generated=None) -> None:  # pragma: no cover
+        """Generate and encode one clip; ``on_generated`` runs between the two."""
         import torch
+
+        on_generated = on_generated or (lambda: None)
 
         with torch.inference_mode():
             if self.config.ltx_layout == "split":
@@ -218,6 +230,7 @@ class LTXEngine:
                     prompt=prompt, seed=seed, height=height, width=width,
                     num_frames=num_frames, frame_rate=fps, images=images,
                 )
+                on_generated()
                 self._encode_video(
                     video=result.video, fps=fps, audio=result.audio, output_path=dest_path,
                     video_chunks_number=self._get_chunks(result.num_frames, result.tiling_config),
@@ -227,6 +240,7 @@ class LTXEngine:
                     prompt=prompt, seed=seed, height=height, width=width,
                     num_frames=num_frames, frame_rate=fps, images=images, tiling_config=self._tiling,
                 )
+                on_generated()
                 self._encode_video(
                     video=video, fps=fps, audio=audio, output_path=dest_path,
                     video_chunks_number=self._get_chunks(num_frames, self._tiling),
@@ -284,7 +298,8 @@ class LTXEngine:
         t0 = time.time()
         try:
             self._render(prompt=spec["prompt"], seed=seed, width=width, height=height,
-                         num_frames=num_frames, fps=fps, images=images, dest_path=dest_path)
+                         num_frames=num_frames, fps=fps, images=images, dest_path=dest_path,
+                         on_generated=lambda: progress_cb(2, 3))
         finally:
             for p in tmp_paths:
                 try:

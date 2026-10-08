@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.video_api import submit_video_job, _job_to_dict, _video_model_names
+from backend.app.api.video_api import submit_video_job, _job_to_dict
 from backend.app.dashboard.routes import get_masquerade_user_id, get_session_user_id
 from backend.app.db import crud
 from backend.app.security.api_keys import first_live_api_key
@@ -87,8 +87,12 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
     default_model = await crud.get_config_json(db, "vid.default_model", "lightricks/ltx-2.3-distilled")
     from backend.app.core.telemetry.registry import get_registry
 
-    video_models = await _video_model_names(get_registry())
-    if default_model not in video_models:
+    # Offer only models a healthy backend serves right now; the configured
+    # default (an alias resolves to its model) comes first when it is one.
+    default_model, _ = get_registry().resolve_alias(default_model)
+    video_models = await crud.get_servable_video_models(db)
+    if default_model in video_models:
+        video_models.remove(default_model)
         video_models.insert(0, default_model)
 
     api_keys = await crud.get_user_api_keys(db, user_id, include_revoked=False)

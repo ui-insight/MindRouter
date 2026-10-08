@@ -1878,6 +1878,28 @@ async def get_backends_with_model(
     return list(result.scalars().all())
 
 
+async def get_servable_video_models(db: AsyncSession) -> List[str]:
+    """Video models with at least one healthy video backend right now, by name.
+
+    The video runner claims only jobs for these, and the Video tab offers only
+    these: a disabled or restarting backend's model is neither picked up nor
+    offered."""
+    result = await db.execute(
+        select(Model.name)
+        .join(Backend, Backend.id == Model.backend_id)
+        .where(
+            and_(
+                Backend.engine == BackendEngine.VIDEO,
+                Backend.status == BackendStatus.HEALTHY,
+                Model.modality == Modality.VIDEO_GENERATION,
+            )
+        )
+        .distinct()
+        .order_by(Model.name)
+    )
+    return [name for (name,) in result.all()]
+
+
 async def model_is_configured(db: AsyncSession, model_name: str) -> bool:
     """Is this model known to the fleet at all, regardless of backend health?
 
@@ -5509,15 +5531,25 @@ async def count_active_video_jobs_for_user(db: AsyncSession, user_id: int) -> in
 
 
 # --- Video runner CRUD (claim / re-adopt / state transitions) -------------
-async def claim_next_video_job(db: AsyncSession, worker_id: str) -> Optional[VideoJob]:
+async def claim_next_video_job(
+    db: AsyncSession, worker_id: str, models: Optional[List[str]] = None,
+) -> Optional[VideoJob]:
     """Atomically claim the highest-priority queued job (race-safe across
     workers via SELECT ... FOR UPDATE SKIP LOCKED). Returns the claimed job
-    (now RENDERING) or None if the queue is empty. Commits."""
+    (now RENDERING) or None if the queue is empty. Commits.
+
+    With `models`, only jobs for those models are eligible: a job whose model
+    has no healthy backend stays queued without blocking the jobs behind it."""
+    if models is not None and not models:
+        return None
+    query = select(VideoJob.id).where(VideoJob.status == VideoJobStatus.QUEUED)
+    if models is not None:
+        query = query.where(
+            VideoJob.project_id.in_(select(VideoProject.id).where(VideoProject.model.in_(list(models))))
+        )
     candidate = (
         await db.execute(
-            select(VideoJob.id)
-            .where(VideoJob.status == VideoJobStatus.QUEUED)
-            .order_by(VideoJob.priority.desc(), VideoJob.id.asc())
+            query.order_by(VideoJob.priority.desc(), VideoJob.id.asc())
             .limit(1)
             .with_for_update(skip_locked=True)
         )

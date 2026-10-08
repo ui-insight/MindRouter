@@ -125,6 +125,52 @@ class TestRenderRatioPerModel:
         assert [r["model"] for r in rows] == [NEW]
 
 
+class TestServableModelsAndClaim:
+    @pytest.fixture
+    async def fleet(self, db):
+        """Three video backends: 2.3 healthy, 2.5 restarting (unhealthy), an old
+        disabled one; plus a healthy chat backend that must not count."""
+        from backend.app.db.models import Backend, BackendEngine, BackendStatus, Base, Modality, Model
+
+        async with db.bind.begin() as conn:
+            await conn.run_sync(lambda s: Base.metadata.create_all(
+                s, tables=[Base.metadata.tables["backends"], Base.metadata.tables["models"]]))
+        rows = [
+            (1, "ltx23", BackendEngine.VIDEO, BackendStatus.HEALTHY, OLD, Modality.VIDEO_GENERATION),
+            (2, "ltx25", BackendEngine.VIDEO, BackendStatus.UNHEALTHY, NEW, Modality.VIDEO_GENERATION),
+            (3, "old", BackendEngine.VIDEO, BackendStatus.DISABLED, "lightricks/ltx-2.2", Modality.VIDEO_GENERATION),
+            (4, "chat", BackendEngine.VLLM, BackendStatus.HEALTHY, "qwen/qwen3.8-27b", Modality.CHAT),
+        ]
+        for bid, name, engine, status, model, modality in rows:
+            db.add(Backend(id=bid, name=name, url=f"https://{name}:8000", engine=engine, status=status))
+            db.add(Model(id=bid, backend_id=bid, name=model, modality=modality))
+        await db.commit()
+
+    async def test_only_models_with_a_healthy_video_backend(self, db, fleet):
+        from backend.app.db import crud
+        from backend.app.db.models import Backend, BackendStatus
+
+        assert await crud.get_servable_video_models(db) == [OLD]
+        (await db.get(Backend, 2)).status = BackendStatus.HEALTHY      # 2.5 finished warming up
+        await db.commit()
+        assert await crud.get_servable_video_models(db) == [OLD, NEW]
+
+    async def test_claim_skips_jobs_for_models_that_are_down(self, db):
+        from backend.app.db import crud
+        from backend.app.db.models import VideoJobStatus
+
+        queued = VideoJobStatus.QUEUED
+        await _job(db, 1, NEW, gpu_seconds=0, status=queued)     # oldest, but its model is down
+        await _job(db, 2, OLD, gpu_seconds=0, status=queued)
+        await db.commit()
+
+        job = await crud.claim_next_video_job(db, "runner-1", models=[OLD])
+        assert job.id == 3 and job.status == VideoJobStatus.RENDERING      # the 2.3 job, ids are n + 1
+        assert await crud.claim_next_video_job(db, "runner-1", models=[OLD]) is None
+        assert await crud.claim_next_video_job(db, "runner-1", models=[]) is None
+        assert (await crud.claim_next_video_job(db, "runner-1")).id == 2     # no filter: any model
+
+
 class TestQueueEstimates:
     async def test_each_queued_job_is_estimated_with_its_own_model(self):
         from backend.app.dashboard import video as video_dash
