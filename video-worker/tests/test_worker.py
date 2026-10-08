@@ -199,3 +199,49 @@ def test_no_key_configured_leaves_routes_open(tmp_path):
     # sends the key). No header, still 200.
     with _client(tmp_path) as client:
         assert client.get("/v1/models").status_code == 200
+
+
+def test_resident_and_layout_settings_from_env(monkeypatch):
+    """Weights stay resident and warm by default; the env can switch either off
+    and pick the LTX-2.5 split layout."""
+    for name in ("VIDEO_WORKER_RESIDENT", "VIDEO_WORKER_WARMUP", "VIDEO_WORKER_LTX_LAYOUT", "VIDEO_WORKER_VIDEO_VAE"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = WorkerConfig()
+    assert (cfg.resident, cfg.warmup, cfg.ltx_layout, cfg.video_vae_file) == (True, True, "monolith", "")
+
+    monkeypatch.setenv("VIDEO_WORKER_RESIDENT", "0")
+    monkeypatch.setenv("VIDEO_WORKER_WARMUP", "false")
+    monkeypatch.setenv("VIDEO_WORKER_LTX_LAYOUT", "split")
+    monkeypatch.setenv("VIDEO_WORKER_VIDEO_VAE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors")
+    cfg = WorkerConfig()
+    assert (cfg.resident, cfg.warmup, cfg.ltx_layout) == (False, False, "split")
+
+    monkeypatch.setenv("VIDEO_WORKER_RESIDENT", "")   # blank = default
+    assert WorkerConfig().resident is True
+
+
+def test_split_layout_paths_follow_the_hf_repo_layout(tmp_path):
+    """LTX-2.5 files resolve under the checkpoint dir in the Hugging Face repo's
+    own layout; a VAE override swaps only the video decoder."""
+    from engine import LTXEngine
+
+    cfg = WorkerConfig(mode="ltx", checkpoint_dir="/m/ltx-2.5")
+    cfg.ltx_layout = "split"
+    paths = LTXEngine(cfg)._paths()
+    assert paths["transformer"] == "/m/ltx-2.5/diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"
+    assert paths["text_encoder"] == "/m/ltx-2.5/text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"
+    assert paths["video_vae"].endswith("vae/ltx-2.5-video-vae-bf16.safetensors")
+    cfg.video_vae_file = "vae/ltx-2.5-video-vae-conv-bf16.safetensors"
+    assert LTXEngine(cfg)._paths()["video_vae"] == "/m/ltx-2.5/vae/ltx-2.5-video-vae-conv-bf16.safetensors"
+
+    cfg.ltx_layout = "monolith"
+    assert LTXEngine(cfg)._paths()["gemma"] == "/m/ltx-2.5/gemma-3-12b"
+
+
+def test_unknown_layout_is_refused():
+    from engine import LTXEngine
+
+    cfg = WorkerConfig(mode="ltx")
+    cfg.ltx_layout = "fat"
+    with pytest.raises(ValueError, match="monolith"):
+        LTXEngine(cfg).load()

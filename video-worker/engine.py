@@ -6,7 +6,9 @@
 #
 #   MockEngine — no GPU, deterministic placeholder MP4 (dev + CI).
 #   LTXEngine  — real ltx_pipelines on the H200 (torch/ltx_pipelines imported
-#                lazily so this module loads without them).
+#                lazily so this module loads without them). Serves LTX-2.3
+#                (one checkpoint) or LTX-2.5 (split checkpoints), weights
+#                resident between renders.
 #
 # Generation is a blocking call run OFF the event loop by the JobManager, so
 # GET /health stays under 5s while a render is in flight.
@@ -81,19 +83,36 @@ class LTXEngine:
     """Real video-model engine (mode=ltx). torch + ltx_pipelines are imported
     lazily in load() so this file imports on a machine without them.
 
-    Phase-0 validated recipe (aspen1 GPU2, H200; see
-    docs/video-generation-plan.md and the phase0 memory):
-      - DistilledPipeline (two-stage 8+3 distilled), model resident via one
-        construction; generation runs under torch.inference_mode() — WITHOUT it
-        autograd retains the graph and OOMs at ~139GB.
-      - quantization="fp8-cast": ~24GB peak (vs bf16 ~44GB and right at the
-        141GB edge). fp8-cast needs NO custom ltx-kernels build.
-      - Measured: ~35s per 5s 720p clip (121f), stable 24GB, zero leak.
-      - Attention is torch SDPA (cuDNN on Hopper) — the model ships no FA3 path.
+    Two checkpoint layouts, picked by ``config.ltx_layout``:
+      - "monolith" (LTX-2.3): one fat checkpoint + a separate Gemma 3 folder,
+        driven by the ltx_pipelines release of July 2026 (its own venv).
+      - "split" (LTX-2.5): one file per component (transformer, Gemma 4 text
+        encoder, video VAE, audio VAE), driven by ltx_pipelines >= 1.2 (its
+        own venv; the July release cannot load 2.5).
+
+    Recipe (aspen1 GPU2, H200; see docs/video-generation-plan.md):
+      - DistilledPipeline (two-stage 8+4 distilled), quantization fp8-cast.
+      - Generation runs under torch.inference_mode() — WITHOUT it autograd
+        retains the graph and OOMs at ~139GB.
+      - Weights stay resident (``config.resident``): the pipeline is built with
+        a weight registry, so the first render loads every component onto the
+        GPU and later renders reuse them. Measured on 2.3: ~31 s -> ~11 s per
+        5 s 720p clip, output bit-identical, ~55 GB held between renders
+        (vs ~24 GB peak / 1.7 GB idle when reloading per render).
+      - ``config.warmup`` renders one small clip at startup so the first user
+        job does not pay the load.
       - The model generates synchronized audio natively.
-    Requires (installed in the worker's uv venv on the GPU node): torch cu130,
-    torchvision, ltx-core, ltx-pipelines. Checkpoints under VIDEO_WORKER_CKPT_DIR.
     """
+
+    # LTX-2.5 split layout, relative to the checkpoint dir (the Hugging Face
+    # repo's own folder layout, kept by `hf download --local-dir`).
+    SPLIT_FILES = {
+        "transformer": "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
+        "text_encoder": "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "video_vae": "vae/ltx-2.5-video-vae-bf16.safetensors",
+        "audio_vae": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+        "upsampler": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+    }
 
     def __init__(self, config: WorkerConfig):
         self.config = config
@@ -105,6 +124,11 @@ class LTXEngine:
     def _paths(self):
         import os
         d = self.config.checkpoint_dir
+        if self.config.ltx_layout == "split":
+            paths = {k: os.path.join(d, v) for k, v in self.SPLIT_FILES.items()}
+            if self.config.video_vae_file:
+                paths["video_vae"] = os.path.join(d, self.config.video_vae_file)
+            return paths
         return {
             "dit": os.path.join(d, "ltx-2.3", "ltx-2.3-22b-distilled-1.1.safetensors"),
             "upsampler": os.path.join(d, "ltx-2.3", "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
@@ -112,25 +136,101 @@ class LTXEngine:
         }
 
     def load(self) -> None:  # pragma: no cover - requires GPU + ltx_pipelines
+        if self.config.ltx_layout not in ("monolith", "split"):
+            raise ValueError(f"VIDEO_WORKER_LTX_LAYOUT must be 'monolith' or 'split', not {self.config.ltx_layout!r}")
         import logging
         from ltx_pipelines.distilled import DistilledPipeline
         from ltx_pipelines.utils.media_io import encode_video
         from ltx_pipelines.utils.quantization_factory import QuantizationKind
-        from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
+        from ltx_core.model.video_vae import get_video_chunks_number
 
-        logging.getLogger(__name__).info("Loading the two-stage distilled video pipeline (fp8-cast)…")
+        log = logging.getLogger(__name__)
         p = self._paths()
-        policy = QuantizationKind("fp8-cast").to_policy(checkpoint_path=p["dit"])
-        self._pipeline = DistilledPipeline(
-            distilled_checkpoint_path=p["dit"],
-            gemma_root=p["gemma"],
-            spatial_upsampler_path=p["upsampler"],
-            loras=(),
-            quantization=policy,
-        )
+        if self.config.ltx_layout == "split":
+            from ltx_core.loader import ModelRegistry
+            from ltx_pipelines.utils.model_paths import ModelPaths
+
+            log.info("Loading the two-stage distilled video pipeline, split layout (fp8-cast, resident=%s)…",
+                     self.config.resident)
+            policy = QuantizationKind("fp8-cast").to_policy(checkpoint_path=p["transformer"])
+            self._pipeline = DistilledPipeline(
+                model_paths=ModelPaths.from_split(
+                    transformer_path=p["transformer"],
+                    text_encoder_path=p["text_encoder"],
+                    video_vae_path=p["video_vae"],
+                    audio_vae_path=p["audio_vae"],
+                ),
+                spatial_upsampler_path=p["upsampler"],
+                loras=(),
+                quantization=policy,
+                registry=ModelRegistry() if self.config.resident else None,
+            )
+            self._tiling = None  # the pipeline sizes decode tiles itself (AUTO_TILING)
+        else:
+            from ltx_core.loader import StateDictRegistry
+            from ltx_core.model.video_vae import TilingConfig
+
+            log.info("Loading the two-stage distilled video pipeline (fp8-cast, resident=%s)…",
+                     self.config.resident)
+            policy = QuantizationKind("fp8-cast").to_policy(checkpoint_path=p["dit"])
+            self._pipeline = DistilledPipeline(
+                distilled_checkpoint_path=p["dit"],
+                gemma_root=p["gemma"],
+                spatial_upsampler_path=p["upsampler"],
+                loras=(),
+                quantization=policy,
+                registry=StateDictRegistry() if self.config.resident else None,
+            )
+            self._tiling = TilingConfig.default()
         self._encode_video = encode_video
-        self._tiling = TilingConfig.default()
         self._get_chunks = get_video_chunks_number
+
+        if self.config.resident and self.config.warmup:
+            self._warm_up(log)
+
+    def _warm_up(self, log) -> None:  # pragma: no cover - requires GPU
+        """Render one small clip so every component is loaded and cached before
+        the first real job. Uses the smallest preset; output is discarded."""
+        import os
+        import time
+        import uuid as _uuid
+
+        os.makedirs(self.config.output_dir, exist_ok=True)
+        dest = os.path.join(self.config.output_dir, f"warmup-{_uuid.uuid4().hex[:8]}.mp4")
+        started = time.time()
+        try:
+            self._render(prompt="A calm lake at dawn, gentle water sounds.", seed=1,
+                         width=768, height=448, num_frames=frames_for(4), fps=24.0,
+                         images=[], dest_path=dest)
+            log.info("Warm-up render done in %.1fs; weights are resident.", time.time() - started)
+        finally:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+
+    def _render(self, *, prompt, seed, width, height, num_frames, fps, images, dest_path) -> None:  # pragma: no cover
+        import torch
+
+        with torch.inference_mode():
+            if self.config.ltx_layout == "split":
+                result = self._pipeline(
+                    prompt=prompt, seed=seed, height=height, width=width,
+                    num_frames=num_frames, frame_rate=fps, images=images,
+                )
+                self._encode_video(
+                    video=result.video, fps=fps, audio=result.audio, output_path=dest_path,
+                    video_chunks_number=self._get_chunks(result.num_frames, result.tiling_config),
+                )
+            else:
+                video, audio = self._pipeline(
+                    prompt=prompt, seed=seed, height=height, width=width,
+                    num_frames=num_frames, frame_rate=fps, images=images, tiling_config=self._tiling,
+                )
+                self._encode_video(
+                    video=video, fps=fps, audio=audio, output_path=dest_path,
+                    video_chunks_number=self._get_chunks(num_frames, self._tiling),
+                )
 
     def capabilities(self) -> Dict[str, Any]:
         return self.config.capabilities()
@@ -145,7 +245,10 @@ class LTXEngine:
         import os
         import uuid as _uuid
 
-        from ltx_pipelines.utils.args import ImageConditioningInput
+        if self.config.ltx_layout == "split":
+            from ltx_pipelines.utils.types import ImageConditioningInput
+        else:
+            from ltx_pipelines.utils.args import ImageConditioningInput
 
         strength = float(spec.get("image_strength") or 1.0)
         images, tmp = [], []
@@ -163,7 +266,6 @@ class LTXEngine:
     def generate(self, spec, dest_path, progress_cb, should_cancel) -> Dict[str, Any]:  # pragma: no cover
         import os
         import time
-        import torch
 
         if self._pipeline is None:
             self.load()
@@ -181,16 +283,8 @@ class LTXEngine:
         progress_cb(1, 3)
         t0 = time.time()
         try:
-            with torch.inference_mode():
-                video, audio = self._pipeline(
-                    prompt=spec["prompt"], seed=seed, height=height, width=width,
-                    num_frames=num_frames, frame_rate=fps, images=images, tiling_config=self._tiling,
-                )
-                progress_cb(2, 3)
-                self._encode_video(
-                    video=video, fps=fps, audio=audio, output_path=dest_path,
-                    video_chunks_number=self._get_chunks(num_frames, self._tiling),
-                )
+            self._render(prompt=spec["prompt"], seed=seed, width=width, height=height,
+                         num_frames=num_frames, fps=fps, images=images, dest_path=dest_path)
         finally:
             for p in tmp_paths:
                 try:

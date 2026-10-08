@@ -5791,22 +5791,26 @@ async def get_backend_snapshot(db: AsyncSession, backend_id: int) -> Optional[di
     return {"id": b.id, "url": b.url, "healthy": b.status == BackendStatus.HEALTHY}
 
 
-async def get_recent_render_ratio(db: AsyncSession, sample: int = 20, default: float = 6.0) -> float:
+async def get_recent_render_ratio(
+    db: AsyncSession, model: Optional[str] = None, sample: int = 5, default: float = 6.0,
+) -> float:
     """Render seconds per output second, averaged over recent completed jobs, so
-    ETA scales with clip length (a 90 s clip ≫ a 5 s clip). Falls back to
-    `default` (~6×, from Phase-0 measurement) when there's no history yet."""
+    ETA scales with clip length (a 90 s clip ≫ a 5 s clip). With `model`, only
+    that model's jobs count: models render at different speeds. The sample is
+    small so a speed-up (e.g. weights kept resident) shows within a few jobs.
+    Falls back to `default` (~6×, from Phase-0 measurement) with no history."""
+    conditions = [
+        VideoJob.status == VideoJobStatus.COMPLETED,
+        VideoJob.gpu_seconds.is_not(None),
+        VideoJob.duration_seconds.is_not(None),
+        VideoJob.duration_seconds > 0,
+    ]
+    query = select(VideoJob.gpu_seconds, VideoJob.duration_seconds)
+    if model:
+        query = query.join(VideoProject, VideoProject.id == VideoJob.project_id)
+        conditions.append(VideoProject.model == model)
     result = await db.execute(
-        select(VideoJob.gpu_seconds, VideoJob.duration_seconds)
-        .where(
-            and_(
-                VideoJob.status == VideoJobStatus.COMPLETED,
-                VideoJob.gpu_seconds.is_not(None),
-                VideoJob.duration_seconds.is_not(None),
-                VideoJob.duration_seconds > 0,
-            )
-        )
-        .order_by(VideoJob.id.desc())
-        .limit(sample)
+        query.where(and_(*conditions)).order_by(VideoJob.id.desc()).limit(sample)
     )
     ratios = [g / d for g, d in result.all() if g and d]
     return (sum(ratios) / len(ratios)) if ratios else default
@@ -5843,6 +5847,7 @@ async def get_active_video_queue(db: AsyncSession) -> list[dict]:
             "seconds": float(shot.seconds) if shot and shot.seconds is not None else None,
             "quality": getattr(proj.quality, "value", proj.quality) if proj else None,
             "size": proj.size if proj else None,
+            "model": proj.model if proj else None,
             "created_at": _unix_or_none(job.created_at),
             "started_at": _unix_or_none(job.started_at),
         })

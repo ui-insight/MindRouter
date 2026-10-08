@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.video_api import submit_video_job, _job_to_dict
+from backend.app.api.video_api import submit_video_job, _job_to_dict, _video_model_names
 from backend.app.dashboard.routes import get_masquerade_user_id, get_session_user_id
 from backend.app.db import crud
 from backend.app.security.api_keys import first_live_api_key
@@ -84,6 +84,12 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
     default_seconds = str(await crud.get_config_json(db, "vid.default_seconds", 5))
     default_quality = await crud.get_config_json(db, "vid.default_quality", "standard")
     max_total_seconds = await crud.get_config_json(db, "vid.max_total_seconds", 30)
+    default_model = await crud.get_config_json(db, "vid.default_model", "lightricks/ltx-2.3-distilled")
+    from backend.app.core.telemetry.registry import get_registry
+
+    video_models = await _video_model_names(get_registry())
+    if default_model not in video_models:
+        video_models.insert(0, default_model)
 
     api_keys = await crud.get_user_api_keys(db, user_id, include_revoked=False)
 
@@ -103,6 +109,8 @@ async def video_page(request: Request, db: AsyncSession = Depends(get_async_db))
             "default_size": default_size,
             "default_seconds": default_seconds,
             "default_quality": default_quality,
+            "video_models": video_models,
+            "default_model": default_model,
             "min_seconds": await crud.get_config_json(db, "vid.min_seconds", 4),
             "max_seconds": max_total_seconds,
             "has_api_key": first_live_api_key(api_keys) is not None,
@@ -240,12 +248,15 @@ async def video_queue(request: Request, db: AsyncSession = Depends(get_async_db)
 
     user, _ = await _get_video_user(request, db)
     rows = await crud.get_active_video_queue(db)
-    ratio = await crud.get_recent_render_ratio(db)
+    ratios = {}          # model -> render seconds per output second
+    for row in rows:
+        if row.get("model") not in ratios:
+            ratios[row.get("model")] = await crud.get_recent_render_ratio(db, model=row.get("model"))
     now = time.time()
 
     def _est(row):
         secs = row.get("seconds") or 0
-        base = ratio * secs
+        base = ratios[row.get("model")] * secs
         q = (row.get("quality") or "standard")
         mult = {"draft": 0.6, "standard": 1.0, "final": 1.6}.get(q, 1.0)
         return max(5.0, base * mult)

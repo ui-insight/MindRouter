@@ -67,7 +67,7 @@ you to use `size`).
 | field | type | required | default | notes |
 |---|---|---|---|---|
 | `prompt` | string | **yes** | — | The scene description. Must be non-empty. |
-| `model` | string | no | `vid.default_model` (`lightricks/ltx-2.3-distilled`) | Served video model id. Must exist; aliases are resolved. |
+| `model` | string | no | `vid.default_model` (`lightricks/ltx-2.3-distilled`) | Served video model id: `lightricks/ltx-2.3-distilled` or `lightricks/ltx-2.5-distilled` (list them with `GET /v1/videos/models`). Must exist; aliases are resolved. |
 | `size` | string | no | `vid.default_size` (`1280x704`) | `"WIDTHxHEIGHT"` from the fixed preset menu (see [Sizes & durations](#sizes-durations-fps)). Off-menu → `400`. |
 | `seconds` | int / string | no | `vid.default_seconds` (`5`) | Whole number of seconds, `4`–`30` inclusive (`vid.min_seconds`..`vid.max_total_seconds`). Non-integer or out-of-range → `400`. |
 | `fps` | int | no | `24` | Accepted but **not validated**: any value is stored and echoed back, but only `24` is actually rendered. Off-`24` values are neither honored nor rejected (no `400`). |
@@ -195,6 +195,12 @@ Render your UI controls from this so the preset matrix has one source of truth.
   ]
 }
 ```
+
+Two models are served, one entry each: `lightricks/ltx-2.3-distilled` and
+`lightricks/ltx-2.5-distilled` (LTX-2.5: same 22B size, a Gemma 4 text encoder and
+a diffusion video decoder). Both take the same sizes, durations and image
+conditioning. Both keep their weights loaded on the GPU between renders, so a
+clip does not pay a model load: a 5 s 1280x704 clip on LTX-2.3 takes about 11 s.
 
 > **Capability flags** now reflect shipped behavior (since 2.8.42):
 > `supports_image_to_video` and `supports_keyframes` are `true` because
