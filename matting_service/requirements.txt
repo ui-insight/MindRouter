@@ -4,22 +4,23 @@
 # Install torch FIRST from the CUDA wheel index for the node,
 # then the rest:
 #
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 #   pip install -r matting_service/requirements.txt
 #
-# The model comparison of 2026-10-06 ran with torch 2.5.1,
-# transformers 5.1.0, timm 1.0.30, kornia 0.8.3 and einops
-# 0.8.2 (CPU / Apple GPU). Record the versions installed on
-# the GPU node in the README when the service is deployed.
+# These are the versions the service runs with in production
+# (aspen4, since 2026-10-07). The model's own code is loaded
+# from its repository and imports timm, kornia and einops, so
+# a newer transformers or timm is a change to test, not a
+# routine upgrade.
 # ############################################################
 
-torch
-torchvision
-transformers
+torch==2.11.0
+torchvision==0.26.0
+transformers==5.1.0
 # BiRefNet's own code (shipped in the model repo) imports these three.
-timm
-kornia
-einops
+timm==1.0.30
+kornia==0.8.3
+einops==0.8.2
 numpy
 pillow
 huggingface_hub[hf_xet]

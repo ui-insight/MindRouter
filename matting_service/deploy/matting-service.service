@@ -33,6 +33,9 @@ Environment=HF_HOME=__HF_HOME__
 # code is executed at load, so it must be the copy that was reviewed.
 Environment=HF_HUB_OFFLINE=1
 Environment=PYTHONUNBUFFERED=1
+# Without these the model load writes hundreds of progress-bar lines to the journal.
+Environment=HF_HUB_DISABLE_PROGRESS_BARS=1
+Environment=TRANSFORMERS_VERBOSITY=error
 
 ExecStart=__VENV_DIR__/bin/python -m matting_service
 
