@@ -27,9 +27,10 @@ Which caller-facing model name goes where is the admin setting
 router pick a checkpoint by language); ``api_key`` is the upstream's bearer
 token, if it requires one.
 
-Upstreams are NOT registered MindRouter backends: no health polling, no
-circuit breaker, no GPU telemetry. A failing upstream answers 502 on every
-request until fixed. See docs/decisions-api.md "Limitations".
+An upstream may also be registered as a backend with engine ``decision`` and
+the same URL (Clef is): it is then health-polled, has a circuit breaker and is
+skipped while down (``registry.decision_server_state``). An unregistered
+upstream is dialed blind and answers 502 on every request until fixed.
 
 The reply is not trusted: every answer is checked against the question that
 was asked and reduced to TypeSafe's fields before it reaches the caller, so a
