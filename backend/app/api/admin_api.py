@@ -1012,6 +1012,50 @@ async def get_queue(
     }
 
 
+async def _add_decision_capacity(db: AsyncSession, capacity_by_model: Dict[str, Any]) -> None:
+    """Count decision servers (e.g. Clef) under the model name callers use.
+
+    A ``decision`` backend has no model rows: /v1/systemone reaches it through
+    ``decisions.upstreams``, matched to the backend by URL, so the models join
+    above never sees it and the model would show "No backends"."""
+    from sqlalchemy import select
+
+    from backend.app.core.telemetry.registry import normalize_server_url
+    from backend.app.db.models import Backend
+    from backend.app.services.decisions.upstream import parse_upstreams
+
+    upstreams, _ = parse_upstreams(await crud.get_config_json(db, "decisions.upstreams", {}))
+    if not upstreams:
+        return
+    rows = (
+        await db.execute(
+            select(Backend.name, Backend.url, Backend.status, Backend.max_concurrent, Backend.current_concurrent)
+            .where(Backend.engine == BackendEngine.DECISION, Backend.status != BackendStatus.DISABLED)
+            .order_by(Backend.name)
+        )
+    ).all()
+    for name, upstream in upstreams.items():
+        wanted = normalize_server_url(upstream.url)
+        for row in rows:
+            if normalize_server_url(row.url or "") != wanted:
+                continue
+            entry = capacity_by_model.setdefault(
+                name, {"backends": [], "total_max_concurrent": 0, "healthy_backends": 0}
+            )
+            status_value = getattr(row.status, "value", row.status)
+            entry["backends"].append(
+                {
+                    "name": row.name,
+                    "status": status_value,
+                    "max_concurrent": row.max_concurrent,
+                    "current_concurrent": row.current_concurrent,
+                }
+            )
+            entry["total_max_concurrent"] += row.max_concurrent or 0
+            if status_value == "healthy":
+                entry["healthy_backends"] += 1
+
+
 @router.get("/queue/monitor")
 async def get_queue_monitor(
     window: int = Query(5, description="Time window in minutes (5, 60, or 1440)"),
@@ -1071,6 +1115,8 @@ async def get_queue_monitor(
         capacity_by_model[model]["total_max_concurrent"] += row.max_concurrent
         if row.status == "healthy":
             capacity_by_model[model]["healthy_backends"] += 1
+
+    await _add_decision_capacity(db, capacity_by_model)
 
     # 3. Completion stats by model+user within window
     stats_rows = (
