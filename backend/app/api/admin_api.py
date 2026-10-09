@@ -1036,24 +1036,27 @@ async def _add_decision_capacity(db: AsyncSession, capacity_by_model: Dict[str, 
     ).all()
     for name, upstream in upstreams.items():
         wanted = normalize_server_url(upstream.url)
-        for row in rows:
-            if normalize_server_url(row.url or "") != wanted:
-                continue
-            entry = capacity_by_model.setdefault(
-                name, {"backends": [], "total_max_concurrent": 0, "healthy_backends": 0}
-            )
-            status_value = getattr(row.status, "value", row.status)
-            entry["backends"].append(
-                {
-                    "name": row.name,
-                    "status": status_value,
-                    "max_concurrent": row.max_concurrent,
-                    "current_concurrent": row.current_concurrent,
-                }
-            )
-            entry["total_max_concurrent"] += row.max_concurrent or 0
-            if status_value == "healthy":
-                entry["healthy_backends"] += 1
+        matches = [row for row in rows if normalize_server_url(row.url or "") == wanted]
+        if not matches:
+            continue
+        # An upstream is one server: two rows with the same URL are the same
+        # machine registered twice, not twice the capacity. Show one, healthy first.
+        row = next((r for r in matches if getattr(r.status, "value", r.status) == "healthy"), matches[0])
+        status_value = getattr(row.status, "value", row.status)
+        entry = capacity_by_model.setdefault(
+            name, {"backends": [], "total_max_concurrent": 0, "healthy_backends": 0}
+        )
+        entry["backends"].append(
+            {
+                "name": row.name,
+                "status": status_value,
+                "max_concurrent": row.max_concurrent,
+                "current_concurrent": row.current_concurrent,
+            }
+        )
+        entry["total_max_concurrent"] += row.max_concurrent or 0
+        if status_value == "healthy":
+            entry["healthy_backends"] += 1
 
 
 @router.get("/queue/monitor")
@@ -1116,7 +1119,10 @@ async def get_queue_monitor(
         if row.status == "healthy":
             capacity_by_model[model]["healthy_backends"] += 1
 
-    await _add_decision_capacity(db, capacity_by_model)
+    try:
+        await _add_decision_capacity(db, capacity_by_model)
+    except Exception as exc:  # extra detail; the rest of the monitor still answers
+        logger.warning("queue_monitor_decision_capacity_failed", error=type(exc).__name__)
 
     # 3. Completion stats by model+user within window
     stats_rows = (
