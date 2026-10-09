@@ -62,6 +62,16 @@
           </div>
 
           <div class="row g-3">
+            {% if video_models|length > 1 %}
+            <div class="col-12">
+              <label for="vid-model" class="form-label">Model</label>
+              <select id="vid-model" class="form-select">
+                {% for m in video_models %}
+                <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            {% endif %}
             <div class="col-sm-6">
               <label for="vid-size" class="form-label">Size</label>
               <select id="vid-size" class="form-select">
@@ -373,6 +383,9 @@
       seconds: $("vid-seconds").value,
       quality: $("vid-quality").value,
     };
+    // Only present when more than one video model is offered; otherwise the
+    // server's default model is used.
+    if ($("vid-model")) body.model = $("vid-model").value;
     const seed = $("vid-seed").value;
     if (seed !== "") body.seed = parseInt(seed, 10);
 

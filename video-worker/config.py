@@ -44,6 +44,13 @@ DURATION_FRAMES: Dict[str, int] = {
 QUALITY_TIERS: List[str] = ["draft", "standard", "final"]
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 @dataclass
 class WorkerConfig:
     # "mock" (no GPU, deterministic placeholder output — dev + CI) or "ltx".
@@ -57,6 +64,17 @@ class WorkerConfig:
     )
     # Model checkpoint dir + fp8 flag (only used in mode=ltx).
     checkpoint_dir: str = field(default_factory=lambda: os.environ.get("VIDEO_WORKER_CKPT_DIR", ""))
+    # Checkpoint layout (mode=ltx): "monolith" = LTX-2.3 (one checkpoint +
+    # Gemma 3 folder under checkpoint_dir); "split" = LTX-2.5 (one file per
+    # component, the Hugging Face repo layout, directly under checkpoint_dir).
+    ltx_layout: str = field(default_factory=lambda: os.environ.get("VIDEO_WORKER_LTX_LAYOUT", "monolith"))
+    # Split layout only: optional video VAE file (relative to checkpoint_dir) in
+    # place of the default diffusion decoder, e.g. the lighter conv decoder.
+    video_vae_file: str = field(default_factory=lambda: os.environ.get("VIDEO_WORKER_VIDEO_VAE", ""))
+    # Keep weights on the GPU between renders (~3x faster; holds the weights
+    # permanently), and warm them with one small render at startup.
+    resident: bool = field(default_factory=lambda: _env_flag("VIDEO_WORKER_RESIDENT", True))
+    warmup: bool = field(default_factory=lambda: _env_flag("VIDEO_WORKER_WARMUP", True))
     # Shared secret required on the X-Worker-Key header for the /v1/* control +
     # content routes. Empty = auth DISABLED (open, legacy behavior) so a new
     # worker can be rolled out ahead of the gateway sending the key. Set the SAME

@@ -72,8 +72,11 @@ WorkerSubmitError = _wc.WorkerSubmitError
 class FakeRepo:
     """In-memory VideoJobRepo. Records terminal transitions for assertions."""
 
-    def __init__(self, job=None, backend=None, cancelled_after=None, stale=None, readopt_ok=True):
+    def __init__(self, job=None, backend=None, cancelled_after=None, stale=None, readopt_ok=True,
+                 servable=("lightricks/ltx-2.3-distilled",)):
         self._job = job
+        self._servable = list(servable)
+        self.claimed_with = None     # the models list tick() passed to claim_next
         self._backend = backend
         # is_cancelled returns True once this many calls have been made.
         self._cancel_after = cancelled_after
@@ -103,7 +106,13 @@ class FakeRepo:
     async def get_backend(self, backend_id):
         return self._backend
 
-    async def claim_next(self, worker_id):
+    async def servable_models(self):
+        return list(self._servable)
+
+    async def claim_next(self, worker_id, models=None):
+        self.claimed_with = models
+        if models is not None and self._job is not None and self._job["model"] not in models:
+            return None
         j, self._job = self._job, None
         return j
 
@@ -290,6 +299,37 @@ async def test_tick_processes_a_claimed_job(tmp_path):
     r = _runner(repo, FakeWorker(), tmp_path)
     assert await r.tick() is True
     assert repo.state == "completed"
+    assert repo.claimed_with == ["lightricks/ltx-2.3-distilled"]   # only servable models are claimed
+
+
+@pytest.mark.asyncio
+async def test_tick_claims_nothing_when_no_model_has_a_backend(tmp_path):
+    # e.g. the only video worker is restarting: the queued job stays queued and
+    # the loop sleeps instead of claiming and requeueing it in a tight loop.
+    repo = FakeRepo(job=_job(), backend={"id": 5, "url": "http://w"}, servable=())
+    r = _runner(repo, FakeWorker(), tmp_path)
+    assert await r.tick() is False
+    assert repo.claimed_with is None and repo.state is None
+
+
+@pytest.mark.asyncio
+async def test_tick_skips_a_job_whose_model_is_down(tmp_path):
+    # Two models: the 2.5 worker is down, a 2.5 job waits; it is not claimed.
+    repo = FakeRepo(job=_job(model="lightricks/ltx-2.5-distilled"), backend={"id": 5, "url": "http://w"},
+                    servable=("lightricks/ltx-2.3-distilled",))
+    r = _runner(repo, FakeWorker(), tmp_path)
+    assert await r.tick() is False
+    assert repo.state is None
+
+
+@pytest.mark.asyncio
+async def test_tick_reports_no_work_when_the_backend_vanished_after_the_claim(tmp_path):
+    # The backend went down between the claim and the dispatch: the job goes
+    # back to the queue and tick() says no work was done, so the loop pauses.
+    repo = FakeRepo(job=_job(), backend=None)
+    r = _runner(repo, FakeWorker(), tmp_path)
+    assert await r.tick() is False
+    assert repo.state == "requeued"
 
 
 @pytest.mark.asyncio

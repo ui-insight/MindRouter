@@ -13,6 +13,14 @@ See `../docs/video-generation-plan.md` for the full design.
   Used for dev, CI, and gateway integration before the GPU node is ready.
 - `VIDEO_WORKER_MODE=ltx` — the real video model on the H200 (wired during Phase 0).
 
+Each model runs as its own worker process with its own venv, because LTX-2.5 needs
+a newer `ltx_pipelines` (>= 1.2, torch 2.13 cu132) than LTX-2.3's July 2026 build.
+On aspen1 both share GPU 2: `video-worker` (LTX-2.3, venv
+`/scratch/mindrouter-video-worker/.venv`, :18301 behind nginx :8004) and
+`video-worker-ltx25` (LTX-2.5, venv `/scratch/mindrouter-video-worker-25/.venv`,
+:18302 behind nginx :8005). The gateway renders one clip at a time, so the two
+never render at once; each keeps its own weights resident.
+
 ## Run (mock)
 
 ```bash
@@ -42,6 +50,10 @@ uvicorn app:app --host 0.0.0.0 --port 18300
 | `VIDEO_WORKER_MODEL` | `lightricks/ltx-2.3-distilled` | served-model-name |
 | `VIDEO_WORKER_OUTPUT_DIR` | `/tmp/mindrouter-video-worker` | artifact dir |
 | `VIDEO_WORKER_CKPT_DIR` | — | model checkpoint dir (mode=ltx) |
+| `VIDEO_WORKER_LTX_LAYOUT` | `monolith` | `monolith` = LTX-2.3 (one checkpoint + `gemma-3-12b/` under the checkpoint dir); `split` = LTX-2.5 (the Hugging Face repo layout under the checkpoint dir) |
+| `VIDEO_WORKER_VIDEO_VAE` | — | split only: video decoder file relative to the checkpoint dir, e.g. `vae/ltx-2.5-video-vae-conv-bf16.safetensors` for the lighter conv decoder |
+| `VIDEO_WORKER_RESIDENT` | `1` | keep weights on the GPU between renders (LTX-2.3: ~31 s → ~11 s per 5 s 720p clip; holds ~55 GB) |
+| `VIDEO_WORKER_WARMUP` | `1` | render one small clip at startup so the first job is fast too |
 | `VIDEO_WORKER_MOCK_STEP_DELAY` | `0` | mock: seconds/step (load tests) |
 
 ## Register with the gateway (after it's up)

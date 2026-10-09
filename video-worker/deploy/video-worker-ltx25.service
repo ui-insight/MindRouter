@@ -1,0 +1,32 @@
+# systemd unit for the LTX-2.5 video worker (second model on the same GPU as
+# video-worker.service). Same code as the LTX-2.3 worker, its own venv: LTX-2.5
+# needs ltx_pipelines >= 1.2 (torch 2.13 cu132), built from the LTX-2 repo with
+#   UV_PROJECT_ENVIRONMENT=<venv> uv sync --extra natten --python 3.11
+# plus fastapi/uvicorn. Install: /etc/systemd/system/video-worker-ltx25.service,
+#   systemctl daemon-reload && systemctl enable --now video-worker-ltx25
+[Unit]
+Description=MindRouter LTX-2.5 Video Worker (aspen1 GPU2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sheneman
+WorkingDirectory=/scratch/mindrouter-video-worker-25
+Environment=VIDEO_WORKER_MODE=ltx
+Environment=VIDEO_WORKER_MODEL=lightricks/ltx-2.5-distilled
+Environment=VIDEO_WORKER_LTX_LAYOUT=split
+Environment=VIDEO_WORKER_CKPT_DIR=/scratch/models/ltx-2.5
+Environment=VIDEO_WORKER_OUTPUT_DIR=/scratch/vw-out-25
+Environment=VIDEO_WORKER_RESIDENT=1
+Environment=VIDEO_WORKER_WARMUP=1
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Environment=CUDA_VISIBLE_DEVICES=2
+ExecStart=/scratch/mindrouter-video-worker-25/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 18302 --log-level info
+Restart=on-failure
+RestartSec=5
+# Loading the weights and the warm-up render take a few minutes.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

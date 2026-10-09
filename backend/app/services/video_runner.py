@@ -53,7 +53,11 @@ class VideoJobRepo(Protocol):
 
     async def get_backend(self, backend_id: int) -> Optional[Dict[str, Any]]: ...
 
-    async def claim_next(self, worker_id: str) -> Optional[Dict[str, Any]]: ...
+    async def claim_next(
+        self, worker_id: str, models: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]: ...
+
+    async def servable_models(self) -> List[str]: ...
 
     async def is_cancelled(self, job_id: int) -> bool: ...
 
@@ -241,16 +245,26 @@ class VideoRunner:
             return 0.0
 
     async def tick(self) -> bool:
-        """Claim and process one job. Returns False if the queue was empty."""
-        job = await self.repo.claim_next(self.worker_id)
+        """Claim and process one job. Returns False when there was nothing to
+        do, so the loop sleeps: the queue is empty, no model has a healthy
+        backend, or the claimed job had to go back to the queue.
+
+        Only jobs whose model has a healthy backend are claimed, so a job for a
+        model that is down (restarting, disabled) waits without blocking jobs
+        for other models behind it."""
+        models = await self.repo.servable_models()
+        if not models:
+            return False
+        job = await self.repo.claim_next(self.worker_id, models=models)
         if job is None:
             return False
-        await self.process_job(job)
-        return True
+        return await self.process_job(job) is not False
 
     # -- one job -----------------------------------------------------------
-    async def process_job(self, job: Dict[str, Any]) -> None:
-        """Drive a single claimed job to a terminal state. v1: one shot."""
+    async def process_job(self, job: Dict[str, Any]) -> Optional[bool]:
+        """Drive a single claimed job to a terminal state. v1: one shot.
+        Returns False only when the job went back to the queue untouched
+        because no backend serves its model (the caller should pause)."""
         job_id = job["id"]
         job_uuid = job["job_uuid"]
 
@@ -265,7 +279,7 @@ class VideoRunner:
                 # later tick retry (bounded by the job's wall deadline elsewhere).
                 await self.repo.requeue(job_id)
                 logger.warning("video_runner_no_backend", job=job_uuid, model=job["model"])
-                return
+                return False
 
             # Submit (retryable transient failures re-queue the whole job).
             payload = self._build_payload(job)
@@ -429,12 +443,21 @@ class CrudVideoJobRepo:
         async with get_async_db_context() as db:
             return await crud.get_backend_snapshot(db, backend_id)
 
-    async def claim_next(self, worker_id: str) -> Optional[Dict[str, Any]]:
+    async def servable_models(self) -> List[str]:
         from backend.app.db import crud
         from backend.app.db.session import get_async_db_context
 
         async with get_async_db_context() as db:
-            job = await crud.claim_next_video_job(db, worker_id)
+            return await crud.get_servable_video_models(db)
+
+    async def claim_next(
+        self, worker_id: str, models: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
+        from backend.app.db import crud
+        from backend.app.db.session import get_async_db_context
+
+        async with get_async_db_context() as db:
+            job = await crud.claim_next_video_job(db, worker_id, models=models)
             if job is None:
                 return None
             # Load project + single shot for the worker payload (v1 = one shot).
