@@ -212,6 +212,7 @@ class LTXEngine:
                          images=[], dest_path=dest)
             log.info("Warm-up render done in %.1fs; weights are resident.", time.time() - started)
         finally:
+            self._release_working_memory()
             try:
                 os.remove(dest)
             except OSError:
@@ -245,6 +246,20 @@ class LTXEngine:
                     video=video, fps=fps, audio=audio, output_path=dest_path,
                     video_chunks_number=self._get_chunks(num_frames, self._tiling),
                 )
+
+    @staticmethod
+    def _release_working_memory() -> None:  # pragma: no cover - requires GPU
+        """Hand a render's working memory back to the GPU. PyTorch otherwise
+        keeps it reserved for this process, and with two models resident on
+        one GPU that reserve squeezes the other model's renders: measured on
+        aspen1, a 30 s 2.3 render peaked within 0.7 GB of the 141 GB card
+        while 2.5 sat on ~10 GB it no longer used. Resident weights stay."""
+        import gc
+
+        import torch
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def capabilities(self) -> Dict[str, Any]:
         return self.config.capabilities()
@@ -301,6 +316,7 @@ class LTXEngine:
                          num_frames=num_frames, fps=fps, images=images, dest_path=dest_path,
                          on_generated=lambda: progress_cb(2, 3))
         finally:
+            self._release_working_memory()
             for p in tmp_paths:
                 try:
                     os.remove(p)
