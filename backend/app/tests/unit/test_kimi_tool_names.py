@@ -99,6 +99,44 @@ class TestNaming:
         assert [m["name"] for m in messages[1:]] == [UNKNOWN_TOOL_NAME, UNKNOWN_TOOL_NAME]
 
 
+class TestClientsWithoutIds:
+    """Ollama /api/chat sends tool results without ids; K3 used to name them by
+    position and must keep doing so (independent review of 2.9.94)."""
+
+    def test_ollama_tool_result_named_by_position(self):
+        from backend.app.core.translators.ollama_in import OllamaInTranslator
+
+        canonical = OllamaInTranslator.translate_chat_request({
+            "model": KIMI, "stream": False,
+            "messages": [
+                {"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "get_weather", "arguments": {"city": "Moscow"}}},
+                    {"function": {"name": "get_time", "arguments": {}}}]},
+                {"role": "tool", "content": "sunny", "tool_name": "get_weather"},
+                {"role": "tool", "content": "noon", "tool_name": "get_time"},
+            ]})
+        payload = VLLMOutTranslator.translate_chat_request(canonical)
+        assert [m["name"] for m in payload["messages"] if m["role"] == "tool"] == ["get_weather", "get_time"]
+
+    def test_position_counts_from_the_last_assistant_message(self):
+        call = lambda name: {"type": "function", "function": {"name": name, "arguments": "{}"}}
+        messages = [{"role": "assistant", "content": None, "tool_calls": [call("a"), call("b")]},
+                    {"role": "tool", "content": "1"},
+                    {"role": "assistant", "content": None, "tool_calls": [call("c")]},
+                    {"role": "tool", "content": "2"},
+                    {"role": "tool", "content": "3"}]          # more results than calls
+        name_tool_results(messages)
+        assert [m["name"] for m in messages if m["role"] == "tool"] == ["a", "c", UNKNOWN_TOOL_NAME]
+
+    def test_an_id_match_beats_position(self):
+        call = lambda cid, name: {"id": cid, "type": "function", "function": {"name": name, "arguments": "{}"}}
+        messages = [{"role": "assistant", "content": None, "tool_calls": [call("a", "shell"), call("b", "read")]},
+                    {"role": "tool", "tool_call_id": "b", "content": "1"}]
+        name_tool_results(messages)
+        assert messages[1]["name"] == "read"
+
+
 class TestOnlyKimiK3:
     @pytest.mark.parametrize("model", ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "moonshotai/kimi-k2"])
     def test_other_models_get_the_messages_unchanged(self, model):

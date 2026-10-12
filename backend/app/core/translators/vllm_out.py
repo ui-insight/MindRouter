@@ -57,7 +57,7 @@ UNKNOWN_TOOL_NAME = "unknown_tool"
 
 def name_tool_results(messages: List[Dict[str, Any]]) -> None:
     """Give every tool message without a ``name`` the name of the call it
-    answers, looked up by ``tool_call_id`` in the assistant messages before it.
+    answers.
 
     Kimi K3's template only falls back to matching a tool result to the LAST
     assistant message's calls by position, and refuses the request (400
@@ -66,21 +66,37 @@ def name_tool_results(messages: List[Dict[str, Any]]) -> None:
     calls split over two assistant messages, or a result whose call is gone.
     Responses-API clients (Codex) replay history item by item, so all three
     happen. With a name on every result, the template never has to guess.
+
+    The name comes from the latest earlier call with the same
+    ``tool_call_id``; failing that, from the template's own rule (the last
+    assistant message's calls, by position), so a request that rendered
+    before renders the same (Ollama clients send no ids); failing that,
+    ``unknown_tool``.
     """
     names: Dict[str, str] = {}
+    last_calls: List[Optional[str]] = []
+    position = 0
     for message in messages:
         role = message.get("role")
         if role == "assistant":
+            last_calls, position = [], 0
             for call in message.get("tool_calls") or []:
-                call_id = call.get("id") if isinstance(call, dict) else None
                 function = call.get("function") if isinstance(call, dict) else None
                 name = function.get("name") if isinstance(function, dict) else None
+                last_calls.append(name or None)
+                call_id = call.get("id") if isinstance(call, dict) else None
                 if call_id and name:
                     names[str(call_id)] = name
-        elif role == "tool" and not message.get("name"):
+        elif role == "tool":
+            position += 1
+            if message.get("name"):
+                continue
             name = names.get(str(message.get("tool_call_id") or ""))
+            if name is None and position <= len(last_calls):
+                name = last_calls[position - 1]
             if name is None:
-                logger.info("tool_result_without_call", tool_call_id=message.get("tool_call_id"))
+                # debug: this runs on the token pre-count and on every retry too
+                logger.debug("tool_result_without_call", tool_call_id=message.get("tool_call_id"))
             message["name"] = name or UNKNOWN_TOOL_NAME
 
 
