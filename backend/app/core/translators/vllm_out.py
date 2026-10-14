@@ -45,9 +45,59 @@ from backend.app.core.canonical_schemas import (
     TextContent,
     UsageInfo,
 )
+from backend.app.core.reasoning import profile_for
 from backend.app.core.url_guard import image_url_reason
 
 logger = structlog.get_logger(__name__)
+
+# A tool result whose call is not in the history (e.g. dropped by a client's
+# compaction) still needs a name on Kimi K3; this one says so honestly.
+UNKNOWN_TOOL_NAME = "unknown_tool"
+
+
+def name_tool_results(messages: List[Dict[str, Any]]) -> None:
+    """Give every tool message without a ``name`` the name of the call it
+    answers.
+
+    Kimi K3's template only falls back to matching a tool result to the LAST
+    assistant message's calls by position, and refuses the request (400
+    "tool messages need a resolvable tool name") when that fails: an
+    assistant text message between a call and its result, one model turn's
+    calls split over two assistant messages, or a result whose call is gone.
+    Responses-API clients (Codex) replay history item by item, so all three
+    happen. With a name on every result, the template never has to guess.
+
+    The name comes from the latest earlier call with the same
+    ``tool_call_id``; failing that, from the template's own rule (the last
+    assistant message's calls, by position), so a request that rendered
+    before renders the same (Ollama clients send no ids); failing that,
+    ``unknown_tool``.
+    """
+    names: Dict[str, str] = {}
+    last_calls: List[Optional[str]] = []
+    position = 0
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant":
+            last_calls, position = [], 0
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") if isinstance(call, dict) else None
+                name = function.get("name") if isinstance(function, dict) else None
+                last_calls.append(name or None)
+                call_id = call.get("id") if isinstance(call, dict) else None
+                if call_id and name:
+                    names[str(call_id)] = name
+        elif role == "tool":
+            position += 1
+            if message.get("name"):
+                continue
+            name = names.get(str(message.get("tool_call_id") or ""))
+            if name is None and position <= len(last_calls):
+                name = last_calls[position - 1]
+            if name is None:
+                # debug: this runs on the token pre-count and on every retry too
+                logger.debug("tool_result_without_call", tool_call_id=message.get("tool_call_id"))
+            message["name"] = name or UNKNOWN_TOOL_NAME
 
 
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -166,6 +216,11 @@ class VLLMOutTranslator:
             messages = [{"role": "system", "content": merged}] + non_system
         else:
             messages = system + non_system
+
+        # Only K3 needs it (the same family rule as its reasoning controls);
+        # every other template keeps the messages exactly as before.
+        if profile_for(canonical.model).family == "kimi-k3":
+            name_tool_results(messages)
 
         payload: Dict[str, Any] = {
             "model": canonical.model,
