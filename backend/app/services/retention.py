@@ -789,7 +789,11 @@ async def archive_expired_chats(
 # Rollups run on every cycle, independent of tier 1, so the archive trails the
 # live tables by about one cycle rather than by tier1_days, and tier 1 = 0
 # (never delete raw rows) still archives.  A raw row is deleted only after the
-# bucket it falls in has been committed to the archive.
+# bucket it falls in has been committed to the archive.  That holds for every
+# deleter while archival is on: the retention cycle caps its delete at the
+# rollup it just ran, and the backend registry's own TELEMETRY_RETENTION_DAYS
+# loop goes through delete_raw_telemetry_older_than, which caps at the
+# frontier read back from the archive.
 #
 # Progress is read back from the archive itself: the newest bucket_start in a
 # rollup table is that table's watermark, and the next pass resumes after it.
@@ -797,6 +801,12 @@ async def archive_expired_chats(
 # transaction.  A failure mid-window rolls the whole window back, so the
 # watermark never reflects a window that was written for some entities (some
 # GPUs, say) but not for the rest.
+#
+# A pass never starts before now - tier2_days.  Older buckets are deleted by
+# the same cycle's purge, so writing them is wasted work, and worse: when they
+# are all a pass wrote, the purge empties the rollup table, the watermark is
+# lost, and the next pass starts over at the oldest live reading, every cycle,
+# without ever reaching recent buckets.
 
 _ROLLUP_BUCKET = timedelta(minutes=5)
 # A bucket is complete once it ended at least this long ago.  Readings are
@@ -810,11 +820,16 @@ _ROLLUP_SAFETY_MARGIN = timedelta(minutes=10)
 _ROLLUP_WINDOW = timedelta(hours=6)
 # At most this much history per table per cycle, so the first-deploy backfill
 # of 30-90 days spreads over a few hourly cycles instead of one long run that
-# holds the retention lock.
+# holds the retention lock.  A manual purge lifts the cap (max_span=None): it
+# is about to delete, so it catches up in one pass first.
 _ROLLUP_MAX_SPAN_PER_CYCLE = timedelta(days=14)
-# Rows per multi-row INSERT IGNORE.  About 20 columns x 1000 rows keeps each
-# statement well under 1 MB, far below max_allowed_packet and the 16 MB
-# multi-packet bug that _bulk_insert_ignore works around (aiomysql#450).
+# Rows per INSERT IGNORE call.  The rows go in as executemany parameters of
+# the single-row statement, which SQLAlchemy compiles once and caches; the
+# driver packs them into multi-row INSERTs of at most ~1 MB, far below
+# max_allowed_packet and the 16 MB multi-packet bug that _bulk_insert_ignore
+# works around (aiomysql#450).  A multi-VALUES statement (.values(rows)) has
+# no cache key: every batch would be compiled from scratch, ~100 ms of CPU
+# for 1000 GPU rows, on the event loop of a worker that is serving requests.
 _ROLLUP_INSERT_BATCH = 1000
 # Rollup rows per DELETE when tier 2 expires them.  Shortening tier 2 can
 # expire millions of rows at once.
@@ -1056,8 +1071,9 @@ class _RollupPlan(NamedTuple):
     """One table's rollup pass, as planned by _plan_rollup_windows."""
 
     # Rollup frontier before this pass: every live reading older than it has
-    # already been aggregated, or never existed.  None only when neither the
-    # archive nor the live table holds anything to anchor on.
+    # already been aggregated, never existed, or is older than tier 2 keeps
+    # (its average would be purged at once).  None only when nothing anchors
+    # it: an empty archive, no tier-2 limit and no live reading.
     start: Optional[datetime]
     # Contiguous, bucket-aligned [from, to) windows to aggregate, in order.
     windows: list[tuple[datetime, datetime]]
@@ -1070,38 +1086,48 @@ def _plan_rollup_windows(
     next_reading: Optional[datetime],
     now: datetime,
     *,
+    keep_since: Optional[datetime] = None,
     window: timedelta = _ROLLUP_WINDOW,
-    max_span: timedelta = _ROLLUP_MAX_SPAN_PER_CYCLE,
+    max_span: Optional[timedelta] = _ROLLUP_MAX_SPAN_PER_CYCLE,
     margin: timedelta = _ROLLUP_SAFETY_MARGIN,
 ) -> _RollupPlan:
     """Plan one table's rollup pass.  Pure: no I/O.
 
     ``watermark`` is the newest bucket_start already in the archive (None
     if the rollup table is empty).  ``next_reading`` is the oldest live
-    reading in or after the bucket that follows the watermark (the
-    table-wide oldest reading when there is no watermark; None if there is
-    none).  ``now`` comes from the clock that stamped the readings.
+    reading at or after the point the pass resumes from (below; None if
+    there is none).  ``now`` comes from the clock that stamped the readings.
+    ``keep_since`` is where tier 2 begins, now - tier2_days on that clock
+    (None = averages never expire).
 
-    The pass starts at the watermark's next bucket, moved forward to
-    ``next_reading``'s bucket when the readings start later, because nothing
-    in between exists to aggregate.  Windows run up to the horizon and stop
-    after ``max_span`` in total; ``window`` and ``max_span`` must be whole
-    multiples of 5 minutes so every window stays bucket-aligned.
+    The pass resumes at the watermark's next bucket, or at ``keep_since``'s
+    bucket when that is later or the archive is empty: an older bucket is
+    deleted by the same cycle's purge, so it is never written.  The start
+    then moves forward to ``next_reading``'s bucket when the readings begin
+    later, because nothing in between exists to aggregate.  Windows run up
+    to the horizon and stop after ``max_span`` in total (None = no cap);
+    ``window`` and ``max_span`` must be whole multiples of 5 minutes so
+    every window stays bucket-aligned.
     """
     horizon = _floor_to_bucket(_as_naive_utc(now) - margin)
     resume = None
     if watermark is not None:
         resume = _floor_to_bucket(watermark) + _ROLLUP_BUCKET
+    if keep_since is not None:
+        oldest_kept = _floor_to_bucket(keep_since)
+        if resume is None or resume < oldest_kept:
+            resume = oldest_kept
     if next_reading is None:
         return _RollupPlan(resume, [], horizon)
 
     start = _floor_to_bucket(next_reading)
     if resume is not None and start < resume:
         # The caller seeks from `resume`, so this only guards a misuse:
-        # never re-plan buckets the archive already holds.
+        # never re-plan buckets the archive already holds, or ones that
+        # tier 2 does not keep.
         start = resume
 
-    stop = min(horizon, start + max_span)
+    stop = horizon if max_span is None else min(horizon, start + max_span)
     windows: list[tuple[datetime, datetime]] = []
     cursor = start
     while cursor < stop:
@@ -1150,6 +1176,30 @@ async def _telemetry_db_now(app_db: AsyncSession) -> datetime:
     return now
 
 
+def _telemetry_delete_batch(batch_size: Optional[int]) -> int:
+    """Rows per raw-telemetry DELETE.
+
+    Larger than the request tables use: telemetry rows are small and have
+    no FK children.
+    """
+    return max(batch_size or 0, 10000)
+
+
+async def _newest_archived_bucket(
+    archive_db: AsyncSession, model: Any
+) -> Optional[datetime]:
+    """Newest bucket_start in one rollup table, its watermark (None if empty).
+
+    Commits to end the read, so whatever the caller does next on the archive
+    starts a transaction of its own.
+    """
+    newest = (
+        await archive_db.execute(select(func.max(model.bucket_start)))
+    ).scalar()
+    await archive_db.commit()
+    return newest
+
+
 async def _rollup_telemetry_table(
     app_db: AsyncSession,
     archive_db: AsyncSession,
@@ -1157,38 +1207,49 @@ async def _rollup_telemetry_table(
     model: Any,
     now: datetime,
     insert_batch: int = _ROLLUP_INSERT_BATCH,
+    *,
+    keep_since: Optional[datetime] = None,
+    max_span: Optional[timedelta] = _ROLLUP_MAX_SPAN_PER_CYCLE,
 ) -> dict[str, Any]:
     """Archive one table's complete buckets that are not in the archive yet.
 
     Each window is aggregated in SQL on the app DB (raw rows never reach
-    Python), then written with multi-row INSERT IGNORE inside one archive
-    transaction, committed once at the end of the window.
+    Python), then written with INSERT IGNORE, the rows passed as executemany
+    parameters (see _ROLLUP_INSERT_BATCH), inside one archive transaction
+    committed once at the end of the window.  Buckets older than
+    ``keep_since`` (where tier 2 begins) are never written, and ``max_span``
+    caps the history one pass covers (None = everything up to the horizon).
 
     Returns ``rolled_through``, the end of the last committed window: every
-    live reading older than it has been aggregated.  It is None only when
-    the table has never held a reading.  Raises on failure.  Windows
+    live reading older than it has been aggregated, or is older than
+    ``keep_since``.  It is None only when the table has never held a
+    reading and there is no ``keep_since``.  Raises on failure.  Windows
     committed before the failure stay committed, and the caller must leave
     this table's raw rows alone for the cycle.
     """
-    table = model.__table__
+    # The single-row statement, executed with a list of rows: SQLAlchemy
+    # compiles it once and serves every later batch from its cache.
+    insert_ignore = model.__table__.insert().prefix_with("IGNORE")
 
-    watermark = (
-        await archive_db.execute(select(func.max(model.bucket_start)))
-    ).scalar()
-    # End the read so each window below is exactly one archive transaction.
-    await archive_db.commit()
+    # The read is committed, so each window below is exactly one archive
+    # transaction.
+    watermark = await _newest_archived_bucket(archive_db, model)
 
     after = (
         _floor_to_bucket(watermark) + _ROLLUP_BUCKET
         if watermark is not None
         else _ROLLUP_EPOCH
     )
+    if keep_since is not None:
+        after = max(after, _floor_to_bucket(keep_since))
     next_reading = (
         await app_db.execute(text(spec.next_reading_sql), {"after": after})
     ).scalar()
     await app_db.commit()
 
-    plan = _plan_rollup_windows(watermark, next_reading, now)
+    plan = _plan_rollup_windows(
+        watermark, next_reading, now, keep_since=keep_since, max_span=max_span
+    )
     rolled_through = plan.start
     rows_written = 0
 
@@ -1206,9 +1267,7 @@ async def _rollup_telemetry_table(
         try:
             for i in range(0, len(rows), insert_batch):
                 inserted = await archive_db.execute(
-                    table.insert()
-                    .prefix_with("IGNORE")
-                    .values(rows[i:i + insert_batch])
+                    insert_ignore, rows[i:i + insert_batch]
                 )
                 window_written += inserted.rowcount or 0
             await archive_db.commit()
@@ -1260,27 +1319,32 @@ async def archive_expired_telemetry(
     batch_size: int,
     *,
     now: Optional[datetime] = None,
+    tier2_days: Optional[int] = None,
+    max_span: Optional[timedelta] = _ROLLUP_MAX_SPAN_PER_CYCLE,
 ) -> dict[str, Any]:
     """Roll telemetry up into 5-minute archive rows, then delete expired raw rows.
 
     Two steps for each live table (node, GPU device, backend):
 
     1. Rollup.  Every complete 5-minute bucket that is not in the archive
-       yet is aggregated in SQL (avg/min/max plus sample counts) and written
-       to the table's Archived*Telemetry5m rollup table, in 6-hour windows
-       that are each one archive transaction, at most 14 days of history
-       per table per call.  It runs whether or not anything is due for
-       deletion (``cutoff`` None = rollup only), so the archive stays about
-       one retention cycle behind the live tables.
+       yet, and that tier 2 keeps (the last ``tier2_days``; None = no
+       limit), is aggregated in SQL (avg/min/max plus sample counts) and
+       written to the table's Archived*Telemetry5m rollup table, in 6-hour
+       windows that are each one archive transaction, at most ``max_span``
+       (14 days) of history per table per call; None lifts the cap, for a
+       manual purge that must catch up before it deletes.  It runs whether
+       or not anything is due for deletion (``cutoff`` None = rollup only),
+       so the archive stays about one retention cycle behind the live tables.
     2. Delete.  Raw readings older than ``cutoff`` are deleted in batches,
        but never past the table's rollup frontier: a reading goes only after
-       its bucket has been committed to the archive.  When a table's rollup
-       fails, its raw rows are left alone this cycle.
+       its bucket has been committed to the archive (or when it is older
+       than tier 2 keeps).  When a table's rollup fails, its raw rows are
+       left alone this cycle.
 
     Raw readings are not copied to the archive one by one; the rollups are
     the long-term record.  The raw archived_*_telemetry tables only hold
     legacy rows.  ``now`` defaults to the app DB's clock, which stamped the
-    readings.
+    readings; tier 2 is measured on the same clock.
 
     Returns, per table: rollup rows written, windows aggregated, the rollup
     frontier (ISO string), raw rows deleted, and ``error`` when the rollup
@@ -1289,9 +1353,10 @@ async def archive_expired_telemetry(
     models = _rollup_models()
     if now is None:
         now = await _telemetry_db_now(app_db)
-    # A larger batch than the request tables use: telemetry rows are small
-    # and have no FK children.
-    tel_batch = max(batch_size or 0, 10000)
+    keep_since = (
+        _as_naive_utc(now) - timedelta(days=tier2_days) if tier2_days else None
+    )
+    tel_batch = _telemetry_delete_batch(batch_size)
 
     summary: dict[str, Any] = {}
     for spec in _ROLLUP_SPECS:
@@ -1305,7 +1370,8 @@ async def archive_expired_telemetry(
 
         try:
             progress = await _rollup_telemetry_table(
-                app_db, archive_db, spec, models[spec.table], now
+                app_db, archive_db, spec, models[spec.table], now,
+                keep_since=keep_since, max_span=max_span,
             )
         except Exception as exc:
             await _rollback_quietly(app_db)
@@ -1342,8 +1408,8 @@ async def archive_expired_telemetry(
             continue
         before = _effective_delete_cutoff(cutoff, progress["rolled_through"])
         if before is None:
-            # No frontier means the live table has never held a reading, so
-            # there is nothing to delete.
+            # No frontier means the live table has never held a reading
+            # (and there is no tier-2 limit), so there is nothing to delete.
             continue
         entry["deleted"] = await _delete_telemetry_before(
             app_db, spec, before, tel_batch
@@ -1386,6 +1452,95 @@ async def cleanup_expired_telemetry(
     return counts
 
 
+async def _delete_rolled_up_telemetry(
+    app_db: AsyncSession,
+    archive_db: AsyncSession,
+    cutoff: datetime,
+    batch: int,
+) -> dict[str, int]:
+    """Delete raw readings older than ``cutoff`` whose buckets are archived.
+
+    For a deleter outside the retention cycle, which has no rollup of its
+    own to cap at.  Each table's frontier is read back from the archive
+    instead: the bucket after the newest archived one.  Windows commit whole
+    and in order, so every reading older than that has been aggregated, or
+    is older than tier 2 keeps.  A table with nothing archived yet keeps its
+    raw rows, and so does every table whose rollup table cannot be read.
+
+    Returns the number of raw rows deleted per table.
+    """
+    models = _rollup_models()
+    counts: dict[str, int] = {}
+    for spec in _ROLLUP_SPECS:
+        counts[spec.table] = 0
+        try:
+            newest = await _newest_archived_bucket(archive_db, models[spec.table])
+        except Exception as exc:
+            await _rollback_quietly(archive_db)
+            logger.warning(
+                "telemetry_cleanup_delete_skipped",
+                table=spec.table,
+                reason="archive_unreadable",
+                error=f"{type(exc).__name__}: {exc}"[:500],
+            )
+            continue
+
+        frontier = (
+            _floor_to_bucket(newest) + _ROLLUP_BUCKET if newest is not None else None
+        )
+        before = _effective_delete_cutoff(cutoff, frontier)
+        if before is None:
+            # The first rollup has not reached this table yet.  If rollups
+            # keep failing, the retention cycle warns about it every hour.
+            logger.info(
+                "telemetry_cleanup_delete_skipped",
+                table=spec.table,
+                reason="nothing_archived",
+            )
+            continue
+        counts[spec.table] = await _delete_telemetry_before(
+            app_db, spec, before, batch
+        )
+    return counts
+
+
+async def delete_raw_telemetry_older_than(cutoff: datetime) -> dict[str, int]:
+    """Delete raw telemetry older than ``cutoff``, for the backend registry.
+
+    The registry deletes raw readings after TELEMETRY_RETENTION_DAYS on an
+    hourly loop of its own, outside the retention cycle.  While 5-minute
+    averages are being kept (archive DB configured and telemetry tier 2 > 0)
+    that delete must follow the cycle's rule.  Otherwise, whenever the
+    rollups stall for longer than that setting (an archive outage, say), it
+    deletes readings that were never averaged, and once the archive recovers
+    the rollup resumes at the oldest surviving reading and reports success,
+    leaving a hole in the averages that nothing reports.  So each table's
+    delete is capped at its archived frontier (_delete_rolled_up_telemetry),
+    and readings the rollups have not reached stay until they do.  Without
+    archival it is the plain batched delete.
+
+    Returns the number of raw rows deleted per table.
+    """
+    from backend.app.db.session import get_archive_db_context, get_async_db_context
+    from backend.app.settings import get_settings
+
+    async with get_async_db_context() as app_db:
+        config = await get_retention_config(app_db)
+    archiving = (
+        get_settings().archive_database_url is not None
+        and config.get("retention.telemetry.tier2_days", 0) > 0
+    )
+
+    async with get_async_db_context() as app_db:
+        if not archiving:
+            return await cleanup_expired_telemetry(app_db, cutoff)
+        async with get_archive_db_context() as archive_db:
+            return await _delete_rolled_up_telemetry(
+                app_db, archive_db, cutoff,
+                _telemetry_delete_batch(config.get("retention.batch_size", 500)),
+            )
+
+
 # ------------------------------------------------------------------
 # Tier 2: purge old archives
 # ------------------------------------------------------------------
@@ -1420,7 +1575,10 @@ async def purge_expired_archives(
 
     Archived requests, chat and legacy raw telemetry expire by archived_at.
     The 5-minute telemetry rollups expire by bucket_start, the time they
-    describe, so tier 2 is the amount of history kept.
+    describe, so tier 2 is the amount of history kept.  A tier 2 of 0 purges
+    nothing, as for every category: for telemetry it stops new rollups, but
+    the averages already in the archive are kept (the Retention page says
+    so).
     """
     from backend.app.db.archive_models import (
         ArchivedArtifact,
@@ -2054,9 +2212,9 @@ async def run_purge(category: str, older_than_days: int) -> dict[str, Any]:
     Runs the same archive-then-delete pipeline the retention cycle
     uses, just with an explicit cutoff — so an archive DB (when
     configured) still receives requests/chat rows, and telemetry's
-    5-minute averages, before they leave the app DB, and file artifacts
-    are removed with their rows.  older_than_days=0 purges everything in
-    the category.
+    5-minute averages (best effort, see the telemetry branch), before
+    they leave the app DB, and file artifacts are removed with their rows.
+    older_than_days=0 purges everything in the category.
     """
     if category not in PURGE_CATEGORIES:
         raise ValueError(f"Unknown purge category: {category}")
@@ -2107,21 +2265,42 @@ async def run_purge(category: str, older_than_days: int) -> dict[str, Any]:
                     "orphan_attachments": orphans,
                 }
     elif category == "telemetry":
-        if archive_configured and config.get("retention.telemetry.tier2_days", 0) > 0:
+        tel_tier2 = config.get("retention.telemetry.tier2_days", 0)
+        if archive_configured and tel_tier2 > 0:
             # Bring the 5-minute averages up to date first, so complete
-            # buckets reach the archive before their raw rows go.  Best
-            # effort: the purge is an explicit admin action and runs
-            # regardless, even over readings the rollup could not cover
-            # (the last ~10 minutes, or everything if the archive is down).
+            # buckets reach the archive before their raw rows go.  One pass
+            # without the 14-day cap: right after archiving was enabled, or
+            # after an archive outage, the backlog is longer than a
+            # scheduled cycle covers, and a capped pass would leave every
+            # reading past its frontier to be purged unaveraged.  Best
+            # effort all the same: the purge is an explicit admin action and
+            # runs regardless.  Readings the rollup could not cover (the last
+            # ~10 minutes, a table whose rollup failed, everything if the
+            # archive is down) are deleted without averages, and the summary
+            # and a warning name the tables that fell short.
+            failed: list[str] = []
             try:
                 async with get_async_db_context() as app_db:
                     async with get_archive_db_context() as archive_db:
                         summary["rollup"] = await archive_expired_telemetry(
-                            app_db, archive_db, None, batch
+                            app_db, archive_db, None, batch,
+                            tier2_days=tel_tier2, max_span=None,
                         )
+                failed = sorted(
+                    table for table, entry in summary["rollup"].items()
+                    if "error" in entry
+                )
             except Exception as exc:
                 logger.warning("purge_telemetry_rollup_failed", error=str(exc))
                 summary["rollup"] = {"error": str(exc)[:500]}
+                failed = sorted(_TELEMETRY_TABLES)
+            if failed:
+                summary["rollup_incomplete"] = failed
+                logger.warning(
+                    "purge_telemetry_rollup_incomplete",
+                    tables=failed,
+                    cutoff=cutoff.isoformat(),
+                )
         async with get_async_db_context() as app_db:
             summary["result"] = await cleanup_expired_telemetry(app_db, cutoff)
     elif category == "request_images":
@@ -2264,7 +2443,9 @@ async def run_retention_cycle() -> dict[str, Any]:
     # Telemetry.  With an archive DB and tier 2 > 0, 5-minute averages roll
     # into the archive on every cycle, even when tier 1 is 0 (keep raw rows
     # forever), and expired raw rows are deleted only once their buckets are
-    # archived.  Otherwise expired raw rows are simply deleted.
+    # archived.  The rollup skips buckets older than tier 2, which the purge
+    # below would delete again.  Otherwise expired raw rows are simply
+    # deleted.
     telemetry_tier1 = config.get("retention.telemetry.tier1_days", 30)
     telemetry_tier2 = config.get("retention.telemetry.tier2_days", 0)
     if archive_configured and telemetry_tier2 > 0:
@@ -2278,6 +2459,7 @@ async def run_retention_cycle() -> dict[str, Any]:
                 summary["telemetry"] = await archive_expired_telemetry(
                     app_db, archive_db, cutoff,
                     config.get("retention.batch_size", 500),
+                    tier2_days=telemetry_tier2,
                 )
     elif telemetry_tier1 > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)

@@ -14,8 +14,9 @@ The SQL itself is exercised against a real MariaDB in
 ``tests/integration/test_telemetry_rollup_mariadb.py``.  These tests cover
 everything that needs no database: the pure planning helpers, the order of
 commits and rollbacks around each window, which telemetry path each
-tier/archive combination takes, the purge and stats wiring, the archive
-models, and the rendered Retention page.
+tier/archive combination takes, the purge and stats wiring, the backend
+registry's own raw-telemetry delete, the archive models, and the rendered
+Retention page.
 
 Import hygiene: ``retention.py`` and ``archive_models.py`` are loaded from
 their files under private module names, and retention's only heavy
@@ -23,7 +24,9 @@ top-level import, ``logging_config``, is stubbed for the load and restored.
 retention imports the session, settings, chat_crud and archive-model modules
 at call time, so the tests that reach those imports pin fresh stub modules
 for the duration of the call (``_pinned_modules``) and restore every key
-afterwards.  No pre-existing sys.modules entry is ever mutated.
+afterwards.  No pre-existing sys.modules entry is ever mutated.  registry.py
+is never imported (it pulls in the db, adapter and session chain): the one
+method under test is compiled from its source on its own.
 """
 
 import ast
@@ -45,8 +48,10 @@ from sqlalchemy.sql.selectable import Select
 _APP = Path(__file__).resolve().parents[2]
 _RETENTION_PATH = _APP / "services" / "retention.py"
 _ARCHIVE_MODELS_PATH = _APP / "db" / "archive_models.py"
+_REGISTRY_PATH = _APP / "core" / "telemetry" / "registry.py"
 _TEMPLATES = _APP / "dashboard" / "templates"
 _REPO = _APP.parents[1]
+_TABLES = ("node_telemetry", "gpu_device_telemetry", "backend_telemetry")
 
 _MISSING = object()
 
@@ -252,6 +257,48 @@ class TestPlanRollupWindows:
     def test_aware_now_is_read_as_utc(self):
         now = datetime(2026, 10, 30, 12, 7, 30, tzinfo=timezone.utc)
         assert self.plan(None, None, now).horizon == dt(2026, 10, 30, 11, 55)
+
+    # --- tier 2 bounds where a pass may start -----------------------------
+
+    def test_empty_archive_starts_where_tier2_begins_not_at_the_oldest_reading(self):
+        # 60 days of live history, tier 2 = 7 days.  Starting at the oldest
+        # reading wrote 14 days that the same cycle's purge deleted again,
+        # emptying the archive, so every cycle started over there.
+        keep_since = self.NOW - timedelta(days=7)  # Oct 23 12:07:30
+        plan = self.plan(None, self.NOW - timedelta(days=60), keep_since=keep_since)
+        assert plan.start == dt(2026, 10, 23, 12, 5)
+        assert plan.windows[0][0] == dt(2026, 10, 23, 12, 5)
+        # Seven days fit in one pass, so it reaches the horizon.
+        assert plan.windows[-1][1] == plan.horizon
+
+    def test_watermark_older_than_tier2_resumes_where_tier2_begins(self):
+        # Rollups stalled for longer than tier 2: the gap is past keeping.
+        plan = self.plan(
+            dt(2026, 9, 1), dt(2026, 9, 1, 0, 5), keep_since=dt(2026, 10, 23, 12, 7)
+        )
+        assert plan.start == dt(2026, 10, 23, 12, 5)
+
+    def test_newer_watermark_is_untouched_by_tier2(self):
+        plan = self.plan(
+            dt(2026, 10, 30, 9, 0), dt(2026, 10, 30, 9, 5, 2), keep_since=dt(2026, 10, 23)
+        )
+        assert plan.start == dt(2026, 10, 30, 9, 5)
+
+    def test_no_readings_within_tier2_still_gives_a_frontier(self):
+        # Readings older than tier 2 will never be averaged, so the frontier
+        # sits where tier 2 begins and the tier-1 delete may remove them.
+        plan = self.plan(None, None, keep_since=dt(2026, 10, 23, 12, 7))
+        assert plan.start == dt(2026, 10, 23, 12, 5)
+        assert plan.windows == []
+
+    def test_uncapped_pass_runs_to_the_horizon(self):
+        now = dt(2026, 10, 30, 12, 0)
+        plan = self.plan(None, now - timedelta(days=90), now, max_span=None)
+        assert plan.windows[0][0] == dt(2026, 8, 1, 12, 0)
+        assert plan.windows[-1][1] == plan.horizon == dt(2026, 10, 30, 11, 50)
+        # 90 days of 6-hour windows, the last one 10 minutes short.
+        assert len(plan.windows) == 90 * 4
+        assert all(a == b for (_, a), (b, _) in zip(plan.windows, plan.windows[1:]))
 
 
 class TestEffectiveDeleteCutoff:
@@ -480,6 +527,7 @@ class _FakeArchiveDb:
         self.watermark = watermark
         self.fail_on_insert = fail_on_insert
         self.inserts = 0
+        self.insert_calls = []
         self.events = []
 
     async def execute(self, stmt, params=None):
@@ -488,6 +536,7 @@ class _FakeArchiveDb:
             return _Result(scalar=self.watermark)
         if isinstance(stmt, Insert):
             self.inserts += 1
+            self.insert_calls.append((stmt, params))
             assert "INSERT IGNORE INTO archived_node_telemetry_5m" in str(
                 stmt.compile(dialect=mysql.dialect())
             )
@@ -575,6 +624,65 @@ class TestRollupTransactions:
         progress = await self.run(app, _FakeArchiveDb())
         assert progress["windows"] == 56
         assert progress["more_pending"] is True
+        # The frontier is the end of the 56th window, not the horizon.  The
+        # delete is capped at it: reporting the horizon after a capped pass
+        # would let tier 1 delete the 46 days this pass never averaged.
+        start = retention._floor_to_bucket(self.NOW - timedelta(days=60))
+        assert progress["rolled_through"] == start + timedelta(days=14)
+        assert progress["rolled_through"] < dt(2026, 10, 30, 12, 0)
+
+    async def test_uncapped_pass_reaches_the_horizon(self):
+        app = _FakeAppDb(self.NOW - timedelta(days=60), rows_per_window=0)
+        progress = await self.run(app, _FakeArchiveDb(), max_span=None)
+        assert progress["windows"] == 60 * 4
+        assert progress["rolled_through"] == dt(2026, 10, 30, 12, 0)
+        assert progress["more_pending"] is False
+
+    async def test_rows_go_in_as_executemany_on_one_cached_statement(self):
+        app = _FakeAppDb(dt(2026, 10, 29, 23, 58), rows_per_window=5)
+        archive = _FakeArchiveDb()
+        await self.run(app, archive, insert_batch=2)
+
+        cache_keys = set()
+        for stmt, params in archive.insert_calls:
+            # The rows travel as executemany parameters, in batches...
+            assert isinstance(params, list) and 1 <= len(params) <= 2
+            assert all(isinstance(row, dict) for row in params)
+            # ...of the single-row statement.  A multi-VALUES statement
+            # (.values(rows)) has no cache key, so every 1000-row batch was
+            # compiled from scratch (~100 ms for GPU rows) on the event loop.
+            sql = str(stmt.compile(dialect=mysql.dialect()))
+            assert sql.count("VALUES (") == 1 and "), (" not in sql
+            key = stmt._generate_cache_key()
+            assert key is not None
+            cache_keys.add(key.key)
+        # One statement shape for every batch: compiled once, then cached.
+        assert len(cache_keys) == 1
+        # 3 windows x 5 rows, each sent exactly once.
+        sent = [row for _, params in archive.insert_calls for row in params]
+        assert len(sent) == 15
+        assert [row["node_id"] for row in sent] == list(range(5)) * 3
+
+    async def test_seek_and_plan_start_where_tier2_begins(self):
+        # Empty archive, live history far older than tier 2 (7 days).
+        keep_since = self.NOW - timedelta(days=7)  # Oct 23 12:13 -> 12:10
+        app = _FakeAppDb(dt(2026, 10, 23, 12, 11), rows_per_window=0)
+        progress = await self.run(app, _FakeArchiveDb(), keep_since=keep_since)
+        assert app.events[0] == ("next_reading", dt(2026, 10, 23, 12, 10))
+        # 7 days less 10 minutes, to the horizon: 28 windows in one pass.
+        assert progress["windows"] == 28
+        assert progress["rolled_through"] == dt(2026, 10, 30, 12, 0)
+        assert progress["more_pending"] is False
+
+    async def test_a_watermark_older_than_tier2_resumes_where_tier2_begins(self):
+        keep_since = self.NOW - timedelta(days=7)
+        app = _FakeAppDb(None, rows_per_window=0)
+        progress = await self.run(
+            app, _FakeArchiveDb(watermark=dt(2026, 9, 1)), keep_since=keep_since
+        )
+        assert app.events[0] == ("next_reading", dt(2026, 10, 23, 12, 10))
+        # No readings since: the frontier is where tier 2 begins.
+        assert progress["rolled_through"] == dt(2026, 10, 23, 12, 10)
 
 
 # ===================================================================
@@ -604,11 +712,13 @@ def orchestration(monkeypatch):
         },
         failing=set(),
         rollup_now=[],
+        rollup_kw=[],
         deletes=[],
     )
 
     async def fake_rollup(app_db, archive_db, spec, model, now, **kw):
         state.rollup_now.append(now)
+        state.rollup_kw.append(kw)
         assert model is ROLLUP_MODELS[spec.table]
         if spec.table in state.failing:
             raise RuntimeError(f"{spec.table} boom")
@@ -693,6 +803,67 @@ class TestArchiveExpiredTelemetry:
         )
         assert {d[2] for d in orchestration.deletes} == {25000}
 
+    async def test_tier2_bounds_every_tables_pass_on_the_db_clock(self, orchestration):
+        await retention.archive_expired_telemetry(
+            _NullDb(), _NullDb(), self.CUTOFF, 500, tier2_days=7
+        )
+        # Measured on the clock that stamped the readings (12:13 here).
+        assert orchestration.rollup_kw == [{
+            "keep_since": dt(2026, 10, 23, 12, 13),
+            "max_span": retention._ROLLUP_MAX_SPAN_PER_CYCLE,
+        }] * 3
+
+    async def test_no_tier2_limit_and_an_uncapped_catch_up_pass_through(self, orchestration):
+        await retention.archive_expired_telemetry(
+            _NullDb(), _NullDb(), None, 500, max_span=None
+        )
+        assert orchestration.rollup_kw == [{"keep_since": None, "max_span": None}] * 3
+
+
+# ===================================================================
+# _delete_telemetry_before: batched delete, one commit per batch
+# ===================================================================
+
+
+class _DeletingAppDb:
+    """App session whose DELETEs report the given rowcounts, in order."""
+
+    def __init__(self, rowcounts):
+        self.rowcounts = list(rowcounts)
+        self.events = []
+
+    async def execute(self, stmt, params=None):
+        self.events.append(("delete", str(stmt), dict(params)))
+        return _Result(rowcount=self.rowcounts.pop(0))
+
+    async def commit(self):
+        self.events.append(("commit",))
+
+
+class TestDeleteTelemetryBefore:
+    BEFORE = dt(2026, 9, 1)
+
+    async def test_loops_until_a_short_batch_committing_after_each(self):
+        db = _DeletingAppDb([500, 500, 3])
+        spec = SPECS["gpu_device_telemetry"]
+        total = await retention._delete_telemetry_before(db, spec, self.BEFORE, 500)
+        assert total == 1003
+        # A commit after every batch keeps InnoDB lock time bounded while
+        # the poller keeps inserting; one commit at the end would hold row
+        # locks on every expired reading at once.
+        assert [e[0] for e in db.events] == ["delete", "commit"] * 3
+        for event in db.events[::2]:
+            assert event[1] == spec.delete_sql
+            assert event[2] == {"cutoff": self.BEFORE, "batch": 500}
+
+    async def test_a_full_last_batch_takes_one_more_round(self):
+        db = _DeletingAppDb([500, 0])
+        total = await retention._delete_telemetry_before(
+            db, SPECS["node_telemetry"], self.BEFORE, 500
+        )
+        assert total == 500
+        assert [e[0] for e in db.events] == ["delete", "commit"] * 2
+
 
 # ===================================================================
 # run_retention_cycle / run_purge wiring
@@ -776,7 +947,10 @@ def _config(**overrides):
 @pytest.fixture
 def wiring(monkeypatch):
     calls = []
-    state = types.SimpleNamespace(calls=calls, config=_config(), rollup_error=None)
+    state = types.SimpleNamespace(
+        calls=calls, config=_config(), rollup_error=None, rollup_kw=[],
+        rollup_result={t: {"rolled_up": 1, "deleted": 0} for t in _TABLES},
+    )
 
     async def get_retention_config(db):
         return state.config
@@ -784,9 +958,10 @@ def wiring(monkeypatch):
     async def archive_expired_telemetry(app_db, archive_db, cutoff, batch_size, **kw):
         assert app_db.kind == "app" and archive_db.kind == "archive"
         calls.append(("archive_expired_telemetry", cutoff))
+        state.rollup_kw.append(kw)
         if state.rollup_error:
             raise state.rollup_error
-        return {"rolled": True}
+        return state.rollup_result
 
     async def cleanup_expired_telemetry(app_db, cutoff):
         assert app_db.kind == "app"
@@ -850,6 +1025,10 @@ class TestRetentionCycleWiring:
         else:
             _assert_days_ago(cutoff, expected[1])
         assert summary["telemetry"]
+        if name == "archive_expired_telemetry":
+            # Tier 2 bounds the rollup (so the purge below cannot undo it);
+            # the scheduled cycle keeps the 14-day cap.
+            assert wiring.rollup_kw == [{"tier2_days": tier2}]
 
     async def test_archive_purge_still_runs_after_telemetry(self, wiring):
         wiring.config = _config(tier1_days=90, tier2_days=365)
@@ -872,7 +1051,16 @@ class TestManualPurgeWiring:
         ]
         assert calls[0][1] is None  # rollup only: the purge does the deleting
         _assert_days_ago(calls[1][1], 7)
-        assert summary["rollup"] == {"rolled": True}
+        assert summary["rollup"] == wiring.rollup_result
+        assert "rollup_incomplete" not in summary
+
+    async def test_rollup_catches_up_in_one_uncapped_pass(self, wiring):
+        # A capped pass covers 14 days; the purge then deleted everything
+        # past that frontier unaveraged, with the archive healthy.
+        wiring.config = _config(tier1_days=90, tier2_days=365)
+        with _pinned_modules(_wiring_modules(True)):
+            await retention.run_purge("telemetry", 7)
+        assert wiring.rollup_kw == [{"tier2_days": 365, "max_span": None}]
 
     async def test_purge_proceeds_when_the_rollup_fails(self, wiring):
         wiring.config = _config(tier1_days=90, tier2_days=365)
@@ -884,7 +1072,27 @@ class TestManualPurgeWiring:
         ]
         assert "archive down" in summary["rollup"]["error"]
         assert summary["result"] == {"deleted": True}
+        assert summary["rollup_incomplete"] == sorted(_TABLES)
         assert "purge_telemetry_rollup_failed" in _LOG.events("warning")
+        assert "purge_telemetry_rollup_incomplete" in _LOG.events("warning")
+
+    async def test_tables_whose_rollup_failed_are_named(self, wiring):
+        wiring.config = _config(tier1_days=90, tier2_days=365)
+        wiring.rollup_result = dict(wiring.rollup_result)
+        wiring.rollup_result["gpu_device_telemetry"] = {
+            "rolled_up": 0, "deleted": 0, "error": "OperationalError: gone",
+        }
+        with _pinned_modules(_wiring_modules(True)):
+            summary = await retention.run_purge("telemetry", 30)
+        # The purge still runs; the summary and a warning say which table's
+        # readings went without averages.
+        assert summary["result"] == {"deleted": True}
+        assert summary["rollup_incomplete"] == ["gpu_device_telemetry"]
+        (record,) = [
+            k for (lvl, e, k) in _LOG.records
+            if e == "purge_telemetry_rollup_incomplete"
+        ]
+        assert record["tables"] == ["gpu_device_telemetry"]
 
     @pytest.mark.parametrize("archive,tier2", [(False, 365), (True, 0)])
     async def test_no_rollup_without_archival(self, wiring, archive, tier2):
@@ -898,6 +1106,202 @@ class TestManualPurgeWiring:
 
 
 # ===================================================================
+# The backend registry's TELEMETRY_RETENTION_DAYS delete
+# ===================================================================
+
+
+def _registry_method(name):
+    """Compile one BackendRegistry method from registry.py on its own.
+
+    Importing registry.py pulls in the db models, adapters and session
+    chain.  The method under test needs only the datetime names and a
+    logger, and imports the retention service at call time, so it runs
+    against those and nothing else: any other global it touched (``crud``,
+    say) would raise NameError.
+    """
+    tree = ast.parse(_REGISTRY_PATH.read_text())
+    (cls,) = [
+        n for n in tree.body
+        if isinstance(n, ast.ClassDef) and n.name == "BackendRegistry"
+    ]
+    (fn,) = [
+        n for n in cls.body
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == name
+    ]
+    namespace = {
+        "datetime": datetime, "timedelta": timedelta, "timezone": timezone,
+        "logger": _LOG,
+    }
+    code = compile(ast.Module(body=[fn], type_ignores=[]), str(_REGISTRY_PATH), "exec")
+    exec(code, namespace)
+    return namespace[name]
+
+
+class TestRegistryTelemetryCleanup:
+    async def test_goes_through_the_retention_services_capped_delete(self):
+        # Before: three plain ORM DELETEs at now - TELEMETRY_RETENTION_DAYS
+        # with no rollup frontier, which removed readings that a stalled
+        # rollup had never averaged.
+        calls = []
+        retention_stub = types.ModuleType("backend.app.services.retention")
+
+        async def delete_raw_telemetry_older_than(cutoff):
+            calls.append(cutoff)
+            return {"node_telemetry": 3, "gpu_device_telemetry": 0,
+                    "backend_telemetry": 0}
+
+        retention_stub.delete_raw_telemetry_older_than = delete_raw_telemetry_older_than
+        method = _registry_method("_cleanup_old_telemetry")
+        registry = types.SimpleNamespace(
+            _settings=types.SimpleNamespace(telemetry_retention_days=30)
+        )
+        with _pinned_modules({"backend.app.services.retention": retention_stub}):
+            await method(registry)
+
+        (cutoff,) = calls
+        _assert_days_ago(cutoff, 30)
+        (record,) = [k for (_, e, k) in _LOG.records if e == "telemetry_cleaned_up"]
+        assert record["node_telemetry_deleted"] == 3
+        assert record["gpu_telemetry_deleted"] == 0
+
+    def test_retention_exports_the_entry_point_the_registry_imports(self):
+        assert callable(retention.delete_raw_telemetry_older_than)
+
+
+@pytest.fixture
+def raw_delete(monkeypatch):
+    """Stub the two delete paths behind delete_raw_telemetry_older_than."""
+    state = types.SimpleNamespace(
+        config=_config(tier1_days=90, tier2_days=365), calls=[]
+    )
+
+    async def get_retention_config(db):
+        return state.config
+
+    async def cleanup_expired_telemetry(app_db, cutoff):
+        state.calls.append(("cleanup_expired_telemetry", app_db.kind, cutoff))
+        return {"node_telemetry": 1}
+
+    async def delete_rolled_up(app_db, archive_db, cutoff, batch):
+        state.calls.append(
+            ("_delete_rolled_up_telemetry", app_db.kind, archive_db.kind, cutoff, batch)
+        )
+        return {"node_telemetry": 2}
+
+    monkeypatch.setattr(retention, "get_retention_config", get_retention_config)
+    monkeypatch.setattr(retention, "cleanup_expired_telemetry", cleanup_expired_telemetry)
+    monkeypatch.setattr(retention, "_delete_rolled_up_telemetry", delete_rolled_up)
+    return state
+
+
+class TestDeleteRawTelemetryOlderThan:
+    CUTOFF = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+
+    async def test_capped_at_the_archive_while_averages_are_kept(self, raw_delete):
+        with _pinned_modules(_wiring_modules(True)):
+            counts = await retention.delete_raw_telemetry_older_than(self.CUTOFF)
+        assert raw_delete.calls == [
+            ("_delete_rolled_up_telemetry", "app", "archive", self.CUTOFF, 10000),
+        ]
+        assert counts == {"node_telemetry": 2}
+
+    async def test_a_larger_configured_batch_is_kept(self, raw_delete):
+        raw_delete.config["retention.batch_size"] = 25000
+        with _pinned_modules(_wiring_modules(True)):
+            await retention.delete_raw_telemetry_older_than(self.CUTOFF)
+        assert raw_delete.calls[0][-1] == 25000
+
+    @pytest.mark.parametrize("archive,tier2", [(False, 365), (True, 0)])
+    async def test_plain_delete_without_archival(self, raw_delete, archive, tier2):
+        raw_delete.config = _config(tier1_days=90, tier2_days=tier2)
+        with _pinned_modules(_wiring_modules(archive)):
+            counts = await retention.delete_raw_telemetry_older_than(self.CUTOFF)
+        assert raw_delete.calls == [("cleanup_expired_telemetry", "app", self.CUTOFF)]
+        assert counts == {"node_telemetry": 1}
+
+
+class _FrontierArchiveDb:
+    """Archive session answering MAX(bucket_start) per rollup table."""
+
+    def __init__(self, newest, unreadable=()):
+        self.newest = newest
+        self.unreadable = set(unreadable)
+        self.rollbacks = 0
+
+    async def execute(self, stmt, params=None):
+        assert isinstance(stmt, Select)
+        sql = str(stmt.compile(dialect=mysql.dialect()))
+        assert "max(" in sql.lower()
+        table = re.search(r"FROM (\w+)", sql).group(1)
+        if table in self.unreadable:
+            raise RuntimeError("archive unreachable")
+        return _Result(scalar=self.newest.get(table))
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        self.rollbacks += 1
+
+
+class TestDeleteRolledUpTelemetry:
+    CUTOFF = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+
+    @pytest.fixture
+    def deletes(self, monkeypatch):
+        calls = []
+
+        async def fake_delete(app_db, spec, before, batch):
+            calls.append((spec.table, before, batch))
+            return 5
+
+        monkeypatch.setattr(retention, "_delete_telemetry_before", fake_delete)
+        monkeypatch.setattr(retention, "_rollup_models", lambda: dict(ROLLUP_MODELS))
+        return calls
+
+    async def test_each_table_stops_at_its_archived_frontier(self, deletes):
+        archive = _FrontierArchiveDb({
+            # Caught up: the cutoff applies.
+            "archived_node_telemetry_5m": dt(2026, 10, 30, 11, 55),
+            # Rollups stalled on Sep 12: nothing after that bucket may go,
+            # although it is older than the cutoff.
+            "archived_gpu_device_telemetry_5m": dt(2026, 9, 12, 7, 40),
+            # Nothing archived yet (first rollup still to come).
+            "archived_backend_telemetry_5m": None,
+        })
+        counts = await retention._delete_rolled_up_telemetry(
+            _NullDb(), archive, self.CUTOFF, 10000
+        )
+        assert deletes == [
+            ("node_telemetry", dt(2026, 9, 30, 12, 0), 10000),
+            ("gpu_device_telemetry", dt(2026, 9, 12, 7, 45), 10000),
+        ]
+        assert counts == {"node_telemetry": 5, "gpu_device_telemetry": 5,
+                          "backend_telemetry": 0}
+        (record,) = [k for (_, e, k) in _LOG.records
+                     if e == "telemetry_cleanup_delete_skipped"]
+        assert record == {"table": "backend_telemetry", "reason": "nothing_archived"}
+
+    async def test_an_unreadable_archive_deletes_nothing_and_warns(self, deletes):
+        archive = _FrontierArchiveDb({}, unreadable={
+            "archived_node_telemetry_5m", "archived_gpu_device_telemetry_5m",
+            "archived_backend_telemetry_5m",
+        })
+        counts = await retention._delete_rolled_up_telemetry(
+            _NullDb(), archive, self.CUTOFF, 10000
+        )
+        assert deletes == []
+        assert counts == {t: 0 for t in _TABLES}
+        warnings = [(e, k["table"], k["reason"]) for (lvl, e, k) in _LOG.records
+                    if lvl == "warning"]
+        assert warnings == [
+            ("telemetry_cleanup_delete_skipped", t, "archive_unreadable")
+            for t in _TABLES
+        ]
+        assert archive.rollbacks == 3
+
+
+# ===================================================================
 # purge_expired_archives / get_archive_stats
 # ===================================================================
 
@@ -907,7 +1311,7 @@ class _PurgeArchiveDb:
 
     def __init__(self):
         self.deletes = []
-        self.commits = 0
+        self.events = []
         self._full_batch_sent = set()
 
     async def execute(self, stmt, params=None):
@@ -917,6 +1321,7 @@ class _PurgeArchiveDb:
         compiled = stmt.compile(dialect=mysql.dialect())
         table = stmt.table.name
         self.deletes.append((table, str(compiled), dict(compiled.params)))
+        self.events.append(("delete", table))
         rowcount = 0
         if table.endswith("_5m") and table not in self._full_batch_sent:
             self._full_batch_sent.add(table)
@@ -927,7 +1332,7 @@ class _PurgeArchiveDb:
         pass
 
     async def commit(self):
-        self.commits += 1
+        self.events.append(("commit",))
 
 
 class TestPurgeExpiredArchives:
@@ -958,6 +1363,16 @@ class TestPurgeExpiredArchives:
                 assert abs((cutoff - expected_cutoff).total_seconds()) < 60
         assert counts["node_telemetry_5m"] == retention._ROLLUP_PURGE_BATCH
         assert counts["backend_telemetry_5m"] == retention._ROLLUP_PURGE_BATCH
+
+    async def test_every_rollup_batch_is_committed_before_the_next(self):
+        db, _ = await self.purge(365)
+        rollup_deletes = [
+            i for i, e in enumerate(db.events)
+            if e[0] == "delete" and e[1].endswith("_5m")
+        ]
+        assert len(rollup_deletes) == 6
+        for i in rollup_deletes:
+            assert db.events[i + 1] == ("commit",)
 
     async def test_legacy_raw_tables_still_expire_by_archived_at(self):
         db, counts = await self.purge(365)
@@ -1009,7 +1424,7 @@ class _Inputs(HTMLParser):
     handle_startendtag = handle_starttag
 
 
-def _render_policies(archive_configured):
+def _render_policies(archive_configured, tab="policies"):
     env = Environment(
         loader=ChoiceLoader([
             DictLoader({
@@ -1021,7 +1436,7 @@ def _render_policies(archive_configured):
         autoescape=True,
     )
     html = env.get_template("admin/retention.html").render(
-        tab="policies", is_read_only=False, retention_running=False,
+        tab=tab, is_read_only=False, retention_running=False,
         success=None, error=None, archive_configured=archive_configured,
         config=dict(retention._DEFAULTS, **{"retention.telemetry.tier2_days": 365}),
         app_counts={},
@@ -1034,6 +1449,17 @@ def _render_policies(archive_configured):
 def _by_name(tags, name):
     (attrs,) = [a for t, a in tags if t == "input" and a.get("name") == name]
     return attrs
+
+
+def _text(html_fragment):
+    """Visible text of an HTML fragment, whitespace collapsed."""
+    return " ".join(re.sub(r"<[^>]+>", " ", html_fragment).split())
+
+
+def _element_text(html, element_id):
+    match = re.search(rf'id="{element_id}">(.*?)</div>', html, re.S)
+    assert match, element_id
+    return _text(match.group(1))
 
 
 class TestRetentionPage:
@@ -1056,6 +1482,31 @@ class TestRetentionPage:
         assert "5-minute averages" in html
         assert "TELEMETRY_RETENTION_DAYS" in html
 
+    def test_tier1_help_puts_the_server_setting_under_the_same_rule(self):
+        # The registry's TELEMETRY_RETENTION_DAYS delete now waits for the
+        # averages too, which is what makes "only after its average is in
+        # the archive" true.
+        help_text = _element_text(_render_policies(True)[0], "retention_telemetry_tier1_help")
+        assert "deleted only after its average is in the archive" in help_text
+        assert "TELEMETRY_RETENTION_DAYS setting (default 30) also deletes raw readings, under the same rule" in help_text
+
+    def test_tier2_zero_is_described_as_keeping_archived_averages(self):
+        # Tier 2 = 0 skips the rollup purge, so averages already archived
+        # stay.  The help used to promise "0 = keep no averages".
+        help_text = _element_text(_render_policies(True)[0], "retention_telemetry_tier2_help")
+        assert "keep no averages" not in help_text
+        assert "0 = write no new averages" in help_text
+        assert "averages already in the archive are kept, not purged" in help_text
+
+    def test_purge_tab_says_the_telemetry_rollup_is_best_effort(self):
+        html, _ = _render_policies(True, tab="purge")
+        intro = _text(html.split("Manual Purge", 1)[1].split("This cannot be undone", 1)[0])
+        # The rollup before a manual purge is not a guarantee: the purge
+        # deletes the readings either way.
+        assert "brought up to date first, as far as the archive allows" in intro
+        assert "the readings are deleted either way" in intro
+        assert "are deleted without averages" in intro
+
     def test_telemetry_inputs_are_labelled_and_described(self):
         html, tags = _render_policies(True)
         labels = {a.get("for") for t, a in tags if t == "label"}
@@ -1072,9 +1523,22 @@ class TestRetentionPage:
 
 
 class TestDocs:
+    DOCS = (_REPO / "docs" / "index.md").read_text()
+
     def test_docs_describe_rollups(self):
-        docs = (_REPO / "docs" / "index.md").read_text()
         for table in ("archived_node_telemetry_5m", "archived_gpu_device_telemetry_5m",
                       "archived_backend_telemetry_5m"):
-            assert table in docs
-        assert "5-minute averages" in docs
+            assert table in self.DOCS
+        assert "5-minute averages" in self.DOCS
+
+    def test_docs_match_the_review_fixes(self):
+        docs = " ".join(self.DOCS.split())
+        # The registry's delete follows the rollup frontier.
+        assert "by the retention cycle and by the registry's `TELEMETRY_RETENTION_DAYS` cleanup alike" in docs
+        assert "a stalled rollup holds raw readings back instead of losing them" in docs
+        # Backfill never reaches past tier 2.
+        assert "starting no further back than Tier 2" in docs
+        # Tier 2 = 0 keeps what is archived; the purge rollup is best effort.
+        assert "no averages are kept" not in docs
+        assert "does not purge the averages already in the archive" in docs
+        assert "That step is best effort" in docs

@@ -159,7 +159,7 @@
                                     <input type="number" class="form-control" id="retention_telemetry_tier1_days" name="retention.telemetry.tier1_days"
                                            value="{{ config['retention.telemetry.tier1_days'] }}" min="0"
                                            aria-describedby="retention_telemetry_tier1_help">
-                                    <div class="form-text" id="retention_telemetry_tier1_help">0 = never delete. While 5-minute averages are kept, a reading is deleted only after its average is in the archive. The server's <code>TELEMETRY_RETENTION_DAYS</code> setting (default 30) also deletes raw readings; the shorter period applies.</div>
+                                    <div class="form-text" id="retention_telemetry_tier1_help">0 = never delete. While 5-minute averages are kept, a reading is deleted only after its average is in the archive, or once it is older than Tier 2. The server's <code>TELEMETRY_RETENTION_DAYS</code> setting (default 30) also deletes raw readings, under the same rule; the shorter period applies.</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label" for="retention_telemetry_tier2_days">Tier 2 — Keep 5-minute averages in Archive DB (days)</label>
@@ -167,7 +167,7 @@
                                            value="{{ config['retention.telemetry.tier2_days'] }}" min="0"
                                            aria-describedby="retention_telemetry_tier2_help"
                                            {% if not archive_configured %}disabled{% endif %}>
-                                    <div class="form-text" id="retention_telemetry_tier2_help">Counted from when the readings were taken. 0 = keep no averages; expired readings are simply deleted.</div>
+                                    <div class="form-text" id="retention_telemetry_tier2_help">Counted from when the readings were taken. 0 = write no new averages: expired readings are simply deleted, and averages already in the archive are kept, not purged.</div>
                                     {% if not archive_configured %}
                                     <div class="form-text text-warning">Archive DB not configured.</div>
                                     {% endif %}
@@ -448,9 +448,12 @@
                         Immediately remove records in one category older than a cutoff,
                         using the same pipeline as the retention cycle: when an archive
                         database is configured, requests/chat rows are archived before
-                        they leave the app database, and telemetry's 5-minute averages
-                        are brought up to date first (when telemetry Tier 2 is above 0);
-                        file artifacts are removed with their rows.
+                        they leave the app database; file artifacts are removed with
+                        their rows. When telemetry Tier 2 is above 0, telemetry's
+                        5-minute averages are brought up to date first, as far as the
+                        archive allows; the readings are deleted either way, so any the
+                        archive could not take (if it is unreachable, say), and the last
+                        ~10 minutes, are deleted without averages.
                     </p>
                     <p class="text-danger mb-4">
                         <i class="bi bi-exclamation-triangle"></i>

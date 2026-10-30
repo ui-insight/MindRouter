@@ -269,13 +269,65 @@ async def _seed_all(env):
 # ------------------------------------------------------------------
 
 
-async def _run(env, cutoff=None, now=NOW, batch=500, archive_wrapper=None):
+async def _run(env, cutoff=None, now=NOW, batch=500, archive_wrapper=None, **kw):
     retention = env.mods.retention
     async with env.app_session() as app_db, env.archive_session() as archive_db:
         archive = archive_wrapper(archive_db) if archive_wrapper else archive_db
         return await retention.archive_expired_telemetry(
-            app_db, archive, cutoff, batch, now=now
+            app_db, archive, cutoff, batch, now=now, **kw
         )
+
+
+def _retention_config(env, **telemetry):
+    config = dict(env.mods.retention._DEFAULTS)
+    config.update({f"retention.telemetry.{k}": v for k, v in telemetry.items()})
+    return config
+
+
+@contextlib.contextmanager
+def _runtime(env, monkeypatch, config, archive_wrapper=None):
+    """Point retention's call-time session and settings imports at the scratch
+    databases, with an archive configured and ``config`` as app_config, so the
+    entry points (run_purge, delete_raw_telemetry_older_than) run unchanged."""
+    session_mod = types.ModuleType("backend.app.db.session")
+
+    @contextlib.asynccontextmanager
+    async def get_async_db_context():
+        async with env.app_session() as session:
+            try:
+                yield session
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+
+    @contextlib.asynccontextmanager
+    async def get_archive_db_context():
+        async with env.archive_session() as session:
+            try:
+                yield archive_wrapper(session) if archive_wrapper else session
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+
+    session_mod.get_async_db_context = get_async_db_context
+    session_mod.get_archive_db_context = get_archive_db_context
+    settings_mod = types.ModuleType("backend.app.settings")
+    settings_mod.get_settings = lambda: types.SimpleNamespace(
+        archive_database_url="mysql+aiomysql://scratch/archive",
+        artifact_storage_path="/nonexistent",
+    )
+
+    async def get_retention_config(db):
+        return dict(config)
+
+    monkeypatch.setattr(env.mods.retention, "get_retention_config", get_retention_config)
+    with _pinned_modules({
+        "backend.app.db.session": session_mod,
+        "backend.app.settings": settings_mod,
+    }):
+        yield
 
 
 async def _rollups(env, model, key):
@@ -312,6 +364,19 @@ class _FailingArchive:
             if self.inserts == self._fail_on:
                 raise RuntimeError("simulated archive failure")
         return await self._session.execute(stmt, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+
+class _UnreachableArchive:
+    """Archive session proxy on which every statement fails (archive down)."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def execute(self, *args, **kwargs):
+        raise RuntimeError("archive unreachable")
 
     def __getattr__(self, name):
         return getattr(self._session, name)
@@ -431,7 +496,7 @@ async def test_rerunning_a_committed_window_inserts_nothing(monkeypatch):
         real_plan = retention._plan_rollup_windows
         monkeypatch.setattr(
             retention, "_plan_rollup_windows",
-            lambda wm, nxt, now: real_plan(None, m(0), now),
+            lambda wm, nxt, now, **kw: real_plan(None, m(0), now, **kw),
         )
         summary = await _run(env)
         assert summary["node_telemetry"]["windows"] == 1
@@ -644,3 +709,215 @@ async def test_rollup_purge_loops_over_batches():
             )
         assert deleted == 6
         assert set(await _rollups(env, node_m, "node_id")) == {(1, m(15)), (2, m(15))}
+
+
+async def test_raw_delete_loops_over_batches():
+    async with _scratch() as env:
+        retention = env.mods.retention
+        await _seed_dimensions(env)
+        await _insert_readings(env, node=[_node(1, m(i), 1, 1.0) for i in range(9)])
+        async with env.app_session() as app_db:
+            deleted = await retention._delete_telemetry_before(
+                app_db, retention._NODE_ROLLUP, m(7), batch=2
+            )
+        # Four rounds of two then a short one; the newer readings survive.
+        assert deleted == 7
+        assert await _raw_timestamps(env, env.mods.models.NodeTelemetry) == [m(7), m(8)]
+
+
+async def test_executemany_counts_inserted_rows_and_ignores_duplicates(monkeypatch):
+    async with _scratch() as env:
+        retention = env.mods.retention
+        m_ = env.mods.models
+        async with env.app_engine.begin() as conn:
+            await conn.execute(insert(m_.Node.__table__), [
+                {"id": n, "name": f"node{n}", "status": m_.NodeStatus.ONLINE}
+                for n in range(1, 8)
+            ])
+        await _insert_readings(env, node=[_node(n, m(1), 100 * n, 1.0) for n in range(1, 8)])
+        node_m = _models(env)[0]
+
+        async def rollup():
+            async with env.app_session() as app_db, env.archive_session() as archive_db:
+                return await retention._rollup_telemetry_table(
+                    app_db, archive_db, retention._NODE_ROLLUP, node_m, NOW,
+                    insert_batch=3,
+                )
+
+        # 7 rows sent as executemany batches of 3, 3 and 1: every row is
+        # written, with its own values, and counted.
+        progress = await rollup()
+        assert progress["rows_written"] == 7
+        rows = await _rollups(env, node_m, "node_id")
+        assert {n: r["server_power_watts_avg"] for (n, _), r in rows.items()} == {
+            n: pytest.approx(100.0 * n) for n in range(1, 8)
+        }
+        assert {r["node_name"] for r in rows.values()} == {f"node{n}" for n in range(1, 8)}
+
+        # Replay the archived window: INSERT IGNORE skips every duplicate, and
+        # the count says so.
+        real_plan = retention._plan_rollup_windows
+        monkeypatch.setattr(
+            retention, "_plan_rollup_windows",
+            lambda wm, nxt, now, **kw: real_plan(None, m(0), now, **kw),
+        )
+        replay = await rollup()
+        assert replay["windows"] == 1 and replay["rows_written"] == 0
+        assert await _rollups(env, node_m, "node_id") == rows
+
+
+async def test_a_short_tier2_still_archives_the_recent_buckets():
+    # 30 days of hourly readings, tier 2 = 7 days.  Starting at the oldest
+    # reading, a pass wrote 14 days that the same cycle's purge deleted
+    # again; the archive stayed empty and every cycle started over.
+    async with _scratch() as env:
+        retention = env.mods.retention
+        await _seed_dimensions(env)
+        floor = retention._floor_to_bucket
+        # Close to the real clock, which the purge measures tier 2 by, and
+        # 2 minutes into a bucket.
+        real_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = floor(real_now - timedelta(minutes=5)) + timedelta(minutes=2)
+        await _insert_readings(env, node=[
+            _node(1, now - timedelta(hours=h), 1000 + h, 10.0)
+            for h in range(30 * 24, 0, -1)
+        ])
+        node_m = _models(env)[0]
+        config = _retention_config(env, tier2_days=7)
+
+        cycles = []
+        for _ in range(3):
+            summary = await _run(env, cutoff=None, now=now, tier2_days=7)
+            async with env.archive_session() as archive_db:
+                purged = await retention.purge_expired_archives(archive_db, config)
+            cycles.append((summary["node_telemetry"], purged["node_telemetry_5m"]))
+
+        first, purged_first = cycles[0]
+        # Cycle 1 starts where tier 2 begins (the reading 168 h ago) and
+        # reaches the horizon in one pass; the purge then expires only that
+        # oldest bucket.
+        assert first["rolled_up"] == 168
+        assert first["rolled_through"] == floor(now - timedelta(minutes=10)).isoformat()
+        assert purged_first == 1
+        # Later cycles have nothing new to do: no re-aggregation, no purge.
+        for later, purged_later in cycles[1:]:
+            assert later["rolled_up"] == 0 and purged_later == 0
+        buckets = sorted(b for _, b in await _rollups(env, node_m, "node_id"))
+        assert buckets == [floor(now - timedelta(hours=h)) for h in range(167, 0, -1)]
+
+
+async def test_manual_purge_averages_every_reading_it_deletes(monkeypatch):
+    # 30 days of readings, nothing archived yet (archiving just enabled),
+    # purge everything older than 7 days.  One capped pass averaged the
+    # oldest 14 days, then the purge deleted the next 9 days unaveraged.
+    async with _scratch(app_time_zone="+00:00") as env:
+        retention = env.mods.retention
+        await _seed_dimensions(env)
+        real_now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+        readings = [real_now - timedelta(hours=h, minutes=3) for h in range(30 * 24, 0, -1)]
+        await _insert_readings(env, node=[_node(1, ts, 1000, 10.0) for ts in readings])
+        raw, node_m = env.mods.models.NodeTelemetry, _models(env)[0]
+
+        with _runtime(env, monkeypatch, _retention_config(env, tier2_days=365)):
+            summary = await retention.run_purge("telemetry", 7)
+
+        remaining = set(await _raw_timestamps(env, raw))
+        deleted = [ts for ts in readings if ts not in remaining]
+        # Every reading 168 hours old or older (the readings are h hours and
+        # 3 minutes old, for h = 720 down to 1).
+        assert len(deleted) == 30 * 24 - 167
+        archived = {b for _, b in await _rollups(env, node_m, "node_id")}
+        floor = retention._floor_to_bucket
+        assert [ts for ts in deleted if floor(ts) not in archived] == []
+        assert "rollup_incomplete" not in summary
+        assert summary["result"]["node_telemetry"] == len(deleted)
+
+
+async def test_manual_purge_with_the_archive_down_names_what_it_lost(monkeypatch):
+    async with _scratch(app_time_zone="+00:00") as env:
+        retention = env.mods.retention
+        await _seed_dimensions(env)
+        real_now = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+        await _insert_readings(env, node=[
+            _node(1, real_now - timedelta(days=d), 1000, 10.0) for d in range(10, 0, -1)
+        ])
+        with _runtime(env, monkeypatch, _retention_config(env, tier2_days=365),
+                      archive_wrapper=_UnreachableArchive):
+            summary = await retention.run_purge("telemetry", 0)
+        # Best effort: the explicit purge still runs, and says what went
+        # without averages.
+        assert summary["result"]["node_telemetry"] == 10
+        assert summary["rollup_incomplete"] == [
+            "backend_telemetry", "gpu_device_telemetry", "node_telemetry",
+        ]
+        events = [(lvl, e) for (lvl, e, _) in env.mods.log.records]
+        assert ("warning", "purge_telemetry_rollup_incomplete") in events
+
+
+async def test_registry_delete_never_outruns_a_failed_rollup(monkeypatch):
+    # The backend registry deletes raw readings after TELEMETRY_RETENTION_DAYS
+    # (30) on its own loop.  It used to do so with no regard for the rollups:
+    # with the archive failing for longer than that, readings were deleted
+    # before they were ever averaged, and once the archive recovered the
+    # rollup resumed at the oldest surviving reading, reporting success over
+    # a permanent hole.
+    async with _scratch() as env:
+        retention = env.mods.retention
+        await _seed_dimensions(env)
+        now = datetime(2026, 10, 30, 12, 0)
+        days = list(range(40, 0, -1))
+        await _insert_readings(env, node=[
+            _node(1, now - timedelta(days=d), 1000 + d, 10.0) for d in days
+        ])
+        raw, node_m = env.mods.models.NodeTelemetry, _models(env)[0]
+        config = _retention_config(env, tier1_days=30, tier2_days=365)
+        registry_cutoff = now - timedelta(days=30)
+
+        # 1. The archive is down.  The cycle's rollup fails and its own
+        #    delete is skipped; the registry cannot read a frontier either.
+        failed = await _run(env, cutoff=registry_cutoff, now=now,
+                            archive_wrapper=_UnreachableArchive, tier2_days=365)
+        assert "archive unreachable" in failed["node_telemetry"]["error"]
+        with _runtime(env, monkeypatch, config, archive_wrapper=_UnreachableArchive):
+            assert await retention.delete_raw_telemetry_older_than(registry_cutoff) == {
+                "node_telemetry": 0, "gpu_device_telemetry": 0, "backend_telemetry": 0,
+            }
+
+        # 2. The archive answers but rejects writes: nothing is archived,
+        #    so there is still no frontier to delete up to.
+        def reject_writes(session):
+            return _FailingArchive(session, 1)
+
+        failed = await _run(env, cutoff=registry_cutoff, now=now,
+                            archive_wrapper=reject_writes, tier2_days=365)
+        assert "simulated archive failure" in failed["node_telemetry"]["error"]
+        with _runtime(env, monkeypatch, config):
+            assert (await retention.delete_raw_telemetry_older_than(registry_cutoff))[
+                "node_telemetry"
+            ] == 0
+        assert len(await _raw_timestamps(env, raw)) == 40
+
+        # 3. The archive recovers.  The backfill takes three cycles, and the
+        #    registry deletes only what has been averaged meanwhile.
+        for cycle in range(3):
+            await _run(env, cutoff=None, now=now, tier2_days=365)
+            if cycle == 0:
+                # Averaged through now - 26 days: the readings 40..31 days
+                # old may go, the rest of the backlog may not.
+                with _runtime(env, monkeypatch, config):
+                    counts = await retention.delete_raw_telemetry_older_than(
+                        registry_cutoff
+                    )
+                assert counts["node_telemetry"] == 10
+
+        # No hole: every day has its average, and only readings older than
+        # 30 days, all averaged, were deleted.
+        archived = sorted(b for _, b in await _rollups(env, node_m, "node_id"))
+        assert archived == [now - timedelta(days=d) for d in days]
+        assert await _raw_timestamps(env, raw) == [
+            now - timedelta(days=d) for d in range(30, 0, -1)
+        ]
+        warnings = [(e, k.get("table"), k.get("reason"))
+                    for (lvl, e, k) in env.mods.log.records if lvl == "warning"]
+        assert ("telemetry_cleanup_delete_skipped", "node_telemetry",
+                "archive_unreadable") in warnings

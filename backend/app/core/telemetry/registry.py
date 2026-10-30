@@ -1831,27 +1831,33 @@ class BackendRegistry:
                 logger.error("telemetry_cleanup_error", error=str(e))
 
     async def _cleanup_old_telemetry(self) -> None:
-        """Delete telemetry data older than the retention period.
+        """Delete raw telemetry older than TELEMETRY_RETENTION_DAYS.
+
+        The delete itself lives in the retention service.  While 5-minute
+        averages are kept in the archive DB, it must not pass the rollup
+        frontier: a reading goes only once its bucket is archived, so a
+        rollup that stalls for longer than this setting holds readings back
+        instead of losing them.  Without archival it is a plain batched
+        delete.
 
         API key expiry maintenance is a SEPARATE loop
         (_api_key_maintenance_loop) with its own admin-configurable interval,
         so a slow or failing key prune can never delay or roll back telemetry
         pruning (the coupling that made the old shared job fail every hour).
         """
+        from backend.app.services.retention import delete_raw_telemetry_older_than
+
         cutoff = datetime.now(timezone.utc) - timedelta(
             days=self._settings.telemetry_retention_days
         )
+        deleted = await delete_raw_telemetry_older_than(cutoff)
 
-        async with get_async_db_context() as db:
-            deleted_bt = await crud.delete_old_telemetry(db, older_than=cutoff)
-            deleted_gdt = await crud.delete_old_gpu_telemetry(db, older_than=cutoff)
-            deleted_nt = await crud.delete_old_node_telemetry(db, older_than=cutoff)
-
-        if deleted_bt or deleted_gdt:
+        if any(deleted.values()):
             logger.info(
                 "telemetry_cleaned_up",
-                backend_telemetry_deleted=deleted_bt,
-                gpu_telemetry_deleted=deleted_gdt,
+                backend_telemetry_deleted=deleted.get("backend_telemetry", 0),
+                gpu_telemetry_deleted=deleted.get("gpu_device_telemetry", 0),
+                node_telemetry_deleted=deleted.get("node_telemetry", 0),
                 cutoff=cutoff.isoformat(),
             )
 
