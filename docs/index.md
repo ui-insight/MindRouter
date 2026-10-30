@@ -1140,7 +1140,7 @@ The admin dashboard has a persistent sidebar with links to all admin pages:
 | Video | `/admin/video-config` | Video generation enable toggle, default model, allowed sizes and durations, per-user concurrent job cap and storage cap, token cost per second, per-user access grants |
 | Blog Posts | `/admin/blog` | Blog/CMS management -- create, edit, publish, delete posts |
 | Email | `/admin/email` | Compose and send announcement email to selected users or groups, with recipient count preview and test send Every send requires an explicit **audience**: *Everyone*, or *Direct MindRouter users only* (people who have signed in to MindRouter itself; accounts that exist only through a registered app such as VandalChat are left out). The same choice applies to a blog post's *Send as Email*. |
-| Data Retention | `/admin/retention` | Retention policies for request, conversation, telemetry, request-image, stored-response, and Conversations-API data; archive statistics; an archive browser; and a **Purge** tab for immediate per-category deletion older than a chosen cutoff (typed `PURGE` confirmation) |
+| Data Retention | `/admin/retention` | Retention policies for request, conversation, telemetry (raw readings in the app DB, 5-minute averages in the archive DB), request-image, stored-response, and Conversations-API data; archive statistics; an archive browser; and a **Purge** tab for immediate per-category deletion older than a chosen cutoff (typed `PURGE` confirmation) |
 | Backup & Restore | `/admin/backup` | Export or restore MindRouter configuration (nodes, backends, users, groups, API keys, quotas, models, settings, blog posts). The export is role-scoped since 2.9.9: full admins get a restorable dump including credential material, while read-only auditors get the same configuration with password hashes, API key hashes, and secret settings (SMTP password, provider API keys) nulled. A redacted file is marked in its metadata and is refused by Restore |
 | Branding | `/admin/branding` | Institution / organization name, logos (navbar / footer / login), favicon, and accessible light/dark accent colors (see [branding.md](branding.md)) |
 | Settings | `/admin/settings` | Site-wide settings: timezone, enforce `num_ctx` override |
@@ -1931,7 +1931,7 @@ Per-model and per-feature runtime tunables (chat defaults, voice, video presets 
 | `DATABASE_POOL_SIZE` | int | `30` | Connection pool size |
 | `DATABASE_MAX_OVERFLOW` | int | `20` | Max overflow connections beyond pool |
 | `DATABASE_ECHO` | bool | `false` | Log SQL queries |
-| `ARCHIVE_DATABASE_URL` | str | `None` | Optional second database for tiered retention. Archival is skipped entirely when unset |
+| `ARCHIVE_DATABASE_URL` | str | `None` | Optional second database for tiered retention: archived requests and chats, and 5-minute telemetry averages. Archival is skipped entirely when unset |
 
 ### Cache
 
@@ -2229,8 +2229,8 @@ Colors, organization name, and logo selections are `branding.*` rows in `app_con
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `TELEMETRY_RETENTION_DAYS` | int | `30` | Telemetry data retention period |
-| `TELEMETRY_CLEANUP_INTERVAL` | int | `3600` | Cleanup interval (seconds) |
+| `TELEMETRY_RETENTION_DAYS` | int | `30` | Raw telemetry older than this is deleted by the backend registry's own cleanup loop, independently of the telemetry tiers at **Admin → Retention**; the shorter of this and Tier 1 decides how long raw readings stay. The archive's 5-minute averages are normally written within about an hour of each reading, long before this deletes it |
+| `TELEMETRY_CLEANUP_INTERVAL` | int | `3600` | Interval of that registry cleanup loop (seconds) |
 | `SIDECAR_TIMEOUT` | int | `15` | Sidecar HTTP call timeout (seconds) |
 | `GPU_AGENT_HOST` | str | `0.0.0.0` | Bind address for sidecar HTTP server |
 | `GPU_AGENT_PORT` | int | `8007` | Port for sidecar HTTP server |
@@ -2266,7 +2266,9 @@ Default allowed extensions: `.txt`, `.md`, `.csv`, `.json`, `.html`, `.htm`, `.l
 Retention periods are **not** environment variables: they are runtime-editable
 policies stored in the `app_config` table and managed at **Admin → Retention**
 (categories: requests, chat, telemetry, request images, stored responses,
-Conversations API; `0` = keep forever). The retention cycle runs hourly.
+Conversations API; `0` = keep forever). The retention cycle runs hourly. The
+one exception is raw telemetry, which the backend registry also deletes after
+`TELEMETRY_RETENTION_DAYS` (see [Telemetry & GPU](#telemetry--gpu)).
 
 Audit content capture IS environment-configurable:
 
@@ -2372,6 +2374,8 @@ A background sync loop flushes Redis token usage counters to the database every 
 ### Retention Cycle
 
 A background task runs the data-retention cycle every **hour** (configurable via the `retention.cleanup_interval` policy at Admin → Retention). The requests, chat, and telemetry day values are seeded into `app_config` by migration 029; the request-images, stored-responses, and Conversations-API values fall back to built-in defaults (180 / 30 / 0 days) until first saved. All six are runtime-editable on the same page. An admin can also trigger a cycle immediately with **Run Retention Now**, or purge a single category on demand from the **Purge** tab (type-`PURGE` confirmation required).
+
+**Telemetry is archived as 5-minute averages, not row by row.** Raw GPU, node, and backend readings (one row per device every few seconds) stay in the app DB for `retention.telemetry.tier1_days`. When `ARCHIVE_DATABASE_URL` is set and `retention.telemetry.tier2_days` is above 0, every cycle aggregates each complete 5-minute bucket that is not archived yet into `archived_node_telemetry_5m`, `archived_gpu_device_telemetry_5m`, and `archived_backend_telemetry_5m`. The aggregates are avg/min/max power, utilization, memory, temperature, SM clock, and request load, with sample counts, and node/GPU/backend names are copied in so history survives renames and deletions. This happens continuously, independent of Tier 1, so the archive trails the live tables by about one cycle, and Tier 1 = 0 (no tier-1 deletion) still archives. A bucket is complete 10 minutes after it ends. The first cycles after enabling backfill up to 14 days of history per cycle. An expired raw reading is deleted only after its bucket is in the archive, and a table whose rollup failed keeps its raw rows until a later cycle succeeds. The averages are kept for Tier 2 days, counted from when they were measured. With Tier 2 = 0 (the seeded default) or no archive DB, no averages are kept and expired raw readings are simply deleted. When averages are kept, a manual telemetry purge brings them up to date first, then deletes as requested. The raw `archived_*_telemetry` tables hold only legacy rows from before rollups existed and expire by `archived_at`.
 
 ### Backend Options Passthrough
 

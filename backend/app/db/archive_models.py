@@ -20,6 +20,9 @@ These mirror the app DB tables but have:
 - No relationship() declarations
 - autoincrement=False on PKs (preserve original IDs)
 - Added archived_at DateTime column
+
+The exception is the telemetry rollups at the end of the file, which are
+aggregates rather than mirrors (see the comment block there).
 """
 
 from datetime import datetime
@@ -35,6 +38,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
@@ -363,4 +367,132 @@ class ArchivedNodeTelemetry(ArchiveBase):
     __table_args__ = (
         Index("ix_arch_nt_node_time", "node_id", "timestamp"),
         Index("ix_arch_nt_archived_at", "archived_at"),
+    )
+
+
+# ------------------------------------------------------------------
+# Telemetry rollups (5-minute aggregates)
+# ------------------------------------------------------------------
+#
+# Raw telemetry is one row per GPU, node and backend every few seconds
+# (~35M rows a month), far too much to archive row for row.  The three
+# raw-snapshot tables above only hold legacy rows from before rollups
+# existed.  Instead, the retention cycle continuously aggregates live
+# telemetry into these 5-minute rows and keeps them for
+# retention.telemetry.tier2_days (services/retention.py).
+#
+# They are aggregates, not mirrors, so they differ from the tables above:
+# - ids are the archive's own (autoincrement); the natural key is
+#   (entity, bucket_start), unique so that re-running a window under
+#   INSERT IGNORE is idempotent.
+# - bucket_start is the UTC start of the 5-minute bucket.
+# - names, node and gpu_index are copied in, because backends and GPU
+#   devices are deleted, renamed and re-created far more often than their
+#   history should be orphaned.  They are nullable: a LEFT JOIN against a
+#   dimension row that is already gone yields NULL.
+# - sample_count counts every reading in the bucket; *_samples counts the
+#   non-NULL readings behind the matching averages, so a sensor gap can be
+#   told apart from a zero reading.
+
+
+class ArchivedNodeTelemetry5m(ArchiveBase):
+    """5-minute aggregate of node telemetry (server and GPU power)."""
+
+    __tablename__ = "archived_node_telemetry_5m"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    node_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    server_power_watts_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    server_power_watts_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    server_power_watts_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    server_power_samples: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    gpu_power_watts_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_power_watts_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_power_watts_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_power_samples: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("node_id", "bucket_start", name="uq_arch_nt5m_node_bucket"),
+        Index("ix_arch_nt5m_bucket", "bucket_start"),
+    )
+
+
+class ArchivedGPUDeviceTelemetry5m(ArchiveBase):
+    """5-minute aggregate of per-GPU device telemetry."""
+
+    __tablename__ = "archived_gpu_device_telemetry_5m"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    gpu_device_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gpu_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    gpu_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    power_draw_watts_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    power_draw_watts_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    power_draw_watts_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    power_samples: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    utilization_gpu_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    utilization_gpu_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    utilization_memory_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    memory_used_gb_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    memory_used_gb_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    temperature_gpu_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    temperature_gpu_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    clock_sm_mhz_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("gpu_device_id", "bucket_start", name="uq_arch_gdt5m_device_bucket"),
+        Index("ix_arch_gdt5m_bucket", "bucket_start"),
+    )
+
+
+class ArchivedBackendTelemetry5m(ArchiveBase):
+    """5-minute aggregate of backend telemetry (GPU share and request load)."""
+
+    __tablename__ = "archived_backend_telemetry_5m"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    backend_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    backend_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    node_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    gpu_power_draw_watts_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_power_draw_watts_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    power_samples: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    gpu_utilization_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gpu_memory_used_gb_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    active_requests_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    active_requests_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    queued_requests_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    queued_requests_max: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    requests_per_second_avg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("backend_id", "bucket_start", name="uq_arch_bt5m_backend_bucket"),
+        Index("ix_arch_bt5m_bucket", "bucket_start"),
     )

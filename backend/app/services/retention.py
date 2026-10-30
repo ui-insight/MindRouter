@@ -16,16 +16,19 @@
 """Tiered data retention service.
 
 Tier 1 (App DB): configurable retention periods per category.
-Tier 2 (Archive DB): longer retention with full data preserved.
+Tier 2 (Archive DB): longer retention.  Requests and chat keep full rows;
+telemetry keeps 5-minute averages (rolled up continuously, see
+archive_expired_telemetry).
 """
 
 import asyncio
 import json as _json
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from sqlalchemy import bindparam, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -771,63 +774,582 @@ async def archive_expired_chats(
     return counts
 
 
+# ------------------------------------------------------------------
+# Telemetry: continuous 5-minute rollups into the archive DB
+# ------------------------------------------------------------------
+#
+# Raw telemetry (one row per GPU, node and backend every few seconds, ~35M
+# rows a month) is far too much to archive row for row.  What is worth keeping
+# for the long term is the shape of the series, power above all, so when an
+# archive DB is configured and retention.telemetry.tier2_days > 0 the
+# retention cycle aggregates raw readings into 5-minute rows (avg/min/max and
+# sample counts, archive_models.Archived*Telemetry5m) kept for tier2_days,
+# while the raw rows stay in the app DB for tier1_days.
+#
+# Rollups run on every cycle, independent of tier 1, so the archive trails the
+# live tables by about one cycle rather than by tier1_days, and tier 1 = 0
+# (never delete raw rows) still archives.  A raw row is deleted only after the
+# bucket it falls in has been committed to the archive.
+#
+# Progress is read back from the archive itself: the newest bucket_start in a
+# rollup table is that table's watermark, and the next pass resumes after it.
+# That is only sound because each window is written in ONE archive
+# transaction.  A failure mid-window rolls the whole window back, so the
+# watermark never reflects a window that was written for some entities (some
+# GPUs, say) but not for the rest.
+
+_ROLLUP_BUCKET = timedelta(minutes=5)
+# A bucket is complete once it ended at least this long ago.  Readings are
+# stamped by the DB's NOW() when inserted, so a reading lands in a bucket that
+# has already been rolled up only if its writing transaction stays open longer
+# than this.
+_ROLLUP_SAFETY_MARGIN = timedelta(minutes=10)
+# Aggregate and commit in 6-hour windows.  Each GROUP BY then reads a bounded
+# slice of the timestamp index (~200k rows of gpu_device_telemetry), each
+# archive transaction stays short, and a failure loses one window of work.
+_ROLLUP_WINDOW = timedelta(hours=6)
+# At most this much history per table per cycle, so the first-deploy backfill
+# of 30-90 days spreads over a few hourly cycles instead of one long run that
+# holds the retention lock.
+_ROLLUP_MAX_SPAN_PER_CYCLE = timedelta(days=14)
+# Rows per multi-row INSERT IGNORE.  About 20 columns x 1000 rows keeps each
+# statement well under 1 MB, far below max_allowed_packet and the 16 MB
+# multi-packet bug that _bulk_insert_ignore works around (aiomysql#450).
+_ROLLUP_INSERT_BATCH = 1000
+# Rollup rows per DELETE when tier 2 expires them.  Shortening tier 2 can
+# expire millions of rows at once.
+_ROLLUP_PURGE_BATCH = 10000
+# Seek origin for a table that has never been rolled up, and the epoch of the
+# bucket expression below.  No reading predates it.
+_ROLLUP_EPOCH = datetime(2000, 1, 1)
+
+
+@dataclass(frozen=True)
+class _RollupSpec:
+    """The static SQL that rolls one live telemetry table into the archive.
+
+    Every statement is written out in full, with no interpolated
+    identifiers, so each can be read, grepped and EXPLAINed as it runs.
+
+    All three rollup statements bucket readings with the same expression::
+
+        TIMESTAMPADD(MINUTE,
+            FLOOR(TIMESTAMPDIFF(MINUTE, TIMESTAMP'2000-01-01 00:00:00',
+                                t.timestamp) / 5) * 5,
+            TIMESTAMP'2000-01-01 00:00:00')
+
+    It is plain DATETIME arithmetic against a fixed epoch, so it does not
+    depend on the session time_zone, which UNIX_TIMESTAMP()/FROM_UNIXTIME()
+    convert through.  The epoch is a TIMESTAMP literal rather than a string
+    because TIMESTAMPADD over a string returns VARCHAR, and over a DATETIME
+    returns DATETIME.  Readings are aggregated in a derived table and the
+    dimension table is joined afterwards, once per (entity, bucket) rather
+    than once per reading.
+    """
+
+    # Live app-DB table; also this table's key in the cycle summary.
+    table: str
+    # Oldest reading at or after :after.  The pass starts there, so it can
+    # jump over a stretch with no telemetry (a fleet outage, or a pause in
+    # archiving) instead of rescanning empty windows every cycle.
+    next_reading_sql: str
+    # One row per (entity, 5-minute bucket) for readings in [:start, :end).
+    # The column aliases are the archive model's column names.
+    rollup_sql: str
+    # Batched tier-1 delete.  The caller caps :cutoff at the rollup frontier.
+    delete_sql: str
+
+
+_NODE_ROLLUP = _RollupSpec(
+    table="node_telemetry",
+    next_reading_sql=(
+        "SELECT MIN(timestamp) FROM node_telemetry WHERE timestamp >= :after"
+    ),
+    rollup_sql="""
+        SELECT
+            a.node_id AS node_id,
+            n.name AS node_name,
+            a.bucket_start AS bucket_start,
+            a.sample_count AS sample_count,
+            a.server_power_watts_avg AS server_power_watts_avg,
+            a.server_power_watts_min AS server_power_watts_min,
+            a.server_power_watts_max AS server_power_watts_max,
+            a.server_power_samples AS server_power_samples,
+            a.gpu_power_watts_avg AS gpu_power_watts_avg,
+            a.gpu_power_watts_min AS gpu_power_watts_min,
+            a.gpu_power_watts_max AS gpu_power_watts_max,
+            a.gpu_power_samples AS gpu_power_samples
+        FROM (
+            SELECT
+                t.node_id AS node_id,
+                TIMESTAMPADD(MINUTE,
+                    FLOOR(TIMESTAMPDIFF(MINUTE, TIMESTAMP'2000-01-01 00:00:00',
+                                        t.timestamp) / 5) * 5,
+                    TIMESTAMP'2000-01-01 00:00:00') AS bucket_start,
+                COUNT(*) AS sample_count,
+                AVG(t.server_power_watts) AS server_power_watts_avg,
+                MIN(t.server_power_watts) AS server_power_watts_min,
+                MAX(t.server_power_watts) AS server_power_watts_max,
+                COUNT(t.server_power_watts) AS server_power_samples,
+                AVG(t.gpu_power_watts) AS gpu_power_watts_avg,
+                MIN(t.gpu_power_watts) AS gpu_power_watts_min,
+                MAX(t.gpu_power_watts) AS gpu_power_watts_max,
+                COUNT(t.gpu_power_watts) AS gpu_power_samples
+            FROM node_telemetry t
+            WHERE t.timestamp >= :start AND t.timestamp < :end
+            GROUP BY t.node_id, bucket_start
+        ) a
+        LEFT JOIN nodes n ON n.id = a.node_id
+    """,
+    delete_sql=(
+        "DELETE FROM node_telemetry WHERE timestamp < :cutoff LIMIT :batch"
+    ),
+)
+
+_GPU_DEVICE_ROLLUP = _RollupSpec(
+    table="gpu_device_telemetry",
+    next_reading_sql=(
+        "SELECT MIN(timestamp) FROM gpu_device_telemetry"
+        " WHERE timestamp >= :after"
+    ),
+    rollup_sql="""
+        SELECT
+            a.gpu_device_id AS gpu_device_id,
+            g.node_id AS node_id,
+            g.gpu_index AS gpu_index,
+            g.name AS gpu_name,
+            a.bucket_start AS bucket_start,
+            a.sample_count AS sample_count,
+            a.power_draw_watts_avg AS power_draw_watts_avg,
+            a.power_draw_watts_min AS power_draw_watts_min,
+            a.power_draw_watts_max AS power_draw_watts_max,
+            a.power_samples AS power_samples,
+            a.utilization_gpu_avg AS utilization_gpu_avg,
+            a.utilization_gpu_max AS utilization_gpu_max,
+            a.utilization_memory_avg AS utilization_memory_avg,
+            a.memory_used_gb_avg AS memory_used_gb_avg,
+            a.memory_used_gb_max AS memory_used_gb_max,
+            a.temperature_gpu_avg AS temperature_gpu_avg,
+            a.temperature_gpu_max AS temperature_gpu_max,
+            a.clock_sm_mhz_avg AS clock_sm_mhz_avg
+        FROM (
+            SELECT
+                t.gpu_device_id AS gpu_device_id,
+                TIMESTAMPADD(MINUTE,
+                    FLOOR(TIMESTAMPDIFF(MINUTE, TIMESTAMP'2000-01-01 00:00:00',
+                                        t.timestamp) / 5) * 5,
+                    TIMESTAMP'2000-01-01 00:00:00') AS bucket_start,
+                COUNT(*) AS sample_count,
+                AVG(t.power_draw_watts) AS power_draw_watts_avg,
+                MIN(t.power_draw_watts) AS power_draw_watts_min,
+                MAX(t.power_draw_watts) AS power_draw_watts_max,
+                COUNT(t.power_draw_watts) AS power_samples,
+                AVG(t.utilization_gpu) AS utilization_gpu_avg,
+                MAX(t.utilization_gpu) AS utilization_gpu_max,
+                AVG(t.utilization_memory) AS utilization_memory_avg,
+                AVG(t.memory_used_gb) AS memory_used_gb_avg,
+                MAX(t.memory_used_gb) AS memory_used_gb_max,
+                AVG(t.temperature_gpu) AS temperature_gpu_avg,
+                MAX(t.temperature_gpu) AS temperature_gpu_max,
+                AVG(t.clock_sm_mhz) AS clock_sm_mhz_avg
+            FROM gpu_device_telemetry t
+            WHERE t.timestamp >= :start AND t.timestamp < :end
+            GROUP BY t.gpu_device_id, bucket_start
+        ) a
+        LEFT JOIN gpu_devices g ON g.id = a.gpu_device_id
+    """,
+    delete_sql=(
+        "DELETE FROM gpu_device_telemetry WHERE timestamp < :cutoff LIMIT :batch"
+    ),
+)
+
+_BACKEND_ROLLUP = _RollupSpec(
+    table="backend_telemetry",
+    next_reading_sql=(
+        "SELECT MIN(timestamp) FROM backend_telemetry WHERE timestamp >= :after"
+    ),
+    rollup_sql="""
+        SELECT
+            a.backend_id AS backend_id,
+            b.name AS backend_name,
+            b.node_id AS node_id,
+            a.bucket_start AS bucket_start,
+            a.sample_count AS sample_count,
+            a.gpu_power_draw_watts_avg AS gpu_power_draw_watts_avg,
+            a.gpu_power_draw_watts_max AS gpu_power_draw_watts_max,
+            a.power_samples AS power_samples,
+            a.gpu_utilization_avg AS gpu_utilization_avg,
+            a.gpu_memory_used_gb_avg AS gpu_memory_used_gb_avg,
+            a.active_requests_avg AS active_requests_avg,
+            a.active_requests_max AS active_requests_max,
+            a.queued_requests_avg AS queued_requests_avg,
+            a.queued_requests_max AS queued_requests_max,
+            a.requests_per_second_avg AS requests_per_second_avg
+        FROM (
+            SELECT
+                t.backend_id AS backend_id,
+                TIMESTAMPADD(MINUTE,
+                    FLOOR(TIMESTAMPDIFF(MINUTE, TIMESTAMP'2000-01-01 00:00:00',
+                                        t.timestamp) / 5) * 5,
+                    TIMESTAMP'2000-01-01 00:00:00') AS bucket_start,
+                COUNT(*) AS sample_count,
+                AVG(t.gpu_power_draw_watts) AS gpu_power_draw_watts_avg,
+                MAX(t.gpu_power_draw_watts) AS gpu_power_draw_watts_max,
+                COUNT(t.gpu_power_draw_watts) AS power_samples,
+                AVG(t.gpu_utilization) AS gpu_utilization_avg,
+                AVG(t.gpu_memory_used_gb) AS gpu_memory_used_gb_avg,
+                AVG(t.active_requests) AS active_requests_avg,
+                MAX(t.active_requests) AS active_requests_max,
+                AVG(t.queued_requests) AS queued_requests_avg,
+                MAX(t.queued_requests) AS queued_requests_max,
+                AVG(t.requests_per_second) AS requests_per_second_avg
+            FROM backend_telemetry t
+            WHERE t.timestamp >= :start AND t.timestamp < :end
+            GROUP BY t.backend_id, bucket_start
+        ) a
+        LEFT JOIN backends b ON b.id = a.backend_id
+    """,
+    delete_sql=(
+        "DELETE FROM backend_telemetry WHERE timestamp < :cutoff LIMIT :batch"
+    ),
+)
+
+# Node first: server power is the series the archive exists for.
+_ROLLUP_SPECS = (_NODE_ROLLUP, _GPU_DEVICE_ROLLUP, _BACKEND_ROLLUP)
+
+
+def _rollup_models() -> dict[str, Any]:
+    """Map each live telemetry table to its 5-minute archive model.
+
+    Imported at call time, like every archive model in this module.
+    """
+    from backend.app.db.archive_models import (
+        ArchivedBackendTelemetry5m,
+        ArchivedGPUDeviceTelemetry5m,
+        ArchivedNodeTelemetry5m,
+    )
+
+    return {
+        "node_telemetry": ArchivedNodeTelemetry5m,
+        "gpu_device_telemetry": ArchivedGPUDeviceTelemetry5m,
+        "backend_telemetry": ArchivedBackendTelemetry5m,
+    }
+
+
+def _as_naive_utc(ts: datetime) -> datetime:
+    """Convert an aware datetime to the naive UTC that DATETIME columns hold.
+
+    A naive value is returned unchanged.
+    """
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    return ts
+
+
+def _floor_to_bucket(ts: datetime) -> datetime:
+    """Start of the 5-minute bucket that contains ``ts`` (naive UTC)."""
+    ts = _as_naive_utc(ts)
+    return ts.replace(minute=ts.minute - ts.minute % 5, second=0, microsecond=0)
+
+
+class _RollupPlan(NamedTuple):
+    """One table's rollup pass, as planned by _plan_rollup_windows."""
+
+    # Rollup frontier before this pass: every live reading older than it has
+    # already been aggregated, or never existed.  None only when neither the
+    # archive nor the live table holds anything to anchor on.
+    start: Optional[datetime]
+    # Contiguous, bucket-aligned [from, to) windows to aggregate, in order.
+    windows: list[tuple[datetime, datetime]]
+    # Last complete bucket boundary: floor(now - margin).
+    horizon: datetime
+
+
+def _plan_rollup_windows(
+    watermark: Optional[datetime],
+    next_reading: Optional[datetime],
+    now: datetime,
+    *,
+    window: timedelta = _ROLLUP_WINDOW,
+    max_span: timedelta = _ROLLUP_MAX_SPAN_PER_CYCLE,
+    margin: timedelta = _ROLLUP_SAFETY_MARGIN,
+) -> _RollupPlan:
+    """Plan one table's rollup pass.  Pure: no I/O.
+
+    ``watermark`` is the newest bucket_start already in the archive (None
+    if the rollup table is empty).  ``next_reading`` is the oldest live
+    reading in or after the bucket that follows the watermark (the
+    table-wide oldest reading when there is no watermark; None if there is
+    none).  ``now`` comes from the clock that stamped the readings.
+
+    The pass starts at the watermark's next bucket, moved forward to
+    ``next_reading``'s bucket when the readings start later, because nothing
+    in between exists to aggregate.  Windows run up to the horizon and stop
+    after ``max_span`` in total; ``window`` and ``max_span`` must be whole
+    multiples of 5 minutes so every window stays bucket-aligned.
+    """
+    horizon = _floor_to_bucket(_as_naive_utc(now) - margin)
+    resume = None
+    if watermark is not None:
+        resume = _floor_to_bucket(watermark) + _ROLLUP_BUCKET
+    if next_reading is None:
+        return _RollupPlan(resume, [], horizon)
+
+    start = _floor_to_bucket(next_reading)
+    if resume is not None and start < resume:
+        # The caller seeks from `resume`, so this only guards a misuse:
+        # never re-plan buckets the archive already holds.
+        start = resume
+
+    stop = min(horizon, start + max_span)
+    windows: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < stop:
+        upper = min(cursor + window, stop)
+        windows.append((cursor, upper))
+        cursor = upper
+    return _RollupPlan(start, windows, horizon)
+
+
+def _effective_delete_cutoff(
+    cutoff: Optional[datetime], rolled_through: Optional[datetime]
+) -> Optional[datetime]:
+    """Delete raw readings older than this; None means delete nothing.
+
+    The tier-1 cutoff, capped at the table's rollup frontier so that no
+    reading is deleted before its bucket is in the archive.  None when
+    there is no tier-1 cutoff (tier 1 = 0, or a rollup-only call) or no
+    known frontier.
+    """
+    if cutoff is None or rolled_through is None:
+        return None
+    return min(_as_naive_utc(cutoff), _as_naive_utc(rolled_through))
+
+
+def _iso(ts: Optional[datetime]) -> Optional[str]:
+    return ts.isoformat() if ts is not None else None
+
+
+async def _rollback_quietly(db: AsyncSession) -> None:
+    """Roll back after a failure without masking the error that caused it."""
+    try:
+        await db.rollback()
+    except Exception:
+        pass
+
+
+async def _telemetry_db_now(app_db: AsyncSession) -> datetime:
+    """Read the app DB's clock, which is the clock that stamped the readings.
+
+    Telemetry timestamps come from the columns' server default, NOW().
+    Judging bucket completeness by the app host's clock instead would shift
+    every window by any host clock skew, or by a DB time zone other than UTC.
+    """
+    now = (await app_db.execute(text("SELECT NOW()"))).scalar()
+    await app_db.commit()
+    return now
+
+
+async def _rollup_telemetry_table(
+    app_db: AsyncSession,
+    archive_db: AsyncSession,
+    spec: _RollupSpec,
+    model: Any,
+    now: datetime,
+    insert_batch: int = _ROLLUP_INSERT_BATCH,
+) -> dict[str, Any]:
+    """Archive one table's complete buckets that are not in the archive yet.
+
+    Each window is aggregated in SQL on the app DB (raw rows never reach
+    Python), then written with multi-row INSERT IGNORE inside one archive
+    transaction, committed once at the end of the window.
+
+    Returns ``rolled_through``, the end of the last committed window: every
+    live reading older than it has been aggregated.  It is None only when
+    the table has never held a reading.  Raises on failure.  Windows
+    committed before the failure stay committed, and the caller must leave
+    this table's raw rows alone for the cycle.
+    """
+    table = model.__table__
+
+    watermark = (
+        await archive_db.execute(select(func.max(model.bucket_start)))
+    ).scalar()
+    # End the read so each window below is exactly one archive transaction.
+    await archive_db.commit()
+
+    after = (
+        _floor_to_bucket(watermark) + _ROLLUP_BUCKET
+        if watermark is not None
+        else _ROLLUP_EPOCH
+    )
+    next_reading = (
+        await app_db.execute(text(spec.next_reading_sql), {"after": after})
+    ).scalar()
+    await app_db.commit()
+
+    plan = _plan_rollup_windows(watermark, next_reading, now)
+    rolled_through = plan.start
+    rows_written = 0
+
+    for window_start, window_end in plan.windows:
+        result = await app_db.execute(
+            text(spec.rollup_sql), {"start": window_start, "end": window_end}
+        )
+        rows = [dict(row) for row in result.mappings().all()]
+        # End the app-DB read now.  A snapshot held across the archive write,
+        # or across the whole backfill, would pin undo history on the busiest
+        # tables in the app DB.
+        await app_db.commit()
+
+        window_written = 0
+        try:
+            for i in range(0, len(rows), insert_batch):
+                inserted = await archive_db.execute(
+                    table.insert()
+                    .prefix_with("IGNORE")
+                    .values(rows[i:i + insert_batch])
+                )
+                window_written += inserted.rowcount or 0
+            await archive_db.commit()
+        except BaseException:
+            await _rollback_quietly(archive_db)
+            raise
+
+        rows_written += window_written
+        rolled_through = window_end
+
+    return {
+        "rows_written": rows_written,
+        "windows": len(plan.windows),
+        "rolled_through": rolled_through,
+        "more_pending": bool(plan.windows) and rolled_through < plan.horizon,
+    }
+
+
+async def _delete_telemetry_before(
+    app_db: AsyncSession, spec: _RollupSpec, before: datetime, batch: int
+) -> int:
+    """Delete one table's readings older than ``before`` in batches.
+
+    Commits after each batch so InnoDB lock duration stays bounded.
+    """
+    total = 0
+    while True:
+        result = await app_db.execute(
+            text(spec.delete_sql), {"cutoff": before, "batch": batch}
+        )
+        deleted = result.rowcount
+        total += deleted
+        await app_db.commit()
+        if deleted > 0:
+            logger.info(
+                "retention_telemetry_batch",
+                table=spec.table,
+                deleted=deleted,
+                total=total,
+            )
+        if deleted < batch:
+            return total
+
+
 async def archive_expired_telemetry(
     app_db: AsyncSession,
     archive_db: AsyncSession,
-    cutoff: datetime,
+    cutoff: Optional[datetime],
     batch_size: int,
-) -> dict[str, int]:
-    """Delete expired telemetry from app DB in batches using direct SQL.
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Roll telemetry up into 5-minute archive rows, then delete expired raw rows.
 
-    Telemetry data is high-volume and low-value for archival, so we
-    delete directly with ``DELETE ... WHERE timestamp < :cutoff LIMIT :n``
-    instead of the SELECT→archive→DELETE-by-IDs pattern.  This avoids
-    loading millions of rows into Python and prevents lock contention.
+    Two steps for each live table (node, GPU device, backend):
 
-    A small recent sample is archived for audit purposes, but the bulk
-    delete does not archive (the data is reproducible from sidecar logs).
+    1. Rollup.  Every complete 5-minute bucket that is not in the archive
+       yet is aggregated in SQL (avg/min/max plus sample counts) and written
+       to the table's Archived*Telemetry5m rollup table, in 6-hour windows
+       that are each one archive transaction, at most 14 days of history
+       per table per call.  It runs whether or not anything is due for
+       deletion (``cutoff`` None = rollup only), so the archive stays about
+       one retention cycle behind the live tables.
+    2. Delete.  Raw readings older than ``cutoff`` are deleted in batches,
+       but never past the table's rollup frontier: a reading goes only after
+       its bucket has been committed to the archive.  When a table's rollup
+       fails, its raw rows are left alone this cycle.
+
+    Raw readings are not copied to the archive one by one; the rollups are
+    the long-term record.  The raw archived_*_telemetry tables only hold
+    legacy rows.  ``now`` defaults to the app DB's clock, which stamped the
+    readings.
+
+    Returns, per table: rollup rows written, windows aggregated, the rollup
+    frontier (ISO string), raw rows deleted, and ``error`` when the rollup
+    failed.
     """
-    counts = {
-        "backend_telemetry": 0,
-        "gpu_device_telemetry": 0,
-        "node_telemetry": 0,
-    }
+    models = _rollup_models()
+    if now is None:
+        now = await _telemetry_db_now(app_db)
+    # A larger batch than the request tables use: telemetry rows are small
+    # and have no FK children.
+    tel_batch = max(batch_size or 0, 10000)
 
-    # Use a larger batch for telemetry — these are simple rows with
-    # no FK children, so big deletes are safe.
-    tel_batch = max(batch_size, 10000)
+    summary: dict[str, Any] = {}
+    for spec in _ROLLUP_SPECS:
+        entry: dict[str, Any] = {
+            "rolled_up": 0,
+            "windows": 0,
+            "rolled_through": None,
+            "deleted": 0,
+        }
+        summary[spec.table] = entry
 
-    for table_name, key in [
-        ("backend_telemetry", "backend_telemetry"),
-        ("gpu_device_telemetry", "gpu_device_telemetry"),
-        ("node_telemetry", "node_telemetry"),
-    ]:
-        assert table_name in _TELEMETRY_TABLES  # closed allowlist, not input
-        while True:
-            result = await app_db.execute(
-                text(
-                    f"DELETE FROM {table_name}"
-                    f" WHERE timestamp < :cutoff"
-                    f" LIMIT :batch"
-                ),
-                {"cutoff": cutoff, "batch": tel_batch},
+        try:
+            progress = await _rollup_telemetry_table(
+                app_db, archive_db, spec, models[spec.table], now
             )
-            deleted = result.rowcount
-            counts[key] += deleted
-            await app_db.commit()
-
-            if deleted > 0:
-                logger.info(
-                    "retention_telemetry_batch",
-                    table=table_name,
-                    deleted=deleted,
-                    total=counts[key],
+        except Exception as exc:
+            await _rollback_quietly(app_db)
+            await _rollback_quietly(archive_db)
+            entry["error"] = f"{type(exc).__name__}: {exc}"[:500]
+            logger.warning(
+                "retention_telemetry_rollup_failed",
+                table=spec.table,
+                error=entry["error"],
+                exc_info=True,
+            )
+            if cutoff is not None:
+                logger.warning(
+                    "retention_telemetry_delete_skipped",
+                    table=spec.table,
+                    reason="rollup_failed",
                 )
+            continue
 
-            if deleted < tel_batch:
-                break  # No more rows to delete
+        entry["rolled_up"] = progress["rows_written"]
+        entry["windows"] = progress["windows"]
+        entry["rolled_through"] = _iso(progress["rolled_through"])
+        if progress["windows"]:
+            logger.info(
+                "retention_telemetry_rollup",
+                table=spec.table,
+                rolled_up=progress["rows_written"],
+                windows=progress["windows"],
+                rolled_through=entry["rolled_through"],
+                more_pending=progress["more_pending"],
+            )
 
-    return counts
+        if cutoff is None:
+            continue
+        before = _effective_delete_cutoff(cutoff, progress["rolled_through"])
+        if before is None:
+            # No frontier means the live table has never held a reading, so
+            # there is nothing to delete.
+            continue
+        entry["deleted"] = await _delete_telemetry_before(
+            app_db, spec, before, tel_batch
+        )
+
+    return summary
 
 
 async def cleanup_expired_telemetry(
@@ -869,10 +1391,37 @@ async def cleanup_expired_telemetry(
 # ------------------------------------------------------------------
 
 
+async def _purge_rollups_before(
+    archive_db: AsyncSession, model: Any, cutoff: datetime,
+    batch: int = _ROLLUP_PURGE_BATCH,
+) -> int:
+    """Delete one rollup table's buckets that start before ``cutoff``.
+
+    Runs in batches, committing after each one.
+    """
+    total = 0
+    while True:
+        result = await archive_db.execute(
+            delete(model)
+            .where(model.bucket_start < cutoff)
+            .with_dialect_options(mysql_limit=batch)
+        )
+        deleted = result.rowcount or 0
+        total += deleted
+        await archive_db.commit()
+        if deleted < batch:
+            return total
+
+
 async def purge_expired_archives(
     archive_db: AsyncSession, config: dict[str, Any]
 ) -> dict[str, int]:
-    """Delete from archive DB where archived_at is older than tier2_days."""
+    """Delete archive rows older than each category's tier2_days.
+
+    Archived requests, chat and legacy raw telemetry expire by archived_at.
+    The 5-minute telemetry rollups expire by bucket_start, the time they
+    describe, so tier 2 is the amount of history kept.
+    """
     from backend.app.db.archive_models import (
         ArchivedArtifact,
         ArchivedBackendTelemetry,
@@ -956,7 +1505,8 @@ async def purge_expired_archives(
             )
             counts["chat_conversations"] = r.rowcount
 
-    # Purge telemetry archives
+    # Purge telemetry archives: the legacy raw snapshots, archived before
+    # 5-minute rollups replaced them, by archive time.
     tel_tier2 = config.get("retention.telemetry.tier2_days", 0)
     if tel_tier2 > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=tel_tier2)
@@ -972,6 +1522,18 @@ async def purge_expired_archives(
 
     await archive_db.flush()
     await archive_db.commit()
+
+    # The 5-minute rollups, by the time they describe.  Batched with a commit
+    # per batch, because shortening tier 2 can expire millions of rows at once.
+    if tel_tier2 > 0:
+        rollup_cutoff = _as_naive_utc(
+            datetime.now(timezone.utc) - timedelta(days=tel_tier2)
+        )
+        for table_name, model in _rollup_models().items():
+            counts[f"{table_name}_5m"] = await _purge_rollups_before(
+                archive_db, model, rollup_cutoff
+            )
+
     return counts
 
 
@@ -993,6 +1555,9 @@ async def get_archive_stats(archive_db: AsyncSession) -> dict[str, Any]:
         "archived_backend_telemetry",
         "archived_gpu_device_telemetry",
         "archived_node_telemetry",
+        "archived_node_telemetry_5m",
+        "archived_gpu_device_telemetry_5m",
+        "archived_backend_telemetry_5m",
     ]
 
     stats: dict[str, Any] = {"tables": {}, "total_rows": 0, "total_size_mb": 0.0}
@@ -1488,9 +2053,10 @@ async def run_purge(category: str, older_than_days: int) -> dict[str, Any]:
 
     Runs the same archive-then-delete pipeline the retention cycle
     uses, just with an explicit cutoff — so an archive DB (when
-    configured) still receives requests/chat/telemetry rows before they
-    leave the app DB, and file artifacts are removed with their rows.
-    older_than_days=0 purges everything in the category.
+    configured) still receives requests/chat rows, and telemetry's
+    5-minute averages, before they leave the app DB, and file artifacts
+    are removed with their rows.  older_than_days=0 purges everything in
+    the category.
     """
     if category not in PURGE_CATEGORIES:
         raise ValueError(f"Unknown purge category: {category}")
@@ -1541,6 +2107,21 @@ async def run_purge(category: str, older_than_days: int) -> dict[str, Any]:
                     "orphan_attachments": orphans,
                 }
     elif category == "telemetry":
+        if archive_configured and config.get("retention.telemetry.tier2_days", 0) > 0:
+            # Bring the 5-minute averages up to date first, so complete
+            # buckets reach the archive before their raw rows go.  Best
+            # effort: the purge is an explicit admin action and runs
+            # regardless, even over readings the rollup could not cover
+            # (the last ~10 minutes, or everything if the archive is down).
+            try:
+                async with get_async_db_context() as app_db:
+                    async with get_archive_db_context() as archive_db:
+                        summary["rollup"] = await archive_expired_telemetry(
+                            app_db, archive_db, None, batch
+                        )
+            except Exception as exc:
+                logger.warning("purge_telemetry_rollup_failed", error=str(exc))
+                summary["rollup"] = {"error": str(exc)[:500]}
         async with get_async_db_context() as app_db:
             summary["result"] = await cleanup_expired_telemetry(app_db, cutoff)
     elif category == "request_images":
@@ -1680,20 +2261,28 @@ async def run_retention_cycle() -> dict[str, Any]:
                     "orphan_attachments": orphans,
                 }
 
+    # Telemetry.  With an archive DB and tier 2 > 0, 5-minute averages roll
+    # into the archive on every cycle, even when tier 1 is 0 (keep raw rows
+    # forever), and expired raw rows are deleted only once their buckets are
+    # archived.  Otherwise expired raw rows are simply deleted.
     telemetry_tier1 = config.get("retention.telemetry.tier1_days", 30)
-    if telemetry_tier1 > 0:
+    telemetry_tier2 = config.get("retention.telemetry.tier2_days", 0)
+    if archive_configured and telemetry_tier2 > 0:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
+            if telemetry_tier1 > 0
+            else None
+        )
+        async with get_async_db_context() as app_db:
+            async with get_archive_db_context() as archive_db:
+                summary["telemetry"] = await archive_expired_telemetry(
+                    app_db, archive_db, cutoff,
+                    config.get("retention.batch_size", 500),
+                )
+    elif telemetry_tier1 > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
-        telemetry_tier2 = config.get("retention.telemetry.tier2_days", 0)
-        if archive_configured and telemetry_tier2 > 0:
-            async with get_async_db_context() as app_db:
-                async with get_archive_db_context() as archive_db:
-                    summary["telemetry"] = await archive_expired_telemetry(
-                        app_db, archive_db, cutoff,
-                        config.get("retention.batch_size", 500),
-                    )
-        else:
-            async with get_async_db_context() as app_db:
-                summary["telemetry"] = await cleanup_expired_telemetry(app_db, cutoff)
+        async with get_async_db_context() as app_db:
+            summary["telemetry"] = await cleanup_expired_telemetry(app_db, cutoff)
 
     # Tier 2: purge old archives
     if archive_configured:
