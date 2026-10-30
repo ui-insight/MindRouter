@@ -1106,199 +1106,76 @@ class TestManualPurgeWiring:
 
 
 # ===================================================================
-# The backend registry's TELEMETRY_RETENTION_DAYS delete
+# Raw telemetry has exactly one deleter: the retention cycle
 # ===================================================================
 
-
-def _registry_method(name):
-    """Compile one BackendRegistry method from registry.py on its own.
-
-    Importing registry.py pulls in the db models, adapters and session
-    chain.  The method under test needs only the datetime names and a
-    logger, and imports the retention service at call time, so it runs
-    against those and nothing else: any other global it touched (``crud``,
-    say) would raise NameError.
-    """
-    tree = ast.parse(_REGISTRY_PATH.read_text())
-    (cls,) = [
-        n for n in tree.body
-        if isinstance(n, ast.ClassDef) and n.name == "BackendRegistry"
-    ]
-    (fn,) = [
-        n for n in cls.body
-        if isinstance(n, ast.AsyncFunctionDef) and n.name == name
-    ]
-    namespace = {
-        "datetime": datetime, "timedelta": timedelta, "timezone": timezone,
-        "logger": _LOG,
-    }
-    code = compile(ast.Module(body=[fn], type_ignores=[]), str(_REGISTRY_PATH), "exec")
-    exec(code, namespace)
-    return namespace[name]
+# Age-based deletes of the raw telemetry tables (filtered on ``timestamp``),
+# matched as whole identifiers: the archive's archived_*_telemetry_5m tables
+# may be purged, and delete_backend may drop a removed backend's own rows.
+_RAW_DELETE_RE = re.compile(
+    r"DELETE\s+FROM\s+`?(node_telemetry|gpu_device_telemetry|backend_telemetry)`?\s+WHERE\s+`?timestamp`?"
+    r"|\bdelete\(\s*(NodeTelemetry|GPUDeviceTelemetry|BackendTelemetry)\s*\)\s*\.where\(\s*\2\.timestamp\b",
+    re.IGNORECASE,
+)
 
 
-class TestRegistryTelemetryCleanup:
-    async def test_goes_through_the_retention_services_capped_delete(self):
-        # Before: three plain ORM DELETEs at now - TELEMETRY_RETENTION_DAYS
-        # with no rollup frontier, which removed readings that a stalled
-        # rollup had never averaged.
-        calls = []
-        retention_stub = types.ModuleType("backend.app.services.retention")
+class TestSingleTelemetryDeleter:
+    """The backend registry used to run its own hourly loop deleting raw
+    telemetry after TELEMETRY_RETENTION_DAYS (default 30, never passed through
+    docker-compose), which silently overrode Tier 1: setting Tier 1 to 90 days
+    on Admin -> Retention kept nothing past 30.  Tier 1 is now the only control."""
 
-        async def delete_raw_telemetry_older_than(cutoff):
-            calls.append(cutoff)
-            return {"node_telemetry": 3, "gpu_device_telemetry": 0,
-                    "backend_telemetry": 0}
+    def test_registry_runs_no_telemetry_cleanup(self):
+        tree = ast.parse(_REGISTRY_PATH.read_text())
+        (cls,) = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "BackendRegistry"]
+        methods = {n.name for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert "_telemetry_cleanup_loop" not in methods
+        assert "_cleanup_old_telemetry" not in methods
+        src = _REGISTRY_PATH.read_text()
+        assert "telemetry_retention_days" not in src
+        assert "telemetry_cleanup_interval" not in src
 
-        retention_stub.delete_raw_telemetry_older_than = delete_raw_telemetry_older_than
-        method = _registry_method("_cleanup_old_telemetry")
-        registry = types.SimpleNamespace(
-            _settings=types.SimpleNamespace(telemetry_retention_days=30)
+    def test_settings_no_longer_define_the_registry_knobs(self):
+        tree = ast.parse((_APP / "settings.py").read_text())
+        fields = {
+            t.target.id
+            for n in ast.walk(tree) if isinstance(n, ast.ClassDef)
+            for t in n.body if isinstance(t, ast.AnnAssign) and isinstance(t.target, ast.Name)
+        }
+        assert "telemetry_retention_days" not in fields
+        assert "telemetry_cleanup_interval" not in fields
+
+    def test_only_the_retention_service_deletes_raw_telemetry(self):
+        offenders = []
+        for path in sorted(_APP.rglob("*.py")):
+            rel = path.relative_to(_APP).as_posix()
+            if rel.startswith("tests/") or rel == "services/retention.py":
+                continue
+            for m in _RAW_DELETE_RE.finditer(path.read_text()):
+                offenders.append(f"{rel}: {m.group(0)}")
+        assert offenders == []
+
+    def test_the_guard_pattern_catches_both_delete_styles(self):
+        # Mutation check for the scan above: it must see raw and ORM deletes,
+        # and must not trip on the archive's rollup tables.
+        assert _RAW_DELETE_RE.search("DELETE FROM node_telemetry WHERE timestamp < :c")
+        assert _RAW_DELETE_RE.search(
+            "await db.execute(delete(GPUDeviceTelemetry).where(GPUDeviceTelemetry.timestamp < cutoff))"
         )
-        with _pinned_modules({"backend.app.services.retention": retention_stub}):
-            await method(registry)
-
-        (cutoff,) = calls
-        _assert_days_ago(cutoff, 30)
-        (record,) = [k for (_, e, k) in _LOG.records if e == "telemetry_cleaned_up"]
-        assert record["node_telemetry_deleted"] == 3
-        assert record["gpu_telemetry_deleted"] == 0
-
-    def test_retention_exports_the_entry_point_the_registry_imports(self):
-        assert callable(retention.delete_raw_telemetry_older_than)
-
-
-@pytest.fixture
-def raw_delete(monkeypatch):
-    """Stub the two delete paths behind delete_raw_telemetry_older_than."""
-    state = types.SimpleNamespace(
-        config=_config(tier1_days=90, tier2_days=365), calls=[]
-    )
-
-    async def get_retention_config(db):
-        return state.config
-
-    async def cleanup_expired_telemetry(app_db, cutoff):
-        state.calls.append(("cleanup_expired_telemetry", app_db.kind, cutoff))
-        return {"node_telemetry": 1}
-
-    async def delete_rolled_up(app_db, archive_db, cutoff, batch):
-        state.calls.append(
-            ("_delete_rolled_up_telemetry", app_db.kind, archive_db.kind, cutoff, batch)
+        assert not _RAW_DELETE_RE.search("DELETE FROM archived_node_telemetry_5m WHERE bucket_start < :c")
+        assert not _RAW_DELETE_RE.search("delete(ArchivedNodeTelemetry5m).where(x)")
+        # delete_backend's cascade of the removed backend's own rows is not retention
+        assert not _RAW_DELETE_RE.search(
+            "delete(BackendTelemetry).where(BackendTelemetry.backend_id == backend_id)"
         )
-        return {"node_telemetry": 2}
 
-    monkeypatch.setattr(retention, "get_retention_config", get_retention_config)
-    monkeypatch.setattr(retention, "cleanup_expired_telemetry", cleanup_expired_telemetry)
-    monkeypatch.setattr(retention, "_delete_rolled_up_telemetry", delete_rolled_up)
-    return state
-
-
-class TestDeleteRawTelemetryOlderThan:
-    CUTOFF = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
-
-    async def test_capped_at_the_archive_while_averages_are_kept(self, raw_delete):
-        with _pinned_modules(_wiring_modules(True)):
-            counts = await retention.delete_raw_telemetry_older_than(self.CUTOFF)
-        assert raw_delete.calls == [
-            ("_delete_rolled_up_telemetry", "app", "archive", self.CUTOFF, 10000),
-        ]
-        assert counts == {"node_telemetry": 2}
-
-    async def test_a_larger_configured_batch_is_kept(self, raw_delete):
-        raw_delete.config["retention.batch_size"] = 25000
-        with _pinned_modules(_wiring_modules(True)):
-            await retention.delete_raw_telemetry_older_than(self.CUTOFF)
-        assert raw_delete.calls[0][-1] == 25000
-
-    @pytest.mark.parametrize("archive,tier2", [(False, 365), (True, 0)])
-    async def test_plain_delete_without_archival(self, raw_delete, archive, tier2):
-        raw_delete.config = _config(tier1_days=90, tier2_days=tier2)
-        with _pinned_modules(_wiring_modules(archive)):
-            counts = await retention.delete_raw_telemetry_older_than(self.CUTOFF)
-        assert raw_delete.calls == [("cleanup_expired_telemetry", "app", self.CUTOFF)]
-        assert counts == {"node_telemetry": 1}
-
-
-class _FrontierArchiveDb:
-    """Archive session answering MAX(bucket_start) per rollup table."""
-
-    def __init__(self, newest, unreadable=()):
-        self.newest = newest
-        self.unreadable = set(unreadable)
-        self.rollbacks = 0
-
-    async def execute(self, stmt, params=None):
-        assert isinstance(stmt, Select)
-        sql = str(stmt.compile(dialect=mysql.dialect()))
-        assert "max(" in sql.lower()
-        table = re.search(r"FROM (\w+)", sql).group(1)
-        if table in self.unreadable:
-            raise RuntimeError("archive unreachable")
-        return _Result(scalar=self.newest.get(table))
-
-    async def commit(self):
-        pass
-
-    async def rollback(self):
-        self.rollbacks += 1
-
-
-class TestDeleteRolledUpTelemetry:
-    CUTOFF = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
-
-    @pytest.fixture
-    def deletes(self, monkeypatch):
-        calls = []
-
-        async def fake_delete(app_db, spec, before, batch):
-            calls.append((spec.table, before, batch))
-            return 5
-
-        monkeypatch.setattr(retention, "_delete_telemetry_before", fake_delete)
-        monkeypatch.setattr(retention, "_rollup_models", lambda: dict(ROLLUP_MODELS))
-        return calls
-
-    async def test_each_table_stops_at_its_archived_frontier(self, deletes):
-        archive = _FrontierArchiveDb({
-            # Caught up: the cutoff applies.
-            "archived_node_telemetry_5m": dt(2026, 10, 30, 11, 55),
-            # Rollups stalled on Sep 12: nothing after that bucket may go,
-            # although it is older than the cutoff.
-            "archived_gpu_device_telemetry_5m": dt(2026, 9, 12, 7, 40),
-            # Nothing archived yet (first rollup still to come).
-            "archived_backend_telemetry_5m": None,
-        })
-        counts = await retention._delete_rolled_up_telemetry(
-            _NullDb(), archive, self.CUTOFF, 10000
-        )
-        assert deletes == [
-            ("node_telemetry", dt(2026, 9, 30, 12, 0), 10000),
-            ("gpu_device_telemetry", dt(2026, 9, 12, 7, 45), 10000),
-        ]
-        assert counts == {"node_telemetry": 5, "gpu_device_telemetry": 5,
-                          "backend_telemetry": 0}
-        (record,) = [k for (_, e, k) in _LOG.records
-                     if e == "telemetry_cleanup_delete_skipped"]
-        assert record == {"table": "backend_telemetry", "reason": "nothing_archived"}
-
-    async def test_an_unreadable_archive_deletes_nothing_and_warns(self, deletes):
-        archive = _FrontierArchiveDb({}, unreadable={
-            "archived_node_telemetry_5m", "archived_gpu_device_telemetry_5m",
-            "archived_backend_telemetry_5m",
-        })
-        counts = await retention._delete_rolled_up_telemetry(
-            _NullDb(), archive, self.CUTOFF, 10000
-        )
-        assert deletes == []
-        assert counts == {t: 0 for t in _TABLES}
-        warnings = [(e, k["table"], k["reason"]) for (lvl, e, k) in _LOG.records
-                    if lvl == "warning"]
-        assert warnings == [
-            ("telemetry_cleanup_delete_skipped", t, "archive_unreadable")
-            for t in _TABLES
-        ]
-        assert archive.rollbacks == 3
+    def test_retention_service_keeps_both_raw_delete_paths(self):
+        # With averages kept: rollup, then a delete capped at the frontier.
+        # Without: the plain batched delete.  Nothing else.
+        assert callable(retention.archive_expired_telemetry)
+        assert callable(retention.cleanup_expired_telemetry)
+        assert not hasattr(retention, "delete_raw_telemetry_older_than")
+        assert not hasattr(retention, "_delete_rolled_up_telemetry")
 
 
 # ===================================================================
@@ -1480,15 +1357,15 @@ class TestRetentionPage:
         assert "Not archived" not in html
         assert "always 0" not in html
         assert "5-minute averages" in html
-        assert "TELEMETRY_RETENTION_DAYS" in html
+        assert "TELEMETRY_RETENTION_DAYS" not in html
 
-    def test_tier1_help_puts_the_server_setting_under_the_same_rule(self):
-        # The registry's TELEMETRY_RETENTION_DAYS delete now waits for the
-        # averages too, which is what makes "only after its average is in
-        # the archive" true.
+    def test_tier1_help_says_it_is_the_only_raw_delete(self):
+        # Tier 1 used to be overridden by the registry's own 30-day loop; it
+        # is now the only setting that deletes raw readings, and says so.
         help_text = _element_text(_render_policies(True)[0], "retention_telemetry_tier1_help")
         assert "deleted only after its average is in the archive" in help_text
-        assert "TELEMETRY_RETENTION_DAYS setting (default 30) also deletes raw readings, under the same rule" in help_text
+        assert "This is the only setting that deletes raw readings." in help_text
+        assert "TELEMETRY_RETENTION_DAYS" not in help_text
 
     def test_tier2_zero_is_described_as_keeping_archived_averages(self):
         # Tier 2 = 0 skips the rollup purge, so averages already archived
@@ -1533,9 +1410,11 @@ class TestDocs:
 
     def test_docs_match_the_review_fixes(self):
         docs = " ".join(self.DOCS.split())
-        # The registry's delete follows the rollup frontier.
-        assert "by the retention cycle and by the registry's `TELEMETRY_RETENTION_DAYS` cleanup alike" in docs
-        assert "a stalled rollup holds raw readings back instead of losing them" in docs
+        # The retention cycle is the only deleter of raw telemetry; the
+        # registry's TELEMETRY_RETENTION_DAYS loop and its settings are gone.
+        assert "by the retention cycle (the only deleter of raw telemetry)" in docs
+        assert "were removed in this release and are ignored if set" in docs
+        assert "| `TELEMETRY_RETENTION_DAYS`" not in docs
         # Backfill never reaches past tier 2.
         assert "starting no further back than Tier 2" in docs
         # Tier 2 = 0 keeps what is archived; the purge rollup is best effort.

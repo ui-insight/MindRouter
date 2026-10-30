@@ -288,7 +288,7 @@ def _retention_config(env, **telemetry):
 def _runtime(env, monkeypatch, config, archive_wrapper=None):
     """Point retention's call-time session and settings imports at the scratch
     databases, with an archive configured and ``config`` as app_config, so the
-    entry points (run_purge, delete_raw_telemetry_older_than) run unchanged."""
+    entry points (run_purge) run unchanged."""
     session_mod = types.ModuleType("backend.app.db.session")
 
     @contextlib.asynccontextmanager
@@ -854,15 +854,12 @@ async def test_manual_purge_with_the_archive_down_names_what_it_lost(monkeypatch
         assert ("warning", "purge_telemetry_rollup_incomplete") in events
 
 
-async def test_registry_delete_never_outruns_a_failed_rollup(monkeypatch):
-    # The backend registry deletes raw readings after TELEMETRY_RETENTION_DAYS
-    # (30) on its own loop.  It used to do so with no regard for the rollups:
-    # with the archive failing for longer than that, readings were deleted
-    # before they were ever averaged, and once the archive recovered the
-    # rollup resumed at the oldest surviving reading, reporting success over
-    # a permanent hole.
+async def test_a_failed_rollup_never_lets_the_cycle_delete_unaveraged_readings():
+    # The retention cycle is the only deleter of raw telemetry (the backend
+    # registry's own 30-day loop is gone).  With the archive failing for
+    # longer than Tier 1, it must keep readings that were never averaged, and
+    # once the archive recovers the backfill must leave no hole.
     async with _scratch() as env:
-        retention = env.mods.retention
         await _seed_dimensions(env)
         now = datetime(2026, 10, 30, 12, 0)
         days = list(range(40, 0, -1))
@@ -870,54 +867,38 @@ async def test_registry_delete_never_outruns_a_failed_rollup(monkeypatch):
             _node(1, now - timedelta(days=d), 1000 + d, 10.0) for d in days
         ])
         raw, node_m = env.mods.models.NodeTelemetry, _models(env)[0]
-        config = _retention_config(env, tier1_days=30, tier2_days=365)
-        registry_cutoff = now - timedelta(days=30)
+        cutoff = now - timedelta(days=30)
 
-        # 1. The archive is down.  The cycle's rollup fails and its own
-        #    delete is skipped; the registry cannot read a frontier either.
-        failed = await _run(env, cutoff=registry_cutoff, now=now,
+        # 1. The archive is down: the rollup fails and the delete is skipped.
+        failed = await _run(env, cutoff=cutoff, now=now,
                             archive_wrapper=_UnreachableArchive, tier2_days=365)
         assert "archive unreachable" in failed["node_telemetry"]["error"]
-        with _runtime(env, monkeypatch, config, archive_wrapper=_UnreachableArchive):
-            assert await retention.delete_raw_telemetry_older_than(registry_cutoff) == {
-                "node_telemetry": 0, "gpu_device_telemetry": 0, "backend_telemetry": 0,
-            }
+        assert failed["node_telemetry"]["deleted"] == 0
 
-        # 2. The archive answers but rejects writes: nothing is archived,
-        #    so there is still no frontier to delete up to.
+        # 2. The archive answers but rejects writes: still nothing archived,
+        #    so still nothing deleted.
         def reject_writes(session):
             return _FailingArchive(session, 1)
 
-        failed = await _run(env, cutoff=registry_cutoff, now=now,
+        failed = await _run(env, cutoff=cutoff, now=now,
                             archive_wrapper=reject_writes, tier2_days=365)
         assert "simulated archive failure" in failed["node_telemetry"]["error"]
-        with _runtime(env, monkeypatch, config):
-            assert (await retention.delete_raw_telemetry_older_than(registry_cutoff))[
-                "node_telemetry"
-            ] == 0
         assert len(await _raw_timestamps(env, raw)) == 40
 
-        # 3. The archive recovers.  The backfill takes three cycles, and the
-        #    registry deletes only what has been averaged meanwhile.
-        for cycle in range(3):
-            await _run(env, cutoff=None, now=now, tier2_days=365)
-            if cycle == 0:
-                # Averaged through now - 26 days: the readings 40..31 days
-                # old may go, the rest of the backlog may not.
-                with _runtime(env, monkeypatch, config):
-                    counts = await retention.delete_raw_telemetry_older_than(
-                        registry_cutoff
-                    )
-                assert counts["node_telemetry"] == 10
+        # 3. The archive recovers.  The backfill takes three cycles (14 days
+        #    each); the first already averages days 40..27, so the readings
+        #    40..31 days old (past Tier 1) go then, and the rest wait.
+        first = await _run(env, cutoff=cutoff, now=now, tier2_days=365)
+        assert first["node_telemetry"]["deleted"] == 10
+        for _ in range(2):
+            await _run(env, cutoff=cutoff, now=now, tier2_days=365)
 
         # No hole: every day has its average, and only readings older than
-        # 30 days, all averaged, were deleted.
+        # Tier 1, all averaged, were deleted.
         archived = sorted(b for _, b in await _rollups(env, node_m, "node_id"))
         assert archived == [now - timedelta(days=d) for d in days]
         assert await _raw_timestamps(env, raw) == [
             now - timedelta(days=d) for d in range(30, 0, -1)
         ]
-        warnings = [(e, k.get("table"), k.get("reason"))
-                    for (lvl, e, k) in env.mods.log.records if lvl == "warning"]
-        assert ("telemetry_cleanup_delete_skipped", "node_telemetry",
-                "archive_unreadable") in warnings
+        warnings = [(e, k.get("table")) for (lvl, e, k) in env.mods.log.records if lvl == "warning"]
+        assert ("retention_telemetry_delete_skipped", "node_telemetry") in warnings

@@ -2808,26 +2808,6 @@ async def get_latest_gpu_device_telemetry(
     return list(result.scalars().all())
 
 
-async def delete_old_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete backend telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(BackendTelemetry).where(BackendTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
-
-
-async def delete_old_gpu_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete per-GPU telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(GPUDeviceTelemetry).where(GPUDeviceTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
 
 
 async def create_node_telemetry(
@@ -2945,16 +2925,6 @@ async def get_cluster_power_history(
         for row in rows
     ]
 
-
-async def delete_old_node_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete node telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(NodeTelemetry).where(NodeTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
 
 
 async def delete_expired_api_keys(

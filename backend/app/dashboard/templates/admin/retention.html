@@ -159,7 +159,7 @@
                                     <input type="number" class="form-control" id="retention_telemetry_tier1_days" name="retention.telemetry.tier1_days"
                                            value="{{ config['retention.telemetry.tier1_days'] }}" min="0"
                                            aria-describedby="retention_telemetry_tier1_help">
-                                    <div class="form-text" id="retention_telemetry_tier1_help">0 = never delete. While 5-minute averages are kept, a reading is deleted only after its average is in the archive, or once it is older than Tier 2. The server's <code>TELEMETRY_RETENTION_DAYS</code> setting (default 30) also deletes raw readings, under the same rule; the shorter period applies.</div>
+                                    <div class="form-text" id="retention_telemetry_tier1_help">0 = never delete. While 5-minute averages are kept, a reading is deleted only after its average is in the archive, or once it is older than Tier 2. This is the only setting that deletes raw readings.</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label" for="retention_telemetry_tier2_days">Tier 2 — Keep 5-minute averages in Archive DB (days)</label>

@@ -789,11 +789,9 @@ async def archive_expired_chats(
 # Rollups run on every cycle, independent of tier 1, so the archive trails the
 # live tables by about one cycle rather than by tier1_days, and tier 1 = 0
 # (never delete raw rows) still archives.  A raw row is deleted only after the
-# bucket it falls in has been committed to the archive.  That holds for every
-# deleter while archival is on: the retention cycle caps its delete at the
-# rollup it just ran, and the backend registry's own TELEMETRY_RETENTION_DAYS
-# loop goes through delete_raw_telemetry_older_than, which caps at the
-# frontier read back from the archive.
+# bucket it falls in has been committed to the archive: the retention cycle
+# caps its delete at the rollup it just ran.  The cycle is the ONLY deleter of
+# raw telemetry (the backend registry used to run its own 30-day loop).
 #
 # Progress is read back from the archive itself: the newest bucket_start in a
 # rollup table is that table's watermark, and the next pass resumes after it.
@@ -1450,95 +1448,6 @@ async def cleanup_expired_telemetry(
                 break
 
     return counts
-
-
-async def _delete_rolled_up_telemetry(
-    app_db: AsyncSession,
-    archive_db: AsyncSession,
-    cutoff: datetime,
-    batch: int,
-) -> dict[str, int]:
-    """Delete raw readings older than ``cutoff`` whose buckets are archived.
-
-    For a deleter outside the retention cycle, which has no rollup of its
-    own to cap at.  Each table's frontier is read back from the archive
-    instead: the bucket after the newest archived one.  Windows commit whole
-    and in order, so every reading older than that has been aggregated, or
-    is older than tier 2 keeps.  A table with nothing archived yet keeps its
-    raw rows, and so does every table whose rollup table cannot be read.
-
-    Returns the number of raw rows deleted per table.
-    """
-    models = _rollup_models()
-    counts: dict[str, int] = {}
-    for spec in _ROLLUP_SPECS:
-        counts[spec.table] = 0
-        try:
-            newest = await _newest_archived_bucket(archive_db, models[spec.table])
-        except Exception as exc:
-            await _rollback_quietly(archive_db)
-            logger.warning(
-                "telemetry_cleanup_delete_skipped",
-                table=spec.table,
-                reason="archive_unreadable",
-                error=f"{type(exc).__name__}: {exc}"[:500],
-            )
-            continue
-
-        frontier = (
-            _floor_to_bucket(newest) + _ROLLUP_BUCKET if newest is not None else None
-        )
-        before = _effective_delete_cutoff(cutoff, frontier)
-        if before is None:
-            # The first rollup has not reached this table yet.  If rollups
-            # keep failing, the retention cycle warns about it every hour.
-            logger.info(
-                "telemetry_cleanup_delete_skipped",
-                table=spec.table,
-                reason="nothing_archived",
-            )
-            continue
-        counts[spec.table] = await _delete_telemetry_before(
-            app_db, spec, before, batch
-        )
-    return counts
-
-
-async def delete_raw_telemetry_older_than(cutoff: datetime) -> dict[str, int]:
-    """Delete raw telemetry older than ``cutoff``, for the backend registry.
-
-    The registry deletes raw readings after TELEMETRY_RETENTION_DAYS on an
-    hourly loop of its own, outside the retention cycle.  While 5-minute
-    averages are being kept (archive DB configured and telemetry tier 2 > 0)
-    that delete must follow the cycle's rule.  Otherwise, whenever the
-    rollups stall for longer than that setting (an archive outage, say), it
-    deletes readings that were never averaged, and once the archive recovers
-    the rollup resumes at the oldest surviving reading and reports success,
-    leaving a hole in the averages that nothing reports.  So each table's
-    delete is capped at its archived frontier (_delete_rolled_up_telemetry),
-    and readings the rollups have not reached stay until they do.  Without
-    archival it is the plain batched delete.
-
-    Returns the number of raw rows deleted per table.
-    """
-    from backend.app.db.session import get_archive_db_context, get_async_db_context
-    from backend.app.settings import get_settings
-
-    async with get_async_db_context() as app_db:
-        config = await get_retention_config(app_db)
-    archiving = (
-        get_settings().archive_database_url is not None
-        and config.get("retention.telemetry.tier2_days", 0) > 0
-    )
-
-    async with get_async_db_context() as app_db:
-        if not archiving:
-            return await cleanup_expired_telemetry(app_db, cutoff)
-        async with get_archive_db_context() as archive_db:
-            return await _delete_rolled_up_telemetry(
-                app_db, archive_db, cutoff,
-                _telemetry_delete_batch(config.get("retention.batch_size", 500)),
-            )
 
 
 # ------------------------------------------------------------------
