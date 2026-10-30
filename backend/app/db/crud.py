@@ -1487,7 +1487,33 @@ async def delete_node(db: AsyncSession, node_id: int) -> bool:
     if result.scalar_one_or_none():
         return False
 
-    # Delete GPU devices on this node (cascade deletes their telemetry)
+    # Bulk-delete the node's raw telemetry first, in committed batches.  Left to
+    # the ORM cascade below, every reading (millions at a 90-day Tier 1) is
+    # loaded into memory just to be deleted.  Averages already in the archive
+    # are kept; readings not yet averaged (the last ~hour) go with the node.
+    device_ids = list(
+        (await db.execute(select(GPUDevice.id).where(GPUDevice.node_id == node_id)))
+        .scalars()
+        .all()
+    )
+    batch = 10000
+    for model, condition in (
+        (GPUDeviceTelemetry, GPUDeviceTelemetry.gpu_device_id.in_(device_ids) if device_ids else None),
+        (NodeTelemetry, NodeTelemetry.node_id == node_id),
+    ):
+        if condition is None:
+            continue
+        while True:
+            deleted = (
+                await db.execute(
+                    delete(model).where(condition).with_dialect_options(mysql_limit=batch)
+                )
+            ).rowcount or 0
+            await db.commit()
+            if deleted < batch:
+                break
+
+    # Delete GPU devices on this node (their telemetry is already gone)
     gpu_result = await db.execute(
         select(GPUDevice).where(GPUDevice.node_id == node_id)
     )

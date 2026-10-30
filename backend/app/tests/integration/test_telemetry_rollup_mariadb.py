@@ -902,3 +902,41 @@ async def test_a_failed_rollup_never_lets_the_cycle_delete_unaveraged_readings()
         ]
         warnings = [(e, k.get("table")) for (lvl, e, k) in env.mods.log.records if lvl == "warning"]
         assert ("retention_telemetry_delete_skipped", "node_telemetry") in warnings
+
+
+async def test_the_full_cycle_still_prunes_telemetry_when_an_earlier_step_fails(monkeypatch):
+    # run_retention_cycle end to end.  The scratch app DB has no requests
+    # table, so the requests step fails for real (as it would with the archive
+    # DB down or /tmp full).  The cycle is the only pruner of raw telemetry, so
+    # that failure must not skip it: before, one failing step ended the cycle.
+    async with _scratch() as env:
+        retention = env.mods.retention
+        await _seed_dimensions(env)
+        async with env.app_session() as s:
+            db_now = (await s.execute(text("SELECT NOW()"))).scalar_one()
+        # Half a day off every whole day, so the 30-day boundary is unambiguous
+        # whichever clock (host UTC or DB session time) the cutoff is taken on.
+        stamps = [db_now - timedelta(days=d, hours=12) for d in range(40, 0, -1)]
+        await _insert_readings(env, node=[_node(1, ts, 1000, 10.0) for ts in stamps])
+        raw, node_m = env.mods.models.NodeTelemetry, _models(env)[0]
+        config = _retention_config(env, tier1_days=30, tier2_days=365)
+        config.update({
+            "retention.requests.tier1_days": 30, "retention.chat.tier1_days": 0,
+            "retention.responses_store_days": 0, "retention.conversations_days": 0,
+            "retention.dlp_alerts_days": 0, "retention.web_search_logs_days": 0,
+        })
+        with _runtime(env, monkeypatch, config):
+            first = await retention.run_retention_cycle()
+            for _ in range(2):
+                await retention.run_retention_cycle()
+
+        assert "requests" in first["failed_steps"]
+        assert "telemetry" not in first["failed_steps"]
+        assert "error" in first["requests"]
+        # 40.5 .. 30.5 days old: past Tier 1 and averaged in the first pass.
+        assert first["telemetry"]["node_telemetry"]["deleted"] == 11
+        archived = sorted(b for _, b in await _rollups(env, node_m, "node_id"))
+        assert len(archived) == 40
+        assert len(await _raw_timestamps(env, raw)) == 29
+        events = [(lvl, e) for (lvl, e, _) in env.mods.log.records]
+        assert ("warning", "retention_cycle_partial") in events

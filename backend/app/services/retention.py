@@ -1596,10 +1596,21 @@ async def purge_expired_archives(
         rollup_cutoff = _as_naive_utc(
             datetime.now(timezone.utc) - timedelta(days=tel_tier2)
         )
+        # One table at a time, each on its own: a rollup table that is missing
+        # (create_all failed at startup) or broken must not stop the others,
+        # nor - now that steps are isolated - the rest of the purge's caller.
         for table_name, model in _rollup_models().items():
-            counts[f"{table_name}_5m"] = await _purge_rollups_before(
-                archive_db, model, rollup_cutoff
-            )
+            key = f"{table_name}_5m"
+            try:
+                counts[key] = await _purge_rollups_before(
+                    archive_db, model, rollup_cutoff
+                )
+            except Exception as exc:
+                await _rollback_quietly(archive_db)
+                counts[key] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+                logger.warning(
+                    "retention_rollup_purge_failed", table=key, error=counts[key]["error"]
+                )
 
     return counts
 
@@ -2289,150 +2300,200 @@ async def try_run_purge_with_lock(
 async def run_retention_cycle() -> dict[str, Any]:
     """Execute one full retention cycle.
 
+    Every category runs in its own ``_step``: an exception in one (the
+    archive DB unreachable, /tmp full for the request dump, deadlock retries
+    exhausted) is logged as ``retention_step_failed``, recorded in the summary
+    as ``{"error": ...}`` and listed in ``failed_steps``, and the remaining
+    categories still run.  The cycle used to run straight-line, so one failing
+    early step silently skipped every later one - including raw-telemetry
+    pruning, which nothing else performs.
+
     Returns a summary dict of all actions taken.
     """
     from backend.app.db.session import (
         get_archive_db_context,
-        get_archive_engine,
         get_async_db_context,
     )
     from backend.app.settings import get_settings
 
     settings = get_settings()
     summary: dict[str, Any] = {}
+    failed: list[str] = []
 
     async with get_async_db_context() as app_db:
         config = await get_retention_config(app_db)
 
     archive_configured = settings.archive_database_url is not None
 
+    async def _step(name: str, run) -> None:
+        try:
+            result = await run()
+        except Exception as exc:
+            failed.append(name)
+            summary[name] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
+            logger.exception("retention_step_failed", step=name)
+            return
+        if result is not None:
+            summary[name] = result
+
     # Tier 1: archive + delete from app DB
-    req_tier1 = config.get("retention.requests.tier1_days", 90)
-    if req_tier1 > 0:
+    async def _requests():
+        req_tier1 = config.get("retention.requests.tier1_days", 90)
+        if req_tier1 <= 0:
+            return None
         cutoff = datetime.now(timezone.utc) - timedelta(days=req_tier1)
         if archive_configured:
             async with get_async_db_context() as app_db:
                 async with get_archive_db_context() as archive_db:
-                    summary["requests"] = await archive_expired_requests(
+                    return await archive_expired_requests(
                         app_db, archive_db, cutoff,
                         config.get("retention.batch_size", 500),
                     )
-        else:
-            # No archive DB — just delete
-            async with get_async_db_context() as app_db:
-                summary["requests"] = await delete_expired_requests_no_archive(
-                    app_db, cutoff,
-                    config.get("retention.batch_size", 500) or 500,
-                )
+        # No archive DB — just delete
+        async with get_async_db_context() as app_db:
+            return await delete_expired_requests_no_archive(
+                app_db, cutoff,
+                config.get("retention.batch_size", 500) or 500,
+            )
 
-    chat_tier1 = config.get("retention.chat.tier1_days", 90)
-    if chat_tier1 > 0:
+    async def _chats():
+        chat_tier1 = config.get("retention.chat.tier1_days", 90)
+        if chat_tier1 <= 0:
+            return None
         cutoff = datetime.now(timezone.utc) - timedelta(days=chat_tier1)
         if archive_configured:
             async with get_async_db_context() as app_db:
                 async with get_archive_db_context() as archive_db:
-                    summary["chats"] = await archive_expired_chats(
+                    return await archive_expired_chats(
                         app_db, archive_db, cutoff,
                         config.get("retention.batch_size", 500),
                     )
-        else:
-            # Fall back to existing cleanup (no archival)
-            from backend.app.db import chat_crud
-            async with get_async_db_context() as app_db:
-                deleted = await chat_crud.delete_expired_conversations(
-                    app_db, chat_tier1,
-                )
-                orphans = await chat_crud.delete_all_orphan_attachments(app_db)
-                await app_db.commit()
-                summary["chats"] = {
-                    "conversations_deleted": deleted,
-                    "orphan_attachments": orphans,
-                }
+        # Fall back to existing cleanup (no archival)
+        from backend.app.db import chat_crud
+        async with get_async_db_context() as app_db:
+            deleted = await chat_crud.delete_expired_conversations(
+                app_db, chat_tier1,
+            )
+            orphans = await chat_crud.delete_all_orphan_attachments(app_db)
+            await app_db.commit()
+            return {
+                "conversations_deleted": deleted,
+                "orphan_attachments": orphans,
+            }
 
     # Telemetry.  With an archive DB and tier 2 > 0, 5-minute averages roll
     # into the archive on every cycle, even when tier 1 is 0 (keep raw rows
     # forever), and expired raw rows are deleted only once their buckets are
     # archived.  The rollup skips buckets older than tier 2, which the purge
     # below would delete again.  Otherwise expired raw rows are simply
-    # deleted.
-    telemetry_tier1 = config.get("retention.telemetry.tier1_days", 30)
-    telemetry_tier2 = config.get("retention.telemetry.tier2_days", 0)
-    if archive_configured and telemetry_tier2 > 0:
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
-            if telemetry_tier1 > 0
-            else None
-        )
-        async with get_async_db_context() as app_db:
-            async with get_archive_db_context() as archive_db:
-                summary["telemetry"] = await archive_expired_telemetry(
-                    app_db, archive_db, cutoff,
-                    config.get("retention.batch_size", 500),
-                    tier2_days=telemetry_tier2,
-                )
-    elif telemetry_tier1 > 0:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
-        async with get_async_db_context() as app_db:
-            summary["telemetry"] = await cleanup_expired_telemetry(app_db, cutoff)
+    # deleted.  This is the only place raw telemetry is pruned.
+    async def _telemetry():
+        telemetry_tier1 = config.get("retention.telemetry.tier1_days", 30)
+        telemetry_tier2 = config.get("retention.telemetry.tier2_days", 0)
+        if archive_configured and telemetry_tier2 > 0:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
+                if telemetry_tier1 > 0
+                else None
+            )
+            async with get_async_db_context() as app_db:
+                async with get_archive_db_context() as archive_db:
+                    return await archive_expired_telemetry(
+                        app_db, archive_db, cutoff,
+                        config.get("retention.batch_size", 500),
+                        tier2_days=telemetry_tier2,
+                    )
+        if telemetry_tier1 > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
+            async with get_async_db_context() as app_db:
+                return await cleanup_expired_telemetry(app_db, cutoff)
+        return None
 
     # Tier 2: purge old archives
-    if archive_configured:
+    async def _archive_purge():
+        if not archive_configured:
+            return None
         async with get_archive_db_context() as archive_db:
-            summary["archive_purge"] = await purge_expired_archives(
-                archive_db, config
-            )
+            return await purge_expired_archives(archive_db, config)
 
     # Orphan attachments cleanup (always)
-    from backend.app.db import chat_crud
-    async with get_async_db_context() as app_db:
-        orphans = await chat_crud.delete_all_orphan_attachments(app_db)
-        await app_db.commit()
-        summary["orphan_attachments"] = orphans
+    async def _orphan_attachments():
+        from backend.app.db import chat_crud
+        async with get_async_db_context() as app_db:
+            orphans = await chat_crud.delete_all_orphan_attachments(app_db)
+            await app_db.commit()
+            return orphans
 
     # Audit-offload request images: reap directories older than the
     # configured window (filesystem-only, no DB rows involved).
-    summary["request_images"] = await cleanup_expired_request_images(
-        settings.artifact_storage_path,
-        config.get("retention.request_images_days", 180),
-    )
+    async def _request_images():
+        return await cleanup_expired_request_images(
+            settings.artifact_storage_path,
+            config.get("retention.request_images_days", 180),
+        )
 
     # Stored Responses API state (delete-only, no archival — the audit
     # copy lives in requests/responses; offloaded image files are
     # removed row-driven, with their row).
-    responses_days = config.get("retention.responses_store_days", 30)
-    if responses_days > 0:
+    async def _responses_store():
+        responses_days = config.get("retention.responses_store_days", 30)
+        if responses_days <= 0:
+            return None
         cutoff = datetime.now(timezone.utc) - timedelta(days=responses_days)
         async with get_async_db_context() as app_db:
-            summary["responses_store"] = await cleanup_expired_stored_responses(
+            return await cleanup_expired_stored_responses(
                 app_db, cutoff, config.get("retention.batch_size", 5000)
             )
 
     # Conversations (durable state — default 0 = never delete; sweeps
     # by last activity, not creation).
-    conversations_days = config.get("retention.conversations_days", 0)
-    if conversations_days > 0:
+    async def _conversations():
+        conversations_days = config.get("retention.conversations_days", 0)
+        if conversations_days <= 0:
+            return None
         cutoff = datetime.now(timezone.utc) - timedelta(days=conversations_days)
         async with get_async_db_context() as app_db:
-            summary["conversations"] = await cleanup_expired_conversations(
+            return await cleanup_expired_conversations(
                 app_db, cutoff, config.get("retention.batch_size", 5000)
             )
 
     # DLP alerts (delete-only, no archival — default 0 = never delete).
-    dlp_days = config.get("retention.dlp_alerts_days", 0)
-    if dlp_days > 0:
+    async def _dlp_alerts():
+        dlp_days = config.get("retention.dlp_alerts_days", 0)
+        if dlp_days <= 0:
+            return None
         cutoff = datetime.now(timezone.utc) - timedelta(days=dlp_days)
         async with get_async_db_context() as app_db:
-            summary["dlp_alerts"] = await cleanup_expired_dlp_alerts(
+            return await cleanup_expired_dlp_alerts(
                 app_db, cutoff, config.get("retention.batch_size", 5000)
             )
 
     # Web-search audit logs (delete-only — default 0 = never delete).
-    ws_days = config.get("retention.web_search_logs_days", 0)
-    if ws_days > 0:
+    async def _web_search_logs():
+        ws_days = config.get("retention.web_search_logs_days", 0)
+        if ws_days <= 0:
+            return None
         cutoff = datetime.now(timezone.utc) - timedelta(days=ws_days)
         async with get_async_db_context() as app_db:
-            summary["web_search_logs"] = await cleanup_expired_web_search_logs(
+            return await cleanup_expired_web_search_logs(
                 app_db, cutoff, config.get("retention.batch_size", 5000)
             )
 
+    for name, run in (
+        ("requests", _requests),
+        ("chats", _chats),
+        ("telemetry", _telemetry),
+        ("archive_purge", _archive_purge),
+        ("orphan_attachments", _orphan_attachments),
+        ("request_images", _request_images),
+        ("responses_store", _responses_store),
+        ("conversations", _conversations),
+        ("dlp_alerts", _dlp_alerts),
+        ("web_search_logs", _web_search_logs),
+    ):
+        await _step(name, run)
+
+    if failed:
+        summary["failed_steps"] = failed
+        logger.warning("retention_cycle_partial", failed_steps=failed)
     return summary

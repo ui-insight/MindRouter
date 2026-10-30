@@ -1039,6 +1039,59 @@ class TestRetentionCycleWiring:
             "purge_expired_archives"
         )
 
+    @pytest.mark.parametrize("archive,tier2,expected", [
+        (True, 730, "archive_expired_telemetry"),
+        (True, 0, "cleanup_expired_telemetry"),
+        (False, 730, "cleanup_expired_telemetry"),
+    ])
+    async def test_failing_earlier_steps_do_not_stop_telemetry_pruning(
+        self, wiring, monkeypatch, archive, tier2, expected
+    ):
+        # The retention cycle is the only pruner of raw telemetry, so one
+        # broken category (archive DB down, /tmp full for the request dump)
+        # must not skip it: before, an exception in the requests step ended
+        # the cycle and raw telemetry was never pruned again.
+        wiring.config = _config(tier1_days=90, tier2_days=tier2)
+        wiring.config["retention.requests.tier1_days"] = 30
+        wiring.config["retention.chat.tier1_days"] = 30
+
+        async def boom(*a, **k):
+            wiring.calls.append(("boom", None))
+            raise ConnectionRefusedError("archive unreachable")
+
+        for fn in ("archive_expired_requests", "delete_expired_requests_no_archive",
+                   "archive_expired_chats"):
+            monkeypatch.setattr(retention, fn, boom)
+        chat_mods = _wiring_modules(archive)
+        chat_mods["backend.app.db.chat_crud"].delete_expired_conversations = boom
+        with _pinned_modules(chat_mods):
+            summary = await retention.run_retention_cycle()
+
+        assert [c[0] for c in _telemetry_calls(wiring.calls)] == [expected]
+        assert summary["telemetry"]
+        assert summary["failed_steps"] == ["requests", "chats"]
+        assert summary["requests"]["error"].startswith("ConnectionRefusedError")
+        assert summary["chats"]["error"].startswith("ConnectionRefusedError")
+        failed = [k["step"] for (lvl, e, k) in _LOG.records if e == "retention_step_failed"]
+        assert failed == ["requests", "chats"]
+        assert ("warning", "retention_cycle_partial") in [(lvl, e) for (lvl, e, _) in _LOG.records]
+
+    async def test_a_failing_telemetry_step_does_not_stop_the_rest(self, wiring):
+        wiring.config = _config(tier1_days=90, tier2_days=730)
+        wiring.rollup_error = RuntimeError("rollup exploded")
+        with _pinned_modules(_wiring_modules(True)):
+            summary = await retention.run_retention_cycle()
+        assert summary["failed_steps"] == ["telemetry"]
+        assert "purge_expired_archives" in [c[0] for c in wiring.calls]
+        assert "orphan_attachments" in summary and "request_images" in summary
+
+    async def test_a_clean_cycle_reports_no_failed_steps(self, wiring):
+        wiring.config = _config(tier1_days=90, tier2_days=730)
+        with _pinned_modules(_wiring_modules(True)):
+            summary = await retention.run_retention_cycle()
+        assert "failed_steps" not in summary
+        assert [e for (_, e, _) in _LOG.records if e == "retention_step_failed"] == []
+
 
 class TestManualPurgeWiring:
     async def test_rollup_runs_first_then_the_requested_purge(self, wiring):
@@ -1169,6 +1222,56 @@ class TestSingleTelemetryDeleter:
             "delete(BackendTelemetry).where(BackendTelemetry.backend_id == backend_id)"
         )
 
+    def test_raw_telemetry_deleters_have_pinned_callers(self):
+        # Pins the callers, not the SQL text: a new deleter that went through
+        # the retention service's own functions (as the removed registry loop
+        # last did) would pass the text scan above but fails here.
+        names = {"cleanup_expired_telemetry", "archive_expired_telemetry", "_delete_telemetry_before"}
+        for path in sorted(_APP.rglob("*.py")):
+            rel = path.relative_to(_APP).as_posix()
+            if rel.startswith("tests/") or rel == "services/retention.py":
+                continue
+            src = path.read_text()
+            assert not [n for n in names if n in src], rel
+
+        def direct_refs(fn):
+            out, stack = set(), list(fn.body)
+            while stack:
+                n = stack.pop()
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue
+                if isinstance(n, ast.Name) and n.id in names:
+                    out.add(n.id)
+                stack.extend(ast.iter_child_nodes(n))
+            return out
+
+        tree = ast.parse(_RETENTION_PATH.read_text())
+        callers = {
+            fn.name: direct_refs(fn)
+            for fn in ast.walk(tree)
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and direct_refs(fn)
+        }
+        assert callers == {
+            # the scheduled cycle's telemetry step (nested in run_retention_cycle)
+            "_telemetry": {"archive_expired_telemetry", "cleanup_expired_telemetry"},
+            # Admin -> Retention -> Purge
+            "run_purge": {"archive_expired_telemetry", "cleanup_expired_telemetry"},
+            "archive_expired_telemetry": {"_delete_telemetry_before"},
+        }
+
+    def test_delete_node_bulk_deletes_telemetry_before_the_orm_cascade(self):
+        # The ORM cascade loaded every reading of the node's GPUs into memory
+        # just to delete it; with a 90-day Tier 1 that is millions of rows.
+        crud_src = (_APP / "db" / "crud.py").read_text()
+        fn = crud_src[crud_src.index("async def delete_node("):]
+        fn = fn[: fn.index("\nasync def ", 1)]
+        bulk = fn.index("delete(model).where(condition).with_dialect_options(mysql_limit=batch)")
+        assert "GPUDeviceTelemetry.gpu_device_id.in_(device_ids)" in fn
+        assert "(NodeTelemetry, NodeTelemetry.node_id == node_id)" in fn
+        assert bulk < fn.index("await db.delete(device)") < fn.index("await db.delete(node)")
+        loop = fn[bulk: fn.index("await db.delete(device)")]
+        assert "await db.commit()" in loop and "if deleted < batch:" in loop
+
     def test_retention_service_keeps_both_raw_delete_paths(self):
         # With averages kept: rollup, then a delete capped at the frontier.
         # Without: the plain batched delete.  Nothing else.
@@ -1240,6 +1343,30 @@ class TestPurgeExpiredArchives:
                 assert abs((cutoff - expected_cutoff).total_seconds()) < 60
         assert counts["node_telemetry_5m"] == retention._ROLLUP_PURGE_BATCH
         assert counts["backend_telemetry_5m"] == retention._ROLLUP_PURGE_BATCH
+
+    async def test_a_missing_rollup_table_does_not_stop_the_others(self):
+        # A *_5m table that create_all never made (or that errors) used to
+        # abort every purge - and, before steps were isolated, every cycle.
+        class _MissingGpuTable(_PurgeArchiveDb):
+            async def execute(self, stmt, params=None):
+                if isinstance(stmt, Delete) and stmt.table.name == "archived_gpu_device_telemetry_5m":
+                    raise RuntimeError("Table 'archived_gpu_device_telemetry_5m' doesn't exist")
+                return await super().execute(stmt, params)
+
+            async def rollback(self):
+                self.events.append(("rollback",))
+
+        db = _MissingGpuTable()
+        config = dict(retention._DEFAULTS)
+        config["retention.telemetry.tier2_days"] = 365
+        with _pinned_modules({"backend.app.db.archive_models": archive_models}):
+            counts = await retention.purge_expired_archives(db, config)
+        assert counts["gpu_device_telemetry_5m"]["error"].startswith("RuntimeError")
+        assert counts["node_telemetry_5m"] == retention._ROLLUP_PURGE_BATCH
+        assert counts["backend_telemetry_5m"] == retention._ROLLUP_PURGE_BATCH
+        assert ("rollback",) in db.events
+        (record,) = [k for (lvl, e, k) in _LOG.records if e == "retention_rollup_purge_failed"]
+        assert record["table"] == "gpu_device_telemetry_5m"
 
     async def test_every_rollup_batch_is_committed_before_the_next(self):
         db, _ = await self.purge(365)
@@ -1407,6 +1534,21 @@ class TestDocs:
                       "archived_backend_telemetry_5m"):
             assert table in self.DOCS
         assert "5-minute averages" in self.DOCS
+
+    def test_public_documentation_page_matches(self):
+        page = " ".join((_TEMPLATES / "public" / "documentation.html").read_text().split())
+        assert "TELEMETRY_RETENTION_DAYS" not in page
+        assert "TELEMETRY_CLEANUP_INTERVAL" not in page
+        assert "Not archived (deleted only)" not in page
+        assert "0 = telemetry is not archived" not in page
+        assert "5-minute averages in <code>archived_*_telemetry_5m</code>" in page
+        assert "The only setting that deletes raw telemetry" in page
+        assert "Each category runs on its own" in page
+
+    def test_docs_describe_isolation_and_entity_deletes(self):
+        docs = " ".join(self.DOCS.split())
+        assert "listed in the cycle summary's `failed_steps`" in docs
+        assert "readings not yet averaged (up to about the last hour) go with it" in docs
 
     def test_docs_match_the_review_fixes(self):
         docs = " ".join(self.DOCS.split())
