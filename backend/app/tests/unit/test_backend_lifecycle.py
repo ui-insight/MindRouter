@@ -97,8 +97,8 @@ class TestDeleteBackend:
         backend = MagicMock()
         async def execute(stmt):
             executed.append(str(stmt.compile(compile_kwargs={"literal_binds": True})).lower())
-            return MagicMock(scalar_one_or_none=lambda: backend)
-        db = MagicMock(execute=execute, delete=AsyncMock(), flush=AsyncMock())
+            return MagicMock(scalar_one_or_none=lambda: backend, rowcount=0)
+        db = MagicMock(execute=execute, delete=AsyncMock(), flush=AsyncMock(), commit=AsyncMock())
         assert asyncio.run(crud_mod.delete_backend(db, 76)) is True
         updates = [s for s in executed if s.startswith("update")]
         assert any("update requests set backend_id=null" in s for s in updates)

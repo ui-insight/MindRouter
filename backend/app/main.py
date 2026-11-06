@@ -458,12 +458,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     settings_ref = get_settings()
     if settings_ref.archive_database_url:
         try:
-            from backend.app.db.archive_models import ArchiveBase
+            from backend.app.db.archive_models import create_archive_tables
             from backend.app.db.session import get_archive_engine
             archive_engine = get_archive_engine()
             if archive_engine:
-                async with archive_engine.begin() as conn:
-                    await conn.run_sync(ArchiveBase.metadata.create_all)
+                await create_archive_tables(archive_engine)
                 logger.info("archive_db_initialized")
         except Exception:
             logger.exception("archive_db_init_failed")
