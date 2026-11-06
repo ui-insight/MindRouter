@@ -36,6 +36,7 @@ from backend.app.core.canonical_schemas import (
     ResponseFormatType,
     TextContent,
 )
+from backend.app.core.reasoning import history_reasoning_text
 from backend.app.core.url_guard import image_url_reason
 
 logger = structlog.get_logger(__name__)
@@ -208,6 +209,16 @@ class OpenAIInTranslator:
         # Extract tool_call_id from tool messages
         tool_call_id = msg.get("tool_call_id")
 
+        # An earlier assistant turn's reasoning, as the client returned it
+        # (vLLM and most SDKs: reasoning_content; vLLM's newer name: reasoning).
+        # The gateway decides per model whether it is forwarded.
+        reasoning = None
+        if role == MessageRole.ASSISTANT:
+            reasoning = (
+                history_reasoning_text(msg.get("reasoning_content"))
+                or history_reasoning_text(msg.get("reasoning"))
+            )
+
         # Handle multimodal content
         if isinstance(content, list):
             content_blocks: List[ContentBlock] = []
@@ -221,6 +232,7 @@ class OpenAIInTranslator:
             return CanonicalMessage(
                 role=role,
                 content=content_blocks,
+                reasoning=reasoning,
                 name=msg.get("name"),
                 tool_calls=tool_calls,
                 tool_call_id=tool_call_id,
@@ -230,6 +242,7 @@ class OpenAIInTranslator:
         return CanonicalMessage(
             role=role,
             content=content,
+            reasoning=reasoning,
             name=msg.get("name"),
             tool_calls=tool_calls,
             tool_call_id=tool_call_id,

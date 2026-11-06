@@ -89,6 +89,10 @@ def _load_ocr(chat_completion=None, admission=None):
     sys.modules["backend.app.settings"] = st
     sess = ModuleType("backend.app.db.session"); sess.AsyncSessionLocal = _Session
     sys.modules["backend.app.db.session"] = sess
+    # perform_ocr resolves model aliases through the registry (2.9.98).
+    reg = ModuleType("backend.app.core.telemetry.registry")
+    reg.get_registry = lambda: SimpleNamespace(resolve_alias=lambda m: (m, None))
+    sys.modules["backend.app.core.telemetry.registry"] = reg
     inf = ModuleType("backend.app.services.inference")
 
     class InferenceService:

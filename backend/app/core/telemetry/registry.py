@@ -132,7 +132,6 @@ class BackendRegistry:
         )
         self._poll_task: Optional[asyncio.Task] = None
         self._persist_task: Optional[asyncio.Task] = None
-        self._cleanup_task: Optional[asyncio.Task] = None
         self._api_key_maint_task: Optional[asyncio.Task] = None
         self._enrich_task: Optional[asyncio.Task] = None
         self._force_offline: bool = False
@@ -222,7 +221,9 @@ class BackendRegistry:
         # Start background tasks
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._persist_task = asyncio.create_task(self._persist_latency_loop())
-        self._cleanup_task = asyncio.create_task(self._telemetry_cleanup_loop())
+        # Raw telemetry is pruned only by the retention cycle (services/
+        # retention.py, Admin -> Retention); a second deleter here once kept
+        # its own 30-day setting and silently overrode Tier 1.
         self._api_key_maint_task = asyncio.create_task(self._api_key_maintenance_loop())
         self._enrich_task = asyncio.create_task(self._enrich_loop())
         logger.info("Backend registry started")
@@ -240,13 +241,6 @@ class BackendRegistry:
             self._persist_task.cancel()
             try:
                 await self._persist_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
             except asyncio.CancelledError:
                 pass
 
@@ -1826,43 +1820,6 @@ class BackendRegistry:
             "grace_days": grace,
             "reminders": reminders,
         }
-
-    async def _telemetry_cleanup_loop(self) -> None:
-        """Periodically purge old telemetry data."""
-        while True:
-            try:
-                await asyncio.sleep(self._settings.telemetry_cleanup_interval)
-                await self._cleanup_old_telemetry()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("telemetry_cleanup_error", error=str(e))
-
-    async def _cleanup_old_telemetry(self) -> None:
-        """Delete telemetry data older than the retention period.
-
-        API key expiry maintenance is a SEPARATE loop
-        (_api_key_maintenance_loop) with its own admin-configurable interval,
-        so a slow or failing key prune can never delay or roll back telemetry
-        pruning (the coupling that made the old shared job fail every hour).
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            days=self._settings.telemetry_retention_days
-        )
-
-        async with get_async_db_context() as db:
-            deleted_bt = await crud.delete_old_telemetry(db, older_than=cutoff)
-            deleted_gdt = await crud.delete_old_gpu_telemetry(db, older_than=cutoff)
-            deleted_nt = await crud.delete_old_node_telemetry(db, older_than=cutoff)
-
-        if deleted_bt or deleted_gdt:
-            logger.info(
-                "telemetry_cleaned_up",
-                backend_telemetry_deleted=deleted_bt,
-                gpu_telemetry_deleted=deleted_gdt,
-                cutoff=cutoff.isoformat(),
-            )
-
 
     # ------------------------------------------------------------------
     # Model auto-enrichment

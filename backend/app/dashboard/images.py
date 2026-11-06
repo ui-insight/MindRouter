@@ -25,6 +25,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.telemetry.registry import get_registry
 from backend.app.db import crud
 from backend.app.security.api_keys import first_live_api_key
 from backend.app.db.models import ApiKey, User, UserImage
@@ -248,6 +249,9 @@ async def images_api_generate(
     # Apply defaults
     if not body.get("model"):
         body["model"] = default_model
+    # Routing looks backends up by real name: resolve an alias, as
+    # /v1/images/generations does (an alias here 404'd every image).
+    body["model"], _ = get_registry().resolve_alias(body["model"])
     if not body.get("size"):
         body["size"] = default_size
     if body.get("num_inference_steps") is None:

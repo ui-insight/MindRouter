@@ -2787,9 +2787,9 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         </tr>
                         <tr>
                             <td><strong>Telemetry</strong></td>
-                            <td><code>backend_telemetry</code>, <code>gpu_device_telemetry</code></td>
-                            <td>30 days</td>
-                            <td>Not archived (deleted only)</td>
+                            <td><code>node_telemetry</code>, <code>gpu_device_telemetry</code>, <code>backend_telemetry</code></td>
+                            <td>30 days (raw readings)</td>
+                            <td>5-minute averages in <code>archived_*_telemetry_5m</code>, kept for Tier 2 days (0 = no averages)</td>
                         </tr>
                     </tbody>
                 </table>
@@ -2825,8 +2825,8 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>retention.requests.tier2_days</code></td><td>730</td><td>Days archived requests are kept before purge</td></tr>
                         <tr><td><code>retention.chat.tier1_days</code></td><td>90</td><td>Days before chat data is archived</td></tr>
                         <tr><td><code>retention.chat.tier2_days</code></td><td>730</td><td>Days archived chat data is kept before purge</td></tr>
-                        <tr><td><code>retention.telemetry.tier1_days</code></td><td>30</td><td>Days before telemetry is purged (no archival)</td></tr>
-                        <tr><td><code>retention.telemetry.tier2_days</code></td><td>0</td><td>0 = telemetry is not archived</td></tr>
+                        <tr><td><code>retention.telemetry.tier1_days</code></td><td>30</td><td>Days raw readings stay in the app DB (0 = never delete). The only scheduled deletion of raw telemetry (the Purge tab and deleting a node or backend also remove readings); while averages are kept, a reading is deleted only after its 5-minute average is archived, or, once averaging has failed for more than 14 days in a row, 14 days past this limit</td></tr>
+                        <tr><td><code>retention.telemetry.tier2_days</code></td><td>0</td><td>Days 5-minute averages are kept in the archive DB; 0 = write no averages (expired readings are simply deleted; averages already archived are kept)</td></tr>
                         <tr><td><code>retention.cleanup_interval</code></td><td>3600</td><td>Seconds between retention cycle runs</td></tr>
                         <tr><td><code>retention.batch_size</code></td><td>500</td><td>Rows per archive+delete batch</td></tr>
                     </tbody>
@@ -2860,11 +2860,11 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                 <ol>
                     <li>Archives and deletes expired requests from the app DB (Tier 1)</li>
                     <li>Archives and deletes expired chat conversations from the app DB (Tier 1)</li>
-                    <li>Deletes expired telemetry data from the app DB (no archival)</li>
+                    <li>Rolls telemetry up into 5-minute averages in the archive DB (when Tier 2 &gt; 0), then deletes expired raw readings that are already averaged</li>
                     <li>Purges expired records from the archive DB (Tier 2)</li>
                     <li>Cleans up orphan chat attachments</li>
                 </ol>
-                <p>All operations are batched and use FK-order deletion to maintain referential integrity. Archive inserts use <code>INSERT IGNORE</code> for idempotent re-runs.</p>
+                <p>All operations are batched and use FK-order deletion to maintain referential integrity. Archive inserts use <code>INSERT IGNORE</code> for idempotent re-runs. Each category runs on its own: a failure in one (say, the archive DB is unreachable) is logged and recorded in the cycle summary, and the remaining categories still run.</p>
 
                 <h3>Storage</h3>
                 <p>The archive database volume can be mounted to a separate, larger disk. Set <code>ARCHIVE_DB_HOST_PATH</code> to a path on that disk (it defaults to a local <code>./data/archive-mariadb</code> directory) so the archive data can reside on a different filesystem than the primary database.</p>
@@ -3769,8 +3769,6 @@ Hello from MindRouter!</code></pre>
                         <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>TELEMETRY_RETENTION_DAYS</code></td><td>int</td><td><code>30</code></td><td>Telemetry data retention period</td></tr>
-                        <tr><td><code>TELEMETRY_CLEANUP_INTERVAL</code></td><td>int</td><td><code>3600</code></td><td>Cleanup interval (seconds)</td></tr>
                         <tr><td><code>SIDECAR_TIMEOUT</code></td><td>int</td><td><code>15</code></td><td>Sidecar HTTP call timeout (seconds)</td></tr>
                     </tbody>
                 </table>

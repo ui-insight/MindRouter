@@ -246,18 +246,42 @@ def make_search_executor(db, user, api_key) -> Callable:
     return executor
 
 
+def _round_text_and_reasoning(items: List[Dict]) -> tuple:
+    """A streamed round's visible text and its reasoning (all reasoning
+    items of the round, in order), from the output items it closed."""
+    content = None
+    reasoning: List[str] = []
+    for item in items:
+        if item.get("type") == "message":
+            content = item["content"][0]["text"]
+        elif item.get("type") == "reasoning":
+            reasoning += [
+                p.get("text") for p in item.get("content") or []
+                if isinstance(p, dict) and p.get("type") == "reasoning_text" and p.get("text")
+            ]
+    return content, ("\n\n".join(reasoning) or None)
+
+
 def _append_round_messages(
     canonical: CanonicalChatRequest,
     content: Optional[str],
     calls: List[Dict[str, str]],
     results: List[str],
+    reasoning: Optional[str] = None,
 ) -> None:
     """Record the model's tool-call turn and the search results in the
-    conversation for the next round."""
+    conversation for the next round.
+
+    The round's reasoning rides along on the assistant turn: this loop is the
+    gateway's own tool loop, exactly the case gpt-oss / Qwen / Gemma-style
+    templates replay reasoning for. Whether the backend sees it is still up
+    to apply_reasoning_history_policy on the next round's attempt.
+    """
     canonical.messages.append(
         CanonicalMessage(
             role=MessageRole.ASSISTANT,
             content=content or None,
+            reasoning=reasoning or None,
             tool_calls=[
                 CanonicalToolCall(
                     id=c["call_id"],
@@ -340,10 +364,9 @@ async def stream_with_web_search(
 
             # The round's visible text (if any) was already streamed and
             # closed into completed_output; find it for the tool-call turn.
-            round_content = None
-            for item in st.completed_output[round_text_before:]:
-                if item.get("type") == "message":
-                    round_content = item["content"][0]["text"]
+            round_content, round_reasoning = _round_text_and_reasoning(
+                st.completed_output[round_text_before:]
+            )
 
             results: List[str] = []
             for call in calls:
@@ -394,7 +417,7 @@ async def stream_with_web_search(
                 )
                 st.completed_output.append(ws_item)
 
-            _append_round_messages(canonical, round_content, calls, results)
+            _append_round_messages(canonical, round_content, calls, results, round_reasoning)
             if calls_made >= max_calls:
                 # Budget exhausted: the model must answer next round.
                 _remove_synthetic_tool(canonical)
@@ -480,7 +503,10 @@ async def run_web_search_loop(
             calls_made += 1
             output.append(build_web_search_call_item(query))
 
-        _append_round_messages(canonical, message.get("content"), calls, results)
+        _append_round_messages(
+            canonical, message.get("content"), calls, results,
+            message.get("reasoning_content") or message.get("reasoning"),
+        )
         if calls_made >= max_calls:
             _remove_synthetic_tool(canonical)
 

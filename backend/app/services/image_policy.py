@@ -284,6 +284,9 @@ async def _call_judge(
     registry = get_registry()
     settings = get_settings()
 
+    # The judge is a config value; backends are looked up by real name, so an
+    # alias here would fail every check (and the policy fails closed).
+    model_name, _ = registry.resolve_alias(model_name)
     backends = await registry.get_backends_with_model(model_name)
     healthy = [b for b in backends if b.status.value == "healthy"]
     if not healthy:
