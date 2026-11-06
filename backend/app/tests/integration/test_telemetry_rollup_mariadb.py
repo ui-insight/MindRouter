@@ -28,6 +28,7 @@ and retention's call-time import of the archive models is pinned to the same
 loaded module for the duration of each test.
 """
 
+import asyncio
 import contextlib
 import functools
 import importlib.util
@@ -902,6 +903,71 @@ async def test_a_failed_rollup_never_lets_the_cycle_delete_unaveraged_readings()
         ]
         warnings = [(e, k.get("table")) for (lvl, e, k) in env.mods.log.records if lvl == "warning"]
         assert ("retention_telemetry_delete_skipped", "node_telemetry") in warnings
+
+
+async def test_rollups_failing_for_weeks_only_delete_past_the_backstop():
+    # With the registry's 30-day delete gone, a broken archive would keep
+    # every raw reading forever.  The backstop deletes readings more than 14
+    # days past Tier 1, and nothing newer, logged as an error.
+    async with _scratch() as env:
+        await _seed_dimensions(env)
+        now = datetime(2026, 10, 30, 12, 0)
+        await _insert_readings(env, node=[
+            _node(1, now - timedelta(days=d, hours=1), 1000 + d, 10.0)
+            for d in range(50, 0, -1)
+        ])
+        raw = env.mods.models.NodeTelemetry
+        failed = await _run(env, cutoff=now - timedelta(days=30), now=now,
+                            archive_wrapper=_UnreachableArchive, tier2_days=365)
+        # Days 50..44 (stamped an hour before each day mark) are older than
+        # 30 + 14 days; day 43 and newer stay, although past Tier 1.
+        assert failed["node_telemetry"]["deleted"] == 7
+        assert await _raw_timestamps(env, raw) == [
+            now - timedelta(days=d, hours=1) for d in range(43, 0, -1)
+        ]
+        errors = [(e, k.get("table")) for (lvl, e, k) in env.mods.log.records if lvl == "error"]
+        assert errors == [("retention_telemetry_backstop_delete", "node_telemetry")]
+
+
+async def test_workers_creating_the_archive_tables_at_once_all_succeed():
+    # Every uvicorn worker creates missing archive tables at startup.  When a
+    # release adds tables they race, and the losers used to fail with 1050
+    # "Table already exists" (logged as archive_db_init_failed).
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    archive_mod = _modules().archive
+    name = f"mr_rollup_race_{uuid.uuid4().hex[:12]}"
+    base_url = make_url(_URL)
+    admin = create_async_engine(base_url, poolclass=NullPool)
+    async with admin.begin() as conn:
+        await conn.execute(text(f"CREATE DATABASE `{name}`"))
+    engines = [create_async_engine(base_url.set(database=name), poolclass=NullPool)
+               for _ in range(8)]
+    try:
+        # The legacy tables exist already; only the 5-minute tables are new.
+        async with engines[0].begin() as conn:
+            await conn.run_sync(
+                archive_mod.ArchiveBase.metadata.create_all,
+                tables=[t for t in archive_mod.ArchiveBase.metadata.sorted_tables
+                        if not t.name.endswith("_5m")],
+            )
+        results = await asyncio.gather(
+            *(archive_mod.create_archive_tables(e) for e in engines),
+            return_exceptions=True,
+        )
+        assert results == [None] * 8
+        async with admin.connect() as conn:
+            tables = set((await conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = :s"), {"s": name})).scalars())
+        assert {t.name for t in archive_mod.ArchiveBase.metadata.sorted_tables} <= tables
+    finally:
+        for e in engines:
+            await e.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f"DROP DATABASE IF EXISTS `{name}`"))
+        await admin.dispose()
 
 
 async def test_the_full_cycle_still_prunes_telemetry_when_an_earlier_step_fails(monkeypatch):

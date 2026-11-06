@@ -42,6 +42,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -385,7 +386,8 @@ class ArchivedNodeTelemetry(ArchiveBase):
 # - ids are the archive's own (autoincrement); the natural key is
 #   (entity, bucket_start), unique so that re-running a window under
 #   INSERT IGNORE is idempotent.
-# - bucket_start is the UTC start of the 5-minute bucket.
+# - bucket_start is the start of the 5-minute bucket, on the app DB's clock
+#   (the clock that stamped the readings; UTC in the stock MariaDB image).
 # - names, node and gpu_index are copied in, because backends and GPU
 #   devices are deleted, renamed and re-created far more often than their
 #   history should be orphaned.  They are nullable: a LEFT JOIN against a
@@ -496,3 +498,27 @@ class ArchivedBackendTelemetry5m(ArchiveBase):
         UniqueConstraint("backend_id", "bucket_start", name="uq_arch_bt5m_backend_bucket"),
         Index("ix_arch_bt5m_bucket", "bucket_start"),
     )
+
+
+# MariaDB's "Table '...' already exists".
+_ER_TABLE_EXISTS = 1050
+
+
+async def create_archive_tables(engine, attempts: int = 3) -> None:
+    """Create any archive table that does not exist yet (there is no Alembic
+    for the archive DB; app startup calls this).
+
+    Every uvicorn worker runs it at once.  When a release adds tables, the
+    workers race: each sees the table missing, one creates it, and the rest
+    fail with 1050.  A retry sees the table and skips it, so 1050 is retried
+    instead of being logged as a failed archive init.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(ArchiveBase.metadata.create_all)
+            return
+        except OperationalError as exc:
+            code = exc.orig.args[0] if getattr(exc.orig, "args", None) else None
+            if code != _ER_TABLE_EXISTS or attempt == attempts:
+                raise

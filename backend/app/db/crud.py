@@ -1478,6 +1478,29 @@ async def update_node_status(
     return node
 
 
+_TELEMETRY_DELETE_BATCH = 10000
+
+
+async def _delete_telemetry_in_batches(db: AsyncSession, model, condition) -> None:
+    """Delete one node's or backend's raw telemetry in committed LIMIT batches.
+
+    At a 90-day Tier 1 that is millions of rows: one DELETE would hold their
+    row locks in a single transaction while the poller keeps inserting, and
+    the ORM cascade would load every row into memory first.
+    """
+    while True:
+        deleted = (
+            await db.execute(
+                delete(model)
+                .where(condition)
+                .with_dialect_options(mysql_limit=_TELEMETRY_DELETE_BATCH)
+            )
+        ).rowcount or 0
+        await db.commit()
+        if deleted < _TELEMETRY_DELETE_BATCH:
+            return
+
+
 async def delete_node(db: AsyncSession, node_id: int) -> bool:
     """Delete a node. Fails if backends still reference it."""
     # Check for backends referencing this node
@@ -1496,22 +1519,11 @@ async def delete_node(db: AsyncSession, node_id: int) -> bool:
         .scalars()
         .all()
     )
-    batch = 10000
-    for model, condition in (
-        (GPUDeviceTelemetry, GPUDeviceTelemetry.gpu_device_id.in_(device_ids) if device_ids else None),
-        (NodeTelemetry, NodeTelemetry.node_id == node_id),
-    ):
-        if condition is None:
-            continue
-        while True:
-            deleted = (
-                await db.execute(
-                    delete(model).where(condition).with_dialect_options(mysql_limit=batch)
-                )
-            ).rowcount or 0
-            await db.commit()
-            if deleted < batch:
-                break
+    if device_ids:
+        await _delete_telemetry_in_batches(
+            db, GPUDeviceTelemetry, GPUDeviceTelemetry.gpu_device_id.in_(device_ids)
+        )
+    await _delete_telemetry_in_batches(db, NodeTelemetry, NodeTelemetry.node_id == node_id)
 
     # Delete GPU devices on this node (their telemetry is already gone)
     gpu_result = await db.execute(
@@ -1776,10 +1788,12 @@ async def update_node(
 
 async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
     """Delete a backend and its associated data."""
-    # Bulk-delete child rows with NOT NULL FK
-    await db.execute(
-        delete(BackendTelemetry).where(BackendTelemetry.backend_id == backend_id)
+    # Its raw telemetry first, in committed batches (see delete_node).
+    # Averages already in the archive are kept.
+    await _delete_telemetry_in_batches(
+        db, BackendTelemetry, BackendTelemetry.backend_id == backend_id
     )
+    # Bulk-delete the other child rows with NOT NULL FK
     await db.execute(
         delete(Model).where(Model.backend_id == backend_id)
     )

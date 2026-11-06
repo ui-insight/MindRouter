@@ -832,6 +832,13 @@ _ROLLUP_INSERT_BATCH = 1000
 # Rollup rows per DELETE when tier 2 expires them.  Shortening tier 2 can
 # expire millions of rows at once.
 _ROLLUP_PURGE_BATCH = 10000
+# While a table's rollup keeps failing, its expired raw readings are kept
+# (they have no averages yet) -- but not forever.  Readings this far past
+# the tier-1 cutoff are deleted anyway, logged as an error: a broken
+# archive must not grow the app DB without limit (~80M rows a month).
+# Under normal operation nothing is that old, so this deletes only after
+# ~2 weeks of failed rollups.
+_TELEMETRY_BACKSTOP_GRACE = timedelta(days=14)
 # Seek origin for a table that has never been rolled up, and the epoch of the
 # bucket expression below.  No reading predates it.
 _ROLLUP_EPOCH = datetime(2000, 1, 1)
@@ -1248,6 +1255,16 @@ async def _rollup_telemetry_table(
     plan = _plan_rollup_windows(
         watermark, next_reading, now, keep_since=keep_since, max_span=max_span
     )
+    if watermark is not None and after > plan.horizon:
+        # Only a clock that ran fast and was stepped back gets here.
+        # Readings stamped before the watermark from now on can no longer
+        # be averaged (their buckets are taken); say so.
+        logger.warning(
+            "retention_telemetry_watermark_ahead",
+            table=spec.table,
+            watermark=_iso(watermark),
+            horizon=_iso(plan.horizon),
+        )
     rolled_through = plan.start
     rows_written = 0
 
@@ -1276,11 +1293,18 @@ async def _rollup_telemetry_table(
         rows_written += window_written
         rolled_through = window_end
 
+    more_pending = bool(plan.windows) and rolled_through < plan.horizon
+    if rolled_through is not None:
+        # Never claim more than the horizon.  The pass can start past it
+        # (the next reading is younger than the margin, or the watermark is
+        # ahead of the clock), and a frontier in the future would let the
+        # delete take readings that are still due to be averaged.
+        rolled_through = min(rolled_through, plan.horizon)
     return {
         "rows_written": rows_written,
         "windows": len(plan.windows),
         "rolled_through": rolled_through,
-        "more_pending": bool(plan.windows) and rolled_through < plan.horizon,
+        "more_pending": more_pending,
     }
 
 
@@ -1337,7 +1361,11 @@ async def archive_expired_telemetry(
        but never past the table's rollup frontier: a reading goes only after
        its bucket has been committed to the archive (or when it is older
        than tier 2 keeps).  When a table's rollup fails, its raw rows are
-       left alone this cycle.
+       left alone this cycle, except readings more than
+       _TELEMETRY_BACKSTOP_GRACE past ``cutoff`` (only rollups failing for
+       that long leaves any), which are deleted with an error logged.  A
+       failed delete is recorded as that table's ``delete_error`` and the
+       other tables still run.
 
     Raw readings are not copied to the archive one by one; the rollups are
     the long-term record.  The raw archived_*_telemetry tables only hold
@@ -1382,10 +1410,15 @@ async def archive_expired_telemetry(
                 exc_info=True,
             )
             if cutoff is not None:
+                backstop = _as_naive_utc(cutoff) - _TELEMETRY_BACKSTOP_GRACE
                 logger.warning(
                     "retention_telemetry_delete_skipped",
                     table=spec.table,
                     reason="rollup_failed",
+                    backstop_before=_iso(backstop),
+                )
+                await _delete_table_telemetry(
+                    app_db, spec, backstop, tel_batch, entry, backstop=True
                 )
             continue
 
@@ -1409,11 +1442,48 @@ async def archive_expired_telemetry(
             # No frontier means the live table has never held a reading
             # (and there is no tier-2 limit), so there is nothing to delete.
             continue
-        entry["deleted"] = await _delete_telemetry_before(
-            app_db, spec, before, tel_batch
-        )
+        await _delete_table_telemetry(app_db, spec, before, tel_batch, entry)
 
     return summary
+
+
+async def _delete_table_telemetry(
+    app_db: AsyncSession,
+    spec: _RollupSpec,
+    before: datetime,
+    batch: int,
+    entry: dict[str, Any],
+    *,
+    backstop: bool = False,
+) -> None:
+    """Delete one table's readings older than ``before`` into ``entry``.
+
+    A failure (a lock-wait timeout, say) is recorded on this table's entry
+    as ``delete_error`` and does not stop the other tables.  ``backstop``
+    marks the delete of a table whose rollup failed: anything it removes
+    had no averages, so it is logged as an error.
+    """
+    try:
+        deleted = await _delete_telemetry_before(app_db, spec, before, batch)
+    except Exception as exc:
+        await _rollback_quietly(app_db)
+        entry["delete_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        logger.warning(
+            "retention_telemetry_delete_failed",
+            table=spec.table,
+            error=entry["delete_error"],
+            exc_info=True,
+        )
+        return
+    entry["deleted"] = deleted
+    if backstop and deleted:
+        logger.error(
+            "retention_telemetry_backstop_delete",
+            table=spec.table,
+            deleted=deleted,
+            before=_iso(before),
+            reason="rollups failing; these readings were never averaged",
+        )
 
 
 async def cleanup_expired_telemetry(
