@@ -335,6 +335,15 @@ class TestValidation:
         assert err["code"] == "model_not_found"
         assert "ghost" in err["message"]
 
+    async def test_configured_but_down_503_says_when_to_retry(self):
+        registry = _make_mock_registry(model_exists=False)
+        registry.model_is_configured = AsyncMock(return_value=True)
+        result, _ = await _call({"model": "qwen", "input": "hi"}, registry=registry)
+        assert result.status_code == 503
+        assert _body(result)["error"]["code"] == "model_unavailable"
+        # As every other surface, and routing, answer the same state.
+        assert result.headers["Retry-After"] == "30"
+
     async def test_translation_error_400(self):
         result, _ = await _call(
             {"model": "m", "input": [{"type": "item_reference", "id": "msg_1"}]}
@@ -801,3 +810,37 @@ class TestCompanionEndpoints:
     async def test_cancel_unknown_404(self):
         result, _, _ = await _call_companion(cancel_response_endpoint)
         assert result.status_code == 404
+
+
+# ================================================================
+# Service errors keep their headers when re-shaped
+# ================================================================
+
+
+class TestReshapeKeepsHeaders:
+    def test_routing_503_keeps_retry_after_and_says_model_unavailable(self):
+        # Routing answers a configured model with no healthy backend with
+        # 503 + Retry-After; the re-shape used to drop the header.  Keyed on
+        # the header, not the wording, so rewording routing's message cannot
+        # silently turn this back into a server_error.
+        msg = "any wording at all"
+        resp = _mod._reshape_http_exception(
+            HTTPException(503, detail=msg, headers={"Retry-After": "30"})
+        )
+        assert resp.status_code == 503
+        assert resp.headers["Retry-After"] == "30"
+        body = json.loads(resp.body)
+        assert body["error"]["code"] == "model_unavailable"
+        assert body["error"]["type"] == "service_unavailable"
+        assert body["error"]["message"] == msg
+
+    def test_rate_limit_retry_after_survives(self):
+        resp = _mod._reshape_http_exception(
+            HTTPException(429, detail="Rate limit exceeded", headers={"Retry-After": "12"})
+        )
+        assert resp.status_code == 429 and resp.headers["Retry-After"] == "12"
+
+    def test_other_server_errors_are_unchanged(self):
+        resp = _mod._reshape_http_exception(HTTPException(503, detail="No healthy backends available"))
+        assert json.loads(resp.body)["error"]["code"] == "server_error"
+        assert "retry-after" not in {k.lower() for k in resp.headers}

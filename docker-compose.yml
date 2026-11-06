@@ -54,6 +54,8 @@ services:
       - BACKEND_TIMEOUT_TRIPS_BREAKER=${BACKEND_TIMEOUT_TRIPS_BREAKER:-false}
       - BACKEND_RETRY_ON_TIMEOUT=${BACKEND_RETRY_ON_TIMEOUT:-false}
       - BACKEND_REQUEST_FAULT_DETECTION=${BACKEND_REQUEST_FAULT_DETECTION:-true}
+      - MODEL_LOOKUP_RETRY_ATTEMPTS=${MODEL_LOOKUP_RETRY_ATTEMPTS:-2}
+      - MODEL_LOOKUP_RETRY_PAUSE_SECONDS=${MODEL_LOOKUP_RETRY_PAUSE_SECONDS:-2.0}
       # Security hardening (2.9.18 audit remediation — see backend/app/settings.py).
       # Defaults preserve current behavior; set the prod-hardening values in .env:
       #   SESSION_COOKIE_SECURE=true, ENABLE_API_DOCS=false.

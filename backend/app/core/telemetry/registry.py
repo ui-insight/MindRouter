@@ -671,6 +671,14 @@ class BackendRegistry:
         async with get_async_db_context() as db:
             return await crud.model_is_configured(db, model_name)
 
+    async def get_model_backend_statuses(
+        self, model_name: str, modality: Optional[Modality] = None
+    ) -> set:
+        """Statuses of the backends carrying the model, whatever their health
+        (see crud.get_model_backend_statuses)."""
+        async with get_async_db_context() as db:
+            return await crud.get_model_backend_statuses(db, model_name, modality)
+
     # --- Model alias cache ---------------------------------------------------
 
     async def load_alias_cache(self) -> None:

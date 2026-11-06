@@ -1905,6 +1905,33 @@ async def get_backends_with_model(
     return list(result.scalars().all())
 
 
+async def get_model_backend_statuses(
+    db: AsyncSession, model_name: str, modality: Optional[Modality] = None
+) -> set:
+    """Statuses of every backend carrying this model, healthy or not.
+
+    The same name / modality / model-less-engine filter as
+    ``get_backends_with_model``, without its HEALTHY condition, so anything
+    routable shows up here.  Empty means the fleet does not have the model
+    (for this modality).  Routing uses it to tell an unknown name (404) from
+    a model whose backends may come back (wait briefly) from one an admin
+    took out of service (answer at once).
+    """
+    conditions = [
+        Model.name == model_name,
+        Backend.engine.notin_(MODELLESS_ENGINES),
+    ]
+    if modality:
+        conditions.append(Model.modality == modality)
+    result = await db.execute(
+        select(Backend.status)
+        .join(Model, Model.backend_id == Backend.id)
+        .where(and_(*conditions))
+        .distinct()
+    )
+    return {status for (status,) in result.all()}
+
+
 async def get_servable_video_models(db: AsyncSession) -> List[str]:
     """Video models with at least one healthy video backend right now, by name.
 

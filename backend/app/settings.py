@@ -283,6 +283,13 @@ class Settings(BaseSettings):
     # own proxy in front of the backend may cut the connection sooner.
     backend_stream_idle_timeout: int = 600
     backend_retry_max_attempts: int = 3
+    # A configured model can briefly have no HEALTHY backend (a backend being
+    # re-enabled waits for its first health check; a health flap under load).
+    # Routing re-checks this many times, this many seconds apart, before
+    # answering 503 + Retry-After.  0 = answer at once.  Only for models the
+    # fleet has: an unknown name is a 404 straight away.
+    model_lookup_retry_attempts: int = 2
+    model_lookup_retry_pause_seconds: float = 2.0
     # Per-attempt ceiling for diffusion (image) backends. Image jobs are long
     # and legitimately variable (n x steps x size), so they get their own
     # budget instead of the chat per-attempt timeout, and a timeout is NOT

@@ -56,11 +56,28 @@ from backend.app.core.translators.vllm_out import (
 )
 from backend.app.core.quota_budget import effective_token_budget
 from backend.app.db import crud
-from backend.app.db.models import ApiKey, Backend, BackendEngine, Modality, User
+from backend.app.db.models import ApiKey, Backend, BackendEngine, BackendStatus, Modality, User
 from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
+
+# What routing answers when a configured model has no healthy backend: the
+# status, wording and Retry-After of the API surfaces' availability check
+# (api/model_availability.py, which services cannot import without pulling in
+# every router; a test keeps them in step).  The body stays a plain detail
+# string, as routing's errors always were: OCR, the dashboard and the
+# streaming paths read it as text.
+MODEL_UNAVAILABLE_MESSAGE = (
+    "The model '{model}' is temporarily unavailable — no healthy "
+    "backend is currently serving it. Please retry shortly."
+)
+MODEL_UNAVAILABLE_RETRY_AFTER_SECONDS = 30
+# Backend states the health poller can turn HEALTHY without an admin.
+# DISABLED and DRAINING are set by an admin and stay until one changes them.
+_SELF_RECOVERING_STATUSES = frozenset(
+    {BackendStatus.HEALTHY, BackendStatus.UNHEALTHY, BackendStatus.UNKNOWN}
+)
 
 
 # Module-level tiktoken encoder (lazy singleton)
@@ -1794,6 +1811,54 @@ class InferenceService:
                 job, user, modality, exclude_backend_ids, max_wait,
             )
 
+    async def _await_routable_backends(
+        self, model: str, modality: Optional[Modality], wait: bool
+    ) -> list:
+        """No HEALTHY backend serves ``model`` right now: tell why.
+
+        A name the fleet does not have is a 404 at once.  A configured model
+        with no healthy backend is usually a short gap (a re-enabled backend
+        waiting for its first health check, a health flap), so look again a
+        few times (``model_lookup_retry_*``), and return the backends if one
+        comes back -- but only while some backend could come back on its
+        own: one an admin disabled or is draining will not, so that is
+        answered at once.  Otherwise 503 + Retry-After, as the API surfaces
+        answer a configured-but-down model (api/model_availability.py), never
+        404 "not found": callers that bypass those checks (OCR chunks,
+        dashboard chat, a request whose backend went down after the check)
+        were told the model does not exist, and OCR does not retry a 4xx.
+        Holds no database session while it waits: the registry opens its own.
+        """
+        statuses = await self._registry.get_model_backend_statuses(model, modality)
+        if not statuses:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model '{model}' not found",
+            )
+        may_recover = bool(statuses & _SELF_RECOVERING_STATUSES)
+        attempts = (
+            max(0, int(self._settings.model_lookup_retry_attempts))
+            if wait and may_recover else 0
+        )
+        pause = max(0.0, float(self._settings.model_lookup_retry_pause_seconds))
+        for attempt in range(1, attempts + 1):
+            await asyncio.sleep(pause)
+            backends = await self._registry.get_backends_with_model(model, modality)
+            if backends:
+                logger.info(
+                    "model_lookup_transient_recovered", model=model, attempt=attempt
+                )
+                return backends
+        logger.warning(
+            "model_lookup_unavailable", model=model, attempts=attempts,
+            may_recover=may_recover,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MODEL_UNAVAILABLE_MESSAGE.format(model=model),
+            headers={"Retry-After": str(MODEL_UNAVAILABLE_RETRY_AFTER_SECONDS)},
+        )
+
     async def _route_request_inner(
         self,
         job: Job,
@@ -1808,9 +1873,9 @@ class InferenceService:
         )
 
         if not backends:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model '{job.model}' not found",
+            # Failover attempts (max_wait=0) fail fast, as they do for capacity.
+            backends = await self._await_routable_backends(
+                job.model, modality, wait=max_wait != 0
             )
 
         # Filter out circuit-broken backends
