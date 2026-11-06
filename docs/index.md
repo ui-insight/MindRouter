@@ -1923,6 +1923,7 @@ Per-model and per-feature runtime tunables (chat defaults, voice, video presets 
 | `RUN_MIGRATIONS` | bool | `false` | When true, the app runs `alembic upgrade head` at startup before serving, so a fresh or unmigrated database does not crash-loop. Opt-in; run single-worker on first boot |
 | `DEBUG` | bool | `false` | Enable debug mode |
 | `RELOAD` | bool | `false` | Auto-reload on code changes (development) |
+| `MALLOC_ARENA_MAX` | int | `2` | glibc malloc arenas per process, read at process start (set in the image; compose passes it through to the app so `.env` can change it). glibc's default is 8 per CPU, and memory freed in a thread's arena is seldom returned to the OS; 2 limits how many copies of a busy moment's memory a worker can keep. `0` restores glibc's default. See docs/malloc-arena-deploy-notes.md |
 
 ### Database
 

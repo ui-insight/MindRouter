@@ -56,6 +56,8 @@ services:
       - BACKEND_REQUEST_FAULT_DETECTION=${BACKEND_REQUEST_FAULT_DETECTION:-true}
       - MODEL_LOOKUP_RETRY_ATTEMPTS=${MODEL_LOOKUP_RETRY_ATTEMPTS:-2}
       - MODEL_LOOKUP_RETRY_PAUSE_SECONDS=${MODEL_LOOKUP_RETRY_PAUSE_SECONDS:-2.0}
+      # glibc malloc arenas per process (see the Dockerfile); 0 = glibc default.
+      - MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}
       # Security hardening (2.9.18 audit remediation — see backend/app/settings.py).
       # Defaults preserve current behavior; set the prod-hardening values in .env:
       #   SESSION_COOKIE_SECURE=true, ENABLE_API_DOCS=false.
