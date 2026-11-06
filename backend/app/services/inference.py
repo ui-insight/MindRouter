@@ -369,6 +369,19 @@ class _RequestIds(NamedTuple):
         return cls(db_request.id, db_request.user_id, db_request.api_key_id)
 
 
+def _record_key_use(api_key_id) -> None:
+    """Count one use of the key; services/key_usage.py writes it later.
+
+    Never fails the request: a lost count is a display field, not accounting.
+    """
+    try:
+        from backend.app.services import key_usage
+
+        key_usage.record(api_key_id)
+    except Exception:
+        logger.warning("key_usage_record_failed", api_key_id=api_key_id)
+
+
 def _isolated_db_session():
     """Open a short-lived, independent write session.
 
@@ -831,6 +844,7 @@ class InferenceService:
         endpoint: str = "/v1/chat/completions",
         skip_quota_check: bool = False,
         extra_parameters: Optional[Dict[str, Any]] = None,
+        skip_rpm_check: bool = False,
     ) -> Dict[str, Any]:
         """
         Handle non-streaming chat completion.
@@ -844,13 +858,18 @@ class InferenceService:
             skip_quota_check: Caller already ran _check_quota (the RPM
                 check increments a Redis counter, so it must run
                 exactly once per request)
+            skip_rpm_check: Enforce the token quota but not the per-minute
+                request limit — for the chunks of an OCR document that was
+                already admitted by services/ocr_admission.py, which bounds
+                that work itself. Counting each chunk as a request made big
+                documents fail half way for accounts near their limit.
 
         Returns:
             OpenAI-compatible chat completion response
         """
         # Check quota
         if not skip_quota_check:
-            await self._check_quota(user, api_key)
+            await self._check_quota(user, api_key, check_rpm=not skip_rpm_check)
 
         # Create audit record
         db_request = await self._create_request_record(
@@ -1514,8 +1533,9 @@ class InferenceService:
             return self.DEFAULT_IMAGE_TOKEN_COST
         return max(0, cost)
 
-    async def _check_quota(self, user: User, api_key: ApiKey) -> None:
-        """Check if user has sufficient quota."""
+    async def _check_quota(self, user: User, api_key: ApiKey, check_rpm: bool = True) -> None:
+        """Check if user has sufficient quota (and, unless check_rpm is
+        False, is under their requests-per-minute limit)."""
         # Reset quota if period expired
         await crud.reset_quota_if_needed(self.db, user.id)
 
@@ -1526,6 +1546,9 @@ class InferenceService:
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Token quota exceeded",
             )
+
+        if not check_rpm:
+            return
 
         # RPM rate limit (Redis-backed, shared across all workers)
         rpm_limit = 0
@@ -3304,10 +3327,10 @@ class InferenceService:
                 logger.warning("dlp_response_redaction_failed",
                                request_id=getattr(db_request, "id", None))
 
-    # Attempts for the completion DB transaction. Hot-row deadlocks (quotas /
-    # api_keys under concurrent same-user traffic, MariaDB error 1213) are
-    # transient; more than a few retries means something structural (the
-    # durable fix is atomic increments in update_quota_usage/update_api_key_usage).
+    # Attempts for the completion DB transaction. Hot-row deadlocks (quotas
+    # under concurrent same-user traffic, MariaDB error 1213) are transient;
+    # more than a few retries means something structural. (api_keys is no
+    # longer written here — see services/key_usage.py.)
     _COMPLETION_DB_ATTEMPTS = 5
 
     async def _run_completion_db(
@@ -3316,22 +3339,22 @@ class InferenceService:
     ) -> None:
         """Run a completion DB transaction; retry deadlocks; never raise.
 
-        LOCK ORDER (the reason every writer bumps api_keys FIRST): the
-        completion UPDATE on ``requests`` rewrites secondary indexes that
-        start with the ``api_key_id`` / ``user_id`` foreign-key columns
-        (``ix_requests_apikey_tokens_covering`` and friends), and InnoDB
-        re-validates the foreign key for every such rewrite by taking a
-        SHARED lock on the parent ``api_keys`` / ``users`` row. With the
-        old order (requests → responses → quotas → api_keys) two
-        completions from the same key both held that S lock, one took X on
-        quotas, then needed X on api_keys — blocked by the other's S lock —
-        while the other waited for quotas: MariaDB 1213 every time the same
-        key completed twice within a few ms (~1,400/day on prod, 2026-09-30;
-        the 5-attempt retry lost ~170/day, which the orphan janitor then
-        mislabelled "Orphaned: queued request not tracked by scheduler"
-        although the client had its 200). Taking our own X lock on api_keys
-        as the FIRST statement subsumes the FK S lock, so same-key
-        transactions queue on that row and never form a cycle.
+        LOCKS: the completion UPDATE on ``requests`` rewrites secondary
+        indexes that start with the ``api_key_id`` / ``user_id`` foreign-key
+        columns (``ix_requests_apikey_tokens_covering`` and friends), and
+        InnoDB re-validates the foreign key for every such rewrite by taking
+        a SHARED lock on the parent ``api_keys`` / ``users`` row. When these
+        writers also bumped ``api_keys.usage_count`` after the quota update,
+        two same-key completions deadlocked (MariaDB 1213, ~1,400/day on
+        prod, 2026-09-30). 2.9.81 fixed that by taking the api_keys X lock
+        FIRST — which in turn serialized every same-key completion on that
+        row for its whole transaction, and under the 2026-11-05 OCR flood
+        ~110 of them queued there holding pooled connections until MariaDB
+        refused new ones. Now no writer touches ``api_keys`` at all: key
+        usage is counted in memory and written in batches by
+        services/key_usage.py. The FK S locks are compatible with each
+        other, and nothing in these transactions wants X on api_keys, so
+        no cycle can form through that row.
 
         ``fallback`` (optional coroutine factory): if the transaction still
         loses every retry to a lock error (1213/1205), run it once so the
@@ -3467,12 +3490,9 @@ class InferenceService:
         user_id = db_request.user_id
         api_key_id = db_request.api_key_id
 
-        async def write_once():
-            # api_keys FIRST (see _run_completion_db: the requests UPDATE
-            # takes an implicit S lock on this row; taking our X lock before
-            # it makes same-key completions serialize instead of deadlock).
-            await crud.update_api_key_usage(self.db, api_key_id)
+        _record_key_use(api_key_id)
 
+        async def write_once():
             await crud.update_request_completed(
                 self.db, request_id,
                 prompt_tokens=prompt_tokens,
@@ -3581,12 +3601,11 @@ class InferenceService:
         """
         request_id, user_id, api_key_id = request_ids
 
+        _record_key_use(api_key_id)
+
         async def write_once():
             stored_content = content
             async with _isolated_db_session() as wdb:
-                # api_keys FIRST — same lock-order rule as _do_complete_db.
-                await crud.update_api_key_usage(wdb, api_key_id)
-
                 await crud.update_request_completed(
                     wdb, request_id,
                     prompt_tokens=prompt_tokens,
@@ -3685,10 +3704,9 @@ class InferenceService:
                 logger.error("request_fail_db_skipped", error="expired_orm_instance")
                 return
 
-        async def write(session) -> None:
-            # api_keys FIRST — same lock-order rule as _do_complete_db.
-            await crud.update_api_key_usage(session, api_key_id)
+        _record_key_use(api_key_id)
 
+        async def write(session) -> None:
             await crud.update_request_failed(
                 session, request_id,
                 error_message=error_message,

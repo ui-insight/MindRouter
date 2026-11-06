@@ -340,6 +340,8 @@ class _Env:
         # the request session's in_txn each time a detached write opened a session
         self.request_session_held_at_isolated_open = []
         self.crud = FakeCrud()
+        # services/key_usage.record calls (via inference._record_key_use)
+        self.key_uses = []
         self.logger = MagicMock()
         self.dlp_enqueued = asyncio.Event()
         self.enqueue_for_dlp = AsyncMock(side_effect=lambda rid: self.dlp_enqueued.set())
@@ -409,6 +411,7 @@ def env(inf, monkeypatch):
     monkeypatch.setitem(sys.modules, "backend.app.core.redis_client", redis_stub)
     monkeypatch.setitem(sys.modules, "backend.app.core.sampling_policy", sampling_policy_mod)
     monkeypatch.setattr(inf, "crud", e.crud)
+    monkeypatch.setattr(inf, "_record_key_use", e.key_uses.append)
     monkeypatch.setattr(inf, "logger", e.logger)
     monkeypatch.setattr(inf, "incr_inflight_tokens", AsyncMock())
     monkeypatch.setattr(inf, "decr_inflight_tokens", AsyncMock())
@@ -592,13 +595,13 @@ def _assert_completion_committed_on_isolated_session(env, svc, job, consumer, te
     iso = env.isolated[0]
     assert iso.violations == []
     assert iso.ops == [
-        "update_api_key_usage", "update_request_completed", "create_response",
+        "update_request_completed", "create_response",
         "update_quota_usage", "commit", "close",
     ]
     assert (iso.commits, iso.rollbacks, iso.closed) == (1, 0, True)
     assert ("update_request_completed", "isolated-1", (REQUEST_ID,)) in env.crud.calls
     assert ("update_quota_usage", "isolated-1", (USER_ID, 15)) in env.crud.calls
-    assert ("update_api_key_usage", "isolated-1", (API_KEY_ID,)) in env.crud.calls
+    assert env.key_uses == [API_KEY_ID]
     env.crud.incr_quota_redis.assert_awaited_once_with(USER_ID, 15)
     env.enqueue_for_dlp.assert_awaited_once_with(REQUEST_ID)
     assert env.db_request.late_reads == [], "detached path read the ORM row"
@@ -738,10 +741,10 @@ class TestStreamingFailureWrite:
         assert env.request_db.ops == ["rollback", "close"]
         assert [s.name for s in env.isolated] == ["isolated-1"]
         assert env.isolated[0].ops == [
-            "update_api_key_usage", "update_request_failed", "commit", "close",
+            "update_request_failed", "commit", "close",
         ]
         assert ("update_request_failed", "isolated-1", (REQUEST_ID,)) in env.crud.calls
-        assert ("update_api_key_usage", "isolated-1", (API_KEY_ID,)) in env.crud.calls
+        assert env.key_uses == [API_KEY_ID]
         assert env.db_request.late_reads == [], "failure path read the ORM row"
         assert consumer.cancelled()
         svc._scheduler.on_job_failed.assert_awaited_once_with(job, BACKEND_ID)
@@ -759,10 +762,10 @@ class TestStreamingFailureWrite:
         assert env.request_db.ops == []
         assert [s.name for s in env.isolated] == ["isolated-1"]
         assert env.isolated[0].ops == [
-            "update_api_key_usage", "update_request_failed", "commit", "close",
+            "update_request_failed", "commit", "close",
         ]
         assert ("update_request_failed", "isolated-1", (REQUEST_ID,)) in env.crud.calls
-        assert ("update_api_key_usage", "isolated-1", (API_KEY_ID,)) in env.crud.calls
+        assert env.key_uses == [API_KEY_ID]
         assert env.db_request.late_reads == []
         svc._scheduler.cancel_job.assert_awaited_once_with("req-uuid-101")
 
@@ -776,10 +779,10 @@ class TestStreamingFailureWrite:
         lost = OperationalError(2013)
         if failing == "commit":
             env.isolated_fail["commit"] = lost
-            written = ["update_api_key_usage", "update_request_failed", "commit"]
+            written = ["update_request_failed", "commit"]
         else:
             env.crud.failures["update_request_failed"] = [lost]
-            written = ["update_api_key_usage", "update_request_failed"]
+            written = ["update_request_failed"]
 
         if scenario == "http_error":
             _svc, _job, received = await _backend_http_error_before_first_chunk(
@@ -855,15 +858,15 @@ def _backend_stream(env, chunks, fail_first_attempt=None):
     return proxy_fn
 
 
-# Lock order (2.9.81): api_keys X lock is taken FIRST in every writer — the
-# requests UPDATE rewrites FK-prefixed secondary indexes and InnoDB takes an S
-# lock on the parent api_keys row for that; taking X first prevents the
-# S→X upgrade deadlock between same-key completions (MariaDB 1213).
+# Writers never touch api_keys (2026-11-05): the requests UPDATE still takes
+# an FK S lock on the parent api_keys row, but nothing in the transaction
+# wants X on it, so same-key completions neither deadlock (2.9.81's 1213) nor
+# serialize on that row. Key usage is counted via services/key_usage.py.
 _ISOLATED_COMPLETION_OPS = [
-    "update_api_key_usage", "update_request_completed", "create_response",
+    "update_request_completed", "create_response",
     "update_quota_usage", "commit", "close",
 ]
-_ISOLATED_FAILURE_OPS = ["update_api_key_usage", "update_request_failed", "commit", "close"]
+_ISOLATED_FAILURE_OPS = ["update_request_failed", "commit", "close"]
 
 
 class TestRequestSessionReleasedBeforeStreaming:
@@ -974,7 +977,7 @@ class TestRequestSessionReleasedBeforeStreaming:
 # ----------------------------------------------------------------------
 
 _WRITE_OPS = [
-    "update_api_key_usage", "update_request_completed", "create_response",
+    "update_request_completed", "create_response",
     "update_quota_usage",
 ]
 
@@ -1026,14 +1029,14 @@ class TestCompletionRetriesOnIsolatedSessions:
         env.enqueue_for_dlp.assert_awaited_once_with(REQUEST_ID)
         assert [s.name for s in env.isolated] == ["isolated-1"]
         assert env.isolated[0].ops == [
-            "update_api_key_usage", "update_request_completed", "rollback", "close",
+            "update_request_completed", "rollback", "close",
         ]
         env.crud.incr_quota_redis.assert_not_awaited()
         assert env.request_db.ops == []
 
     @pytest.mark.asyncio
     async def test_lock_wait_timeout_retried_once(self, inf, env):
-        env.crud.failures["update_api_key_usage"] = [OperationalError(1205), OperationalError(1205)]
+        env.crud.failures["update_request_completed"] = [OperationalError(1205), OperationalError(1205)]
         await _complete_streaming_db(inf, env)
 
         # two attempts, then the single-statement fallback (2.9.81) on a third
@@ -1082,7 +1085,7 @@ class TestCompletionRetriesOnIsolatedSessions:
         }
         env.enqueue_for_dlp.assert_awaited_once_with(REQUEST_ID)
         assert env.isolated[0].ops == [
-            "update_api_key_usage", "update_request_completed", "create_response",
+            "update_request_completed", "create_response",
             "rollback", "close",
         ]
         env.crud.incr_quota_redis.assert_not_awaited()
@@ -1135,17 +1138,18 @@ def _fallback_failed(env):
 
 class TestLockOrderAndFallback:
     @pytest.mark.asyncio
-    async def test_streaming_completion_locks_api_keys_first(self, inf, env):
+    async def test_streaming_completion_never_touches_api_keys(self, inf, env):
         await _complete_streaming_db(inf, env)
         assert env.isolated[0].ops == _WRITE_OPS + ["commit", "close"]
-        assert env.isolated[0].ops[0] == "update_api_key_usage"
+        assert "update_api_key_usage" not in env.isolated[0].ops
         assert env.isolated[0].ops.index("update_quota_usage") > env.isolated[0].ops.index(
             "update_request_completed"
         )
+        assert env.key_uses == [API_KEY_ID]
         assert _fallback_written(env) == [] and _fallback_failed(env) == []
 
     @pytest.mark.asyncio
-    async def test_non_streaming_completion_locks_api_keys_first(self, inf, env):
+    async def test_non_streaming_completion_never_touches_api_keys(self, inf, env):
         svc, _job = _make_service(inf, env, proxy=None)
         response = {
             "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
@@ -1153,18 +1157,27 @@ class TestLockOrderAndFallback:
         }
         await svc._do_complete_db(env.db_request, BACKEND_ID, response, 12, 3, False, 15)
         assert env.request_db.ops == _WRITE_OPS + ["commit"]
-        assert env.request_db.ops[0] == "update_api_key_usage"
+        assert "update_api_key_usage" not in env.request_db.ops
+        assert env.key_uses == [API_KEY_ID]
         assert env.isolated == []
 
     @pytest.mark.asyncio
-    async def test_failure_write_locks_api_keys_first(self, inf, env):
+    async def test_failure_write_never_touches_api_keys(self, inf, env):
         svc, _job = _make_service(inf, env, proxy=None)
         await svc._do_fail_db(
             env.db_request, "boom",
             request_ids=inf._RequestIds(REQUEST_ID, USER_ID, API_KEY_ID),
         )
         assert env.isolated[0].ops == _ISOLATED_FAILURE_OPS
-        assert env.isolated[0].ops[0] == "update_api_key_usage"
+        assert "update_api_key_usage" not in env.isolated[0].ops
+        assert env.key_uses == [API_KEY_ID]
+
+    @pytest.mark.asyncio
+    async def test_retried_completion_counts_the_key_use_once(self, inf, env):
+        env.crud.failures["update_quota_usage"] = [OperationalError(1213), OperationalError(1213)]
+        await _complete_streaming_db(inf, env)
+        assert len(env.isolated) == 3
+        assert env.key_uses == [API_KEY_ID]
 
     @pytest.mark.asyncio
     async def test_fallback_marks_request_completed_after_lost_retries(self, inf, env):
@@ -1186,7 +1199,7 @@ class TestLockOrderAndFallback:
 
     @pytest.mark.asyncio
     async def test_fallback_after_lock_wait_timeouts(self, inf, env):
-        env.crud.failures["update_api_key_usage"] = [OperationalError(1205), OperationalError(1205)]
+        env.crud.failures["update_request_completed"] = [OperationalError(1205), OperationalError(1205)]
         await _complete_streaming_db(inf, env)
         assert len(env.isolated) == 3
         assert env.isolated[2].ops == _FALLBACK_OPS
@@ -1267,9 +1280,10 @@ def _nested_def(method: ast.AST, name: str) -> ast.AST:
 
 
 class TestLockOrderInvariant:
-    """AST guard: every writer takes the api_keys X lock before the requests
-    UPDATE (which takes an implicit FK S lock on the same row) and before
-    quotas; the fallback is a single request-row write and nothing else."""
+    """AST guard: no writer touches api_keys inside its transaction (key usage
+    is counted once per request, outside the retried write, and batched by
+    services/key_usage.py); quotas come after the request-row write; the
+    fallback is a single request-row write and nothing else."""
 
     @pytest.fixture(scope="class")
     def methods(self):
@@ -1280,11 +1294,14 @@ class TestLockOrderInvariant:
         ("_do_complete_streaming_db", "write_once", "update_request_completed"),
         ("_do_fail_db", "write", "update_request_failed"),
     ])
-    def test_api_keys_first(self, methods, method, inner, request_write):
+    def test_no_api_keys_write_in_the_transaction(self, methods, method, inner, request_write):
         order = _crud_call_order(_nested_def(methods[method], inner))
-        assert order[0] == "update_api_key_usage", order
-        assert order.count("update_api_key_usage") == 1
-        assert request_write in order
+        assert not any("api_key" in name for name in order), order
+        assert order[0] == request_write, order
+        # Counted exactly once, in the method body, not in the retried write.
+        outer = ast.unparse(methods[method])
+        assert outer.count("_record_key_use(api_key_id)") == 1
+        assert "_record_key_use" not in ast.unparse(_nested_def(methods[method], inner))
         if "update_quota_usage" in order:
             assert order.index("update_quota_usage") > order.index(request_write)
 

@@ -1928,8 +1928,8 @@ Per-model and per-feature runtime tunables (chat defaults, voice, video presets 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `DATABASE_URL` | str | `mysql+pymysql://...` | MariaDB/MySQL connection string |
-| `DATABASE_POOL_SIZE` | int | `30` | Connection pool size |
-| `DATABASE_MAX_OVERFLOW` | int | `20` | Max overflow connections beyond pool |
+| `DATABASE_POOL_SIZE` | int | `30` | Connection pool size **per uvicorn worker**. Keep `UVICORN_WORKERS × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)` well under MariaDB `max_connections` (512); production uses 8 × (20 + 25) = 360 |
+| `DATABASE_MAX_OVERFLOW` | int | `20` | Max overflow connections beyond pool, per worker |
 | `DATABASE_ECHO` | bool | `false` | Log SQL queries |
 | `ARCHIVE_DATABASE_URL` | str | `None` | Optional second database for tiered retention. Archival is skipped entirely when unset |
 

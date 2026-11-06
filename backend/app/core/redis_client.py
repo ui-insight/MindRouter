@@ -117,6 +117,264 @@ async def release_lease(key: str, token: str) -> None:
         logger.exception("lease_release_failed", extra={"key": key})
 
 
+# ── Concurrency slots (fleet-wide "at most N in flight") ──────────────────
+# Each holder is a member of a sorted set scored by its expiry time, so a
+# worker that dies holding a slot frees it when the score passes instead of
+# leaking it forever. Holders renew while they work.
+_SLOT_ACQUIRE_LUA = """
+local now = tonumber(ARGV[1])
+local expiry = tonumber(ARGV[2])
+local token = ARGV[3]
+local ttl = tonumber(ARGV[6])
+for i = 1, #KEYS do
+  redis.call('zremrangebyscore', KEYS[i], '-inf', now)
+end
+local user_limit = tonumber(ARGV[4])
+if user_limit > 0 and redis.call('zcard', KEYS[1]) >= user_limit then
+  return 1
+end
+local global_limit = tonumber(ARGV[5])
+if global_limit > 0 and redis.call('zcard', KEYS[2]) >= global_limit then
+  return 2
+end
+for i = 1, #KEYS do
+  redis.call('zadd', KEYS[i], expiry, token)
+  redis.call('expire', KEYS[i], ttl)
+end
+return 0
+"""
+
+SLOT_OK, SLOT_USER_FULL, SLOT_GLOBAL_FULL = 0, 1, 2
+
+
+async def acquire_slot(
+    user_key: str, global_key: str, token: str,
+    user_limit: int, global_limit: int, ttl_seconds: int,
+) -> Optional[int]:
+    """Take one slot in both sets, or none if either is full.
+
+    Returns SLOT_OK, SLOT_USER_FULL or SLOT_GLOBAL_FULL, or None when Redis
+    is unavailable (the caller falls back to an in-process count). A limit of
+    0 means unlimited.
+    """
+    if not _available or not _redis:
+        return None
+    now = time.time()
+    try:
+        return int(await _redis.eval(
+            _SLOT_ACQUIRE_LUA, 2, user_key, global_key,
+            now, now + ttl_seconds, token, user_limit, global_limit, ttl_seconds,
+        ))
+    except Exception:
+        logger.exception("slot_acquire_failed", key=user_key)
+        return None
+
+
+# Waiting for a slot. Waiters sit in sorted sets scored by arrival time.
+# Each live waiter also keeps a short-lived liveness key (<live_prefix><token>)
+# that it refreshes on every poll; a waiter whose key has lapsed (its worker
+# died, or it was cancelled before it could leave the line) is dropped at once
+# instead of blocking its account's line. Entries older than `stale_before`
+# are dropped too, as a backstop. Within one user, slots go to the OLDEST live
+# waiter, so an account's documents start in the order they arrived; a new
+# document for an account with nobody waiting takes a free slot directly.
+_WAIT_LUA_COMMON = """
+local function prune_dead(key, prefix)
+  local members = redis.call('zrange', key, 0, -1)
+  for _, m in ipairs(members) do
+    if redis.call('exists', prefix .. m) == 0 then
+      redis.call('zrem', key, m)
+    end
+  end
+end
+"""
+
+# KEYS: user_slots, global_slots, user_wait, global_wait
+# ARGV: now, slot_expiry, token, user_limit, global_limit, slot_ttl,
+#       stale_before, wait_user_limit, wait_global_limit, wait_ttl,
+#       live_prefix, live_ttl
+_SLOT_TRY_OR_ENQUEUE_LUA = _WAIT_LUA_COMMON + """
+local now = tonumber(ARGV[1])
+local token = ARGV[3]
+local stale_before = tonumber(ARGV[7])
+local prefix = ARGV[11]
+redis.call('zremrangebyscore', KEYS[1], '-inf', now)
+redis.call('zremrangebyscore', KEYS[2], '-inf', now)
+redis.call('zremrangebyscore', KEYS[3], '-inf', stale_before)
+redis.call('zremrangebyscore', KEYS[4], '-inf', stale_before)
+prune_dead(KEYS[3], prefix)
+prune_dead(KEYS[4], prefix)
+local user_limit = tonumber(ARGV[4])
+local global_limit = tonumber(ARGV[5])
+local room = (user_limit <= 0 or redis.call('zcard', KEYS[1]) < user_limit)
+  and (global_limit <= 0 or redis.call('zcard', KEYS[2]) < global_limit)
+if room and redis.call('zcard', KEYS[3]) == 0 then
+  local slot_ttl = tonumber(ARGV[6])
+  redis.call('zadd', KEYS[1], tonumber(ARGV[2]), token)
+  redis.call('zadd', KEYS[2], tonumber(ARGV[2]), token)
+  redis.call('expire', KEYS[1], slot_ttl)
+  redis.call('expire', KEYS[2], slot_ttl)
+  return 0
+end
+local wait_user_limit = tonumber(ARGV[8])
+if wait_user_limit > 0 and redis.call('zcard', KEYS[3]) >= wait_user_limit then
+  return 6
+end
+local wait_global_limit = tonumber(ARGV[9])
+if wait_global_limit > 0 and redis.call('zcard', KEYS[4]) >= wait_global_limit then
+  return 7
+end
+local wait_ttl = tonumber(ARGV[10])
+redis.call('zadd', KEYS[3], now, token)
+redis.call('zadd', KEYS[4], now, token)
+redis.call('expire', KEYS[3], wait_ttl)
+redis.call('expire', KEYS[4], wait_ttl)
+redis.call('set', prefix .. token, '1', 'EX', tonumber(ARGV[12]))
+return 5
+"""
+
+# KEYS: user_slots, global_slots, user_wait, global_wait
+# ARGV: now, slot_expiry, token, user_limit, global_limit, slot_ttl,
+#       stale_before, live_prefix, live_ttl
+_SLOT_ACQUIRE_QUEUED_LUA = _WAIT_LUA_COMMON + """
+local now = tonumber(ARGV[1])
+local token = ARGV[3]
+local stale_before = tonumber(ARGV[7])
+local prefix = ARGV[8]
+if not redis.call('zscore', KEYS[3], token) then
+  return 3
+end
+-- Still here and still alive: refresh our liveness before judging others'.
+redis.call('set', prefix .. token, '1', 'EX', tonumber(ARGV[9]))
+redis.call('zremrangebyscore', KEYS[1], '-inf', now)
+redis.call('zremrangebyscore', KEYS[2], '-inf', now)
+redis.call('zremrangebyscore', KEYS[3], '-inf', stale_before)
+redis.call('zremrangebyscore', KEYS[4], '-inf', stale_before)
+prune_dead(KEYS[3], prefix)
+prune_dead(KEYS[4], prefix)
+if not redis.call('zscore', KEYS[3], token) then
+  return 3
+end
+local head = redis.call('zrange', KEYS[3], 0, 0)[1]
+if head ~= token then
+  return 4
+end
+local user_limit = tonumber(ARGV[4])
+if user_limit > 0 and redis.call('zcard', KEYS[1]) >= user_limit then
+  return 1
+end
+local global_limit = tonumber(ARGV[5])
+if global_limit > 0 and redis.call('zcard', KEYS[2]) >= global_limit then
+  return 2
+end
+local slot_ttl = tonumber(ARGV[6])
+redis.call('zadd', KEYS[1], tonumber(ARGV[2]), token)
+redis.call('zadd', KEYS[2], tonumber(ARGV[2]), token)
+redis.call('expire', KEYS[1], slot_ttl)
+redis.call('expire', KEYS[2], slot_ttl)
+redis.call('zrem', KEYS[3], token)
+redis.call('zrem', KEYS[4], token)
+redis.call('del', prefix .. token)
+return 0
+"""
+
+SLOT_NOT_QUEUED, SLOT_NOT_YOUR_TURN = 3, 4
+SLOT_QUEUED, SLOT_WAIT_USER_FULL, SLOT_WAIT_GLOBAL_FULL = 5, 6, 7
+
+
+async def try_or_enqueue_slot(
+    user_key: str, global_key: str, user_wait_key: str, global_wait_key: str,
+    token: str, user_limit: int, global_limit: int, slot_ttl: int,
+    stale_seconds: int, wait_user_limit: int, wait_global_limit: int,
+    live_prefix: str, live_ttl: int,
+) -> Optional[int]:
+    """Take a free slot at once if the account has nobody waiting, else join
+    the account's wait line (if the line has room).
+
+    Returns SLOT_OK (slot held), SLOT_QUEUED, SLOT_WAIT_USER_FULL,
+    SLOT_WAIT_GLOBAL_FULL, or None if the call failed (Redis unavailable or
+    an error/timeout). Limits of 0 mean unlimited.
+    """
+    if not _available or not _redis:
+        return None
+    now = time.time()
+    try:
+        return int(await _redis.eval(
+            _SLOT_TRY_OR_ENQUEUE_LUA, 4, user_key, global_key, user_wait_key, global_wait_key,
+            now, now + slot_ttl, token, user_limit, global_limit, slot_ttl,
+            now - stale_seconds, wait_user_limit, wait_global_limit, stale_seconds,
+            live_prefix, live_ttl,
+        ))
+    except Exception:
+        logger.exception("slot_try_or_enqueue_failed", key=user_key)
+        return None
+
+
+async def acquire_queued_slot(
+    user_key: str, global_key: str, user_wait_key: str, global_wait_key: str,
+    token: str, user_limit: int, global_limit: int, slot_ttl: int,
+    stale_seconds: int, live_prefix: str, live_ttl: int,
+) -> Optional[int]:
+    """Move a waiter into a slot if it is the oldest live waiter in its
+    user's line and both limits have room. Refreshes the waiter's liveness.
+    Returns SLOT_OK, SLOT_USER_FULL, SLOT_GLOBAL_FULL, SLOT_NOT_QUEUED (its
+    wait entry is gone), SLOT_NOT_YOUR_TURN, or None if the call failed."""
+    if not _available or not _redis:
+        return None
+    now = time.time()
+    try:
+        return int(await _redis.eval(
+            _SLOT_ACQUIRE_QUEUED_LUA, 4, user_key, global_key, user_wait_key, global_wait_key,
+            now, now + slot_ttl, token, user_limit, global_limit, slot_ttl,
+            now - stale_seconds, live_prefix, live_ttl,
+        ))
+    except Exception:
+        logger.exception("slot_acquire_failed", key=user_key)
+        return None
+
+
+async def leave_slot(zset_keys: Iterable[str], live_key: str, token: str) -> None:
+    """Remove a token from slot and wait sets and drop its liveness key (safe
+    no-op for any it is not in)."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        for key in zset_keys:
+            pipe.zrem(key, token)
+        pipe.delete(live_key)
+        await pipe.execute()
+    except Exception:
+        logger.exception("slot_leave_failed")
+
+
+async def renew_slot(keys: Iterable[str], token: str, ttl_seconds: int) -> None:
+    """Push the holder's expiry forward (XX: never re-adds a released slot)."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.zadd(key, {token: time.time() + ttl_seconds}, xx=True)
+            pipe.expire(key, ttl_seconds)
+        await pipe.execute()
+    except Exception:
+        logger.exception("slot_renew_failed")
+
+
+async def release_slot(keys: Iterable[str], token: str) -> None:
+    """Give the slot back (safe no-op if it already expired)."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.zrem(key, token)
+        await pipe.execute()
+    except Exception:
+        logger.exception("slot_release_failed")
+
+
 async def incr_tokens(user_id: int, amount: int) -> Optional[int]:
     """Atomically increment token counter. Returns new value or None on failure."""
     if not _available or not _redis:
