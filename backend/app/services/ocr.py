@@ -770,8 +770,18 @@ async def perform_ocr(
     """
     import time as _time
 
+    from backend.app.core.telemetry.registry import get_registry
+
     t_total_start = _time.monotonic()
     is_pdf = (content_type == "application/pdf")
+
+    # Routing looks backends up by the real model name, so an alias that
+    # reaches the chunks unresolved 404s every one of them.  Prod's OCR model
+    # is the alias `default-ocr`: /v1/ocr resolved it before calling here, but
+    # the dashboard chat's scanned-PDF path passed it through, and every
+    # scanned PDF uploaded in chat failed OCR ("Model 'default-ocr' not
+    # found").  Resolving here covers every caller; a real name is unchanged.
+    model, _ = get_registry().resolve_alias(model)
 
     # For Office docs, convert to PDF first (then treat as PDF)
     office_types = {
