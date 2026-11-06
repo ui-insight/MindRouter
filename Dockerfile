@@ -108,17 +108,6 @@ ENV LANG=C.UTF-8 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PATH="/opt/venv/bin:$PATH"
 
-# glibc gives allocating threads their own malloc arenas (up to 8 per CPU),
-# and memory freed inside an arena is seldom returned to the OS.  The app
-# allocates from many threads (asyncio.to_thread: OCR page conversion, file
-# extraction, token counting), so each arena can keep a busy moment's memory:
-# prod workers sat at 4-6 GB each after weeks (33 GB of 62 for 8 workers,
-# 2026-11-06).  Two arenas cap how many such copies a worker keeps; it does
-# not return every freed page (see docs/malloc-arena-deploy-notes.md).
-# docker-compose.yml passes it through so .env can change it without a
-# rebuild; 0 restores glibc's default.
-ENV MALLOC_ARENA_MAX=2
-
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -169,6 +158,18 @@ RUN mkdir -p /data/artifacts /data/chat_files /data/branding /var/log/mindrouter
     chown -R appuser:appuser /app /data /var/log/mindrouter
 
 # Switch to non-root user
+# glibc gives allocating threads their own malloc arenas (up to 8 per CPU),
+# and memory freed inside an arena is seldom returned to the OS.  The app
+# allocates from many threads (asyncio.to_thread: OCR page conversion, file
+# extraction, token counting), so each arena can keep a busy moment's memory:
+# prod workers sat at 4-6 GB each after weeks (33 GB of 62 for 8 workers,
+# 2026-11-06).  Two arenas cap how many such copies a worker keeps; it does
+# not return every freed page (see docs/malloc-arena-deploy-notes.md).
+# docker-compose.yml passes it through so .env can change it without a
+# rebuild; 0 restores glibc's default.  Set late in the stage so changing it
+# does not invalidate the apt and pip layers above.
+ENV MALLOC_ARENA_MAX=2
+
 USER appuser
 
 # Expose port
