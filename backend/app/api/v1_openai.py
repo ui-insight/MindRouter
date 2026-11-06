@@ -46,7 +46,12 @@ from backend.app.db.models import ApiKey, BackendEngine, Modality, RequestStatus
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.image_policy import CATEGORY_OK
-from backend.app.services.inference import InferenceService, count_request_text_chars
+from backend.app.services.inference import (
+    InferenceService,
+    apply_reasoning_history_policy,
+    count_request_text_chars,
+    prefilter_reasoning_history,
+)
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
@@ -396,6 +401,9 @@ async def tokenize(
 
     settings = get_settings()
     max_chars = getattr(settings, "tokenize_max_input_chars", 2_000_000)
+    # Reasoning that can't be forwarded to this model doesn't count toward
+    # the size gate (it is never sent).
+    await prefilter_reasoning_history(canonical)
     if count_request_text_chars(canonical) > max_chars:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -414,9 +422,11 @@ async def tokenize(
 
     # Get model context length
     models = await crud.get_models_for_backend(db, backend.id)
-    target = next((m for m in models if m.name == model), None)
+    target = next((m for m in models if (m.name or "").casefold() == (model or "").casefold()), None)
     max_model_len = target.context_length if target else None
 
+    # Count what would be sent: earlier reasoning is kept or dropped per model.
+    await apply_reasoning_history_policy(canonical, model, target)
     count, is_estimate = await service._count_input_tokens(canonical, backend)
 
     return {
@@ -474,11 +484,19 @@ async def ocr(
     Accepts multipart file upload. For multi-page documents, pages are processed
     in overlapping chunks and merged deterministically.
     """
-    from backend.app.services.ocr import get_ocr_config, perform_ocr
+    from backend.app.services.ocr import (
+        OcrCancelled, get_ocr_config, perform_ocr, validate_client_params,
+    )
+    from backend.app.services.ocr_admission import OcrBusy
 
     user, api_key = auth
     request_id = f"ocr-{uuid.uuid4().hex[:24]}"
     bind_request_context(request_id=request_id, user_id=user.id)
+
+    try:
+        validate_client_params(dpi=dpi, chunk_size=chunk_size, overlap=overlap)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     # Load OCR config from admin settings
     ocr_config = await get_ocr_config(db)
@@ -542,6 +560,16 @@ async def ocr(
             detail=f"File exceeds maximum size of {ocr_config['max_file_size_mb']}MB",
         )
 
+    # One document = one request against the per-minute limit, and the token
+    # quota is checked up front, before any page is converted. (Its chunks
+    # skip the per-minute check; admission bounds them instead.)
+    await InferenceService(db)._check_quota(user, api_key)
+
+    # A document can take minutes. End this request's transaction now so it
+    # does not hold a pooled connection the whole time (each chunk opens its
+    # own session when it needs one).
+    await db.commit()
+
     try:
         result = await perform_ocr(
             file_bytes=file_bytes,
@@ -557,6 +585,15 @@ async def ocr(
             api_key=api_key,
             http_request=request,
         )
+    except OcrBusy as e:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e),
+            headers={"Retry-After": str(e.retry_after)},
+        )
+    except OcrCancelled:
+        # The client is gone; nobody reads this. 499 = client closed request.
+        raise HTTPException(status_code=499, detail="Client closed request")
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -601,11 +638,19 @@ async def ocrmd(
     Same pipeline as /v1/ocr but the response body is plain text/markdown.
     """
     from fastapi.responses import PlainTextResponse
-    from backend.app.services.ocr import get_ocr_config, perform_ocr
+    from backend.app.services.ocr import (
+        OcrCancelled, get_ocr_config, perform_ocr, validate_client_params,
+    )
+    from backend.app.services.ocr_admission import OcrBusy
 
     user, api_key = auth
     request_id = f"ocr-{uuid.uuid4().hex[:24]}"
     bind_request_context(request_id=request_id, user_id=user.id)
+
+    try:
+        validate_client_params(dpi=dpi, chunk_size=chunk_size, overlap=overlap)
+    except ValueError as e:
+        return PlainTextResponse(str(e), status_code=400)
 
     ocr_config = await get_ocr_config(db)
 
@@ -649,6 +694,14 @@ async def ocrmd(
             status_code=413,
         )
 
+    # See /v1/ocr: one request against the per-minute limit, quota checked
+    # up front, and no pooled connection held for the whole document.
+    try:
+        await InferenceService(db)._check_quota(user, api_key)
+    except HTTPException as e:
+        return PlainTextResponse(str(e.detail), status_code=e.status_code)
+    await db.commit()
+
     try:
         result = await perform_ocr(
             file_bytes=file_bytes,
@@ -664,6 +717,12 @@ async def ocrmd(
             api_key=api_key,
             http_request=request,
         )
+    except OcrBusy as e:
+        return PlainTextResponse(
+            str(e), status_code=429, headers={"Retry-After": str(e.retry_after)},
+        )
+    except OcrCancelled:
+        return PlainTextResponse("Client closed request", status_code=499)
     except ValueError as e:
         return PlainTextResponse(str(e), status_code=400)
     except RuntimeError as e:

@@ -1326,7 +1326,7 @@ client.conversations.delete(conv.id)               # delete state anytime</code>
                         <tr><td>Energy</td><td><code>/admin/energy</code></td><td>Server and GPU power history per node and cluster-wide, with CSV/JSON export</td></tr>
                         <tr><td>DLP</td><td><code>/admin/dlp</code></td><td>Data-loss-prevention scanner configuration and alert review (filter by severity, scanner, text; acknowledge alerts). Alert rows store <em>masked</em> snippets, never the verbatim match &mdash; open the linked request for full context. Governed by the <code>DLP Alerts (days)</code> retention setting (default 0 = keep forever)</td></tr>
                         <tr><td>Voice Config</td><td><code>/admin/voice-config</code></td><td>Configure TTS/STT backend connections, available voices, and API quota token costs</td></tr>
-                        <tr><td>OCR</td><td><code>/admin/ocr-config</code></td><td>OCR enable toggle, default model, prompts, DPI, page/file limits, chunk size and overlap, chunk concurrency, retries</td></tr>
+                        <tr><td>OCR</td><td><code>/admin/ocr-config</code></td><td>OCR enable toggle, default model, prompts, DPI, page/file limits, chunk size and overlap, chunk concurrency, retries, load limits (documents in progress per account / for the whole service, page conversions per worker)</td></tr>
                         <tr><td>Images</td><td><code>/admin/images-config</code></td><td>Image generation enable toggle, default model, default/allowed sizes, steps and guidance defaults, safety judge models and policy, per-user access grants</td></tr>
                         <tr><td>Video</td><td><code>/admin/video-config</code></td><td>Video generation enable toggle, default model, allowed sizes and durations, per-user concurrent job cap and storage cap, token cost per second, per-user access grants</td></tr>
                         <tr><td>Email</td><td><code>/admin/email</code></td><td>Compose and send announcement email to selected users or groups, with recipient count preview and test send</td></tr>
@@ -1706,7 +1706,7 @@ curl -X PATCH https://mindrouter.example.edu/api/admin/users/42 \
                     <li><strong>Verification</strong> &mdash; Lookup by prefix (fast), then full Argon2 hash verification.</li>
                     <li><strong>Expiration</strong> &mdash; Optional <code>expires_at</code> timestamp.</li>
                     <li><strong>Revocation</strong> &mdash; Keys can be revoked (soft-delete) without deleting the audit trail.</li>
-                    <li><strong>Usage tracking</strong> &mdash; <code>last_used_at</code> and <code>usage_count</code> updated atomically on each request.</li>
+                    <li><strong>Usage tracking</strong> &mdash; <code>last_used_at</code> and <code>usage_count</code> are counted per request and written in batches about every 15 seconds, so they can lag slightly.</li>
                 </ol>
 
                 <h3>Quota System</h3>
@@ -2057,6 +2057,16 @@ print(f"Pages: {result['pages']}, Chunks: {result['chunks_processed']}")</code><
   > output.md</code></pre>
                 <p>Accepts the same optional parameters as <code>/v1/ocr</code> (<code>model</code>, <code>chunk_size</code>, <code>overlap</code>, <code>dpi</code>) except <code>output_format</code> (always markdown).</p>
 
+                <h4>Limits and Batch Jobs</h4>
+                <p>Turning document pages into images runs on MindRouter&rsquo;s own servers, so OCR is limited by documents in progress rather than only by requests per minute:</p>
+                <ul>
+                    <li><strong>Documents in progress per account</strong> (default 2) and <strong>for the whole service</strong> (default 8). A document over either limit <strong>waits</strong> for a free slot, up to 60 seconds by default; an account's waiting documents start in the order they arrived. If no slot frees up in time, or too many documents are already waiting (default 4 per account, 16 for the service), it is refused with <code>429 Too Many Requests</code> and a <code>Retry-After</code> header &mdash; before any work is done. Send documents one or two at a time and wait for each response; when you get a 429, wait the <code>Retry-After</code> seconds before sending again.</li>
+                    <li><strong>Parameter ranges</strong>: <code>dpi</code> 72&ndash;300, <code>chunk_size</code> 1&ndash;20, <code>overlap</code> 0&ndash;10. Whole numbers outside these ranges are rejected with <code>400</code>; values that are not whole numbers get <code>422</code>.</li>
+                    <li>Each document counts as one request against your per-minute limit, and your token quota is checked before any work starts.</li>
+                    <li>Once a document has started, its chunks do not count against your per-minute request limit (they still count toward your token quota), so a large document is not cut off half way.</li>
+                    <li>If your client disconnects or times out, the rest of the document is abandoned. Use a client timeout long enough for your largest documents (several minutes for 100+ pages) rather than resending a document that is still being processed.</li>
+                </ul>
+
                 <h4>Configuration</h4>
                 <p>Administrators can configure OCR settings via <strong>Admin &rarr; OCR</strong> in the web dashboard. Configurable options include:</p>
                 <ul>
@@ -2065,6 +2075,7 @@ print(f"Pages: {result['pages']}, Chunks: {result['chunks_processed']}")</code><
                     <li><strong>DPI</strong> &mdash; Resolution for PDF and Office document conversion</li>
                     <li><strong>Concurrency</strong> &mdash; How many chunks to process in parallel</li>
                     <li><strong>Safety limits</strong> &mdash; Maximum pages, file size, retries per chunk</li>
+                    <li><strong>Load limits</strong> &mdash; Documents in progress per account and for the whole service, how long and how many documents may wait for a slot, and page conversions at once per app worker</li>
                     <li><strong>Temperature &amp; max tokens</strong> &mdash; LLM parameters for OCR requests</li>
                     <li><strong>Enable/disable</strong> &mdash; Toggle the entire OCR endpoint</li>
                 </ul>
@@ -2775,9 +2786,9 @@ docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi</code>
                         </tr>
                         <tr>
                             <td><strong>Telemetry</strong></td>
-                            <td><code>backend_telemetry</code>, <code>gpu_device_telemetry</code></td>
-                            <td>30 days</td>
-                            <td>Not archived (deleted only)</td>
+                            <td><code>node_telemetry</code>, <code>gpu_device_telemetry</code>, <code>backend_telemetry</code></td>
+                            <td>30 days (raw readings)</td>
+                            <td>5-minute averages in <code>archived_*_telemetry_5m</code>, kept for Tier 2 days (0 = no averages)</td>
                         </tr>
                     </tbody>
                 </table>
@@ -2813,8 +2824,8 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                         <tr><td><code>retention.requests.tier2_days</code></td><td>730</td><td>Days archived requests are kept before purge</td></tr>
                         <tr><td><code>retention.chat.tier1_days</code></td><td>90</td><td>Days before chat data is archived</td></tr>
                         <tr><td><code>retention.chat.tier2_days</code></td><td>730</td><td>Days archived chat data is kept before purge</td></tr>
-                        <tr><td><code>retention.telemetry.tier1_days</code></td><td>30</td><td>Days before telemetry is purged (no archival)</td></tr>
-                        <tr><td><code>retention.telemetry.tier2_days</code></td><td>0</td><td>0 = telemetry is not archived</td></tr>
+                        <tr><td><code>retention.telemetry.tier1_days</code></td><td>30</td><td>Days raw readings stay in the app DB (0 = never delete). The only scheduled deletion of raw telemetry (the Purge tab and deleting a node or backend also remove readings); while averages are kept, a reading is deleted only after its 5-minute average is archived, or, once averaging has failed for more than 14 days in a row, 14 days past this limit</td></tr>
+                        <tr><td><code>retention.telemetry.tier2_days</code></td><td>0</td><td>Days 5-minute averages are kept in the archive DB; 0 = write no averages (expired readings are simply deleted; averages already archived are kept)</td></tr>
                         <tr><td><code>retention.cleanup_interval</code></td><td>3600</td><td>Seconds between retention cycle runs</td></tr>
                         <tr><td><code>retention.batch_size</code></td><td>500</td><td>Rows per archive+delete batch</td></tr>
                     </tbody>
@@ -2848,11 +2859,11 @@ ARCHIVE_DATABASE_URL=mysql+pymysql://mindrouter_archive:&lt;secure-password&gt;@
                 <ol>
                     <li>Archives and deletes expired requests from the app DB (Tier 1)</li>
                     <li>Archives and deletes expired chat conversations from the app DB (Tier 1)</li>
-                    <li>Deletes expired telemetry data from the app DB (no archival)</li>
+                    <li>Rolls telemetry up into 5-minute averages in the archive DB (when Tier 2 &gt; 0), then deletes expired raw readings that are already averaged</li>
                     <li>Purges expired records from the archive DB (Tier 2)</li>
                     <li>Cleans up orphan chat attachments</li>
                 </ol>
-                <p>All operations are batched and use FK-order deletion to maintain referential integrity. Archive inserts use <code>INSERT IGNORE</code> for idempotent re-runs.</p>
+                <p>All operations are batched and use FK-order deletion to maintain referential integrity. Archive inserts use <code>INSERT IGNORE</code> for idempotent re-runs. Each category runs on its own: a failure in one (say, the archive DB is unreachable) is logged and recorded in the cycle summary, and the remaining categories still run.</p>
 
                 <h3>Storage</h3>
                 <p>The archive database volume can be mounted to a separate, larger disk. Set <code>ARCHIVE_DB_HOST_PATH</code> to a path on that disk (it defaults to a local <code>./data/archive-mariadb</code> directory) so the archive data can reside on a different filesystem than the primary database.</p>
@@ -3757,8 +3768,6 @@ Hello from MindRouter!</code></pre>
                         <tr><th>Variable</th><th>Type</th><th>Default</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>TELEMETRY_RETENTION_DAYS</code></td><td>int</td><td><code>30</code></td><td>Telemetry data retention period</td></tr>
-                        <tr><td><code>TELEMETRY_CLEANUP_INTERVAL</code></td><td>int</td><td><code>3600</code></td><td>Cleanup interval (seconds)</td></tr>
                         <tr><td><code>SIDECAR_TIMEOUT</code></td><td>int</td><td><code>15</code></td><td>Sidecar HTTP call timeout (seconds)</td></tr>
                     </tbody>
                 </table>

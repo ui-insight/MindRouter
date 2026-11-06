@@ -24,7 +24,11 @@
 
 import asyncio
 import base64
+import collections
+import contextlib
+import contextvars
 import difflib
+import functools
 import io
 import json
 import re
@@ -98,7 +102,166 @@ async def get_ocr_config(db) -> dict:
         "temperature": await crud.get_config_json(db, "ocr.temperature", 0.1),
         "prompt_ocr": await crud.get_config_json(db, "ocr.prompt_ocr", _DEFAULT_PROMPT_OCR),
         "prompt_ocrmd": await crud.get_config_json(db, "ocr.prompt_ocrmd", _DEFAULT_PROMPT_OCRMD),
+        # Load limits (see services/ocr_admission.py). Documents are counted
+        # fleet-wide; conversions are per uvicorn worker. 0 = unlimited for
+        # the document limits.
+        "max_documents_per_user": await crud.get_config_json(
+            db, "ocr.max_documents_per_user", DEFAULT_MAX_DOCUMENTS_PER_USER),
+        "max_documents": await crud.get_config_json(
+            db, "ocr.max_documents", DEFAULT_MAX_DOCUMENTS),
+        "max_concurrent_conversions": await crud.get_config_json(
+            db, "ocr.max_concurrent_conversions", DEFAULT_MAX_CONVERSIONS),
+        # A document over a limit waits this long for a slot (0 = refuse at
+        # once); the wait line is bounded per user and server-wide.
+        "queue_wait_seconds": await crud.get_config_json(
+            db, "ocr.queue_wait_seconds", DEFAULT_QUEUE_WAIT_SECONDS),
+        "max_waiting_per_user": await crud.get_config_json(
+            db, "ocr.max_waiting_per_user", DEFAULT_MAX_WAITING_PER_USER),
+        "max_waiting": await crud.get_config_json(
+            db, "ocr.max_waiting", DEFAULT_MAX_WAITING),
     }
+
+
+# ---------------------------------------------------------------------------
+# Load limits
+# ---------------------------------------------------------------------------
+
+DEFAULT_MAX_DOCUMENTS_PER_USER = 2
+DEFAULT_MAX_DOCUMENTS = 8
+# Per uvicorn worker: 8 prod workers x 2 = 16 conversions at most, half the
+# gateway's 32 cores.
+DEFAULT_MAX_CONVERSIONS = 2
+DEFAULT_QUEUE_WAIT_SECONDS = 60
+DEFAULT_MAX_WAITING_PER_USER = 4
+DEFAULT_MAX_WAITING = 16
+
+# Bounds on what a caller may ask for. A naive client asking for 1200 dpi or
+# 200-page chunks would otherwise make every conversion enormous.
+CLIENT_DPI_RANGE = (72, 300)
+CLIENT_CHUNK_SIZE_RANGE = (1, 20)
+CLIENT_OVERLAP_RANGE = (0, 10)
+
+# Seconds to wait before retrying a chunk whose request failed (doubles per
+# attempt). Immediate retries multiplied the load in the 2026-11-05 outage.
+CHUNK_RETRY_BACKOFF_SECONDS = 2.0
+
+
+class OcrCancelled(Exception):
+    """The client went away; the rest of the document is not worth doing."""
+
+
+class _ConversionLimiter:
+    """Caps page-image conversions running at once in this worker.
+
+    Turning PDF pages into images (pdftoppm, LibreOffice, PIL) runs on the
+    gateway's own CPUs. Without a cap, every chunk of every document converted
+    at once: 39 pdftoppm processes and load ~90 on 32 cores in the 2026-11-05
+    outage, which starved the event loop until database writes timed out. The
+    limit is re-read from admin config on each document, so it can change
+    without a restart.
+
+    A FIFO of futures rather than an asyncio.Condition: releasing is fully
+    synchronous (no lock to await, so a cancellation during release can never
+    lose a slot), and a freed slot is handed straight to the next waiter (no
+    wake-up can be lost if that waiter is cancelled — it hands it on).
+    """
+
+    def __init__(self, limit: int):
+        self._limit = max(1, int(limit))
+        self._active = 0
+        self._waiters: "collections.deque[asyncio.Future]" = collections.deque()
+
+    def set_limit(self, limit) -> None:
+        try:
+            new = max(1, int(limit))
+        except (TypeError, ValueError):
+            return
+        if new != self._limit:
+            self._limit = new
+            self._wake()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    def _wake(self) -> None:
+        while self._waiters and self._active < self._limit:
+            fut = self._waiters.popleft()
+            if not fut.done():
+                self._active += 1  # the slot passes to this waiter
+                fut.set_result(None)
+
+    async def __aenter__(self):
+        if self._active < self._limit and not self._waiters:
+            self._active += 1
+            return self
+        fut = asyncio.get_running_loop().create_future()
+        self._waiters.append(fut)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                # We were handed a slot just as we were cancelled: pass it on.
+                self._active -= 1
+                self._wake()
+            else:
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove(fut)
+            raise
+        return self
+
+    async def __aexit__(self, *exc):
+        self._active -= 1
+        self._wake()
+        return False
+
+
+_conversions = _ConversionLimiter(DEFAULT_MAX_CONVERSIONS)
+
+
+async def _convert_in_thread(fn, *args):
+    """Run a blocking conversion in a thread, under the conversion limit.
+
+    The limit is held until the THREAD finishes, not just until the awaiting
+    task stops waiting: cancelling a task cannot stop pdftoppm, so releasing
+    on cancellation would let new conversions start while the old ones still
+    run — the limit would count tasks, not processes.
+    """
+    async with _conversions:
+        # copy_context: keep request_id/user_id on log lines from the thread,
+        # as asyncio.to_thread did.
+        ctx = contextvars.copy_context()
+        fut = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(ctx.run, fn, *args),
+        )
+        cancelled = False
+        while not fut.done():
+            try:
+                await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException:
+                break
+        if cancelled:
+            raise asyncio.CancelledError()
+        return fut.result()
+
+
+def validate_client_params(dpi=None, chunk_size=None, overlap=None) -> None:
+    """Reject caller-supplied conversion settings outside sane bounds.
+
+    Only values the caller actually sent are checked (None = not sent); the
+    admin's own defaults are bounded by the settings form instead.
+    """
+    for name, value, (lo, hi) in (
+        ("dpi", dpi, CLIENT_DPI_RANGE),
+        ("chunk_size", chunk_size, CLIENT_CHUNK_SIZE_RANGE),
+        ("overlap", overlap, CLIENT_OVERLAP_RANGE),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, int) or not lo <= value <= hi:
+            raise ValueError(f"{name} must be between {lo} and {hi}")
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +324,7 @@ async def document_to_images(
     # hostile many-frame image can't pin a CPU decoding unbounded frames.
     if content_type.startswith("image/"):
         max_frames = get_settings().ocr_max_frames
-        return await asyncio.to_thread(_image_bytes_to_pages, file_bytes, max_frames)
+        return await _convert_in_thread(_image_bytes_to_pages, file_bytes, max_frames)
 
     # PDF
     if content_type == "application/pdf":
@@ -197,7 +360,7 @@ async def _pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> List[bytes]:
         pil_images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
         return [_image_to_png_bytes(img) for img in pil_images]
 
-    return await asyncio.to_thread(_convert)
+    return await _convert_in_thread(_convert)
 
 
 async def _pdf_page_count(pdf_bytes: bytes) -> int:
@@ -222,11 +385,17 @@ async def _pdf_to_images_range(
         )
         return [_image_to_png_bytes(img) for img in pil_images]
 
-    return await asyncio.to_thread(_convert)
+    return await _convert_in_thread(_convert)
 
 
 async def _office_to_pdf(file_bytes: bytes, suffix: str) -> bytes:
     """Convert Office document to PDF via LibreOffice headless."""
+    async with _conversions:
+        return await _office_to_pdf_unlimited(file_bytes, suffix)
+
+
+async def _office_to_pdf_unlimited(file_bytes: bytes, suffix: str) -> bytes:
+    """The LibreOffice conversion itself; _office_to_pdf holds the limit."""
     lo_path = shutil.which("libreoffice") or shutil.which("soffice")
     if not lo_path:
         raise RuntimeError(
@@ -455,9 +624,76 @@ def _is_image_limit_error(e: Exception) -> bool:
     )
 
 
+def _is_retryable(e: Exception) -> bool:
+    """Whether a failed chunk request is worth retrying.
+
+    A 4xx says the request itself is refused — over the caller's rate limit
+    (429), over quota, invalid — and the same request will be refused again.
+    Retrying those at once is what multiplied a rate-limited client's load in
+    the 2026-11-05 outage. Server errors and timeouts may be transient.
+    """
+    code = getattr(e, "status_code", None)
+    return not (isinstance(code, int) and 400 <= code < 500)
+
+
+async def _should_stop(stop: Optional[asyncio.Event], http_request) -> bool:
+    """Whether a chunk should not start (or retry): the document already
+    failed, or the client went away."""
+    return bool(stop is not None and stop.is_set()) or await _client_gone(http_request)
+
+
+async def _client_gone(http_request) -> bool:
+    """True once the HTTP client that asked for this document has gone away."""
+    is_disconnected = getattr(http_request, "is_disconnected", None)
+    if is_disconnected is None:
+        return False
+    try:
+        return bool(await is_disconnected())
+    except Exception:
+        return False
+
+
+async def _run_chunks(coros, stop: asyncio.Event) -> list:
+    """Run a document's chunks concurrently; the first failure stops the rest.
+
+    asyncio.gather alone raises the first error but leaves the other chunks
+    running, so a failed or abandoned document kept converting pages and
+    calling the model for nobody. Stopping is cooperative: ``stop`` is set and
+    each chunk checks it before converting, before inference and before a
+    retry. Chunks are NOT cancelled mid-flight — a chunk inside its
+    completion's accounting write must finish it before its DB session
+    closes, and a cancelled conversion would leave pdftoppm running unseen.
+    So this returns (or raises) only once every chunk has actually finished.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    first_error: Optional[BaseException] = None
+    pending = set(tasks)
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_EXCEPTION)
+            for t in done:
+                exc = t.exception()
+                if exc is None:
+                    continue
+                stop.set()
+                # Prefer the real cause over the OcrCancelled it triggered.
+                if first_error is None or isinstance(first_error, OcrCancelled):
+                    first_error = exc
+    except asyncio.CancelledError:
+        # The request itself was cancelled: stop the chunks and let them
+        # wind down before the document's slot is released.
+        stop.set()
+        await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+        raise
+    if first_error is not None:
+        raise first_error
+    return [t.result() for t in tasks]
+
+
 async def _ocr_pages_individually(
     service, page_images: List[bytes], prompt_template: str, model: str,
     ocr_config: dict, user, api_key, http_request,
+    stop: Optional[asyncio.Event] = None,
 ) -> Tuple[str, Dict[str, int], bool]:
     """Fallback OCR: one page per request, concatenated. Used when a backend
     cannot accept multiple images in a single request. The bool says whether
@@ -467,6 +703,8 @@ async def _ocr_pages_individually(
     degraded = False
     budget = _effective_max_tokens(ocr_config, 1)
     for img_bytes in page_images:
+        if await _should_stop(stop, http_request):
+            raise OcrCancelled("document stopped")
         b64 = base64.b64encode(img_bytes).decode()
         canonical = CanonicalChatRequest(
             model=model,
@@ -479,7 +717,9 @@ async def _ocr_pages_individually(
             stream=False,
             think=False,
         )
-        result = await service.chat_completion(canonical, user, api_key, http_request)
+        result = await service.chat_completion(
+            canonical, user, api_key, http_request, skip_rpm_check=True,
+        )
         u = result.get("usage", {})
         for k in usage:
             usage[k] += u.get(k, 0)
@@ -505,6 +745,7 @@ async def ocr_chunk(
     user: "User",
     api_key: "ApiKey",
     http_request: "Request",
+    stop: Optional[asyncio.Event] = None,
 ) -> Tuple[int, str, Dict[str, int], bool]:
     """
     Send a chunk of page images to the LLM and return OCR text.
@@ -551,8 +792,10 @@ async def ocr_chunk(
 
         for attempt in range(max_retries + 1):
             try:
+                # The document was admitted as a whole; its chunks are not
+                # separate requests against the per-minute limit.
                 result = await service.chat_completion(
-                    canonical, user, api_key, http_request
+                    canonical, user, api_key, http_request, skip_rpm_check=True,
                 )
             except Exception as e:
                 logger.warning(
@@ -571,15 +814,19 @@ async def ocr_chunk(
                     await chunk_db.rollback()
                     text, deg_usage, degraded = await _ocr_pages_individually(
                         service, page_images, prompt_template, model,
-                        ocr_config, user, api_key, http_request,
+                        ocr_config, user, api_key, http_request, stop=stop,
                     )
                     for k in total_usage:
                         total_usage[k] += deg_usage.get(k, 0)
                     return chunk_idx, text, total_usage, degraded
-                if attempt == max_retries:
+                if attempt == max_retries or not _is_retryable(e):
                     raise
-                # Reset session state for retry
+                # Reset session state for retry, and give the server a moment:
+                # retrying at once only adds load to whatever just failed.
                 await chunk_db.rollback()
+                await asyncio.sleep(CHUNK_RETRY_BACKOFF_SECONDS * (2 ** attempt))
+                if await _should_stop(stop, http_request):
+                    raise OcrCancelled("document stopped")
                 continue
 
             # Accumulate usage
@@ -777,6 +1024,60 @@ async def perform_ocr(
     http_request: "Request",
     prompt_template: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Run one document through OCR, within the load limits.
+
+    A document over the in-progress limits waits for a slot (bounded); if it
+    cannot get one, ocr_admission.OcrBusy is raised before any work. Raises
+    OcrCancelled if the client disconnects while waiting or part way through.
+    """
+    _conversions.set_limit(
+        ocr_config.get("max_concurrent_conversions", DEFAULT_MAX_CONVERSIONS)
+    )
+    args = dict(
+        file_bytes=file_bytes, content_type=content_type, filename=filename,
+        model=model, output_format=output_format, chunk_size=chunk_size,
+        overlap=overlap, dpi=dpi, ocr_config=ocr_config, user=user,
+        api_key=api_key, http_request=http_request,
+        prompt_template=prompt_template,
+    )
+    if user is None:
+        return await _perform_ocr_admitted(**args)
+
+    from backend.app.services.ocr_admission import WaitAbandoned, document_slot
+
+    async def _gone() -> bool:
+        return await _client_gone(http_request)
+
+    try:
+        async with document_slot(
+            user.id,
+            per_user=ocr_config.get("max_documents_per_user", DEFAULT_MAX_DOCUMENTS_PER_USER),
+            global_limit=ocr_config.get("max_documents", DEFAULT_MAX_DOCUMENTS),
+            max_wait_seconds=ocr_config.get("queue_wait_seconds", DEFAULT_QUEUE_WAIT_SECONDS),
+            max_waiting_per_user=ocr_config.get("max_waiting_per_user", DEFAULT_MAX_WAITING_PER_USER),
+            max_waiting=ocr_config.get("max_waiting", DEFAULT_MAX_WAITING),
+            should_abort=_gone,
+        ):
+            return await _perform_ocr_admitted(**args)
+    except WaitAbandoned:
+        raise OcrCancelled("client disconnected while waiting for a slot")
+
+
+async def _perform_ocr_admitted(
+    file_bytes: bytes,
+    content_type: str,
+    filename: str,
+    model: str,
+    output_format: str,
+    chunk_size: int,
+    overlap: int,
+    dpi: int,
+    ocr_config: dict,
+    user: "User",
+    api_key: "ApiKey",
+    http_request: "Request",
+    prompt_template: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Full OCR pipeline: document → images → chunked LLM OCR → merge.
 
@@ -904,6 +1205,7 @@ async def _perform_ocr_pipelined(
     )
 
     semaphore = asyncio.Semaphore(ocr_config["max_concurrent_chunks"])
+    stop = asyncio.Event()
     t_inference_start = _time.monotonic()
 
     async def _convert_and_ocr(idx, start, end):
@@ -911,21 +1213,25 @@ async def _perform_ocr_pipelined(
         # Semaphore gates both conversion and inference together to bound
         # total CPU (pdftoppm processes) and memory (page images in RAM).
         async with semaphore:
+            if await _should_stop(stop, http_request):
+                raise OcrCancelled("document stopped")
             chunk_images = await _pdf_to_images_range(
                 pdf_bytes, first_page=start + 1, last_page=end, dpi=dpi,
             )
+            if await _should_stop(stop, http_request):
+                raise OcrCancelled("document stopped")
             return await ocr_chunk(
                 chunk_images, idx, start, end,
                 total_pages, total_chunks,
                 prompt_template, model, ocr_config,
-                user, api_key, http_request,
+                user, api_key, http_request, stop=stop,
             )
 
     tasks = [
         _convert_and_ocr(i, start, end)
         for i, (start, end) in enumerate(chunk_ranges)
     ]
-    results = await asyncio.gather(*tasks)
+    results = await _run_chunks(tasks, stop)
     t_inference = _time.monotonic() - t_inference_start
 
     # Sort by chunk index and extract text + usage
@@ -1011,23 +1317,26 @@ async def _perform_ocr_simple(
     total_chunks = len(chunk_ranges)
 
     semaphore = asyncio.Semaphore(ocr_config["max_concurrent_chunks"])
+    stop = asyncio.Event()
     t_inference_start = _time.monotonic()
 
     async def _bounded_ocr(idx, start, end):
         async with semaphore:
+            if await _should_stop(stop, http_request):
+                raise OcrCancelled("document stopped")
             return await ocr_chunk(
                 page_images[start:end],
                 idx, start, end,
                 total_pages, total_chunks,
                 prompt_template, model, ocr_config,
-                user, api_key, http_request,
+                user, api_key, http_request, stop=stop,
             )
 
     tasks = [
         _bounded_ocr(i, start, end)
         for i, (start, end) in enumerate(chunk_ranges)
     ]
-    results = await asyncio.gather(*tasks)
+    results = await _run_chunks(tasks, stop)
     t_inference = _time.monotonic() - t_inference_start
 
     results = sorted(results, key=lambda r: r[0])

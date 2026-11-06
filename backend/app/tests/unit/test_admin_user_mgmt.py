@@ -513,10 +513,9 @@ class TestKeyMaintenanceConfig:
     a dedicated background loop reads them; grace 0 = never hard-delete."""
 
     def test_dedicated_loop_separate_from_telemetry(self):
-        # key work is NO LONGER inside _cleanup_old_telemetry
-        tel = _extract_method(REGISTRY_SRC, "_cleanup_old_telemetry")
-        assert "expire_overdue_api_keys" not in tel
-        assert "delete_expired_api_keys" not in tel
+        # key work was split out of the old _cleanup_old_telemetry loop; that
+        # loop is gone too (the retention cycle owns telemetry pruning)
+        assert "_cleanup_old_telemetry" not in REGISTRY_SRC
         # it lives in its own loop, started and cancelled like the others
         assert "async def _api_key_maintenance_loop" in REGISTRY_SRC
         assert "self._api_key_maint_task = asyncio.create_task(self._api_key_maintenance_loop())" in REGISTRY_SRC

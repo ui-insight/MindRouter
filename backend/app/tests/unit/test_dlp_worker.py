@@ -951,8 +951,13 @@ class TestDlpAlertRetention:
         assert "cleanup_expired_dlp_alerts" in RETENTION_SRC
 
     def test_cleanup_runs_in_the_retention_cycle(self):
-        assert 'dlp_days = config.get("retention.dlp_alerts_days", 0)' in RETENTION_SRC
-        assert 'summary["dlp_alerts"] = await cleanup_expired_dlp_alerts' in RETENTION_SRC
+        # Each category runs as its own isolated step of run_retention_cycle.
+        cycle = RETENTION_SRC[RETENTION_SRC.index("async def run_retention_cycle"):]
+        assert 'dlp_days = config.get("retention.dlp_alerts_days", 0)' in cycle
+        step = cycle[cycle.index("async def _dlp_alerts():"):]
+        step = step[: step.index("\n    async def ")]
+        assert "return await cleanup_expired_dlp_alerts(" in step
+        assert '("dlp_alerts", _dlp_alerts),' in cycle
 
     def test_cleanup_batches_and_commits(self):
         fn = RETENTION_SRC[RETENTION_SRC.index("async def cleanup_expired_dlp_alerts"):]

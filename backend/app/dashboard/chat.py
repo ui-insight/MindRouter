@@ -784,6 +784,10 @@ async def chat_upload(
                             )
                             ocr_live_key = first_live_api_key(ocr_api_keys)
                             if ocr_user and ocr_live_key:
+                                # Only reads so far: release the pooled
+                                # connection before OCR, which may wait for a
+                                # slot and then run for minutes.
+                                await db.commit()
                                 ocr_result = await perform_ocr(
                                     file_bytes=file_bytes,
                                     content_type="application/pdf",

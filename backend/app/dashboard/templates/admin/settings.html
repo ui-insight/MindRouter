@@ -18,6 +18,7 @@
                 {% elif success == 'timezone_updated' %}Timezone updated.
                 {% elif success == 'enforce_num_ctx_updated' %}Context length enforcement updated.
                 {% elif success == 'default_effort_updated' %}Default reasoning level updated.
+                {% elif success == 'forward_history_updated' %}Reasoning history setting updated.
                 {% elif success == 'sampling_policies_updated' %}Sampling policies updated.
                 {% elif success == 'decisions_updated' %}Decisions API settings updated.
                 {% elif success == 'auto_enrich_updated' %}Auto-enrichment setting updated.
@@ -136,6 +137,28 @@
                             </form>
                             {% else %}
                             <p class="mb-0">Default reasoning level: <code>{{ default_effort or '(model default)' }}</code></p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Earlier reasoning in multi-turn and tool-calling conversations -->
+                <div class="col-lg-6">
+                    <div class="card">
+                        <div class="card-header"><h5 class="mb-0">Reasoning History</h5></div>
+                        <div class="card-body">
+                            <p class="text-muted small">Forward the reasoning of earlier assistant turns that clients send back (OpenAI <code>reasoning_content</code>, Anthropic thinking blocks, Responses reasoning items, Ollama <code>thinking</code>). Each model's chat template decides what it uses: Kimi K3 and Qwen3.8 keep every earlier turn's reasoning; gpt-oss, Qwen3.5/3.6, Gemma 4 and Nemotron keep only the current tool-calling loop's. Off drops it before the request reaches the model, before it is stored in the audit log or scanned by DLP. A model's own setting on the Models page overrides this. Clients write this text themselves and reasoning models trust it more than ordinary content, so enable it where it helps (tool-calling agents) rather than everywhere at once.</p>
+                            {% if not is_read_only %}
+                            <form method="post" action="/admin/settings">
+                                <input type="hidden" name="action" value="set_forward_history">
+                                <div class="form-check form-switch mb-3">
+                                    <input class="form-check-input" type="checkbox" name="forward_history" id="forwardHistory" {% if forward_history %}checked{% endif %}>
+                                    <label class="form-check-label" for="forwardHistory">Forward earlier reasoning to models (fleet default)</label>
+                                </div>
+                                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                            </form>
+                            {% else %}
+                            <p class="mb-0">Forward earlier reasoning: <span class="badge {% if forward_history %}bg-success">Enabled{% else %}bg-secondary">Disabled{% endif %}</span></p>
                             {% endif %}
                         </div>
                     </div>

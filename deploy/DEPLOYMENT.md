@@ -535,7 +535,7 @@ The file `mariadb/custom.cnf` contains production tuning parameters that are mou
 | `innodb_buffer_pool_size` | `2G` | Adjust based on available RAM (typically 50-70% of total) |
 | `innodb_log_file_size` | `512M` | Larger log files improve write performance |
 | `innodb_io_capacity` | `2000` | Tune for SSD-backed storage |
-| `max_connections` | `200` | Must exceed total uvicorn workers across all app replicas |
+| `max_connections` | `512` | Each uvicorn worker has its own connection pool, so keep `UVICORN_WORKERS × (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW)`, plus the `mcp` container's pool (default 30 + 20) and admin clients, well under this. Production: 8 × (20 + 25) + 50 ≈ 410. Exceeding it turns one overloaded worker into "Too many connections" (error 1040) for everyone — see `docs/ocr-load-guard-deploy-notes.md` |
 | `slow_query_log` | `1` | Logs queries taking longer than 1 second |
 
 Operators should adjust `innodb_buffer_pool_size` based on available RAM on the database host. On a dedicated MariaDB server, 50-70% of total RAM is a reasonable target.

@@ -376,9 +376,7 @@ class Settings(BaseSettings):
     audit_log_prompts: bool = True
     audit_log_responses: bool = True
 
-    # Telemetry & GPU Metrics
-    telemetry_retention_days: int = 30
-    telemetry_cleanup_interval: int = 3600  # seconds
+    # Telemetry & GPU Metrics (retention is set on Admin -> Retention, not here)
     sidecar_timeout: int = 15  # seconds for sidecar HTTP calls
 
     # Observability

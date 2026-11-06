@@ -1289,17 +1289,44 @@ async def delete_api_key(db: AsyncSession, api_key_id: int) -> bool:
 
 
 async def update_api_key_usage(db: AsyncSession, api_key_id: int) -> None:
-    """Update API key last used timestamp and usage count.
+    """Update API key last used timestamp and usage count by one use."""
+    await add_api_key_usage(db, api_key_id, 1)
 
-    Uses an atomic UPDATE to avoid loading the row into the ORM session,
-    which prevents holding an exclusive row lock for the entire request.
+
+async def add_api_key_usage(
+    db: AsyncSession, api_key_id: int, count: int,
+    lock_wait_seconds: Optional[int] = None,
+) -> None:
+    """Add ``count`` uses to a key and stamp last_used_at.
+
+    Atomic UPDATE (no ORM load). Request accounting does not call this inline
+    any more: services/key_usage.py batches uses and writes them in short
+    transactions of their own, so a busy key's row lock never holds up a
+    request's accounting write.
+
+    ``lock_wait_seconds`` bounds the row-lock wait for THIS statement only
+    (MariaDB ``SET STATEMENT ... FOR``), so the pooled connection keeps the
+    server default for whoever uses it next.
     """
+    if lock_wait_seconds is not None:
+        from sqlalchemy import text
+
+        await db.execute(
+            text(
+                "SET STATEMENT innodb_lock_wait_timeout = :wait FOR "
+                "UPDATE api_keys SET last_used_at = NOW(), "
+                "usage_count = usage_count + :count, updated_at = NOW() "
+                "WHERE id = :id"
+            ),
+            {"wait": int(lock_wait_seconds), "count": int(count), "id": api_key_id},
+        )
+        return
     await db.execute(
         update(ApiKey)
         .where(ApiKey.id == api_key_id)
         .values(
             last_used_at=func.now(),
-            usage_count=ApiKey.usage_count + 1,
+            usage_count=ApiKey.usage_count + count,
         )
     )
 
@@ -1350,7 +1377,8 @@ async def update_quota_usage(
     bursty single user touches, and the previous SELECT-then-flush pattern
     made concurrent completion transactions deadlock (MariaDB 1213) — which
     aborted the whole completion write. No row load, no read-modify-write
-    window, deadlock-free ordering with update_api_key_usage.
+    window. (The completion writers no longer touch api_keys at all — see
+    services/key_usage.py — so there is no cross-row ordering to keep.)
     """
     from backend.app.core.redis_client import is_available
 
@@ -1385,11 +1413,10 @@ async def reset_quota_if_needed(db: AsyncSession, user_id: int) -> Optional[Quot
             # Commit the rollover HERE, in its own short transaction (an
             # explicit exception to the caller-commits convention). Every
             # caller goes on to INSERT a requests / web_search_logs row in the
-            # same session, and that INSERT takes FK S locks on api_keys —
-            # while the completion writers take api_keys BEFORE quotas (see
-            # InferenceService._run_completion_db). Holding X(quotas) into the
-            # INSERT would be the opposite order and a (rare, once-per-period)
-            # deadlock with an in-flight completion for the same user.
+            # same session, and that INSERT takes FK S locks on api_keys. The
+            # completion writers no longer take X on api_keys (2.9.95), so
+            # S/S cannot deadlock any more; committing here still keeps the
+            # X(quotas) hold short instead of spanning the INSERT.
             await db.commit()
             # Also reset Redis counter if available
             from backend.app.core.redis_client import reset_tokens, is_available
@@ -1478,6 +1505,29 @@ async def update_node_status(
     return node
 
 
+_TELEMETRY_DELETE_BATCH = 10000
+
+
+async def _delete_telemetry_in_batches(db: AsyncSession, model, condition) -> None:
+    """Delete one node's or backend's raw telemetry in committed LIMIT batches.
+
+    At a 90-day Tier 1 that is millions of rows: one DELETE would hold their
+    row locks in a single transaction while the poller keeps inserting, and
+    the ORM cascade would load every row into memory first.
+    """
+    while True:
+        deleted = (
+            await db.execute(
+                delete(model)
+                .where(condition)
+                .with_dialect_options(mysql_limit=_TELEMETRY_DELETE_BATCH)
+            )
+        ).rowcount or 0
+        await db.commit()
+        if deleted < _TELEMETRY_DELETE_BATCH:
+            return
+
+
 async def delete_node(db: AsyncSession, node_id: int) -> bool:
     """Delete a node. Fails if backends still reference it."""
     # Check for backends referencing this node
@@ -1487,7 +1537,22 @@ async def delete_node(db: AsyncSession, node_id: int) -> bool:
     if result.scalar_one_or_none():
         return False
 
-    # Delete GPU devices on this node (cascade deletes their telemetry)
+    # Bulk-delete the node's raw telemetry first, in committed batches.  Left to
+    # the ORM cascade below, every reading (millions at a 90-day Tier 1) is
+    # loaded into memory just to be deleted.  Averages already in the archive
+    # are kept; readings not yet averaged (the last ~hour) go with the node.
+    device_ids = list(
+        (await db.execute(select(GPUDevice.id).where(GPUDevice.node_id == node_id)))
+        .scalars()
+        .all()
+    )
+    if device_ids:
+        await _delete_telemetry_in_batches(
+            db, GPUDeviceTelemetry, GPUDeviceTelemetry.gpu_device_id.in_(device_ids)
+        )
+    await _delete_telemetry_in_batches(db, NodeTelemetry, NodeTelemetry.node_id == node_id)
+
+    # Delete GPU devices on this node (their telemetry is already gone)
     gpu_result = await db.execute(
         select(GPUDevice).where(GPUDevice.node_id == node_id)
     )
@@ -1750,10 +1815,12 @@ async def update_node(
 
 async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
     """Delete a backend and its associated data."""
-    # Bulk-delete child rows with NOT NULL FK
-    await db.execute(
-        delete(BackendTelemetry).where(BackendTelemetry.backend_id == backend_id)
+    # Its raw telemetry first, in committed batches (see delete_node).
+    # Averages already in the archive are kept.
+    await _delete_telemetry_in_batches(
+        db, BackendTelemetry, BackendTelemetry.backend_id == backend_id
     )
+    # Bulk-delete the other child rows with NOT NULL FK
     await db.execute(
         delete(Model).where(Model.backend_id == backend_id)
     )
@@ -2016,11 +2083,23 @@ async def upsert_model(
         model.family = model.family_override if model.family_override is not None else model.family
         model.parameter_count = model.parameter_count_override if model.parameter_count_override is not None else model.parameter_count
     else:
-        # INSERT new model record
+        # INSERT new model record. A new replica takes the model's
+        # reasoning-history override from its siblings (the admin toggle sets
+        # every row of the name), so every backend serving it decides alike.
+        sibling_rh = await db.execute(
+            select(Model.reasoning_history_override).where(
+                and_(
+                    Model.name == name,
+                    Model.backend_id != backend_id,
+                    Model.reasoning_history_override.is_not(None),
+                )
+            ).limit(1)
+        )
         model = Model(
             backend_id=backend_id,
             name=name,
             modality=modality,
+            reasoning_history_override=sibling_rh.scalar_one_or_none(),
             context_length=context_length,
             model_max_context=model_max_context,
             supports_multimodal=effective_multimodal,
@@ -2130,6 +2209,21 @@ async def set_thinking_override_by_name(
         m.thinking_override = value
         if value is not None:
             m.supports_thinking = value
+    await db.flush()
+    return len(models)
+
+
+async def set_reasoning_history_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set the reasoning-history override for ALL model rows with the given name.
+
+    None returns the model to the fleet setting (reasoning.forward_history).
+    """
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.reasoning_history_override = value
     await db.flush()
     return len(models)
 
@@ -2808,26 +2902,6 @@ async def get_latest_gpu_device_telemetry(
     return list(result.scalars().all())
 
 
-async def delete_old_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete backend telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(BackendTelemetry).where(BackendTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
-
-
-async def delete_old_gpu_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete per-GPU telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(GPUDeviceTelemetry).where(GPUDeviceTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
 
 
 async def create_node_telemetry(
@@ -2945,16 +3019,6 @@ async def get_cluster_power_history(
         for row in rows
     ]
 
-
-async def delete_old_node_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete node telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(NodeTelemetry).where(NodeTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
 
 
 async def delete_expired_api_keys(
