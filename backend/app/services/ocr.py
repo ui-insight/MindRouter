@@ -33,6 +33,7 @@ import io
 import json
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import uuid
@@ -304,21 +305,40 @@ class OcrConversionError(Exception):
     500, unlike an unreadable upload (ValueError, 400)."""
 
 
-def _pdf_rejected(err: Exception) -> bool:
-    """Did poppler reject the PDF itself, rather than fail on our side?
+# pdfinfo's exit status says whose fault a failure is.  Poppler exits 1 when
+# it cannot open the document: not a PDF, empty, truncated, wrong password.
+# A process killed by a signal (the OOM killer; poppler's own "Out of memory"
+# abort) exits negative, a missing shared library exits 127, and poppler
+# prints warnings even for files it then reads fine -- so stderr alone cannot
+# tell a bad file from a fault of ours, but the exit status can.
+_PDFINFO_TIMEOUT_SECONDS = 60
 
-    pdf2image raises PDFPageCountError whenever pdfinfo's output has no
-    "Pages:" line.  For a bad file poppler always says why on the lines after
-    "Unable to get page count." ("Document stream is empty", "Couldn't find
-    trailer dictionary", "Incorrect password").  A pdfinfo killed under memory
-    pressure says nothing, and that is our failure: it must stay a 500, not
-    tell the user their (valid) file is corrupt.
+
+def _pdfinfo_page_count(pdf_bytes: bytes) -> int:
+    """Pages in a PDF, via pdfinfo.  Synchronous: run in a thread.
+
+    Raises ValueError (a 400) only when poppler rejected the file itself;
+    any failure of our own raises OcrConversionError (a 500).
     """
-    from pdf2image.exceptions import PDFPageCountError
-    if not isinstance(err, PDFPageCountError):
-        return False
-    _first, _, detail = str(err).partition("\n")
-    return bool(detail.strip())
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+        f.write(pdf_bytes)
+        f.flush()
+        proc = subprocess.run(
+            ["pdfinfo", f.name], capture_output=True,
+            timeout=_PDFINFO_TIMEOUT_SECONDS,
+        )
+    stderr = proc.stderr.decode("utf-8", "replace").strip()
+    if proc.returncode == 0:
+        for line in proc.stdout.decode("utf-8", "replace").splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "Pages":
+                return int(value.strip())
+        raise OcrConversionError("pdfinfo reported no page count")
+    if proc.returncode == 1 and stderr and "out of memory" not in stderr.lower():
+        raise _unreadable(UNREADABLE_PDF_MESSAGE, RuntimeError(stderr))
+    raise OcrConversionError(
+        f"pdfinfo failed (exit {proc.returncode}): {stderr[:300]}"
+    )
 
 
 def _unreadable(message: str, err: Exception) -> ValueError:
@@ -336,7 +356,10 @@ def _image_bytes_to_pages(file_bytes: bytes, max_frames: int) -> List[bytes]:
     """
     # Image.open reads only the header; a damaged file fails later, while
     # seek/copy/convert decode it, so the whole walk is guarded.  All I/O is
-    # on an in-memory buffer, so an OSError here is the file's, never ours.
+    # on an in-memory buffer, so an OSError here is the file's -- except
+    # PIL's "out of memory" decoder error, which is ours and stays a 500.
+    # Corrupt TIFF tags surface as KeyError/TypeError/IndexError/struct.error
+    # from the plugin's frame setup (as Image.open itself treats them).
     try:
         img = Image.open(io.BytesIO(file_bytes))
         pages: List[bytes] = []
@@ -359,7 +382,12 @@ def _image_bytes_to_pages(file_bytes: bytes, max_frames: int) -> List[bytes]:
         return pages
     except Image.DecompressionBombError as e:
         raise _unreadable(OVERSIZED_IMAGE_MESSAGE, e) from e
-    except (OSError, SyntaxError) as e:
+    except OSError as e:
+        if "out of memory" in str(e).lower():
+            raise
+        raise _unreadable(UNREADABLE_IMAGE_MESSAGE, e) from e
+    except (SyntaxError, KeyError, TypeError, IndexError, ZeroDivisionError,
+            struct.error) as e:
         raise _unreadable(UNREADABLE_IMAGE_MESSAGE, e) from e
 
 
@@ -409,34 +437,28 @@ async def document_to_images(
 
 
 async def _pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> List[bytes]:
-    """Convert PDF bytes to a list of PNG byte buffers using pdf2image."""
+    """Convert PDF bytes to a list of PNG byte buffers using pdf2image.
+
+    Not reached by perform_ocr, which sends PDFs and Office files down the
+    pipelined path (page count first, then ranges); kept for
+    document_to_images' other callers.
+    """
     from pdf2image import convert_from_bytes
 
     def _convert():
-        try:
-            pil_images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
-        except Exception as e:
-            if _pdf_rejected(e):
-                raise _unreadable(UNREADABLE_PDF_MESSAGE, e) from e
-            raise
+        pil_images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
         return [_image_to_png_bytes(img) for img in pil_images]
 
     return await _convert_in_thread(_convert)
 
 
 async def _pdf_page_count(pdf_bytes: bytes) -> int:
-    """Get the number of pages in a PDF without converting to images."""
-    from pdf2image.pdf2image import pdfinfo_from_bytes
-    def _count():
-        try:
-            info = pdfinfo_from_bytes(pdf_bytes)
-        except Exception as e:
-            # Before any pdftoppm process starts for the document.
-            if _pdf_rejected(e):
-                raise _unreadable(UNREADABLE_PDF_MESSAGE, e) from e
-            raise
-        return info.get("Pages", 0)
-    return await asyncio.to_thread(_count)
+    """Get the number of pages in a PDF without converting to images.
+
+    Runs before any pdftoppm process starts for the document, and is where
+    an unreadable PDF is turned away (see _pdfinfo_page_count).
+    """
+    return await asyncio.to_thread(_pdfinfo_page_count, pdf_bytes)
 
 
 async def _pdf_to_images_range(
@@ -454,10 +476,14 @@ async def _pdf_to_images_range(
             pdf_bytes, dpi=dpi, fmt="png",
             first_page=first_page, last_page=last_page,
         )
-        if not pil_images:
+        # A pdftoppm killed part way returns the pages it finished: fail the
+        # chunk rather than send the model fewer pages than it is told.
+        # Callers clamp the range to the page count, so every page exists.
+        expected = last_page - first_page + 1
+        if len(pil_images) != expected:
             raise OcrConversionError(
-                f"PDF page conversion produced no images for pages "
-                f"{first_page}-{last_page}"
+                f"PDF page conversion produced {len(pil_images)} of {expected} "
+                f"images for pages {first_page}-{last_page}"
             )
         return [_image_to_png_bytes(img) for img in pil_images]
 

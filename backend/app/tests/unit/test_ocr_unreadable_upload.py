@@ -80,33 +80,43 @@ async def test_page_count_of_a_broken_pdf_is_a_value_error(ocr, name):
         await ocr._pdf_page_count(BROKEN_PDFS[name])
     assert str(info.value) == ocr.UNREADABLE_PDF_MESSAGE
     # Poppler's own message goes to the log, not to the client.
-    assert "Unable to get page count" in str(info.value.__cause__)
-    ocr._test_log.info.assert_any_call(
-        "ocr_unreadable_upload", reason=ocr.UNREADABLE_PDF_MESSAGE,
-        error=str(info.value.__cause__)[:300],
-    )
+    logged = [c.kwargs for c in ocr._test_log.info.call_args_list
+              if c.args == ("ocr_unreadable_upload",)]
+    assert logged and logged[-1]["reason"] == ocr.UNREADABLE_PDF_MESSAGE
+    assert "Error" in logged[-1]["error"]
+    assert "Error" not in str(info.value)
 
 
-async def test_converting_a_broken_pdf_is_a_value_error_and_frees_the_slot(ocr):
-    with pytest.raises(ValueError, match="could not be read as a PDF"):
-        await ocr._pdf_to_images(BROKEN_PDFS["truncated"], dpi=72)
-    # The per-worker conversion limit is released on the error.
-    assert ocr._conversions._active == 0
+@pytest.mark.parametrize("returncode, stderr", [
+    (-9, b""),                                                   # OOM killer
+    (-9, b"Syntax Warning: May not be a PDF file (continuing anyway)\n"),  # warned, then killed
+    (-6, b"Out of memory\n"),                                   # poppler's own abort
+    (1, b"Out of memory\n"),
+    (127, b"pdfinfo: error while loading shared libraries: libpoppler.so.134\n"),
+    (99, b"Some other error\n"),
+])
+async def test_a_pdfinfo_failure_of_ours_is_never_called_unreadable(ocr, monkeypatch, returncode, stderr):
+    # pdf2image formatted any pdfinfo stderr as a page-count error, so a
+    # broken install or a killed process would have told the user a valid
+    # file was corrupt (400).  Only poppler's "cannot open" exit (1) is.
+    import subprocess
 
-
-async def test_a_pdfinfo_that_died_is_our_error_not_the_files(ocr, monkeypatch):
-    # pdfinfo killed (say by the OOM killer) on a valid PDF prints nothing
-    # after pdf2image's "Unable to get page count."  Telling the user their
-    # file is corrupt would be wrong; it stays a server error.
-    from pdf2image import pdf2image as p2i
-    from pdf2image.exceptions import PDFPageCountError
-
-    def killed(*a, **k):
-        raise PDFPageCountError("Unable to get page count.\n")
-
-    monkeypatch.setattr(p2i, "pdfinfo_from_bytes", killed)
-    with pytest.raises(PDFPageCountError):
+    monkeypatch.setattr(ocr.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], returncode, stdout=b"", stderr=stderr))
+    with pytest.raises(ocr.OcrConversionError):
         await ocr._pdf_page_count(b"%PDF-1.4 a perfectly good file")
+
+
+async def test_pdfinfo_exit_status_is_1_for_every_broken_file(ocr):
+    # The rule above rests on this: real poppler, real broken files.
+    import subprocess
+    import tempfile
+
+    for name, data in BROKEN_PDFS.items():
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+            f.write(data); f.flush()
+            proc = subprocess.run(["pdfinfo", f.name], capture_output=True)
+        assert proc.returncode == 1 and proc.stderr.strip(), name
 
 
 async def test_a_range_conversion_failure_is_never_called_unreadable(ocr):
@@ -116,15 +126,19 @@ async def test_a_range_conversion_failure_is_never_called_unreadable(ocr):
 
     with pytest.raises(PDFPageCountError):
         await ocr._pdf_to_images_range(BROKEN_PDFS["truncated"], 1, 2, dpi=72)
+    # The per-worker conversion limit is released on the error.
     assert ocr._conversions._active == 0
 
 
-async def test_a_conversion_that_returns_no_pages_fails_the_chunk(ocr, monkeypatch):
-    # A pdftoppm that crashed after pdfinfo succeeded returns nothing; the
-    # chunk must not go to the model with no images.
+@pytest.mark.parametrize("returned", [0, 1])
+async def test_a_conversion_that_returns_too_few_pages_fails_the_chunk(ocr, monkeypatch, returned):
+    # A pdftoppm killed part way returns the pages it finished; the chunk
+    # must not go to the model with fewer pages than its metadata says.
     import pdf2image
+    from PIL import Image
 
-    monkeypatch.setattr(pdf2image, "convert_from_bytes", lambda *a, **k: [])
+    monkeypatch.setattr(pdf2image, "convert_from_bytes",
+                        lambda *a, **k: [Image.new("RGB", (8, 8))] * returned)
     with pytest.raises(ocr.OcrConversionError):
         await ocr._pdf_to_images_range(b"%PDF", 3, 4, dpi=72)
     assert not issubclass(ocr.OcrConversionError, (ValueError, RuntimeError))
@@ -149,6 +163,41 @@ async def test_an_image_that_cannot_be_decoded_is_a_value_error(ocr, damage):
     with pytest.raises(ValueError) as info:
         await ocr.document_to_images(data, "image/png", "scan.png", 72)
     assert str(info.value) == ocr.UNREADABLE_IMAGE_MESSAGE
+
+
+@pytest.mark.parametrize("error", [
+    TypeError("Missing dimensions"), KeyError(40056), IndexError("tuple index out of range"),
+])
+async def test_a_corrupt_tiff_frame_is_a_value_error(ocr, monkeypatch, error):
+    # Fuzzed multi-page TIFFs fail in the plugin's frame setup with these
+    # (TiffImagePlugin._setup), not OSError.
+    from PIL import Image, TiffImagePlugin
+
+    buf = io.BytesIO()
+    frames = [Image.new("RGB", (16, 16), c) for c in ((255, 0, 0), (0, 255, 0))]
+    frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+    real_seek = TiffImagePlugin.TiffImageFile.seek
+
+    def seek(self, frame):
+        if frame == 1:
+            raise error
+        return real_seek(self, frame)
+
+    monkeypatch.setattr(TiffImagePlugin.TiffImageFile, "seek", seek)
+    with pytest.raises(ValueError) as info:
+        await ocr.document_to_images(buf.getvalue(), "image/tiff", "scan.tiff", 72)
+    assert str(info.value) == ocr.UNREADABLE_IMAGE_MESSAGE
+
+
+async def test_pil_running_out_of_memory_is_not_called_unreadable(ocr, monkeypatch):
+    from PIL import Image
+
+    def oom(self):
+        raise OSError("out of memory error when reading image file")
+
+    monkeypatch.setattr(Image.Image, "copy", oom)
+    with pytest.raises(OSError, match="out of memory"):
+        await ocr.document_to_images(_png(), "image/png", "scan.png", 72)
 
 
 async def test_an_image_bomb_is_a_value_error_saying_too_large(ocr, monkeypatch):
