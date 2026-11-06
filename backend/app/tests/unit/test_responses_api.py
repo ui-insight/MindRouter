@@ -225,6 +225,7 @@ def _make_mock_crud(chain_error="Previous response with id 'resp_x' not found.")
         crud.get_stored_response_chain = AsyncMock(return_value=[])
     crud.get_stored_response = AsyncMock(return_value=None)
     crud.delete_stored_response = AsyncMock(return_value=None)
+    crud.get_models_for_backend = AsyncMock(return_value=[])
     return crud
 
 
@@ -600,6 +601,8 @@ class TestCountInputTokens:
              patch.object(_mod, "InferenceService", return_value=service), \
              patch.object(_mod, "responses_store", _make_mock_store()), \
              patch.object(_mod, "count_request_text_chars", return_value=0), \
+             patch.object(_mod, "apply_reasoning_history_policy", AsyncMock()), \
+             patch.object(_mod, "prefilter_reasoning_history", AsyncMock()), \
              patch.object(_mod, "crud", _make_mock_crud()):
             return await count_input_tokens_endpoint(
                 _make_mock_request(body),

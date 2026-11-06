@@ -2043,11 +2043,23 @@ async def upsert_model(
         model.family = model.family_override if model.family_override is not None else model.family
         model.parameter_count = model.parameter_count_override if model.parameter_count_override is not None else model.parameter_count
     else:
-        # INSERT new model record
+        # INSERT new model record. A new replica takes the model's
+        # reasoning-history override from its siblings (the admin toggle sets
+        # every row of the name), so every backend serving it decides alike.
+        sibling_rh = await db.execute(
+            select(Model.reasoning_history_override).where(
+                and_(
+                    Model.name == name,
+                    Model.backend_id != backend_id,
+                    Model.reasoning_history_override.is_not(None),
+                )
+            ).limit(1)
+        )
         model = Model(
             backend_id=backend_id,
             name=name,
             modality=modality,
+            reasoning_history_override=sibling_rh.scalar_one_or_none(),
             context_length=context_length,
             model_max_context=model_max_context,
             supports_multimodal=effective_multimodal,
@@ -2157,6 +2169,21 @@ async def set_thinking_override_by_name(
         m.thinking_override = value
         if value is not None:
             m.supports_thinking = value
+    await db.flush()
+    return len(models)
+
+
+async def set_reasoning_history_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set the reasoning-history override for ALL model rows with the given name.
+
+    None returns the model to the fleet setting (reasoning.forward_history).
+    """
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.reasoning_history_override = value
     await db.flush()
     return len(models)
 

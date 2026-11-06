@@ -422,6 +422,11 @@ class OllamaOutTranslator:
         else:
             result["content"] = msg.content if msg.content is not None else ""
 
+        # An earlier turn's reasoning, kept by the gateway policy for this
+        # model: Ollama takes it as the assistant message's `thinking`.
+        if msg.reasoning and msg.role == MessageRole.ASSISTANT:
+            result["thinking"] = msg.reasoning
+
         # Add tool_calls with arguments converted from JSON string to dict
         if msg.tool_calls:
             result["tool_calls"] = []
