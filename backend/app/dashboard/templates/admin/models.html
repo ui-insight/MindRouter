@@ -442,6 +442,7 @@
                                             </div>
 
                                             <h6>Reasoning History</h6>
+                                            <p class="small text-muted mb-1">Forward the reasoning clients send back with earlier turns to this model. Clients write that text themselves, and reasoning models trust it more than ordinary content, so turn it on only for models whose templates use it.</p>
                                             {% set rh_on = first.reasoning_history_override if first.reasoning_history_override is not none else forward_history %}
                                             <div class="d-flex align-items-center gap-2 mb-2">
                                                 <span class="badge {{ 'bg-success' if rh_on else 'bg-secondary' }}">{{ 'ON' if rh_on else 'OFF' }}</span>

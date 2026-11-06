@@ -241,6 +241,88 @@ _FORWARD_HISTORY_TTL_S = 30.0
 _forward_history_cache: Optional[Tuple[bool, float]] = None
 
 
+def _model_row_for(models, name: str):
+    """The backend's row for ``name``: exact match, else case-insensitive
+    (the models table's utf8mb4_general_ci collation matches names that way
+    when the backend's models are looked up), else the first row as before.
+    Comparing case-sensitively here used to hand a case-variant name another
+    model's row — its context length, reasoning profile and overrides."""
+    for m in models:
+        if m.name == name:
+            return m
+    folded = (name or "").casefold()
+    for m in models:
+        if (m.name or "").casefold() == folded:
+            return m
+    return models[0]
+
+
+# Per-model reasoning_history_override values by (case-folded) model name,
+# for the early pre-filter below; same 30 s TTL as the fleet setting.
+_HISTORY_OVERRIDES_TTL_S = 30.0
+_history_overrides_cache: Optional[Tuple[Dict[str, Set[bool]], float]] = None
+
+
+async def _get_reasoning_history_overrides() -> Dict[str, Set[bool]]:
+    """{model name casefolded: set of non-null overrides across its rows}."""
+    global _history_overrides_cache
+    cached = _history_overrides_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[1] < _HISTORY_OVERRIDES_TTL_S:
+        return cached[0]
+    value: Dict[str, Set[bool]] = {}
+    try:
+        from sqlalchemy import select
+
+        from backend.app.db.models import Model
+        from backend.app.db.session import get_async_db_context
+        async with get_async_db_context() as cfg_db:
+            rows = await cfg_db.execute(
+                select(Model.name, Model.reasoning_history_override)
+                .where(Model.reasoning_history_override.isnot(None))
+            )
+            for name, override in rows.all():
+                value.setdefault((name or "").casefold(), set()).add(bool(override))
+    except Exception as exc:  # unreadable → no overrides; the fleet setting decides
+        logger.warning("reasoning_history_overrides_unreadable", error=str(exc))
+    _history_overrides_cache = (value, now)
+    return value
+
+
+async def prefilter_reasoning_history(request) -> None:
+    """Drop earlier reasoning up front when no backend could be sent it.
+
+    The inbound translators keep every earlier turn's reasoning; the real
+    keep/strip decision is per attempt (apply_reasoning_history_policy). But
+    the audit record and the DLP scan happen BEFORE routing, so without this
+    they would store and scan reasoning that will never be forwarded — with
+    the feature off, every agent session's audit rows would repeat all
+    earlier reasoning (growing with the square of the turn count), DLP would
+    alert on model-written text, and old reasoning would push the newest
+    message out of DLP's scan window. Keeps it only if the requested model
+    (alias resolved) has a row that forwards, or has no override and the
+    fleet setting forwards.
+    """
+    messages = getattr(request, "messages", None)
+    if not messages or not any(getattr(m, "reasoning", None) for m in messages):
+        return
+    name = str(getattr(request, "model", "") or "")
+    try:
+        resolved, _ = get_registry().resolve_alias(name)
+    except Exception:
+        resolved = name
+    overrides = await _get_reasoning_history_overrides()
+    values = overrides.get(str(resolved).casefold()) or overrides.get(name.casefold())
+    may_forward = (True in values) if values else await _get_forward_history_default()
+    if may_forward:
+        return
+    for m in messages:
+        if m.reasoning:
+            m.reasoning = None
+    _invalidate_token_memos(request)
+    logger.debug("reasoning_history_prefiltered", model=name)
+
+
 async def _get_forward_history_default() -> bool:
     """Read reasoning.forward_history (a bool) with a 30s TTL cache."""
     global _forward_history_cache
@@ -661,6 +743,33 @@ class InferenceService:
         input_tokens, is_estimate = await self._count_input_tokens(request, backend)
 
         remaining = context_length - input_tokens - _TOKEN_BUFFER
+        if remaining <= 0 and any(m.reasoning for m in request.messages or []):
+            # Forwarded reasoning (apply_reasoning_history_policy) is the
+            # cheapest context to lose, on every client API — not only for
+            # Responses truncation:"auto": strip it, older turns first,
+            # before overflowing or dropping whole turns.
+            from backend.app.core.context_trim import strip_reasoning_to_fit
+
+            _ensure_encoder()
+            reserve = min(request.max_tokens or 1024, 4096)
+            budget = context_length - _TOKEN_BUFFER - reserve
+            before = request.messages
+            request.messages = strip_reasoning_to_fit(
+                request.messages, budget,
+                lambda s: len(_tiktoken_encoder.encode(s)),
+            )
+            if request.messages is not before:
+                _invalidate_token_memos(request)
+                input_tokens, is_estimate = await self._count_input_tokens(
+                    request, backend
+                )
+                remaining = context_length - input_tokens - _TOKEN_BUFFER
+                logger.info(
+                    "reasoning_stripped_to_fit",
+                    input_tokens=input_tokens,
+                    context_length=context_length,
+                    model=request.model,
+                )
         if remaining <= 0 and request.auto_truncate:
             # Responses API truncation:"auto" — drop oldest turns until
             # the input fits, reserving room for a useful response.
@@ -763,6 +872,8 @@ class InferenceService:
         )
 
         self._pending_prompt_redactions = []
+        # Never scan reasoning that cannot be forwarded (see the pre-filter).
+        await prefilter_reasoning_history(request)
         if not await prompt_inline_active(self.db):
             return
 
@@ -1628,6 +1739,9 @@ class InferenceService:
         prompt = None
         parameters = {}
 
+        # Never store reasoning that cannot be forwarded (see the pre-filter).
+        await prefilter_reasoning_history(request)
+
         # Content capture is policy-gated: with prompt capture off, the
         # audit row keeps metadata (model, tokens, timings) but no
         # message/prompt text and no offloaded image files.  Note the
@@ -2187,7 +2301,7 @@ class InferenceService:
 
             # The model this attempt hits (the gateway policies below read its row).
             _policy_target = (
-                next((m for m in models if m.name == job.model), models[0]) if models else None
+                _model_row_for(models, job.model) if models else None
             )
             # Earlier reasoning is kept or dropped first, so the token count
             # below matches what is sent.
@@ -2197,7 +2311,7 @@ class InferenceService:
             # tiktoken estimate (Ollama / fallback).
             cap_context_length = None
             if models and hasattr(request, 'max_tokens'):
-                _target = next((m for m in models if m.name == job.model), models[0])
+                _target = _model_row_for(models, job.model)
                 if _target.context_length:
                     cap_context_length = _target.context_length
                     await self.cap_max_tokens(request, backend, cap_context_length)
@@ -2209,7 +2323,7 @@ class InferenceService:
             # which would otherwise wrongly block a client's opt-in.
             if (backend.engine == BackendEngine.OLLAMA
                     and models and hasattr(request, 'think') and request.think):
-                _target = next((m for m in models if m.name == job.model), models[0])
+                _target = _model_row_for(models, job.model)
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
@@ -2224,7 +2338,7 @@ class InferenceService:
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
-                _ctx_target = next((m for m in models if m.name == job.model), models[0])
+                _ctx_target = _model_row_for(models, job.model)
                 if _ctx_target.context_length:
                     if request.backend_options is None:
                         request.backend_options = {}
@@ -2505,14 +2619,14 @@ class InferenceService:
 
             # Earlier reasoning first (see the non-streaming path).
             _policy_target = (
-                next((m for m in _models if m.name == job.model), _models[0]) if _models else None
+                _model_row_for(_models, job.model) if _models else None
             )
             await apply_reasoning_history_policy(request, job.model, _policy_target)
 
             # Cap max_tokens (same logic as non-streaming path).
             cap_context_length = None
             if _models and hasattr(request, 'max_tokens'):
-                _target = next((m for m in _models if m.name == job.model), _models[0])
+                _target = _model_row_for(_models, job.model)
                 if _target.context_length:
                     cap_context_length = _target.context_length
                     await self.cap_max_tokens(request, backend, cap_context_length)
@@ -2521,7 +2635,7 @@ class InferenceService:
             # (see non-streaming path for rationale; never strip on vLLM).
             if (backend.engine == BackendEngine.OLLAMA
                     and _models and hasattr(request, 'think') and request.think):
-                _target = next((m for m in _models if m.name == job.model), _models[0])
+                _target = _model_row_for(_models, job.model)
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
@@ -2531,7 +2645,7 @@ class InferenceService:
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and _models and hasattr(request, 'backend_options'):
-                _ctx_target = next((m for m in _models if m.name == job.model), _models[0])
+                _ctx_target = _model_row_for(_models, job.model)
                 if _ctx_target.context_length:
                     if request.backend_options is None:
                         request.backend_options = {}

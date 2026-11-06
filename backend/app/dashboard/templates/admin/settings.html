@@ -147,7 +147,7 @@
                     <div class="card">
                         <div class="card-header"><h5 class="mb-0">Reasoning History</h5></div>
                         <div class="card-body">
-                            <p class="text-muted small">Forward the reasoning of earlier assistant turns that clients send back (OpenAI <code>reasoning_content</code>, Anthropic thinking blocks, Responses reasoning items, Ollama <code>thinking</code>). Each model's chat template decides what it uses: Kimi K3 and Qwen3.8 keep every earlier turn's reasoning; gpt-oss, Qwen3.5/3.6, Gemma 4 and Nemotron keep only the current tool-calling loop's. Off drops it before the request reaches the model. A model's own setting on the Models page overrides this.</p>
+                            <p class="text-muted small">Forward the reasoning of earlier assistant turns that clients send back (OpenAI <code>reasoning_content</code>, Anthropic thinking blocks, Responses reasoning items, Ollama <code>thinking</code>). Each model's chat template decides what it uses: Kimi K3 and Qwen3.8 keep every earlier turn's reasoning; gpt-oss, Qwen3.5/3.6, Gemma 4 and Nemotron keep only the current tool-calling loop's. Off drops it before the request reaches the model, before it is stored in the audit log or scanned by DLP. A model's own setting on the Models page overrides this. Clients write this text themselves and reasoning models trust it more than ordinary content, so enable it where it helps (tool-calling agents) rather than everywhere at once.</p>
                             {% if not is_read_only %}
                             <form method="post" action="/admin/settings">
                                 <input type="hidden" name="action" value="set_forward_history">

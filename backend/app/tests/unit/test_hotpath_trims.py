@@ -326,6 +326,38 @@ class TestTokenizeGate:
         assert len(request.messages) == 3 and request.messages[1].reasoning is None
         assert request.max_tokens == 1000
 
+    async def test_overflow_strips_forwarded_reasoning_on_every_api(self):
+        """Review: only Responses truncation:"auto" stripped reasoning, so a
+        chat/Anthropic/Ollama session whose forwarded reasoning outgrew the
+        context fell to the 256-token fallback (or a backend 400). Now the
+        reasoning goes first for every API — older turns' before the current
+        loop's — and the count is redone; no turn is dropped."""
+        svc, client = _make_service()
+        counts = iter([9000, 300])
+
+        async def post(url, json=None):
+            client.calls += 1
+            return _FakeTokenizeResponse(next(counts))
+
+        client.post = post
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="q1"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="word " * 8000),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="step", reasoning="loop"),
+            ],
+            max_tokens=1000,
+            request_id="req-1",
+        )
+        await svc.cap_max_tokens(request, _vllm_backend(), 8192)
+        assert client.calls == 2
+        assert len(request.messages) == 4
+        assert request.messages[1].reasoning is None
+        assert request.messages[3].reasoning == "loop", "current loop kept when older is enough"
+        assert request.max_tokens == 1000
+
     async def test_ollama_never_calls_tokenize(self):
         svc, client = _make_service()
         request = _make_request()

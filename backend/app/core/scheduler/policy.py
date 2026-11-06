@@ -85,6 +85,10 @@ class SchedulerPolicy:
         prompt_text = ""
         for msg in request.messages:
             prompt_text += msg.get_text_content() + " "
+            # Earlier reasoning still on the request after the pre-filter
+            # may be forwarded, so it counts toward the job's size.
+            if getattr(msg, "reasoning", None):
+                prompt_text += msg.reasoning + " "
 
         estimated_prompt_tokens = self.estimate_tokens(prompt_text)
 

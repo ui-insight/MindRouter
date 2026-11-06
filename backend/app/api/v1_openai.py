@@ -46,7 +46,12 @@ from backend.app.db.models import ApiKey, BackendEngine, Modality, RequestStatus
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.image_policy import CATEGORY_OK
-from backend.app.services.inference import InferenceService, apply_reasoning_history_policy, count_request_text_chars
+from backend.app.services.inference import (
+    InferenceService,
+    apply_reasoning_history_policy,
+    count_request_text_chars,
+    prefilter_reasoning_history,
+)
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
@@ -396,6 +401,9 @@ async def tokenize(
 
     settings = get_settings()
     max_chars = getattr(settings, "tokenize_max_input_chars", 2_000_000)
+    # Reasoning that can't be forwarded to this model doesn't count toward
+    # the size gate (it is never sent).
+    await prefilter_reasoning_history(canonical)
     if count_request_text_chars(canonical) > max_chars:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -414,7 +422,7 @@ async def tokenize(
 
     # Get model context length
     models = await crud.get_models_for_backend(db, backend.id)
-    target = next((m for m in models if m.name == model), None)
+    target = next((m for m in models if (m.name or "").casefold() == (model or "").casefold()), None)
     max_model_len = target.context_length if target else None
 
     # Count what would be sent: earlier reasoning is kept or dropped per model.

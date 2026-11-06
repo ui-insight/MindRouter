@@ -21,6 +21,7 @@ override) keeps or drops it before the token count; context trimming counts
 it and drops it before whole turns."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -394,3 +395,251 @@ class TestServiceWiring:
         assert req.messages[1].reasoning == "user SSN is [REDACTED: ssn]"
         payload = VLLMOutTranslator.translate_chat_request(req)
         assert "123-45-6789" not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# Pre-filter: reasoning that cannot be forwarded is dropped before the audit
+# record and the DLP scan (review: with the feature OFF, audit rows repeated
+# every earlier turn's reasoning and DLP scanned it)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def prefilter(monkeypatch):
+    from backend.app.services import inference as inf
+
+    state = {"fleet": False, "overrides": {}, "aliases": {}}
+
+    async def fleet():
+        return state["fleet"]
+
+    async def overrides():
+        return state["overrides"]
+
+    registry = SimpleNamespace(resolve_alias=lambda n: (state["aliases"].get(n, n), None))
+    monkeypatch.setattr(inf, "_get_forward_history_default", fleet)
+    monkeypatch.setattr(inf, "_get_reasoning_history_overrides", overrides)
+    monkeypatch.setattr(inf, "get_registry", lambda: registry)
+
+    def run(req):
+        asyncio.run(inf.prefilter_reasoning_history(req))
+        return req
+
+    run.state = state
+    return run
+
+
+class TestPrefilter:
+    def test_feature_off_and_no_override_drops_it(self, prefilter):
+        req = prefilter(_request())
+        assert all(m.reasoning is None for m in req.messages)
+
+    def test_fleet_on_keeps_it(self, prefilter):
+        prefilter.state["fleet"] = True
+        assert prefilter(_request()).messages[1].reasoning == R2
+
+    def test_a_forwarding_override_keeps_it_even_with_the_fleet_off(self, prefilter):
+        req = _request()
+        prefilter.state["overrides"] = {req.model.casefold(): {True}}
+        assert prefilter(req).messages[1].reasoning == R2
+
+    def test_an_override_off_drops_it_even_with_the_fleet_on(self, prefilter):
+        req = _request()
+        prefilter.state["fleet"] = True
+        prefilter.state["overrides"] = {req.model.casefold(): {False}}
+        assert prefilter(req).messages[1].reasoning is None
+
+    def test_mixed_rows_keep_it_for_the_per_attempt_policy_to_decide(self, prefilter):
+        req = _request()
+        prefilter.state["overrides"] = {req.model.casefold(): {True, False}}
+        assert prefilter(req).messages[1].reasoning == R2
+
+    def test_aliases_are_resolved_and_names_compared_without_case(self, prefilter):
+        req = _request()
+        req.model = "my-alias"
+        prefilter.state["aliases"] = {"my-alias": "MoonshotAI/Kimi-K3"}
+        prefilter.state["overrides"] = {"moonshotai/kimi-k3": {True}}
+        assert prefilter(req).messages[1].reasoning == R2
+
+    def test_it_runs_before_the_audit_copy_and_the_dlp_scan(self):
+        import inspect
+        from backend.app.services import inference as inf
+
+        rec = inspect.getsource(inf.InferenceService._create_request_record)
+        assert rec.index("prefilter_reasoning_history(") < rec.index("m.model_dump()")
+        dlp = inspect.getsource(inf.InferenceService.enforce_prompt_dlp)
+        assert dlp.index("prefilter_reasoning_history(") < dlp.index("_dlp_scan_text(")
+
+    def test_audit_record_never_stores_reasoning_that_cannot_be_forwarded(self, prefilter, monkeypatch):
+        from backend.app.services import inference as inf
+
+        stored = {}
+
+        class _Stop(Exception):
+            pass
+
+        async def create_request(db, **kw):
+            stored.update(kw)
+            raise _Stop()
+
+        monkeypatch.setattr(inf.crud, "create_request", create_request, raising=False)
+        svc = inf.InferenceService.__new__(inf.InferenceService)
+        svc.db = None
+        svc._settings = SimpleNamespace(audit_log_enabled=True, audit_log_prompts=True)
+        svc._extract_images_from_messages = lambda msgs: msgs
+        req = _request()
+        try:
+            asyncio.run(svc._create_request_record(
+                req, SimpleNamespace(id=1), SimpleNamespace(id=2), None, "/v1/chat/completions"))
+        except Exception:
+            pass
+        assert all(m.reasoning is None for m in req.messages)
+        if "messages" in stored:
+            assert all(not m.get("reasoning") for m in stored["messages"])
+
+
+class TestSettingCaches:
+    def test_fleet_setting_is_cached_and_falls_back_to_off(self, monkeypatch):
+        from contextlib import asynccontextmanager
+        from backend.app.services import inference as inf
+
+        calls = {"n": 0}
+
+        @asynccontextmanager
+        async def broken():
+            calls["n"] += 1
+            raise RuntimeError("db down")
+            yield
+
+        import backend.app.db.session as session_mod
+        monkeypatch.setattr(session_mod, "get_async_db_context", broken)
+        monkeypatch.setattr(inf, "_forward_history_cache", None)
+        assert asyncio.run(inf._get_forward_history_default()) is False
+        assert asyncio.run(inf._get_forward_history_default()) is False
+        assert calls["n"] == 1, "a failed read is cached for the TTL like a good one"
+
+    def test_overrides_unreadable_means_no_overrides(self, monkeypatch):
+        from contextlib import asynccontextmanager
+        from backend.app.services import inference as inf
+
+        @asynccontextmanager
+        async def broken():
+            raise RuntimeError("db down")
+            yield
+
+        import backend.app.db.session as session_mod
+        monkeypatch.setattr(session_mod, "get_async_db_context", broken)
+        monkeypatch.setattr(inf, "_history_overrides_cache", None)
+        assert asyncio.run(inf._get_reasoning_history_overrides()) == {}
+
+
+class TestModelRowLookup:
+    def test_exact_then_case_insensitive_then_first(self):
+        from backend.app.services import inference as inf
+
+        a = SimpleNamespace(name="other/model")
+        b = SimpleNamespace(name="MoonshotAI/Kimi-K3")
+        c = SimpleNamespace(name="moonshotai/kimi-k3")
+        assert inf._model_row_for([a, b, c], "moonshotai/kimi-k3") is c
+        assert inf._model_row_for([a, b], "moonshotai/kimi-k3") is b
+        assert inf._model_row_for([a, b], "nothing") is a
+
+    def test_no_exact_name_lookup_remains_on_the_attempt_paths(self):
+        src = (Path(__file__).resolve().parents[2] / "services" / "inference.py").read_text()
+        assert "m.name == job.model" not in src
+
+
+# ---------------------------------------------------------------------------
+# Two-stage reasoning strip (review: the trim stripped the current tool
+# loop's reasoning — the part gpt-oss / Qwen templates replay — together
+# with older turns'; and only truncation:"auto" ever stripped anything)
+# ---------------------------------------------------------------------------
+
+def _loop_conversation():
+    return [
+        CanonicalMessage(role=MessageRole.USER, content="q1"),
+        CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="o" * 400),
+        CanonicalMessage(role=MessageRole.USER, content="q2"),
+        CanonicalMessage(role=MessageRole.ASSISTANT, content="step", reasoning="c" * 400),
+        CanonicalMessage(role=MessageRole.TOOL, content="r", tool_call_id="t1"),
+    ]
+
+
+class TestStripReasoningToFit:
+    def test_older_turns_go_first(self):
+        from backend.app.core.context_trim import strip_reasoning_to_fit
+
+        msgs = _loop_conversation()
+        out = strip_reasoning_to_fit(msgs, 130, _est)
+        assert out[1].reasoning is None and out[3].reasoning == "c" * 400
+
+    def test_then_the_current_loop_if_still_over(self):
+        from backend.app.core.context_trim import strip_reasoning_to_fit
+
+        out = strip_reasoning_to_fit(_loop_conversation(), 40, _est)
+        assert out[1].reasoning is None and out[3].reasoning is None
+
+    def test_current_loop_kept_when_asked(self):
+        from backend.app.core.context_trim import strip_reasoning_to_fit
+
+        out = strip_reasoning_to_fit(_loop_conversation(), 40, _est, include_current_loop=False)
+        assert out[1].reasoning is None and out[3].reasoning == "c" * 400
+
+    def test_fits_means_same_list_and_no_mutation(self):
+        from backend.app.core.context_trim import strip_reasoning_to_fit
+
+        msgs = _loop_conversation()
+        assert strip_reasoning_to_fit(msgs, 10_000, _est) is msgs
+        out = strip_reasoning_to_fit(msgs, 40, _est)
+        assert out is not msgs and msgs[1].reasoning == "o" * 400
+
+    def test_truncation_drops_old_turns_before_the_current_loops_reasoning(self):
+        msgs = _loop_conversation()
+        # q1 4 | a1 104 | q2 4 | step 105 + tool 4 = 221. Budget 116: older
+        # reasoning goes (a1 -> 4) = 121, still over; drop q1 = 117, still
+        # over; drop a1 = 113. The current loop's reasoning survives.
+        trimmed, dropped = trim_messages_to_fit(msgs, 116, _est)
+        assert dropped == 2
+        assert trimmed[1].reasoning == "c" * 400, "current loop's reasoning kept"
+
+    def test_truncation_strips_the_current_loop_only_as_a_last_resort(self):
+        trimmed, _ = trim_messages_to_fit(_loop_conversation(), 30, _est)
+        assert all(m.reasoning is None for m in trimmed)
+
+
+# ---------------------------------------------------------------------------
+# The gateway's own web_search tool loop keeps each round's reasoning
+# ---------------------------------------------------------------------------
+
+class TestWebSearchLoop:
+    def test_round_reasoning_rides_on_the_tool_call_turn(self, monkeypatch):
+        from backend.app.services import responses_websearch as ws
+
+        req = CanonicalChatRequest(model="m", messages=[CanonicalMessage(role=MessageRole.USER, content="q")])
+        ws._append_round_messages(
+            req, None, [{"call_id": "c1", "name": ws.SEARCH_TOOL_NAME, "arguments": "{}"}],
+            ["result"], "thinking about it",
+        )
+        assert req.messages[1].role == MessageRole.ASSISTANT
+        assert req.messages[1].reasoning == "thinking about it"
+
+    def test_both_loops_pass_the_rounds_reasoning(self):
+        src = (Path(__file__).resolve().parents[2] / "services" / "responses_websearch.py").read_text()
+        assert "_append_round_messages(canonical, round_content, calls, results, round_reasoning)" in src
+        assert 'message.get("reasoning_content") or message.get("reasoning")' in src
+
+
+class TestSchedulerEstimate:
+    def test_forwarded_reasoning_counts_toward_the_jobs_size(self):
+        from backend.app.core.scheduler.policy import SchedulerPolicy
+
+        sched = SchedulerPolicy.__new__(SchedulerPolicy)
+        sched.estimate_tokens = lambda text: len(text)
+        base = CanonicalChatRequest(model="m", messages=[
+            CanonicalMessage(role=MessageRole.USER, content="q"),
+            CanonicalMessage(role=MessageRole.ASSISTANT, content="a"),
+        ])
+        with_r = base.model_copy(deep=True)
+        with_r.messages[1].reasoning = "r" * 500
+        a = sched.create_job_from_chat_request(base, 1, 1).estimated_prompt_tokens
+        b = sched.create_job_from_chat_request(with_r, 1, 1).estimated_prompt_tokens
+        assert b - a >= 500
