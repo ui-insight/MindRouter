@@ -276,6 +276,7 @@ Common HTTP status codes:
 | 503 | "No suitable backend: {reason}" -- Model doesn't support required capability (vision, structured output) |
 | 503 | "No backend capacity available (waited Ns)" -- All backends at max concurrent; timed out waiting |
 | 503 | "No healthy backends available" -- All backends unhealthy or circuit-broken |
+| 503 | "The model '{model}' is temporarily unavailable -- …" with `Retry-After: 30` -- The model is configured, but no backend serving it is healthy right now. Routing looks again `MODEL_LOOKUP_RETRY_ATTEMPTS` times, `MODEL_LOOKUP_RETRY_PAUSE_SECONDS` apart (2 × 2 s), before answering, so a backend that is only waiting for its first health check is used instead. It waits only while some backend carrying the model is unhealthy or not yet checked; if all of them are disabled or draining (an admin's doing), it answers at once. A model name the fleet does not have is a 404 at once. Failover attempts do not wait. |
 
 > **Backend pass-through:** Backend 4xx errors (e.g., invalid prompt format) are forwarded directly to the client and are not retried.
 
@@ -2186,6 +2187,8 @@ Colors, organization name, and logo selections are `branding.*` rows in `app_con
 | `BACKEND_REQUEST_TIMEOUT_PER_ATTEMPT` | int | `180` | Per-attempt timeout (seconds). For a streamed response this bounds the wait for the **first byte** only |
 | `BACKEND_STREAM_IDLE_TIMEOUT` | int | `600` | How long a stream may stay silent **after it has started** (seconds). Longer than the first-byte limit because a model whose server sends a tool call only once it is complete (Kimi K3 on vLLM) is silent for as long as the call takes to write. Keep it below the front proxy's `proxy_read_timeout` (720 s); a node's own proxy in front of a backend may cut the connection sooner |
 | `BACKEND_RETRY_MAX_ATTEMPTS` | int | `3` | Max total retry attempts |
+| `MODEL_LOOKUP_RETRY_ATTEMPTS` | int | `2` | When a configured model has no healthy backend, how many more times routing looks before answering 503 + `Retry-After` (0 = answer at once). Unknown model names are a 404 without waiting |
+| `MODEL_LOOKUP_RETRY_PAUSE_SECONDS` | float | `2.0` | Pause between those looks |
 | `STRUCTURED_OUTPUT_RETRY_ON_INVALID` | bool | `true` | Intended to retry on a different backend when a response fails structured-output JSON validation |
 | `THINKING_OFF_BY_DEFAULT` | bool | `true` | Gateway policy: reasoning/thinking is forced **off** unless the client opts in with a switch (`think: true`, `thinking: {type: "enabled"}`) or a level (`reasoning_effort`, `reasoning.effort`, `chat_template_kwargs.reasoning_effort`, `thinking.budget_tokens`). Applies to families with a switch (Qwen, Gemma 4, Nemotron); gpt-oss has none and is left to its default. Set `false` to restore per-model launch defaults |
 | `FIELD_VALIDATION` | str | `log` | Handling of unknown or vLLM-dialect request fields that would otherwise be silently dropped: `off`, `log` (record and continue), or `enforce` (reject with `400`). Deploy at `log` to observe real traffic, then flip to `enforce` |

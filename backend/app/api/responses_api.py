@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.model_availability import (
     AVAILABLE,
+    RETRY_AFTER_SECONDS,
     UNAVAILABLE,
     model_availability,
     unavailable_message,
@@ -100,7 +101,15 @@ def error_json(
 
 
 def _reshape_http_exception(e: HTTPException) -> JSONResponse:
-    """Re-shape a service HTTPException into the OpenAI error envelope."""
+    """Re-shape a service HTTPException into the OpenAI error envelope,
+    keeping its headers (Retry-After on a 429 or a 503)."""
+    response = _reshaped_http_exception_body(e)
+    for name, value in (e.headers or {}).items():
+        response.headers[name] = value
+    return response
+
+
+def _reshaped_http_exception_body(e: HTTPException) -> JSONResponse:
     detail = e.detail
     # Service 404s already carry an OpenAI-style {"error": {...}} detail.
     if isinstance(detail, dict) and "error" in detail:
@@ -109,6 +118,10 @@ def _reshape_http_exception(e: HTTPException) -> JSONResponse:
     if e.status_code == 429:
         code = "insufficient_quota" if "quota" in message.lower() else "rate_limit_exceeded"
         return error_json(429, message, err_type="requests", code=code)
+    if getattr(e, "model_unavailable", False) is True:
+        # Routing's answer for a configured model with no healthy backend
+        # (inference.ModelUnavailableError).
+        return error_json(503, message, err_type="service_unavailable", code="model_unavailable")
     if e.status_code >= 500:
         return error_json(e.status_code, message, err_type="server_error", code="server_error")
     return error_json(e.status_code, message)
@@ -264,12 +277,15 @@ async def responses(
             availability=_availability,
         )
         if _availability == UNAVAILABLE:
-            return error_json(
+            response = error_json(
                 503,
                 unavailable_message(ctx.model, _availability),
                 err_type="service_unavailable",
                 code="model_unavailable",
             )
+            # As every other surface (and routing) answers this state.
+            response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+            return response
         return error_json(
             404,
             f"The model '{ctx.model}' does not exist or you do not have access to it.",
