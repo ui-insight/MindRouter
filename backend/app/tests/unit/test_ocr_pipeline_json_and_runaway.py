@@ -278,6 +278,32 @@ async def test_the_pdf_pipeline_also_gets_the_resolved_name(ocr):
     assert seen == ["dots.MOCR"]
 
 
+@pytest.mark.asyncio
+async def test_a_document_over_the_page_limit_gets_a_note_that_says_so(ocr):
+    # The chat used to tell everyone "try again later"; a 250-page scan
+    # fails the same way every time, so say why.
+    async def fake_images(file_bytes, content_type, filename, dpi):
+        return [b"img"] * 3
+
+    ocr.document_to_images = fake_images
+    with pytest.raises(ValueError) as info:
+        await ocr.perform_ocr(
+            file_bytes=b"x", content_type="image/png", filename="scan.png", model="dots.MOCR",
+            output_format="markdown", chunk_size=6, overlap=2, dpi=200,
+            ocr_config=dict(CFG, max_pages=2), user=None, api_key=None, http_request=None,
+        )
+    note = ocr.failure_note(info.value)
+    assert "Document has 3 pages, exceeding the maximum of 2" in note
+    assert "Try again later" not in note
+
+
+def test_a_service_failure_note_suggests_trying_again(ocr):
+    note = ocr.failure_note(RuntimeError("404: Model 'default-ocr' not found"))
+    assert "OCR is unavailable right now" in note and "Try again later" in note
+    # Internal detail stays in the logs, not in front of the user.
+    assert "default-ocr" not in note
+
+
 # --------------------------------------------------------------------------
 # ocr_chunk: the guard in situ — capped, looping completion is collapsed,
 # flagged, budgeted per page, and not retried.

@@ -77,10 +77,23 @@ def test_dashboard_image_generation_resolves_the_model_after_defaults():
     assert default < resolved < body.index("InferenceService(")
 
 
-def test_chat_tells_the_user_when_ocr_failed():
+def test_dashboard_images_imports_get_registry_at_module_level():
+    # The resolve above calls get_registry(); without the module-level import
+    # every dashboard image request would fail with NameError (500), and the
+    # order check alone would not notice.
+    tree = ast.parse((_APP / "dashboard" / "images.py").read_text())
+    imported = {
+        alias.asname or alias.name
+        for node in tree.body if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "get_registry" in imported
+
+
+def test_chat_shows_the_ocr_failure_note():
+    # Behaviour of the note itself: test_ocr_pipeline_json_and_runaway.py.
     src = (_APP / "dashboard" / "chat.py").read_text()
     handler = src[src.index('logger.warning(\n                            "pdf_ocr_fallback_failed"'):]
-    assert "ocr_failed = True" in handler[: handler.index("else:")]
-    note = src[src.index("elif ocr_failed:"):]
-    assert 'resp["processing_note"]' in note[:300]
-    assert "OCR is unavailable right now" in note[:300]
+    assert "ocr_failure_note = failure_note(ocr_err)" in handler[: handler.index("else:")]
+    note = src[src.index("elif ocr_failure_note:"):]
+    assert 'resp["processing_note"] = ocr_failure_note' in note[:120]

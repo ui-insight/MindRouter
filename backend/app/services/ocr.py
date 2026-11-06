@@ -739,6 +739,25 @@ def merge_chunks(chunks_text: List[str]) -> str:
     return "\n".join(merged_lines)
 
 
+def failure_note(err: Exception) -> str:
+    """What to tell a chat user whose scanned PDF could not be OCR'd.
+
+    perform_ocr raises ValueError for the document itself (no pages, more
+    than ``ocr.max_pages``): the same upload fails the same way every time,
+    so say what is wrong.  Anything else (no healthy backend, a timeout, the
+    service busy) may pass, so suggest trying again.
+    """
+    if isinstance(err, ValueError):
+        return (
+            f"This PDF appears to be scanned, but OCR could not process it ({err}), "
+            "so little or no text could be extracted."
+        )
+    return (
+        "This PDF appears to be scanned, but OCR is unavailable right now, "
+        "so little or no text could be extracted. Try again later."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
