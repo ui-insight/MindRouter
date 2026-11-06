@@ -113,9 +113,9 @@ def _reshaped_http_exception_body(e: HTTPException) -> JSONResponse:
     if e.status_code == 429:
         code = "insufficient_quota" if "quota" in message.lower() else "rate_limit_exceeded"
         return error_json(429, message, err_type="requests", code=code)
-    if e.status_code == 503 and "retry-after" in {k.lower() for k in (e.headers or {})}:
+    if getattr(e, "model_unavailable", False) is True:
         # Routing's answer for a configured model with no healthy backend
-        # (its only 503 that tells the client when to come back).
+        # (inference.ModelUnavailableError).
         return error_json(503, message, err_type="service_unavailable", code="model_unavailable")
     if e.status_code >= 500:
         return error_json(e.status_code, message, err_type="server_error", code="server_error")

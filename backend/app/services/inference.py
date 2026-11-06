@@ -73,6 +73,17 @@ MODEL_UNAVAILABLE_MESSAGE = (
     "backend is currently serving it. Please retry shortly."
 )
 MODEL_UNAVAILABLE_RETRY_AFTER_SECONDS = 30
+class ModelUnavailableError(HTTPException):
+    """Routing's 503 for a configured model with no healthy backend.
+
+    A marker for the API surfaces that re-shape service errors (the
+    Responses API labels it ``model_unavailable``): no other service error
+    carries it, whatever its status or headers.
+    """
+
+    model_unavailable = True
+
+
 # Backend states the health poller can turn HEALTHY without an admin.
 # DISABLED and DRAINING are set by an admin and stay until one changes them.
 _SELF_RECOVERING_STATUSES = frozenset(
@@ -1826,8 +1837,12 @@ class InferenceService:
         answer a configured-but-down model (api/model_availability.py), never
         404 "not found": callers that bypass those checks (OCR chunks,
         dashboard chat, a request whose backend went down after the check)
-        were told the model does not exist, and OCR does not retry a 4xx.
-        Holds no database session while it waits: the registry opens its own.
+        were told the model does not exist (and OCR, since 2.9.95, does not
+        retry a 4xx).
+        Holds no session of its own while it waits (the registry opens short
+        ones); callers must not hold one either -- every routed path commits
+        the request session first (_create_request_record; the OCR endpoints
+        and dashboard chat before perform_ocr).
         """
         statuses = await self._registry.get_model_backend_statuses(model, modality)
         if not statuses:
@@ -1835,7 +1850,16 @@ class InferenceService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model '{model}' not found",
             )
-        may_recover = bool(statuses & _SELF_RECOVERING_STATUSES)
+        if BackendStatus.HEALTHY in statuses:
+            # One turned healthy between the two queries: use it now.
+            backends = await self._registry.get_backends_with_model(model, modality)
+            if backends:
+                return backends
+        # Forced offline, the pollers are stopped: nothing comes back by itself.
+        may_recover = (
+            bool(statuses & _SELF_RECOVERING_STATUSES)
+            and getattr(self._registry, "is_force_offline", False) is not True
+        )
         attempts = (
             max(0, int(self._settings.model_lookup_retry_attempts))
             if wait and may_recover else 0
@@ -1853,7 +1877,7 @@ class InferenceService:
             "model_lookup_unavailable", model=model, attempts=attempts,
             may_recover=may_recover,
         )
-        raise HTTPException(
+        raise ModelUnavailableError(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=MODEL_UNAVAILABLE_MESSAGE.format(model=model),
             headers={"Retry-After": str(MODEL_UNAVAILABLE_RETRY_AFTER_SECONDS)},

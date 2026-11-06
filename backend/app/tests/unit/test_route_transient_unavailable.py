@@ -101,7 +101,8 @@ class _Registry:
     """Healthy backends per lookup, in order (the last one repeats), and the
     statuses of every backend carrying the model (empty: unknown model)."""
 
-    def __init__(self, lookups, statuses=("UNKNOWN",)):
+    def __init__(self, lookups, statuses=("UNKNOWN",), forced_offline=False):
+        self.is_force_offline = forced_offline
         self.lookups = list(lookups)
         self.statuses = statuses
         self.lookup_calls = []
@@ -185,6 +186,8 @@ async def test_a_configured_model_still_down_is_a_503_like_the_api_surfaces(make
         "dots.MOCR", availability.UNAVAILABLE
     )
     assert info.value.headers == {"Retry-After": str(availability.RETRY_AFTER_SECONDS)}
+    # The marker the Responses API labels `model_unavailable` by.
+    assert info.value.model_unavailable is True
     assert sleeps == [1.5] * 3 and len(registry.lookup_calls) == 3
 
 
@@ -203,6 +206,51 @@ async def test_waits_only_while_a_backend_could_come_back(make, statuses, waits)
         await service._await_routable_backends("glm-5.3", CHAT, wait=True)
     assert info.value.status_code == 503
     assert sleeps == ([2.0, 2.0] if waits else [])
+
+
+async def test_a_backend_that_just_turned_healthy_is_used_without_sleeping(make):
+    # Both queries share their filters, so HEALTHY among the statuses means
+    # one came back between them.
+    registry = _Registry([[BACKEND]], statuses=("HEALTHY", "UNHEALTHY"))
+    service, sleeps = make(registry)
+    assert await service._await_routable_backends("dots.MOCR", CHAT, wait=True) == [BACKEND]
+    assert sleeps == []
+
+
+async def test_no_wait_while_the_fleet_is_forced_offline(make):
+    # force_offline stops the pollers and marks every backend UNHEALTHY:
+    # nothing will come back by itself.
+    registry = _Registry([[]], statuses=("UNHEALTHY",), forced_offline=True)
+    service, sleeps = make(registry)
+    with pytest.raises(HTTPException) as info:
+        await service._await_routable_backends("dots.MOCR", CHAT, wait=True)
+    assert info.value.status_code == 503 and sleeps == []
+
+
+def test_failover_attempts_route_with_max_wait_zero():
+    # Only `max_wait=0` skips the lookup wait; pin that every retry loop
+    # passes it on attempts after the first (both calls in each loop, the
+    # cleared-exclusions retry included).
+    import ast
+
+    tree = ast.parse((_APP_DIR / "services" / "inference.py").read_text())
+    loops = {
+        n.name: n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef)
+        and n.name in ("_proxy_with_retry", "_proxy_stream_with_retry")
+    }
+    assert set(loops) == {"_proxy_with_retry", "_proxy_stream_with_retry"}
+    for name, fn in loops.items():
+        src = ast.unparse(fn)
+        assert "retry_wait = None if attempt == 0 else 0" in src, name
+        calls = [
+            c for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and ast.unparse(c.func) == "self._route_request"
+        ]
+        assert len(calls) == 2, name
+        for call in calls:
+            kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
+            assert kw.get("max_wait") == "retry_wait", name
 
 
 @pytest.mark.parametrize("wait, attempts", [(False, 2), (True, 0)])

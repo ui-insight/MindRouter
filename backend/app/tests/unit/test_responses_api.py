@@ -820,12 +820,15 @@ class TestCompanionEndpoints:
 class TestReshapeKeepsHeaders:
     def test_routing_503_keeps_retry_after_and_says_model_unavailable(self):
         # Routing answers a configured model with no healthy backend with
-        # 503 + Retry-After; the re-shape used to drop the header.  Keyed on
-        # the header, not the wording, so rewording routing's message cannot
-        # silently turn this back into a server_error.
+        # 503 + Retry-After; the re-shape used to drop the header.  Labelled
+        # by routing's marker (inference.ModelUnavailableError), not by the
+        # wording or the header.
+        class _ModelUnavailable(HTTPException):
+            model_unavailable = True
+
         msg = "any wording at all"
         resp = _mod._reshape_http_exception(
-            HTTPException(503, detail=msg, headers={"Retry-After": "30"})
+            _ModelUnavailable(503, detail=msg, headers={"Retry-After": "30"})
         )
         assert resp.status_code == 503
         assert resp.headers["Retry-After"] == "30"
@@ -833,6 +836,13 @@ class TestReshapeKeepsHeaders:
         assert body["error"]["code"] == "model_unavailable"
         assert body["error"]["type"] == "service_unavailable"
         assert body["error"]["message"] == msg
+
+    def test_another_503_with_retry_after_is_not_called_model_unavailable(self):
+        resp = _mod._reshape_http_exception(
+            HTTPException(503, detail="backend overloaded", headers={"Retry-After": "5"})
+        )
+        assert json.loads(resp.body)["error"]["code"] == "server_error"
+        assert resp.headers["Retry-After"] == "5"
 
     def test_rate_limit_retry_after_survives(self):
         resp = _mod._reshape_http_exception(
