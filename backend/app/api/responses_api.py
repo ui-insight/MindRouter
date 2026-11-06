@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.model_availability import (
     AVAILABLE,
+    RETRY_AFTER_SECONDS,
     UNAVAILABLE,
     model_availability,
     unavailable_message,
@@ -66,7 +67,12 @@ from backend.app.services import (
     responses_store,
     responses_websearch,
 )
-from backend.app.services.inference import InferenceService, count_request_text_chars
+from backend.app.services.inference import (
+    InferenceService,
+    apply_reasoning_history_policy,
+    count_request_text_chars,
+    prefilter_reasoning_history,
+)
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
@@ -95,7 +101,15 @@ def error_json(
 
 
 def _reshape_http_exception(e: HTTPException) -> JSONResponse:
-    """Re-shape a service HTTPException into the OpenAI error envelope."""
+    """Re-shape a service HTTPException into the OpenAI error envelope,
+    keeping its headers (Retry-After on a 429 or a 503)."""
+    response = _reshaped_http_exception_body(e)
+    for name, value in (e.headers or {}).items():
+        response.headers[name] = value
+    return response
+
+
+def _reshaped_http_exception_body(e: HTTPException) -> JSONResponse:
     detail = e.detail
     # Service 404s already carry an OpenAI-style {"error": {...}} detail.
     if isinstance(detail, dict) and "error" in detail:
@@ -104,6 +118,10 @@ def _reshape_http_exception(e: HTTPException) -> JSONResponse:
     if e.status_code == 429:
         code = "insufficient_quota" if "quota" in message.lower() else "rate_limit_exceeded"
         return error_json(429, message, err_type="requests", code=code)
+    if getattr(e, "model_unavailable", False) is True:
+        # Routing's answer for a configured model with no healthy backend
+        # (inference.ModelUnavailableError).
+        return error_json(503, message, err_type="service_unavailable", code="model_unavailable")
     if e.status_code >= 500:
         return error_json(e.status_code, message, err_type="server_error", code="server_error")
     return error_json(e.status_code, message)
@@ -259,12 +277,15 @@ async def responses(
             availability=_availability,
         )
         if _availability == UNAVAILABLE:
-            return error_json(
+            response = error_json(
                 503,
                 unavailable_message(ctx.model, _availability),
                 err_type="service_unavailable",
                 code="model_unavailable",
             )
+            # As every other surface (and routing) answers this state.
+            response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+            return response
         return error_json(
             404,
             f"The model '{ctx.model}' does not exist or you do not have access to it.",
@@ -510,6 +531,9 @@ async def count_input_tokens(
     max_chars = getattr(settings, "tokenize_max_input_chars", 2_000_000)
     if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars <= 0:
         max_chars = 2_000_000
+    # Reasoning that can't be forwarded to this model doesn't count toward
+    # the size gate (it is never sent).
+    await prefilter_reasoning_history(canonical)
     if count_request_text_chars(canonical) > max_chars:
         return error_json(
             413, "Input too large to tokenize", code="input_too_large",
@@ -537,6 +561,13 @@ async def count_input_tokens(
         (b for b in backends if getattr(b.engine, "value", b.engine) == "vllm"),
         backends[0],
     )
+    # Count what would be sent: earlier reasoning is kept or dropped per model.
+    target = next(
+        (m for m in await crud.get_models_for_backend(db, backend.id)
+         if (m.name or "").casefold() == (canonical.model or "").casefold()),
+        None,
+    )
+    await apply_reasoning_history_policy(canonical, canonical.model, target)
     count, _is_estimate = await service._count_input_tokens(canonical, backend)
 
     return {"object": "response.input_tokens", "input_tokens": count}

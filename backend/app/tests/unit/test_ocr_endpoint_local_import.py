@@ -49,17 +49,30 @@ class _Upload:
         return self._data
 
 
+class _Db:
+    """Request session stand-in: records whether it was released (committed)
+    before OCR started, since a document can run for minutes."""
+
+    def __init__(self, perform):
+        self._perform = perform
+        self.committed_before_ocr = None
+
+    async def commit(self):
+        if self.committed_before_ocr is None:
+            self.committed_before_ocr = not self._perform.await_count
+
+
 def _auth():
     return SimpleNamespace(id=1), SimpleNamespace(id=2)
 
 
-async def _call(handler, upload, **form):
+async def _call(handler, upload, perform=None, **form):
     """Invoke a handler with everything past content-type resolution stubbed.
 
     perform_ocr is imported INSIDE the handler from backend.app.services.ocr,
     so it is patched on that module, not on the api module.
     """
-    perform = AsyncMock(return_value=dict(_RESULT))
+    perform = perform or AsyncMock(return_value=dict(_RESULT))
     registry = SimpleNamespace(resolve_alias=lambda m: (m, None))
     form = {"model": None, "chunk_size": None, "overlap": None, "dpi": None, **form}
     with (
@@ -68,8 +81,9 @@ async def _call(handler, upload, **form):
         patch.object(api, "get_registry", lambda: registry),
         patch.object(api, "model_availability", AsyncMock(return_value=api.AVAILABLE)),
         patch.object(api, "bind_request_context"),
+        patch.object(api, "InferenceService", lambda db: SimpleNamespace(_check_quota=AsyncMock())),
     ):
-        result = await handler(request=SimpleNamespace(), file=upload, db=None, auth=_auth(), **form)
+        result = await handler(request=SimpleNamespace(), file=upload, db=_Db(perform), auth=_auth(), **form)
     return result, perform
 
 
@@ -189,3 +203,33 @@ def test_no_function_shadows_a_module_import_where_it_can_fail(rel):
     tree = ast.parse((_BACKEND / rel).read_text())
     hits = _shadowing_hazards(tree, _module_level_names(tree))
     assert hits == [], f"{rel}: local import shadows a module import on a skippable path: {hits}"
+
+
+# --------------------------------------------------------------------------
+# A file OCR cannot read is the client's error: 400, not 500.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", ["ocr", "ocrmd"])
+async def test_a_broken_pdf_is_a_400_with_a_plain_message(handler):
+    from fastapi import HTTPException
+
+    import backend.app.services.ocr as ocr_service
+
+    async def page_count_first(**kw):
+        # The real page count on garbage, as perform_ocr runs it first.
+        await ocr_service._pdf_page_count(kw["file_bytes"])
+
+    perform = AsyncMock(side_effect=page_count_first)
+    upload = _Upload("scan.pdf", "application/pdf", data=b"%PDF-1.4 truncated")
+    if handler == "ocr":
+        with pytest.raises(HTTPException) as info:
+            await _call(api.ocr, upload, perform=perform, output_format="markdown")
+        status, detail = info.value.status_code, info.value.detail
+    else:
+        # /v1/ocrmd answers in plain text instead of raising.
+        response, _ = await _call(api.ocrmd, upload, perform=perform)
+        status, detail = response.status_code, response.body.decode()
+    assert status == 400
+    assert detail == ocr_service.UNREADABLE_PDF_MESSAGE

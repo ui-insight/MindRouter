@@ -31,6 +31,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
+# kwargs each stubbed InferenceService.chat_completion call received
+calls_kw: list = []
+
 
 class _Session:
     async def __aenter__(self):
@@ -41,6 +44,10 @@ class _Session:
 
     async def rollback(self):
         return None
+
+
+# The registry's alias table as prod has it: the OCR default is an alias.
+ALIASES = {"default-ocr": "dots.MOCR"}
 
 
 def _stub_backend_chain(chat_completion):
@@ -65,6 +72,11 @@ def _stub_backend_chain(chat_completion):
     st.get_settings = lambda: SimpleNamespace(ocr_max_frames=50, chat_upload_max_uncompressed_mb=100, app_version="t")
     sys.modules["backend.app.settings"] = st
     sess = ModuleType("backend.app.db.session"); sess.AsyncSessionLocal = _Session
+    reg = ModuleType("backend.app.core.telemetry.registry")
+    reg.get_registry = lambda: SimpleNamespace(
+        resolve_alias=lambda m: (ALIASES[m], m) if m in ALIASES else (m, None)
+    )
+    sys.modules["backend.app.core.telemetry.registry"] = reg
     sys.modules["backend.app.db.session"] = sess
     inf = ModuleType("backend.app.services.inference")
 
@@ -72,7 +84,8 @@ def _stub_backend_chain(chat_completion):
         def __init__(self, db):
             self.db = db
 
-        async def chat_completion(self, canonical, user, api_key, http_request):
+        async def chat_completion(self, canonical, user, api_key, http_request, **kw):
+            calls_kw.append(kw)
             return await chat_completion(canonical)
 
     inf.InferenceService = InferenceService
@@ -193,11 +206,12 @@ def test_pages_json_is_built_by_the_pipeline(ocr):
 # --------------------------------------------------------------------------
 
 
-async def _run_perform(ocr, fmt, chunk_size=6, overlap=2, pages=3):
+async def _run_perform(ocr, fmt, chunk_size=6, overlap=2, pages=3, model="dots.MOCR",
+                       content_type="image/png"):
     calls = []
 
-    async def fake_chunk(page_images, idx, start, end, total, nchunks, prompt_template, *a, **k):
-        calls.append({"pages": end - start, "prompt": prompt_template, "start": start})
+    async def fake_chunk(page_images, idx, start, end, total, nchunks, prompt_template, model, *a, **k):
+        calls.append({"pages": end - start, "prompt": prompt_template, "start": start, "model": model})
         return idx, f"page {start + 1} text", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}, False
 
     async def fake_images(file_bytes, content_type, filename, dpi):
@@ -206,7 +220,7 @@ async def _run_perform(ocr, fmt, chunk_size=6, overlap=2, pages=3):
     ocr.ocr_chunk = fake_chunk
     ocr.document_to_images = fake_images
     result = await ocr.perform_ocr(
-        file_bytes=b"x", content_type="image/png", filename="scan.png", model="dots.MOCR",
+        file_bytes=b"x", content_type=content_type, filename="scan.png", model=model,
         output_format=fmt, chunk_size=chunk_size, overlap=overlap, dpi=200, ocr_config=dict(CFG),
         user=None, api_key=None, http_request=None,
     )
@@ -232,6 +246,66 @@ async def test_markdown_mode_keeps_chunking_and_the_transcription_prompt(ocr):
     assert [c["pages"] for c in calls] == [3]  # one chunk of three pages
     assert calls[0]["prompt"] == CFG["prompt_ocrmd"]
     assert result["content"] == "page 1 text" and result["format"] == "markdown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fmt", ["markdown", "json"])
+async def test_an_alias_is_resolved_before_any_chunk_is_routed(ocr, fmt):
+    # Prod's OCR model is the alias `default-ocr`.  The dashboard chat's
+    # scanned-PDF path passed it to perform_ocr unresolved, and routing (which
+    # looks backends up by the real name) 404'd every chunk: 192 "Model
+    # 'default-ocr' not found" errors in a week, every scanned PDF in chat.
+    _, calls = await _run_perform(ocr, fmt, model="default-ocr")
+    assert calls and {c["model"] for c in calls} == {"dots.MOCR"}
+
+
+@pytest.mark.asyncio
+async def test_a_real_model_name_is_passed_through_unchanged(ocr):
+    _, calls = await _run_perform(ocr, "markdown", model="qwen/qwen3.8-27b")
+    assert {c["model"] for c in calls} == {"qwen/qwen3.8-27b"}
+
+
+@pytest.mark.asyncio
+async def test_the_pdf_pipeline_also_gets_the_resolved_name(ocr):
+    seen = []
+
+    async def fake_pipelined(pdf_bytes, model, *a, **k):
+        seen.append(model)
+        return {"content": ""}
+
+    ocr._perform_ocr_pipelined = fake_pipelined
+    await ocr.perform_ocr(
+        file_bytes=b"%PDF", content_type="application/pdf", filename="scan.pdf",
+        model="default-ocr", output_format="markdown", chunk_size=6, overlap=2, dpi=200,
+        ocr_config=dict(CFG), user=None, api_key=None, http_request=None,
+    )
+    assert seen == ["dots.MOCR"]
+
+
+@pytest.mark.asyncio
+async def test_a_document_over_the_page_limit_gets_a_note_that_says_so(ocr):
+    # The chat used to tell everyone "try again later"; a 250-page scan
+    # fails the same way every time, so say why.
+    async def fake_images(file_bytes, content_type, filename, dpi):
+        return [b"img"] * 3
+
+    ocr.document_to_images = fake_images
+    with pytest.raises(ValueError) as info:
+        await ocr.perform_ocr(
+            file_bytes=b"x", content_type="image/png", filename="scan.png", model="dots.MOCR",
+            output_format="markdown", chunk_size=6, overlap=2, dpi=200,
+            ocr_config=dict(CFG, max_pages=2), user=None, api_key=None, http_request=None,
+        )
+    note = ocr.failure_note(info.value)
+    assert "Document has 3 pages, exceeding the maximum of 2" in note
+    assert "Try again later" not in note
+
+
+def test_a_service_failure_note_suggests_trying_again(ocr):
+    note = ocr.failure_note(RuntimeError("404: Model 'default-ocr' not found"))
+    assert "OCR is unavailable right now" in note and "Try again later" in note
+    # Internal detail stays in the logs, not in front of the user.
+    assert "default-ocr" not in note
 
 
 # --------------------------------------------------------------------------

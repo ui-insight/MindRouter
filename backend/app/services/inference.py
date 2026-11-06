@@ -56,11 +56,39 @@ from backend.app.core.translators.vllm_out import (
 )
 from backend.app.core.quota_budget import effective_token_budget
 from backend.app.db import crud
-from backend.app.db.models import ApiKey, Backend, BackendEngine, Modality, User
+from backend.app.db.models import ApiKey, Backend, BackendEngine, BackendStatus, Modality, User
 from backend.app.logging_config import get_logger
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
+
+# What routing answers when a configured model has no healthy backend: the
+# status, wording and Retry-After of the API surfaces' availability check
+# (api/model_availability.py, which services cannot import without pulling in
+# every router; a test keeps them in step).  The body stays a plain detail
+# string, as routing's errors always were: OCR, the dashboard and the
+# streaming paths read it as text.
+MODEL_UNAVAILABLE_MESSAGE = (
+    "The model '{model}' is temporarily unavailable — no healthy "
+    "backend is currently serving it. Please retry shortly."
+)
+MODEL_UNAVAILABLE_RETRY_AFTER_SECONDS = 30
+class ModelUnavailableError(HTTPException):
+    """Routing's 503 for a configured model with no healthy backend.
+
+    A marker for the API surfaces that re-shape service errors (the
+    Responses API labels it ``model_unavailable``): no other service error
+    carries it, whatever its status or headers.
+    """
+
+    model_unavailable = True
+
+
+# Backend states the health poller can turn HEALTHY without an admin.
+# DISABLED and DRAINING are set by an admin and stay until one changes them.
+_SELF_RECOVERING_STATUSES = frozenset(
+    {BackendStatus.HEALTHY, BackendStatus.UNHEALTHY, BackendStatus.UNKNOWN}
+)
 
 
 # Module-level tiktoken encoder (lazy singleton)
@@ -94,6 +122,8 @@ def count_request_text_chars(request: "CanonicalChatRequest") -> int:
                 text = getattr(block, "text", None)
                 if text:
                     total += len(text)
+        if msg.reasoning:  # an earlier turn's reasoning, when the client sent it back
+            total += len(msg.reasoning)
     if request.tools:
         total += len(json.dumps([t.model_dump() for t in request.tools]))
     return total
@@ -125,6 +155,7 @@ def _tiktoken_estimate_sync(request: "CanonicalChatRequest", encoder, max_chars:
         elif isinstance(content, list):
             for block in content:
                 total += _encode_capped(getattr(block, "text", None))
+        total += _encode_capped(msg.reasoning)
         # Per-message overhead (role, separators)
         total += 4
 
@@ -229,6 +260,154 @@ async def _get_default_effort() -> Optional[str]:
         logger.warning("reasoning_default_effort_unreadable", error=str(exc))
     _default_effort_cache = (value, now)
     return value
+
+
+# reasoning.forward_history (core/reasoning.py): whether earlier assistant
+# reasoning reaches the backend when a model has no override of its own.
+# Cached like reasoning.default_effort.
+_FORWARD_HISTORY_TTL_S = 30.0
+_forward_history_cache: Optional[Tuple[bool, float]] = None
+
+
+def _model_row_for(models, name: str):
+    """The backend's row for ``name``: exact match, else case-insensitive
+    (the models table's utf8mb4_general_ci collation matches names that way
+    when the backend's models are looked up), else the first row as before.
+    Comparing case-sensitively here used to hand a case-variant name another
+    model's row — its context length, reasoning profile and overrides."""
+    for m in models:
+        if m.name == name:
+            return m
+    folded = (name or "").casefold()
+    for m in models:
+        if (m.name or "").casefold() == folded:
+            return m
+    return models[0]
+
+
+# Per-model reasoning_history_override values by (case-folded) model name,
+# for the early pre-filter below; same 30 s TTL as the fleet setting.
+_HISTORY_OVERRIDES_TTL_S = 30.0
+_history_overrides_cache: Optional[Tuple[Dict[str, Set[bool]], float]] = None
+
+
+async def _get_reasoning_history_overrides() -> Dict[str, Set[bool]]:
+    """{model name casefolded: set of non-null overrides across its rows}."""
+    global _history_overrides_cache
+    cached = _history_overrides_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[1] < _HISTORY_OVERRIDES_TTL_S:
+        return cached[0]
+    value: Dict[str, Set[bool]] = {}
+    try:
+        from sqlalchemy import select
+
+        from backend.app.db.models import Model
+        from backend.app.db.session import get_async_db_context
+        async with get_async_db_context() as cfg_db:
+            rows = await cfg_db.execute(
+                select(Model.name, Model.reasoning_history_override)
+                .where(Model.reasoning_history_override.isnot(None))
+            )
+            for name, override in rows.all():
+                value.setdefault((name or "").casefold(), set()).add(bool(override))
+    except Exception as exc:  # unreadable → no overrides; the fleet setting decides
+        logger.warning("reasoning_history_overrides_unreadable", error=str(exc))
+    _history_overrides_cache = (value, now)
+    return value
+
+
+def reset_reasoning_history_caches() -> None:
+    """Forget the cached fleet setting and per-model overrides (called by the
+    admin handlers after a change, so this worker applies it at once)."""
+    global _forward_history_cache, _history_overrides_cache
+    _forward_history_cache = None
+    _history_overrides_cache = None
+
+
+async def prefilter_reasoning_history(request) -> None:
+    """Drop earlier reasoning up front when no backend could be sent it.
+
+    The inbound translators keep every earlier turn's reasoning; the real
+    keep/strip decision is per attempt (apply_reasoning_history_policy). But
+    the audit record and the DLP scan happen BEFORE routing, so without this
+    they would store and scan reasoning that will never be forwarded — with
+    the feature off, every agent session's audit rows would repeat all
+    earlier reasoning (growing with the square of the turn count), DLP would
+    alert on model-written text, and old reasoning would push the newest
+    message out of DLP's scan window. Keeps it only if the requested model
+    (alias resolved) has a row that forwards, or has no override and the
+    fleet setting forwards.
+    """
+    messages = getattr(request, "messages", None)
+    if not messages or not any(getattr(m, "reasoning", None) for m in messages):
+        return
+    name = str(getattr(request, "model", "") or "")
+    try:
+        resolved, _ = get_registry().resolve_alias(name)
+    except Exception:
+        resolved = name
+    overrides = await _get_reasoning_history_overrides()
+    values = overrides.get(str(resolved).casefold()) or overrides.get(name.casefold())
+    may_forward = (True in values) if values else await _get_forward_history_default()
+    if may_forward:
+        return
+    for m in messages:
+        if m.reasoning:
+            m.reasoning = None
+    _invalidate_token_memos(request)
+    logger.debug("reasoning_history_prefiltered", model=name)
+
+
+async def _get_forward_history_default() -> bool:
+    """Read reasoning.forward_history (a bool) with a 30s TTL cache."""
+    global _forward_history_cache
+    from backend.app.core.reasoning import FORWARD_HISTORY_DEFAULT, FORWARD_HISTORY_KEY
+
+    cached = _forward_history_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[1] < _FORWARD_HISTORY_TTL_S:
+        return cached[0]
+    value = FORWARD_HISTORY_DEFAULT
+    try:
+        from backend.app.db.session import get_async_db_context
+        async with get_async_db_context() as cfg_db:
+            value = bool(await crud.get_config_json(cfg_db, FORWARD_HISTORY_KEY, FORWARD_HISTORY_DEFAULT))
+    except Exception as exc:  # config unreadable → the built-in default (off)
+        logger.warning("reasoning_forward_history_unreadable", error=str(exc))
+    _forward_history_cache = (value, now)
+    return value
+
+
+async def apply_reasoning_history_policy(request, model_name: str, model_row) -> None:
+    """Keep or drop earlier assistant reasoning for the model this attempt hits.
+
+    The inbound translators keep every earlier turn's reasoning the client
+    sent back; this decides whether the backend sees it: the model's
+    ``reasoning_history_override`` if set, else ``reasoning.forward_history``.
+    Reasoning is only ever forwarded on assistant messages. Runs per attempt
+    BEFORE max_tokens is capped, so the token count matches what is sent;
+    a failover attempt targets the same model name, so it decides the same.
+    """
+    messages = getattr(request, "messages", None)
+    if not messages or not any(m.reasoning for m in messages):
+        return
+    from backend.app.core.reasoning import forward_history_for
+
+    override = getattr(model_row, "reasoning_history_override", None)
+    fleet_default = await _get_forward_history_default() if override is None else False
+    keep = forward_history_for(override, fleet_default)
+    stripped = 0
+    for m in messages:
+        if m.reasoning and (not keep or m.role != MessageRole.ASSISTANT):
+            m.reasoning = None
+            stripped += 1
+    if stripped:
+        _invalidate_token_memos(request)
+    logger.debug(
+        "reasoning_history", model=model_name, forwarded=keep,
+        override=override, stripped_messages=stripped,
+    )
 
 
 # Per-model sampling floor / token cap (core/sampling_policy.py), read from
@@ -367,6 +546,19 @@ class _RequestIds(NamedTuple):
     @classmethod
     def of(cls, db_request) -> "_RequestIds":
         return cls(db_request.id, db_request.user_id, db_request.api_key_id)
+
+
+def _record_key_use(api_key_id) -> None:
+    """Count one use of the key; services/key_usage.py writes it later.
+
+    Never fails the request: a lost count is a display field, not accounting.
+    """
+    try:
+        from backend.app.services import key_usage
+
+        key_usage.record(api_key_id)
+    except Exception:
+        logger.warning("key_usage_record_failed", api_key_id=api_key_id)
 
 
 def _isolated_db_session():
@@ -600,19 +792,72 @@ class InferenceService:
         input_tokens, is_estimate = await self._count_input_tokens(request, backend)
 
         remaining = context_length - input_tokens - _TOKEN_BUFFER
+        reserve = min(request.max_tokens or 1024, 4096)
+
+        def _estimator(text: str) -> int:
+            return len(_tiktoken_encoder.encode(text))
+
+        async def _estimated_budget() -> int:
+            """A message-token budget for the trims, sized from the EXACT
+            count: the trims measure messages with a tiktoken estimate that
+            leaves out tool schemas, images and template overhead (10-25k
+            tokens for an agent's tools), so a budget of "context minus
+            reserve" would read as fitting and cut nothing. Cut the excess
+            the exact count found instead."""
+            from backend.app.core.context_trim import estimate_messages_tokens
+
+            excess = input_tokens - (context_length - _TOKEN_BUFFER - reserve)
+            est_total = await asyncio.to_thread(
+                estimate_messages_tokens, request.messages, _estimator,
+            )
+            return est_total - excess
+
+        if remaining <= 0 and any(m.reasoning for m in request.messages or []):
+            # Forwarded reasoning (apply_reasoning_history_policy) is the
+            # cheapest context to lose, on every client API: strip it, older
+            # turns first. With truncation:"auto" the current tool loop's
+            # reasoning is left for trim_messages_to_fit, which drops old
+            # turns before touching it. Up to two passes, in case the
+            # estimate under-counts reasoning relative to the backend.
+            from backend.app.core.context_trim import strip_reasoning_to_fit
+
+            _ensure_encoder()
+            for _pass in range(2):
+                before = request.messages
+                budget = await _estimated_budget()
+                request.messages = await asyncio.to_thread(
+                    strip_reasoning_to_fit, before, budget, _estimator,
+                    not request.auto_truncate,
+                )
+                if request.messages is before:
+                    break
+                _invalidate_token_memos(request)
+                input_tokens, is_estimate = await self._count_input_tokens(
+                    request, backend
+                )
+                remaining = context_length - input_tokens - _TOKEN_BUFFER
+                logger.info(
+                    "reasoning_stripped_to_fit",
+                    input_tokens=input_tokens,
+                    context_length=context_length,
+                    model=request.model,
+                )
+                if remaining > 0:
+                    break
         if remaining <= 0 and request.auto_truncate:
             # Responses API truncation:"auto" — drop oldest turns until
             # the input fits, reserving room for a useful response.
             from backend.app.core.context_trim import trim_messages_to_fit
 
             _ensure_encoder()  # ensure the module-level encoder is ready
-            reserve = min(request.max_tokens or 1024, 4096)
-            budget = context_length - _TOKEN_BUFFER - reserve
-            request.messages, dropped = trim_messages_to_fit(
-                request.messages, budget,
-                lambda s: len(_tiktoken_encoder.encode(s)),
+            budget = await _estimated_budget()
+            before = request.messages
+            request.messages, dropped = await asyncio.to_thread(
+                trim_messages_to_fit, request.messages, budget, _estimator,
             )
-            if dropped:
+            # A new list means something changed: whole turns dropped, or
+            # only earlier reasoning removed (dropped == 0).
+            if request.messages is not before:
                 _invalidate_token_memos(request)
                 input_tokens, is_estimate = await self._count_input_tokens(
                     request, backend
@@ -699,6 +944,8 @@ class InferenceService:
         )
 
         self._pending_prompt_redactions = []
+        # Never scan reasoning that cannot be forwarded (see the pre-filter).
+        await prefilter_reasoning_history(request)
         if not await prompt_inline_active(self.db):
             return
 
@@ -737,13 +984,16 @@ class InferenceService:
     def _apply_prompt_redactions(request: Any, redactions: list) -> None:
         """Redact offending values in the OUTBOUND canonical request in place.
 
-        Walks message contents (str or multimodal text parts) and the raw
-        prompt. The audit record is built from the original before this runs, so
-        only what is dispatched to the backend is altered.
+        Walks message contents (str or multimodal text parts), an earlier
+        turn's reasoning (scanned too, and forwarded when the policy keeps it)
+        and the raw prompt. The audit record is built from the original before
+        this runs, so only what is dispatched to the backend is altered.
         """
         from backend.app.services.dlp_enforcement import redact_text
 
         for msg in getattr(request, "messages", None) or []:
+            if isinstance(getattr(msg, "reasoning", None), str):
+                msg.reasoning = redact_text(msg.reasoning, redactions)
             content = getattr(msg, "content", None)
             if isinstance(content, str):
                 msg.content = redact_text(content, redactions)
@@ -831,6 +1081,7 @@ class InferenceService:
         endpoint: str = "/v1/chat/completions",
         skip_quota_check: bool = False,
         extra_parameters: Optional[Dict[str, Any]] = None,
+        skip_rpm_check: bool = False,
     ) -> Dict[str, Any]:
         """
         Handle non-streaming chat completion.
@@ -844,13 +1095,18 @@ class InferenceService:
             skip_quota_check: Caller already ran _check_quota (the RPM
                 check increments a Redis counter, so it must run
                 exactly once per request)
+            skip_rpm_check: Enforce the token quota but not the per-minute
+                request limit — for the chunks of an OCR document that was
+                already admitted by services/ocr_admission.py, which bounds
+                that work itself. Counting each chunk as a request made big
+                documents fail half way for accounts near their limit.
 
         Returns:
             OpenAI-compatible chat completion response
         """
         # Check quota
         if not skip_quota_check:
-            await self._check_quota(user, api_key)
+            await self._check_quota(user, api_key, check_rpm=not skip_rpm_check)
 
         # Create audit record
         db_request = await self._create_request_record(
@@ -1514,8 +1770,9 @@ class InferenceService:
             return self.DEFAULT_IMAGE_TOKEN_COST
         return max(0, cost)
 
-    async def _check_quota(self, user: User, api_key: ApiKey) -> None:
-        """Check if user has sufficient quota."""
+    async def _check_quota(self, user: User, api_key: ApiKey, check_rpm: bool = True) -> None:
+        """Check if user has sufficient quota (and, unless check_rpm is
+        False, is under their requests-per-minute limit)."""
         # Reset quota if period expired
         await crud.reset_quota_if_needed(self.db, user.id)
 
@@ -1526,6 +1783,9 @@ class InferenceService:
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Token quota exceeded",
             )
+
+        if not check_rpm:
+            return
 
         # RPM rate limit (Redis-backed, shared across all workers)
         rpm_limit = 0
@@ -1560,6 +1820,9 @@ class InferenceService:
         messages = None
         prompt = None
         parameters = {}
+
+        # Never store reasoning that cannot be forwarded (see the pre-filter).
+        await prefilter_reasoning_history(request)
 
         # Content capture is policy-gated: with prompt capture off, the
         # audit row keeps metadata (model, tokens, timings) but no
@@ -1771,6 +2034,67 @@ class InferenceService:
                 job, user, modality, exclude_backend_ids, max_wait,
             )
 
+    async def _await_routable_backends(
+        self, model: str, modality: Optional[Modality], wait: bool
+    ) -> list:
+        """No HEALTHY backend serves ``model`` right now: tell why.
+
+        A name the fleet does not have is a 404 at once.  A configured model
+        with no healthy backend is usually a short gap (a re-enabled backend
+        waiting for its first health check, a health flap), so look again a
+        few times (``model_lookup_retry_*``), and return the backends if one
+        comes back -- but only while some backend could come back on its
+        own: one an admin disabled or is draining will not, so that is
+        answered at once.  Otherwise 503 + Retry-After, as the API surfaces
+        answer a configured-but-down model (api/model_availability.py), never
+        404 "not found": callers that bypass those checks (OCR chunks,
+        dashboard chat, a request whose backend went down after the check)
+        were told the model does not exist (and OCR, since 2.9.95, does not
+        retry a 4xx).
+        Holds no session of its own while it waits (the registry opens short
+        ones); callers must not hold one either -- every routed path commits
+        the request session first (_create_request_record; the OCR endpoints
+        and dashboard chat before perform_ocr).
+        """
+        statuses = await self._registry.get_model_backend_statuses(model, modality)
+        if not statuses:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model '{model}' not found",
+            )
+        if BackendStatus.HEALTHY in statuses:
+            # One turned healthy between the two queries: use it now.
+            backends = await self._registry.get_backends_with_model(model, modality)
+            if backends:
+                return backends
+        # Forced offline, the pollers are stopped: nothing comes back by itself.
+        may_recover = (
+            bool(statuses & _SELF_RECOVERING_STATUSES)
+            and getattr(self._registry, "is_force_offline", False) is not True
+        )
+        attempts = (
+            max(0, int(self._settings.model_lookup_retry_attempts))
+            if wait and may_recover else 0
+        )
+        pause = max(0.0, float(self._settings.model_lookup_retry_pause_seconds))
+        for attempt in range(1, attempts + 1):
+            await asyncio.sleep(pause)
+            backends = await self._registry.get_backends_with_model(model, modality)
+            if backends:
+                logger.info(
+                    "model_lookup_transient_recovered", model=model, attempt=attempt
+                )
+                return backends
+        logger.warning(
+            "model_lookup_unavailable", model=model, attempts=attempts,
+            may_recover=may_recover,
+        )
+        raise ModelUnavailableError(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=MODEL_UNAVAILABLE_MESSAGE.format(model=model),
+            headers={"Retry-After": str(MODEL_UNAVAILABLE_RETRY_AFTER_SECONDS)},
+        )
+
     async def _route_request_inner(
         self,
         job: Job,
@@ -1785,9 +2109,9 @@ class InferenceService:
         )
 
         if not backends:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model '{job.model}' not found",
+            # Failover attempts (max_wait=0) fail fast, as they do for capacity.
+            backends = await self._await_routable_backends(
+                job.model, modality, wait=max_wait != 0
             )
 
         # Filter out circuit-broken backends
@@ -2118,11 +2442,19 @@ class InferenceService:
                 else:
                     raise
 
+            # The model this attempt hits (the gateway policies below read its row).
+            _policy_target = (
+                _model_row_for(models, job.model) if models else None
+            )
+            # Earlier reasoning is kept or dropped first, so the token count
+            # below matches what is sent.
+            await apply_reasoning_history_policy(request, job.model, _policy_target)
+
             # Cap max_tokens using actual token count (vLLM /tokenize) or
             # tiktoken estimate (Ollama / fallback).
             cap_context_length = None
             if models and hasattr(request, 'max_tokens'):
-                _target = next((m for m in models if m.name == job.model), models[0])
+                _target = _model_row_for(models, job.model)
                 if _target.context_length:
                     cap_context_length = _target.context_length
                     await self.cap_max_tokens(request, backend, cap_context_length)
@@ -2134,7 +2466,7 @@ class InferenceService:
             # which would otherwise wrongly block a client's opt-in.
             if (backend.engine == BackendEngine.OLLAMA
                     and models and hasattr(request, 'think') and request.think):
-                _target = next((m for m in models if m.name == job.model), models[0])
+                _target = _model_row_for(models, job.model)
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
@@ -2144,15 +2476,12 @@ class InferenceService:
             # high, Qwen3.8: low/medium/xhigh) or dropped when the family has
             # none. gpt-oss has no switch, so it is left to its own default
             # when nothing is said (preserves its reasoning-promotion handling).
-            _policy_target = (
-                next((m for m in models if m.name == job.model), models[0]) if models else None
-            )
             await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
             await apply_sampling_policy(request, job.model)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and models and hasattr(request, 'backend_options'):
-                _ctx_target = next((m for m in models if m.name == job.model), models[0])
+                _ctx_target = _model_row_for(models, job.model)
                 if _ctx_target.context_length:
                     if request.backend_options is None:
                         request.backend_options = {}
@@ -2431,10 +2760,16 @@ class InferenceService:
                 # routing failed (see _release_request_session).
                 await self._release_request_session()
 
+            # Earlier reasoning first (see the non-streaming path).
+            _policy_target = (
+                _model_row_for(_models, job.model) if _models else None
+            )
+            await apply_reasoning_history_policy(request, job.model, _policy_target)
+
             # Cap max_tokens (same logic as non-streaming path).
             cap_context_length = None
             if _models and hasattr(request, 'max_tokens'):
-                _target = next((m for m in _models if m.name == job.model), _models[0])
+                _target = _model_row_for(_models, job.model)
                 if _target.context_length:
                     cap_context_length = _target.context_length
                     await self.cap_max_tokens(request, backend, cap_context_length)
@@ -2443,20 +2778,17 @@ class InferenceService:
             # (see non-streaming path for rationale; never strip on vLLM).
             if (backend.engine == BackendEngine.OLLAMA
                     and _models and hasattr(request, 'think') and request.think):
-                _target = next((m for m in _models if m.name == job.model), _models[0])
+                _target = _model_row_for(_models, job.model)
                 if not getattr(_target, 'supports_thinking', False):
                     request.think = None
 
             # Gateway reasoning policy (see the non-streaming path).
-            _policy_target = (
-                next((m for m in _models if m.name == job.model), _models[0]) if _models else None
-            )
             await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
             await apply_sampling_policy(request, job.model)
 
             # Inject num_ctx for Ollama backends from model config
             if backend.engine == BackendEngine.OLLAMA and _models and hasattr(request, 'backend_options'):
-                _ctx_target = next((m for m in _models if m.name == job.model), _models[0])
+                _ctx_target = _model_row_for(_models, job.model)
                 if _ctx_target.context_length:
                     if request.backend_options is None:
                         request.backend_options = {}
@@ -3304,10 +3636,10 @@ class InferenceService:
                 logger.warning("dlp_response_redaction_failed",
                                request_id=getattr(db_request, "id", None))
 
-    # Attempts for the completion DB transaction. Hot-row deadlocks (quotas /
-    # api_keys under concurrent same-user traffic, MariaDB error 1213) are
-    # transient; more than a few retries means something structural (the
-    # durable fix is atomic increments in update_quota_usage/update_api_key_usage).
+    # Attempts for the completion DB transaction. Hot-row deadlocks (quotas
+    # under concurrent same-user traffic, MariaDB error 1213) are transient;
+    # more than a few retries means something structural. (api_keys is no
+    # longer written here — see services/key_usage.py.)
     _COMPLETION_DB_ATTEMPTS = 5
 
     async def _run_completion_db(
@@ -3316,22 +3648,22 @@ class InferenceService:
     ) -> None:
         """Run a completion DB transaction; retry deadlocks; never raise.
 
-        LOCK ORDER (the reason every writer bumps api_keys FIRST): the
-        completion UPDATE on ``requests`` rewrites secondary indexes that
-        start with the ``api_key_id`` / ``user_id`` foreign-key columns
-        (``ix_requests_apikey_tokens_covering`` and friends), and InnoDB
-        re-validates the foreign key for every such rewrite by taking a
-        SHARED lock on the parent ``api_keys`` / ``users`` row. With the
-        old order (requests → responses → quotas → api_keys) two
-        completions from the same key both held that S lock, one took X on
-        quotas, then needed X on api_keys — blocked by the other's S lock —
-        while the other waited for quotas: MariaDB 1213 every time the same
-        key completed twice within a few ms (~1,400/day on prod, 2026-09-30;
-        the 5-attempt retry lost ~170/day, which the orphan janitor then
-        mislabelled "Orphaned: queued request not tracked by scheduler"
-        although the client had its 200). Taking our own X lock on api_keys
-        as the FIRST statement subsumes the FK S lock, so same-key
-        transactions queue on that row and never form a cycle.
+        LOCKS: the completion UPDATE on ``requests`` rewrites secondary
+        indexes that start with the ``api_key_id`` / ``user_id`` foreign-key
+        columns (``ix_requests_apikey_tokens_covering`` and friends), and
+        InnoDB re-validates the foreign key for every such rewrite by taking
+        a SHARED lock on the parent ``api_keys`` / ``users`` row. When these
+        writers also bumped ``api_keys.usage_count`` after the quota update,
+        two same-key completions deadlocked (MariaDB 1213, ~1,400/day on
+        prod, 2026-09-30). 2.9.81 fixed that by taking the api_keys X lock
+        FIRST — which in turn serialized every same-key completion on that
+        row for its whole transaction, and under the 2026-11-05 OCR flood
+        ~110 of them queued there holding pooled connections until MariaDB
+        refused new ones. Now no writer touches ``api_keys`` at all: key
+        usage is counted in memory and written in batches by
+        services/key_usage.py. The FK S locks are compatible with each
+        other, and nothing in these transactions wants X on api_keys, so
+        no cycle can form through that row.
 
         ``fallback`` (optional coroutine factory): if the transaction still
         loses every retry to a lock error (1213/1205), run it once so the
@@ -3467,12 +3799,9 @@ class InferenceService:
         user_id = db_request.user_id
         api_key_id = db_request.api_key_id
 
-        async def write_once():
-            # api_keys FIRST (see _run_completion_db: the requests UPDATE
-            # takes an implicit S lock on this row; taking our X lock before
-            # it makes same-key completions serialize instead of deadlock).
-            await crud.update_api_key_usage(self.db, api_key_id)
+        _record_key_use(api_key_id)
 
+        async def write_once():
             await crud.update_request_completed(
                 self.db, request_id,
                 prompt_tokens=prompt_tokens,
@@ -3581,12 +3910,11 @@ class InferenceService:
         """
         request_id, user_id, api_key_id = request_ids
 
+        _record_key_use(api_key_id)
+
         async def write_once():
             stored_content = content
             async with _isolated_db_session() as wdb:
-                # api_keys FIRST — same lock-order rule as _do_complete_db.
-                await crud.update_api_key_usage(wdb, api_key_id)
-
                 await crud.update_request_completed(
                     wdb, request_id,
                     prompt_tokens=prompt_tokens,
@@ -3685,10 +4013,9 @@ class InferenceService:
                 logger.error("request_fail_db_skipped", error="expired_orm_instance")
                 return
 
-        async def write(session) -> None:
-            # api_keys FIRST — same lock-order rule as _do_complete_db.
-            await crud.update_api_key_usage(session, api_key_id)
+        _record_key_use(api_key_id)
 
+        async def write(session) -> None:
             await crud.update_request_failed(
                 session, request_id,
                 error_message=error_message,

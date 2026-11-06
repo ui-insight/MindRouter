@@ -348,3 +348,40 @@ def resolve_reasoning(
         chosen = normalize_level(default_effort)
     native = profile.native_level(chosen) if chosen else None
     return ResolvedReasoning(enabled=enabled, effort=native)
+
+
+# ---------------------------------------------------------------------------
+# Earlier reasoning in the conversation history
+# ---------------------------------------------------------------------------
+#
+# Clients that follow the model makers' guidance send each earlier assistant
+# turn back with its reasoning (OpenAI chat ``reasoning_content``/``reasoning``,
+# Anthropic ``thinking`` blocks, Responses ``reasoning`` items, Ollama
+# ``thinking``).  Every inbound translator keeps it on the canonical message;
+# whether it then reaches the backend is a per-model gateway decision
+# (``reasoning.forward_history``, overridable per model).  Each model's chat
+# template decides what it renders: measured 2026-11-05 on the fleet, Kimi K3
+# and Qwen3.8 keep the reasoning of every earlier turn, gpt-oss, Qwen3.5/3.6,
+# Qwen3-32B, Gemma 4 and Nemotron keep only the current tool-calling loop's,
+# and models without reasoning ignore it.
+
+# The admin setting (app_config) and its value when unset: off, so a release
+# carrying this ships dark and is enabled model by model, then fleet-wide.
+FORWARD_HISTORY_KEY = "reasoning.forward_history"
+FORWARD_HISTORY_DEFAULT = False
+
+
+def history_reasoning_text(value: object) -> Optional[str]:
+    """An earlier turn's reasoning as clients send it: a non-blank string, else None.
+
+    Anything else (OpenRouter's ``reasoning_details`` lists, opaque objects) is
+    not text the backend could replay, so it is ignored.
+    """
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def forward_history_for(override: Optional[bool], fleet_default: bool) -> bool:
+    """Whether a model gets earlier reasoning: its override if set, else the fleet setting."""
+    return fleet_default if override is None else bool(override)

@@ -33,6 +33,7 @@ from backend.app.core.canonical_schemas import (
     ResponseFormatType,
     TextContent,
 )
+from backend.app.core.reasoning import history_reasoning_text
 
 
 class OllamaInTranslator:
@@ -208,6 +209,10 @@ class OllamaInTranslator:
         content = msg.get("content", "")
         images = msg.get("images", [])
 
+        # An earlier assistant turn's reasoning (Ollama returns it as
+        # `thinking`); the gateway decides per model whether it is forwarded.
+        reasoning = history_reasoning_text(msg.get("thinking")) if role == MessageRole.ASSISTANT else None
+
         # Extract tool_calls from assistant messages
         # Ollama uses dict arguments; canonical uses JSON strings
         tool_calls = None
@@ -247,10 +252,10 @@ class OllamaInTranslator:
                     ImageBase64Content(data=img_data, media_type=media_type)
                 )
 
-            return CanonicalMessage(role=role, content=content_blocks, tool_calls=tool_calls)
+            return CanonicalMessage(role=role, content=content_blocks, reasoning=reasoning, tool_calls=tool_calls)
 
         # Simple text message
-        return CanonicalMessage(role=role, content=content, tool_calls=tool_calls)
+        return CanonicalMessage(role=role, content=content, reasoning=reasoning, tool_calls=tool_calls)
 
     @staticmethod
     def _translate_format(

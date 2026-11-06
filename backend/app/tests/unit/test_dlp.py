@@ -402,6 +402,20 @@ class TestTextExtraction:
         assert "Hello world" in result
         assert "Hi there" in result
 
+    def test_earlier_reasoning_is_scanned(self):
+        # Reasoning sent back by the client is client-supplied text in every
+        # spelling: canonical/vLLM, OpenAI, Ollama, Anthropic and Responses.
+        messages = [
+            {"role": "assistant", "content": "a", "reasoning": "canonical-r"},
+            {"role": "assistant", "content": "b", "reasoning_content": "openai-r"},
+            {"role": "assistant", "content": "c", "thinking": "ollama-r"},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "anthropic-r", "signature": "s"}]},
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "responses-r"}]},
+        ]
+        result = extract_scannable_text(messages=messages)
+        for text in ("canonical-r", "openai-r", "ollama-r", "anthropic-r", "responses-r"):
+            assert text in result
+
     def test_images_skipped(self):
         messages = [
             {"role": "user", "content": [

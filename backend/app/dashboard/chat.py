@@ -638,6 +638,7 @@ async def chat_upload(
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     used_ocr = False
+    ocr_failure_note = None
 
     settings = get_settings()
     max_size = settings.chat_upload_max_size_mb * 1024 * 1024
@@ -783,6 +784,10 @@ async def chat_upload(
                             )
                             ocr_live_key = first_live_api_key(ocr_api_keys)
                             if ocr_user and ocr_live_key:
+                                # Only reads so far: release the pooled
+                                # connection before OCR, which may wait for a
+                                # slot and then run for minutes.
+                                await db.commit()
                                 ocr_result = await perform_ocr(
                                     file_bytes=file_bytes,
                                     content_type="application/pdf",
@@ -805,7 +810,11 @@ async def chat_upload(
                             filename=filename,
                             error=str(ocr_err),
                         )
-                        # Keep whatever pdfplumber extracted
+                        # Keep whatever pdfplumber extracted, and say so: the
+                        # user otherwise sees an attachment with almost no
+                        # text and no hint why.
+                        from backend.app.services.ocr import failure_note
+                        ocr_failure_note = failure_note(ocr_err)
         else:
             extracted_text = file_bytes.decode("utf-8", errors="replace")
     except Exception as e:
@@ -866,6 +875,8 @@ async def chat_upload(
     }
     if used_ocr:
         resp["processing_note"] = "This PDF appeared to be scanned — OCR was used to extract the text."
+    elif ocr_failure_note:
+        resp["processing_note"] = ocr_failure_note
     return JSONResponse(resp)
 
 
