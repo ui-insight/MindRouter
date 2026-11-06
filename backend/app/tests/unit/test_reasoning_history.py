@@ -487,17 +487,25 @@ class TestPrefilter:
         svc._settings = SimpleNamespace(audit_log_enabled=True, audit_log_prompts=True)
         svc._extract_images_from_messages = lambda msgs: msgs
         req = _request()
-        try:
+        http = SimpleNamespace(headers={}, client=SimpleNamespace(host="10.0.0.1"))
+        with pytest.raises(_Stop):
             asyncio.run(svc._create_request_record(
-                req, SimpleNamespace(id=1), SimpleNamespace(id=2), None, "/v1/chat/completions"))
-        except Exception:
-            pass
-        assert all(m.reasoning is None for m in req.messages)
-        if "messages" in stored:
-            assert all(not m.get("reasoning") for m in stored["messages"])
+                req, SimpleNamespace(id=1), SimpleNamespace(id=2), http, "/v1/chat/completions"))
+        assert stored["messages"], "the audit write was reached"
+        assert all(not m.get("reasoning") for m in stored["messages"])
 
 
 class TestSettingCaches:
+    def test_admin_changes_reset_this_workers_caches(self):
+        from backend.app.services import inference as inf
+
+        inf._forward_history_cache = (True, 1e12)
+        inf._history_overrides_cache = ({"m": {True}}, 1e12)
+        inf.reset_reasoning_history_caches()
+        assert inf._forward_history_cache is None and inf._history_overrides_cache is None
+        src = (Path(__file__).resolve().parents[2] / "dashboard" / "routes.py").read_text()
+        assert src.count("_reset_reasoning_history_caches()") == 4  # def + 3 handlers
+
     def test_fleet_setting_is_cached_and_falls_back_to_off(self, monkeypatch):
         from contextlib import asynccontextmanager
         from backend.app.services import inference as inf
@@ -610,7 +618,34 @@ class TestStripReasoningToFit:
 # The gateway's own web_search tool loop keeps each round's reasoning
 # ---------------------------------------------------------------------------
 
+class TestResponsesReplay:
+    def test_web_search_rounds_reasoning_is_not_folded_into_the_answer(self):
+        """Review: on previous_response_id replay a web_search_call yields no
+        message, so its round's reasoning used to attach to the final answer."""
+        msgs = ResponsesInTranslator._translate_input([
+            {"type": "message", "role": "user", "content": "q"},
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "search plan"}]},
+            {"type": "web_search_call", "id": "ws_1", "status": "completed",
+             "action": {"type": "search", "query": "x"}},
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "answer plan"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a"}]},
+        ])
+        answer = [m for m in msgs if m.role == MessageRole.ASSISTANT][-1]
+        assert answer.reasoning == "answer plan"
+
+
 class TestWebSearchLoop:
+    def test_a_streamed_round_keeps_all_its_reasoning_items(self):
+        from backend.app.services import responses_websearch as ws
+
+        content, reasoning = ws._round_text_and_reasoning([
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "one"}]},
+            {"type": "message", "content": [{"type": "output_text", "text": "visible"}]},
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "two"}]},
+        ])
+        assert content == "visible" and reasoning == "one\n\ntwo"
+        assert ws._round_text_and_reasoning([]) == (None, None)
+
     def test_round_reasoning_rides_on_the_tool_call_turn(self, monkeypatch):
         from backend.app.services import responses_websearch as ws
 
@@ -622,7 +657,7 @@ class TestWebSearchLoop:
         assert req.messages[1].role == MessageRole.ASSISTANT
         assert req.messages[1].reasoning == "thinking about it"
 
-    def test_both_loops_pass_the_rounds_reasoning(self):
+    def test_both_loops_pass_the_rounds_reasoning(self):  # wiring
         src = (Path(__file__).resolve().parents[2] / "services" / "responses_websearch.py").read_text()
         assert "_append_round_messages(canonical, round_content, calls, results, round_reasoning)" in src
         assert 'message.get("reasoning_content") or message.get("reasoning")' in src

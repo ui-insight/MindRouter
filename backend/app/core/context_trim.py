@@ -90,8 +90,15 @@ def _message_tokens(
     return total
 
 
-def _total(messages: List[CanonicalMessage], estimator: Callable[[str], int]) -> int:
+def estimate_messages_tokens(
+    messages: List[CanonicalMessage], estimator: Callable[[str], int],
+) -> int:
+    """The trims' own estimate for a message list (messages only: no tool
+    schemas or template overhead — callers size budgets accordingly)."""
     return sum(_message_tokens(m, estimator) for m in messages)
+
+
+_total = estimate_messages_tokens
 
 
 def strip_reasoning_to_fit(

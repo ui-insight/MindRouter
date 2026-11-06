@@ -2101,6 +2101,16 @@ async def reset_model_thinking(
     )
 
 
+def _reset_reasoning_history_caches() -> None:
+    """Apply a reasoning-history change at once in this worker (others pick
+    it up within the 30 s cache TTL)."""
+    try:
+        from backend.app.services import inference as _inf
+        _inf.reset_reasoning_history_caches()
+    except Exception:
+        logger.warning("reasoning_history_cache_reset_failed")
+
+
 @dashboard_router.post("/admin/models/toggle-reasoning-history")
 async def toggle_model_reasoning_history(
     request: Request,
@@ -2143,6 +2153,7 @@ async def toggle_model_reasoning_history(
         ip_address=get_client_ip(request),
     )
     await db.commit()
+    _reset_reasoning_history_caches()
 
     return RedirectResponse(
         url="/admin/models?success=updated", status_code=302
@@ -2171,6 +2182,7 @@ async def reset_model_reasoning_history(
         ip_address=get_client_ip(request),
     )
     await db.commit()
+    _reset_reasoning_history_caches()
 
     return RedirectResponse(
         url="/admin/models?success=reset", status_code=302
@@ -6096,6 +6108,7 @@ async def admin_settings_post(
             entity_type="config", detail=f"forward_history={val}", ip_address=_ip,
         )
         await db.commit()
+        _reset_reasoning_history_caches()
         return RedirectResponse(url="/admin/settings?success=forward_history_updated", status_code=302)
 
     elif action == "set_sampling_policies":

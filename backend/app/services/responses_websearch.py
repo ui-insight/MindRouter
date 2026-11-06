@@ -246,6 +246,22 @@ def make_search_executor(db, user, api_key) -> Callable:
     return executor
 
 
+def _round_text_and_reasoning(items: List[Dict]) -> tuple:
+    """A streamed round's visible text and its reasoning (all reasoning
+    items of the round, in order), from the output items it closed."""
+    content = None
+    reasoning: List[str] = []
+    for item in items:
+        if item.get("type") == "message":
+            content = item["content"][0]["text"]
+        elif item.get("type") == "reasoning":
+            reasoning += [
+                p.get("text") for p in item.get("content") or []
+                if isinstance(p, dict) and p.get("type") == "reasoning_text" and p.get("text")
+            ]
+    return content, ("\n\n".join(reasoning) or None)
+
+
 def _append_round_messages(
     canonical: CanonicalChatRequest,
     content: Optional[str],
@@ -348,18 +364,9 @@ async def stream_with_web_search(
 
             # The round's visible text (if any) was already streamed and
             # closed into completed_output; find it for the tool-call turn.
-            round_content = None
-            round_reasoning = None
-            for item in st.completed_output[round_text_before:]:
-                if item.get("type") == "message":
-                    round_content = item["content"][0]["text"]
-                elif item.get("type") == "reasoning":
-                    texts = [
-                        p.get("text") for p in item.get("content") or []
-                        if isinstance(p, dict) and p.get("type") == "reasoning_text" and p.get("text")
-                    ]
-                    if texts:
-                        round_reasoning = "\n\n".join(texts)
+            round_content, round_reasoning = _round_text_and_reasoning(
+                st.completed_output[round_text_before:]
+            )
 
             results: List[str] = []
             for call in calls:

@@ -289,6 +289,14 @@ async def _get_reasoning_history_overrides() -> Dict[str, Set[bool]]:
     return value
 
 
+def reset_reasoning_history_caches() -> None:
+    """Forget the cached fleet setting and per-model overrides (called by the
+    admin handlers after a change, so this worker applies it at once)."""
+    global _forward_history_cache, _history_overrides_cache
+    _forward_history_cache = None
+    _history_overrides_cache = None
+
+
 async def prefilter_reasoning_history(request) -> None:
     """Drop earlier reasoning up front when no backend could be sent it.
 
@@ -743,22 +751,45 @@ class InferenceService:
         input_tokens, is_estimate = await self._count_input_tokens(request, backend)
 
         remaining = context_length - input_tokens - _TOKEN_BUFFER
+        reserve = min(request.max_tokens or 1024, 4096)
+
+        def _estimator(text: str) -> int:
+            return len(_tiktoken_encoder.encode(text))
+
+        async def _estimated_budget() -> int:
+            """A message-token budget for the trims, sized from the EXACT
+            count: the trims measure messages with a tiktoken estimate that
+            leaves out tool schemas, images and template overhead (10-25k
+            tokens for an agent's tools), so a budget of "context minus
+            reserve" would read as fitting and cut nothing. Cut the excess
+            the exact count found instead."""
+            from backend.app.core.context_trim import estimate_messages_tokens
+
+            excess = input_tokens - (context_length - _TOKEN_BUFFER - reserve)
+            est_total = await asyncio.to_thread(
+                estimate_messages_tokens, request.messages, _estimator,
+            )
+            return est_total - excess
+
         if remaining <= 0 and any(m.reasoning for m in request.messages or []):
             # Forwarded reasoning (apply_reasoning_history_policy) is the
-            # cheapest context to lose, on every client API — not only for
-            # Responses truncation:"auto": strip it, older turns first,
-            # before overflowing or dropping whole turns.
+            # cheapest context to lose, on every client API: strip it, older
+            # turns first. With truncation:"auto" the current tool loop's
+            # reasoning is left for trim_messages_to_fit, which drops old
+            # turns before touching it. Up to two passes, in case the
+            # estimate under-counts reasoning relative to the backend.
             from backend.app.core.context_trim import strip_reasoning_to_fit
 
             _ensure_encoder()
-            reserve = min(request.max_tokens or 1024, 4096)
-            budget = context_length - _TOKEN_BUFFER - reserve
-            before = request.messages
-            request.messages = strip_reasoning_to_fit(
-                request.messages, budget,
-                lambda s: len(_tiktoken_encoder.encode(s)),
-            )
-            if request.messages is not before:
+            for _pass in range(2):
+                before = request.messages
+                budget = await _estimated_budget()
+                request.messages = await asyncio.to_thread(
+                    strip_reasoning_to_fit, before, budget, _estimator,
+                    not request.auto_truncate,
+                )
+                if request.messages is before:
+                    break
                 _invalidate_token_memos(request)
                 input_tokens, is_estimate = await self._count_input_tokens(
                     request, backend
@@ -770,18 +801,18 @@ class InferenceService:
                     context_length=context_length,
                     model=request.model,
                 )
+                if remaining > 0:
+                    break
         if remaining <= 0 and request.auto_truncate:
             # Responses API truncation:"auto" — drop oldest turns until
             # the input fits, reserving room for a useful response.
             from backend.app.core.context_trim import trim_messages_to_fit
 
             _ensure_encoder()  # ensure the module-level encoder is ready
-            reserve = min(request.max_tokens or 1024, 4096)
-            budget = context_length - _TOKEN_BUFFER - reserve
+            budget = await _estimated_budget()
             before = request.messages
-            request.messages, dropped = trim_messages_to_fit(
-                request.messages, budget,
-                lambda s: len(_tiktoken_encoder.encode(s)),
+            request.messages, dropped = await asyncio.to_thread(
+                trim_messages_to_fit, request.messages, budget, _estimator,
             )
             # A new list means something changed: whole turns dropped, or
             # only earlier reasoning removed (dropped == 0).

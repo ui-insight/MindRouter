@@ -329,7 +329,10 @@ class ResponsesInTranslator:
         messages: List[CanonicalMessage] = []
         # A turn arrives as its reasoning item(s), then its message and/or
         # function_calls: hold the reasoning until the assistant message it
-        # belongs to. Reasoning followed by anything else is dropped.
+        # belongs to. Reasoning followed by anything else — a non-assistant
+        # message, or an item that becomes no message at all, such as a
+        # hosted web_search_call (that round's reasoning belongs to the
+        # search, not to the final answer) — is dropped.
         pending_reasoning: List[str] = []
         for item in input_value:
             if not isinstance(item, dict):
@@ -339,7 +342,10 @@ class ResponsesInTranslator:
                 if text:
                     pending_reasoning.append(text)
                 continue
-            for msg in ResponsesInTranslator._translate_item(item):
+            translated = ResponsesInTranslator._translate_item(item)
+            if not translated:
+                pending_reasoning = []
+            for msg in translated:
                 if msg.role != MessageRole.ASSISTANT:
                     pending_reasoning = []
                 # Merge a function_call into the preceding assistant
