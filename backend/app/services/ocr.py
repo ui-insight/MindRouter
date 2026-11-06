@@ -24,6 +24,9 @@
 
 import asyncio
 import base64
+import collections
+import contextlib
+import contextvars
 import difflib
 import functools
 import io
@@ -125,7 +128,9 @@ async def get_ocr_config(db) -> dict:
 
 DEFAULT_MAX_DOCUMENTS_PER_USER = 2
 DEFAULT_MAX_DOCUMENTS = 8
-DEFAULT_MAX_CONVERSIONS = 4
+# Per uvicorn worker: 8 prod workers x 2 = 16 conversions at most, half the
+# gateway's 32 cores.
+DEFAULT_MAX_CONVERSIONS = 2
 DEFAULT_QUEUE_WAIT_SECONDS = 60
 DEFAULT_MAX_WAITING_PER_USER = 4
 DEFAULT_MAX_WAITING = 16
@@ -154,44 +159,60 @@ class _ConversionLimiter:
     outage, which starved the event loop until database writes timed out. The
     limit is re-read from admin config on each document, so it can change
     without a restart.
+
+    A FIFO of futures rather than an asyncio.Condition: releasing is fully
+    synchronous (no lock to await, so a cancellation during release can never
+    lose a slot), and a freed slot is handed straight to the next waiter (no
+    wake-up can be lost if that waiter is cancelled — it hands it on).
     """
 
     def __init__(self, limit: int):
         self._limit = max(1, int(limit))
         self._active = 0
-        self._cond: Optional[asyncio.Condition] = None
+        self._waiters: "collections.deque[asyncio.Future]" = collections.deque()
 
     def set_limit(self, limit) -> None:
         try:
-            self._limit = max(1, int(limit))
+            new = max(1, int(limit))
         except (TypeError, ValueError):
             return
-        if self._cond is not None:
-            # Wake waiters so a raised limit takes effect at once.
-            asyncio.ensure_future(self._notify_all())
-
-    async def _notify_all(self) -> None:
-        async with self._cond:
-            self._cond.notify_all()
+        if new != self._limit:
+            self._limit = new
+            self._wake()
 
     @property
     def active(self) -> int:
         return self._active
 
+    def _wake(self) -> None:
+        while self._waiters and self._active < self._limit:
+            fut = self._waiters.popleft()
+            if not fut.done():
+                self._active += 1  # the slot passes to this waiter
+                fut.set_result(None)
+
     async def __aenter__(self):
-        if self._cond is None:
-            self._cond = asyncio.Condition()
-        async with self._cond:
-            await self._cond.wait_for(lambda: self._active < self._limit)
+        if self._active < self._limit and not self._waiters:
             self._active += 1
+            return self
+        fut = asyncio.get_running_loop().create_future()
+        self._waiters.append(fut)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                # We were handed a slot just as we were cancelled: pass it on.
+                self._active -= 1
+                self._wake()
+            else:
+                with contextlib.suppress(ValueError):
+                    self._waiters.remove(fut)
+            raise
         return self
 
     async def __aexit__(self, *exc):
-        async with self._cond:
-            self._active -= 1
-            # notify_all, not notify: a single woken waiter that is cancelled
-            # before it runs would swallow the wake-up and strand the rest.
-            self._cond.notify_all()
+        self._active -= 1
+        self._wake()
         return False
 
 
@@ -207,7 +228,12 @@ async def _convert_in_thread(fn, *args):
     run — the limit would count tasks, not processes.
     """
     async with _conversions:
-        fut = asyncio.get_running_loop().run_in_executor(None, functools.partial(fn, *args))
+        # copy_context: keep request_id/user_id on log lines from the thread,
+        # as asyncio.to_thread did.
+        ctx = contextvars.copy_context()
+        fut = asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(ctx.run, fn, *args),
+        )
         cancelled = False
         while not fut.done():
             try:
@@ -677,7 +703,7 @@ async def _ocr_pages_individually(
     degraded = False
     budget = _effective_max_tokens(ocr_config, 1)
     for img_bytes in page_images:
-        if parts and await _should_stop(stop, http_request):
+        if await _should_stop(stop, http_request):
             raise OcrCancelled("document stopped")
         b64 = base64.b64encode(img_bytes).decode()
         canonical = CanonicalChatRequest(

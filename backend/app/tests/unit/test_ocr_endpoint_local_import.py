@@ -81,6 +81,7 @@ async def _call(handler, upload, **form):
         patch.object(api, "get_registry", lambda: registry),
         patch.object(api, "model_availability", AsyncMock(return_value=api.AVAILABLE)),
         patch.object(api, "bind_request_context"),
+        patch.object(api, "InferenceService", lambda db: SimpleNamespace(_check_quota=AsyncMock())),
     ):
         result = await handler(request=SimpleNamespace(), file=upload, db=_Db(perform), auth=_auth(), **form)
     return result, perform

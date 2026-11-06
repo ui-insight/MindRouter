@@ -163,14 +163,14 @@
 
                                 <div class="mb-3">
                                     <label for="max_waiting_per_user" class="form-label">Max Documents Waiting (per user)</label>
-                                    <input type="number" class="form-control" id="max_waiting_per_user" name="max_waiting_per_user" value="{{ max_waiting_per_user }}" min="0" max="100">
-                                    <div class="form-text">Each waiting request holds its uploaded file in memory, so the line is bounded. Over this, a new document is refused at once. 0 = no limit.</div>
+                                    <input type="number" class="form-control" id="max_waiting_per_user" name="max_waiting_per_user" value="{{ max_waiting_per_user }}" min="1" max="100">
+                                    <div class="form-text">Each waiting request holds its uploaded file in memory, so the line is bounded. Over this, a new document is refused at once. To turn waiting off, set the wait above to 0.</div>
                                 </div>
 
                                 <div class="mb-3">
                                     <label for="max_waiting" class="form-label">Max Documents Waiting (whole server)</label>
-                                    <input type="number" class="form-control" id="max_waiting" name="max_waiting" value="{{ max_waiting }}" min="0" max="1000">
-                                    <div class="form-text">0 = no limit.</div>
+                                    <input type="number" class="form-control" id="max_waiting" name="max_waiting" value="{{ max_waiting }}" min="1" max="1000">
+                                    <div class="form-text">Documents waiting for a slot from everyone together.</div>
                                 </div>
                             </div>
                         </div>

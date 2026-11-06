@@ -28,7 +28,11 @@ from backend.app.logging_config import get_logger
 logger = get_logger(__name__)
 
 FLUSH_INTERVAL_SECONDS = 15
-LOCK_WAIT_SECONDS = 1
+# Don't wait for the row at all: while an X-lock request waits, InnoDB queues
+# new FK S-locks on that row behind it, so even a 1 s wait stalled new
+# requests on a busy key (measured 0.81 s, review of PR #37). A busy row just
+# fails with 1205 at once and the count is retried next interval.
+LOCK_WAIT_SECONDS = 0
 
 _pending: Dict[int, int] = {}
 
@@ -64,9 +68,7 @@ async def flush() -> int:
             count = batch[key_id]
             try:
                 async with isolated_async_session() as db:
-                    # Give up quickly if the row is busy and try again next
-                    # interval: while this waits for the row, other requests'
-                    # foreign-key checks on it queue behind it.
+                    # Give up at once if the row is busy (LOCK_WAIT_SECONDS).
                     await crud.add_api_key_usage(
                         db, key_id, count, lock_wait_seconds=LOCK_WAIT_SECONDS,
                     )

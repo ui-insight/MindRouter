@@ -550,6 +550,11 @@ async def ocr(
             detail=f"File exceeds maximum size of {ocr_config['max_file_size_mb']}MB",
         )
 
+    # One document = one request against the per-minute limit, and the token
+    # quota is checked up front, before any page is converted. (Its chunks
+    # skip the per-minute check; admission bounds them instead.)
+    await InferenceService(db)._check_quota(user, api_key)
+
     # A document can take minutes. End this request's transaction now so it
     # does not hold a pooled connection the whole time (each chunk opens its
     # own session when it needs one).
@@ -679,7 +684,12 @@ async def ocrmd(
             status_code=413,
         )
 
-    # See /v1/ocr: don't hold a pooled connection for the whole document.
+    # See /v1/ocr: one request against the per-minute limit, quota checked
+    # up front, and no pooled connection held for the whole document.
+    try:
+        await InferenceService(db)._check_quota(user, api_key)
+    except HTTPException as e:
+        return PlainTextResponse(str(e.detail), status_code=e.status_code)
     await db.commit()
 
     try:

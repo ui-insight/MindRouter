@@ -5183,7 +5183,7 @@ async def admin_ocr_config(
             "max_concurrent_chunks": await crud.get_config_json(db, "ocr.max_concurrent_chunks", 4),
             "max_documents_per_user": await crud.get_config_json(db, "ocr.max_documents_per_user", 2),
             "max_documents": await crud.get_config_json(db, "ocr.max_documents", 8),
-            "max_concurrent_conversions": await crud.get_config_json(db, "ocr.max_concurrent_conversions", 4),
+            "max_concurrent_conversions": await crud.get_config_json(db, "ocr.max_concurrent_conversions", 2),
             "queue_wait_seconds": await crud.get_config_json(db, "ocr.queue_wait_seconds", 60),
             "max_waiting_per_user": await crud.get_config_json(db, "ocr.max_waiting_per_user", 4),
             "max_waiting": await crud.get_config_json(db, "ocr.max_waiting", 16),
@@ -5229,10 +5229,12 @@ async def admin_ocr_config_post(
         # Load limits (services/ocr_admission.py); 0 = unlimited for documents.
         "ocr.max_documents_per_user": ("max_documents_per_user", 2, 0, 50),
         "ocr.max_documents": ("max_documents", 8, 0, 500),
-        "ocr.max_concurrent_conversions": ("max_concurrent_conversions", 4, 1, 32),
+        "ocr.max_concurrent_conversions": ("max_concurrent_conversions", 2, 1, 32),
+        # 0 = refuse at once instead of waiting. The wait-line caps have no
+        # "unlimited": waiting requests hold their uploads in memory.
         "ocr.queue_wait_seconds": ("queue_wait_seconds", 60, 0, 600),
-        "ocr.max_waiting_per_user": ("max_waiting_per_user", 4, 0, 100),
-        "ocr.max_waiting": ("max_waiting", 16, 0, 1000),
+        "ocr.max_waiting_per_user": ("max_waiting_per_user", 4, 1, 100),
+        "ocr.max_waiting": ("max_waiting", 16, 1, 1000),
         "ocr.min_chars_per_page": ("min_chars_per_page", 400, 0, 2000),
         "ocr.max_retries": ("max_retries", 2, 0, 5),
         "ocr.max_tokens": ("max_tokens", 16384, 1024, 65536),

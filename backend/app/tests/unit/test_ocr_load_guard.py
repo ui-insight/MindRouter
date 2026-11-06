@@ -227,9 +227,39 @@ async def test_skip_rpm_check_keeps_the_token_quota_but_skips_the_rpm_counter(mo
     assert exc.value.detail == "Token quota exceeded"
 
 
-def test_chat_completion_passes_skip_rpm_check_through():
-    src = (REPO_ROOT / "backend/app/services/inference.py").read_text()
-    assert "await self._check_quota(user, api_key, check_rpm=not skip_rpm_check)" in src
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip,expected", [(True, False), (False, True)])
+async def test_chat_completion_passes_skip_rpm_check_through(monkeypatch, skip, expected):
+    from backend.app.services import inference as inf
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    async def check(self, user, api_key, check_rpm=True):
+        seen.append(check_rpm)
+
+    async def stop(self, *a, **k):
+        raise _Stop()
+
+    monkeypatch.setattr(inf.InferenceService, "_check_quota", check)
+    monkeypatch.setattr(inf.InferenceService, "_create_request_record", stop)
+    svc = inf.InferenceService.__new__(inf.InferenceService)
+    with pytest.raises(_Stop):
+        await svc.chat_completion(SimpleNamespace(), SimpleNamespace(id=1), SimpleNamespace(id=2),
+                                  None, skip_rpm_check=skip)
+    assert seen == [expected]
+
+
+@pytest.mark.asyncio
+async def test_the_single_page_fallback_checks_stop_before_its_first_page(ocr):
+    stop = asyncio.Event(); stop.set()
+    service = SimpleNamespace(chat_completion=AsyncMock())
+    with pytest.raises(ocr.OcrCancelled):
+        await ocr._ocr_pages_individually(service, [b"a", b"b"], "p", "m", dict(CFG),
+                                          None, None, None, stop=stop)
+    service.chat_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -471,6 +501,46 @@ async def test_a_cancelled_waiter_does_not_strand_the_others(ocr):
 
 
 @pytest.mark.asyncio
+async def test_no_slot_is_lost_whatever_gets_cancelled(ocr):
+    """Review: with an asyncio.Condition, a task cancelled while waiting for
+    the condition's lock inside __aexit__ never decremented — a slot lost for
+    good; after `limit` such losses every conversion in the worker hung."""
+    limiter = ocr._ConversionLimiter(2)
+
+    async def user(i):
+        async with limiter:
+            await asyncio.sleep(0.001 * (i % 3))
+
+    for round_ in range(20):
+        tasks = [asyncio.create_task(user(i)) for i in range(12)]
+        for _ in range(3):
+            await asyncio.sleep(0)
+            for t in tasks[round_ % 3::3]:
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert limiter.active == 0 and not limiter._waiters, f"round {round_}"
+    async with limiter:
+        pass  # still usable
+
+
+@pytest.mark.asyncio
+async def test_conversion_threads_keep_the_request_context(ocr):
+    import contextvars
+
+    var = contextvars.ContextVar("request_id", default=None)
+    var.set("req-123")
+    assert await ocr._convert_in_thread(var.get) == "req-123"
+
+
+@pytest.mark.asyncio
+async def test_set_limit_to_the_same_value_does_nothing(ocr):
+    limiter = ocr._ConversionLimiter(2)
+    limiter.set_limit(2)
+    limiter.set_limit("not a number")
+    assert limiter._limit == 2
+
+
+@pytest.mark.asyncio
 async def test_perform_ocr_applies_the_configured_conversion_limit(ocr, monkeypatch):
     limits = []
     monkeypatch.setattr(ocr._conversions, "set_limit", limits.append)
@@ -579,25 +649,48 @@ def test_in_range_and_unsent_client_params_pass(ocr):
 
 
 class _FakeSlots:
-    """In-memory stand-in for the redis_client slot functions, with the Lua
-    scripts' semantics (the scripts themselves run in the real-Redis test)."""
+    """In-memory stand-in for the redis_client slot functions with the Lua
+    scripts' semantics, including waiter liveness (the scripts themselves run
+    in the real-Redis test). `fail_next` makes the next N calls fail like a
+    Redis timeout (return None); `available=False` is Redis down at entry."""
 
     def __init__(self):
         self.sets = {}
-        self.down = False
+        self.live = {}
+        self.available = True
+        self.fail_next = 0
         self.renewed = 0
 
     def _set(self, key):
         return self.sets.setdefault(key, {})
 
-    def _prune(self, key, before):
-        self.sets[key] = {t: sc for t, sc in self._set(key).items() if sc > before}
-
     def size(self, key):
         return len(self._set(key))
 
+    def _prune(self, key, before):
+        self.sets[key] = {t: sc for t, sc in self._set(key).items() if sc > before}
+
+    def _alive(self, token):
+        return self.live.get(token, 0) > time.time()
+
+    def _prune_dead(self, key):
+        self.sets[key] = {t: sc for t, sc in self._set(key).items() if self._alive(t)}
+
+    def _failing(self):
+        if self.fail_next:
+            self.fail_next -= 1
+            return True
+        return False
+
+    def _room(self, uk, gk, ul, gl):
+        return (ul <= 0 or self.size(uk) < ul) and (gl <= 0 or self.size(gk) < gl)
+
+    def _take(self, uk, gk, token, ttl):
+        exp = time.time() + ttl
+        self._set(uk)[token] = exp; self._set(gk)[token] = exp
+
     async def acquire_slot(self, uk, gk, token, ul, gl, ttl):
-        if self.down:
+        if self._failing():
             return None
         now = time.time()
         self._prune(uk, now); self._prune(gk, now)
@@ -605,27 +698,39 @@ class _FakeSlots:
             return 1
         if gl > 0 and self.size(gk) >= gl:
             return 2
-        self._set(uk)[token] = now + ttl; self._set(gk)[token] = now + ttl
+        self._take(uk, gk, token, ttl)
         return 0
 
-    async def enqueue_waiter(self, uw, gw, token, ul, gl, stale):
-        if self.down:
-            return None
-        now = time.time()
-        self._prune(uw, now - stale); self._prune(gw, now - stale)
-        if ul > 0 and self.size(uw) >= ul:
-            return 1
-        if gl > 0 and self.size(gw) >= gl:
-            return 2
-        self._set(uw)[token] = now; self._set(gw)[token] = now
-        return 0
-
-    async def acquire_queued_slot(self, uk, gk, uw, gw, token, ul, gl, ttl, stale):
-        if self.down:
+    async def try_or_enqueue_slot(self, uk, gk, uw, gw, token, ul, gl, ttl, stale,
+                                  wul, wgl, prefix, live_ttl):
+        if self._failing():
             return None
         now = time.time()
         self._prune(uk, now); self._prune(gk, now)
         self._prune(uw, now - stale); self._prune(gw, now - stale)
+        self._prune_dead(uw); self._prune_dead(gw)
+        if self._room(uk, gk, ul, gl) and self.size(uw) == 0:
+            self._take(uk, gk, token, ttl)
+            return 0
+        if wul > 0 and self.size(uw) >= wul:
+            return 6
+        if wgl > 0 and self.size(gw) >= wgl:
+            return 7
+        self._set(uw)[token] = now; self._set(gw)[token] = now
+        self.live[token] = now + live_ttl
+        return 5
+
+    async def acquire_queued_slot(self, uk, gk, uw, gw, token, ul, gl, ttl, stale,
+                                  prefix, live_ttl):
+        if self._failing():
+            return None
+        if token not in self._set(uw):
+            return 3
+        now = time.time()
+        self.live[token] = now + live_ttl
+        self._prune(uk, now); self._prune(gk, now)
+        self._prune(uw, now - stale); self._prune(gw, now - stale)
+        self._prune_dead(uw); self._prune_dead(gw)
         line = self._set(uw)
         if token not in line:
             return 3
@@ -635,15 +740,14 @@ class _FakeSlots:
             return 1
         if gl > 0 and self.size(gk) >= gl:
             return 2
-        self._set(uk)[token] = now + ttl; self._set(gk)[token] = now + ttl
-        self._set(uw).pop(token, None); self._set(gw).pop(token, None)
+        self._take(uk, gk, token, ttl)
+        line.pop(token, None); self._set(gw).pop(token, None); self.live.pop(token, None)
         return 0
 
-    async def release_slot(self, keys, token):
-        if self.down:
-            return
+    async def leave_slot(self, keys, live_key, token):
         for k in keys:
             self._set(k).pop(token, None)
+        self.live.pop(token, None)
 
     async def renew_slot(self, keys, token, ttl):
         for k in keys:
@@ -657,14 +761,13 @@ def admission(monkeypatch):
     import backend.app.services.ocr_admission as adm
 
     fake = _FakeSlots()
-    for name in ("acquire_slot", "enqueue_waiter", "acquire_queued_slot",
-                 "release_slot", "renew_slot"):
+    for name in ("acquire_slot", "try_or_enqueue_slot", "acquire_queued_slot",
+                 "leave_slot", "renew_slot"):
         monkeypatch.setattr(adm.redis_client, name, getattr(fake, name))
+    monkeypatch.setattr(adm.redis_client, "is_available", lambda: fake.available)
     monkeypatch.setattr(adm, "POLL_SECONDS", 0.01)
     monkeypatch.setattr(adm, "_local_users", adm.Counter())
     monkeypatch.setattr(adm, "_local_total", 0)
-    monkeypatch.setattr(adm, "_local_waiting_users", adm.Counter())
-    monkeypatch.setattr(adm, "_local_waiting_total", 0)
     return adm, fake
 
 
@@ -682,7 +785,7 @@ async def test_slot_is_taken_and_released(admission):
     adm, fake = admission
     async with adm.document_slot(7, per_user=2, global_limit=8):
         assert fake.size(U7) == 1 and fake.size(ALL) == 1
-        assert fake.size(W7) == 0, "a document that got its slot is no longer waiting"
+        assert fake.size(W7) == 0, "a document with a free slot never joins the line"
     assert fake.size(U7) == 0 and fake.size(ALL) == 0
 
 
@@ -709,7 +812,7 @@ async def test_over_the_limit_waits_then_proceeds(admission):
     assert entered == ["first", "second"] and fake.size(W7) == 0
     second.cancel()
     await asyncio.gather(first, second, return_exceptions=True)
-    assert fake.size(U7) == 0
+    assert fake.size(U7) == 0 and not fake.live
 
 
 @pytest.mark.asyncio
@@ -723,7 +826,7 @@ async def test_a_waiter_gives_up_after_max_wait_with_a_429(admission):
         async with adm.document_slot(7, per_user=1, max_wait_seconds=0.05):
             ran = True
     assert not ran and exc.value.scope == "user" and exc.value.waited
-    assert fake.size(W7) == 0, "a waiter that gave up left its place in line"
+    assert fake.size(W7) == 0 and not fake.live, "a waiter that gave up left its place in line"
     release.set(); await holder
 
 
@@ -782,11 +885,35 @@ async def test_the_server_wide_wait_line_is_bounded_too(admission):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict_owner,scope,limit", [(7, "user", 1), (8, "global", 1)])
-async def test_zero_wait_refuses_at_once(admission, verdict_owner, scope, limit):
+async def test_a_free_slot_is_taken_even_when_the_wait_line_is_full(admission):
+    """Review M3: the line's caps were checked before slot availability, so a
+    flood filling the server-wide line got other accounts refused while
+    slots sat idle."""
+    adm, fake = admission
+    for i in range(16):  # a full server-wide line of (live) waiters elsewhere
+        fake._set(WALL)[f"x{i}"] = time.time(); fake.live[f"x{i}"] = time.time() + 60
+    async with adm.document_slot(5, global_limit=16, max_waiting=16):
+        assert fake.size("ocr:docs:user:5") == 1
+
+
+@pytest.mark.asyncio
+async def test_unlimited_limits_never_queue_a_burst(admission):
+    adm, fake = admission
+    gate, entered = asyncio.Event(), []
+    burst = [asyncio.create_task(_hold(adm, 7, gate, entered, i, per_user=0, global_limit=0,
+                                       max_waiting_per_user=1))
+             for i in range(5)]
+    await asyncio.sleep(0.02)
+    assert sorted(entered) == [0, 1, 2, 3, 4] and fake.size(W7) == 0
+    gate.set(); await asyncio.gather(*burst)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("holder_user,scope,limit", [(7, "user", 1), (8, "global", 1)])
+async def test_zero_wait_refuses_at_once(admission, holder_user, scope, limit):
     adm, _ = admission
     release, entered = asyncio.Event(), []
-    holder = asyncio.create_task(_hold(adm, verdict_owner, release, entered, "h",
+    holder = asyncio.create_task(_hold(adm, holder_user, release, entered, "h",
                                        per_user=1, global_limit=1))
     await asyncio.sleep(0.02)
     with pytest.raises(adm.OcrBusy) as exc:
@@ -806,12 +933,107 @@ async def test_a_client_that_leaves_while_waiting_leaves_the_line(admission):
     with pytest.raises(adm.WaitAbandoned):
         async with adm.document_slot(7, per_user=1, should_abort=gone):
             pass
-    assert fake.size(W7) == 0 and fake.size(WALL) == 0
+    assert fake.size(W7) == 0 and fake.size(WALL) == 0 and not fake.live
     release.set(); await holder
 
 
 @pytest.mark.asyncio
-async def test_cancelled_while_waiting_leaves_the_line_and_holds_nothing(admission):
+async def test_cancelled_right_after_joining_leaves_no_ghost(admission, monkeypatch):
+    """Review M2: cancelled after the enqueue script ran, the entry stayed and
+    blocked the account's next document for max_wait + 60 s."""
+    adm, fake = admission
+    release, entered = asyncio.Event(), []
+    holder = asyncio.create_task(_hold(adm, 7, release, entered, "h", per_user=1))
+    await asyncio.sleep(0.02)
+    real = fake.try_or_enqueue_slot
+    joined = asyncio.Event()
+
+    async def join_then_hang(*a):
+        v = await real(*a)
+        joined.set()
+        await asyncio.sleep(10)  # cancelled here, after the script "ran"
+        return v
+
+    monkeypatch.setattr(adm.redis_client, "try_or_enqueue_slot", join_then_hang)
+    waiter = asyncio.create_task(_hold(adm, 7, asyncio.Event(), entered, "w", per_user=1))
+    await joined.wait()
+    assert fake.size(W7) == 1
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert fake.size(W7) == 0 and fake.size(WALL) == 0 and not fake.live
+    release.set(); await holder
+
+
+@pytest.mark.asyncio
+async def test_a_dead_waiter_does_not_block_the_next_document(admission, monkeypatch):
+    """A waiter whose worker died stops refreshing its liveness and is
+    dropped, instead of holding the head of its account's line."""
+    adm, fake = admission
+    fake._set(W7)["dead"] = time.time() - 5
+    fake._set(WALL)["dead"] = time.time() - 5
+    fake.live["dead"] = time.time() - 1  # lapsed
+
+    async def must_not_wait(*a):
+        raise AssertionError("queued behind a dead waiter")
+
+    monkeypatch.setattr(adm.redis_client, "acquire_queued_slot", must_not_wait)
+    async with adm.document_slot(7, per_user=1, max_wait_seconds=0.1):
+        pass
+    assert "dead" not in fake._set(W7)
+
+
+@pytest.mark.asyncio
+async def test_a_brief_redis_error_mid_wait_does_not_bypass_the_limit(admission):
+    """Review M1: one timeout made the waiter switch to per-worker counting,
+    which cannot see the Redis-held slots: 2 in progress against a limit of 1."""
+    adm, fake = admission
+    release, entered = asyncio.Event(), []
+    holder = asyncio.create_task(_hold(adm, 7, release, entered, "h", per_user=1))
+    await asyncio.sleep(0.02)
+    waiter = asyncio.create_task(_hold(adm, 7, asyncio.Event(), entered, "w", per_user=1))
+    await asyncio.sleep(0.02)
+    fake.fail_next = 1
+    await asyncio.sleep(0.05)
+    assert entered == ["h"], "the waiter got in while the holder still held the only slot"
+    assert adm._local_total == 0
+    release.set()
+    await asyncio.sleep(0.05)
+    assert entered == ["h", "w"]
+    waiter.cancel()
+    await asyncio.gather(holder, waiter, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_repeated_redis_failures_fall_back_to_local_counting(admission):
+    adm, fake = admission
+    fake.fail_next = adm.REDIS_FAILURES_BEFORE_FALLBACK
+    async with adm.document_slot(7, per_user=1):
+        assert adm._local_total == 1 and fake.size(U7) == 0
+    assert adm._local_total == 0
+
+
+@pytest.mark.asyncio
+async def test_without_redis_limits_apply_per_worker_and_nothing_waits(admission):
+    adm, fake = admission
+    fake.available = False
+    release, entered = asyncio.Event(), []
+    holder = asyncio.create_task(_hold(adm, 7, release, entered, "h", per_user=1))
+    await asyncio.sleep(0.02)
+    t0 = time.monotonic()
+    with pytest.raises(adm.OcrBusy) as exc:
+        async with adm.document_slot(7, per_user=1, max_wait_seconds=60):
+            pass
+    assert exc.value.scope == "user" and not exc.value.waited
+    assert time.monotonic() - t0 < 0.5, "waited although Redis is down"
+    async with adm.document_slot(8, per_user=1, global_limit=0):
+        pass
+    release.set(); await holder
+    assert adm._local_total == 0 and not adm._local_users
+
+
+@pytest.mark.asyncio
+async def test_cancelled_while_waiting_holds_nothing(admission):
     adm, fake = admission
     release, entered = asyncio.Event(), []
     holder = asyncio.create_task(_hold(adm, 7, release, entered, "h", per_user=1))
@@ -839,36 +1061,6 @@ async def test_a_long_document_keeps_renewing_its_slot(admission, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_without_redis_the_same_limits_and_wait_apply_per_worker(admission):
-    adm, fake = admission
-    fake.down = True
-    release, entered = asyncio.Event(), []
-    holder = asyncio.create_task(_hold(adm, 7, release, entered, "h", per_user=1))
-    await asyncio.sleep(0.02)
-    # waits, then gives up
-    with pytest.raises(adm.OcrBusy) as exc:
-        async with adm.document_slot(7, per_user=1, max_wait_seconds=0.05):
-            pass
-    assert exc.value.scope == "user" and exc.value.waited
-    # the local wait line is bounded
-    w = asyncio.create_task(_hold(adm, 7, asyncio.Event(), entered, "w",
-                                  per_user=1, max_waiting_per_user=1))
-    await asyncio.sleep(0.02)
-    with pytest.raises(adm.OcrBusy) as exc:
-        async with adm.document_slot(7, per_user=1, max_waiting_per_user=1):
-            pass
-    assert exc.value.scope == "user_waiting"
-    # and a waiter gets the slot when it frees
-    release.set()
-    await asyncio.sleep(0.05)
-    assert entered == ["h", "w"]
-    w.cancel()
-    await asyncio.gather(holder, w, return_exceptions=True)
-    assert adm._local_total == 0 and not adm._local_users
-    assert adm._local_waiting_total == 0 and not adm._local_waiting_users
-
-
-@pytest.mark.asyncio
 async def test_cancelled_while_acquiring_drops_the_slot(admission, monkeypatch):
     adm, fake = admission
     seen = []
@@ -876,11 +1068,11 @@ async def test_cancelled_while_acquiring_drops_the_slot(admission, monkeypatch):
     async def slow(*a):
         await asyncio.sleep(1)
 
-    async def release(keys, token):
+    async def leave(keys, live_key, token):
         seen.append(tuple(keys))
 
     monkeypatch.setattr(adm.redis_client, "acquire_slot", slow)
-    monkeypatch.setattr(adm.redis_client, "release_slot", release)
+    monkeypatch.setattr(adm.redis_client, "leave_slot", leave)
 
     async def use():
         async with adm.document_slot(7, max_wait_seconds=0):
@@ -891,7 +1083,30 @@ async def test_cancelled_while_acquiring_drops_the_slot(admission, monkeypatch):
     t.cancel()
     with pytest.raises(asyncio.CancelledError):
         await t
-    assert (U7, ALL) in seen
+    assert seen and seen[0][:2] == (U7, ALL)
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancellation_during_release_still_frees_the_slot(admission, monkeypatch):
+    adm, fake = admission
+    monkeypatch.setattr(adm, "HEARTBEAT_SECONDS", 10)
+    inside = asyncio.Event()
+
+    async def use():
+        try:
+            async with adm.document_slot(7):
+                inside.set()
+                await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            raise
+
+    t = asyncio.create_task(use())
+    await inside.wait()
+    t.cancel(); await asyncio.sleep(0); t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    await asyncio.sleep(0.02)
+    assert fake.size(U7) == 0 and fake.size(ALL) == 0
 
 
 def test_busy_messages_say_what_to_do(admission):
@@ -900,6 +1115,9 @@ def test_busy_messages_say_what_to_do(admission):
     assert "Retry in" in str(adm.OcrBusy("global", 8))
     assert "already waiting" in str(adm.OcrBusy("user_waiting", 4))
     assert "Waited" in str(adm.OcrBusy("user", 2, waited=True))
+    # the stop reason maps to the right scope
+    assert adm._full(adm.redis_client.SLOT_NOT_YOUR_TURN, 2, 8, True).scope == "user"
+    assert adm._full(adm.redis_client.SLOT_GLOBAL_FULL, 2, 8, True).scope == "global"
 
 
 @pytest.mark.asyncio
@@ -908,13 +1126,14 @@ async def test_acquire_slot_without_redis_returns_none(monkeypatch):
 
     monkeypatch.setattr(redis_client, "_available", False)
     assert await redis_client.acquire_slot("u", "g", "t", 1, 1, 60) is None
+    assert await redis_client.try_or_enqueue_slot("u", "g", "uw", "gw", "t", 1, 1, 60, 60, 1, 1, "p:", 5) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not os.environ.get("MINDROUTER_TEST_REDIS_URL"),
-                    reason="set MINDROUTER_TEST_REDIS_URL to run the Lua script against a real Redis")
-async def test_slot_script_against_real_redis(monkeypatch):
-    """The Lua script itself: per-user and global limits, expiry, release."""
+                    reason="set MINDROUTER_TEST_REDIS_URL to run the Lua scripts against a real Redis")
+async def test_slot_scripts_against_real_redis(monkeypatch):
+    """The Lua scripts themselves."""
     import redis.asyncio as aioredis
 
     from backend.app.core import redis_client as rc
@@ -923,53 +1142,72 @@ async def test_slot_script_against_real_redis(monkeypatch):
     monkeypatch.setattr(rc, "_redis", client)
     monkeypatch.setattr(rc, "_available", True)
     u1, u2, g = "test:ocr:u1", "test:ocr:u2", "test:ocr:all"
-    await client.delete(u1, u2, g)
+    uw, uw2, gw, P = "test:ocr:wait:u1", "test:ocr:wait:u2", "test:ocr:wait:all", "test:ocr:live:"
+    everything = (u1, u2, g, uw, uw2, gw)
+    await client.delete(*everything)
+
+    async def tq(user, wait, token, ul=1, gl=0, wul=4, wgl=16):
+        return await rc.try_or_enqueue_slot(user, g, wait, gw, token, ul, gl, 60, 660, wul, wgl, P, 10)
+
+    async def aq(user, wait, token, ul=1, gl=0):
+        return await rc.acquire_queued_slot(user, g, wait, gw, token, ul, gl, 60, 660, P, 10)
+
     try:
+        # Plain slots (max_wait 0 path): limits, refused not recorded, release,
+        # expiry, renew never resurrects, 0 = unlimited.
         assert await rc.acquire_slot(u1, g, "a", 2, 3, 60) == rc.SLOT_OK
         assert await rc.acquire_slot(u1, g, "b", 2, 3, 60) == rc.SLOT_OK
         assert await rc.acquire_slot(u1, g, "c", 2, 3, 60) == rc.SLOT_USER_FULL
         assert await rc.acquire_slot(u2, g, "d", 2, 3, 60) == rc.SLOT_OK
         assert await rc.acquire_slot(u2, g, "e", 2, 3, 60) == rc.SLOT_GLOBAL_FULL
-        assert await client.zcard(g) == 3, "a refused slot must not be recorded"
-        await rc.release_slot((u1, g), "a")
+        assert await client.zcard(g) == 3
+        await rc.leave_slot((u1, g), P + "a", "a")
         assert await rc.acquire_slot(u2, g, "e", 2, 3, 60) == rc.SLOT_OK
-        # An expired holder (a dead worker) frees its slot.
         await client.zadd(u1, {"b": 1}); await client.zadd(g, {"b": 1})
         assert await rc.acquire_slot(u1, g, "f", 2, 3, 60) == rc.SLOT_OK
-        # Renewal never resurrects a released slot.
-        await rc.release_slot((u1, g), "f")
+        await rc.leave_slot((u1, g), P + "f", "f")
         await rc.renew_slot((u1, g), "f", 60)
         assert await client.zscore(u1, "f") is None
-        # 0 = unlimited
         assert await rc.acquire_slot(u1, g, "g", 0, 0, 60) == rc.SLOT_OK
 
-        # Wait line: bounded, oldest-first within a user, leaves on success.
-        await client.delete(u1, u2, g)
-        uw, gw = "test:ocr:wait:u1", "test:ocr:wait:all"
-        await client.delete(uw, gw)
-        assert await rc.acquire_slot(u1, g, "h", 1, 0, 60) == rc.SLOT_OK
-        assert await rc.enqueue_waiter(uw, gw, "w1", 2, 0, 120) == rc.SLOT_OK
+        # Fast path: free slot and nobody waiting -> slot, no line, no liveness.
+        await client.delete(*everything)
+        assert await tq(u1, uw, "h") == rc.SLOT_OK
+        assert await client.zcard(uw) == 0 and not await client.exists(P + "h")
+        # Over the limit -> queued with a liveness mark; line caps enforced.
+        assert await tq(u1, uw, "w1") == rc.SLOT_QUEUED
+        assert await client.exists(P + "w1")
         await asyncio.sleep(0.01)
-        assert await rc.enqueue_waiter(uw, gw, "w2", 2, 0, 120) == rc.SLOT_OK
-        assert await rc.enqueue_waiter(uw, gw, "w3", 2, 0, 120) == rc.SLOT_USER_FULL
-        assert await rc.acquire_queued_slot(u1, g, uw, gw, "w2", 1, 0, 60, 120) == rc.SLOT_NOT_YOUR_TURN
-        assert await rc.acquire_queued_slot(u1, g, uw, gw, "w1", 1, 0, 60, 120) == rc.SLOT_USER_FULL
-        await rc.release_slot((u1, g), "h")
-        assert await rc.acquire_queued_slot(u1, g, uw, gw, "w2", 1, 0, 60, 120) == rc.SLOT_NOT_YOUR_TURN
-        assert await rc.acquire_queued_slot(u1, g, uw, gw, "w1", 1, 0, 60, 120) == rc.SLOT_OK
+        assert await tq(u1, uw, "w2") == rc.SLOT_QUEUED
+        assert await tq(u1, uw, "w3", wul=2) == rc.SLOT_WAIT_USER_FULL
+        # Oldest first, then the limit.
+        assert await aq(u1, uw, "w2") == rc.SLOT_NOT_YOUR_TURN
+        assert await aq(u1, uw, "w1") == rc.SLOT_USER_FULL
+        await rc.leave_slot((u1, g), P + "h", "h")
+        assert await aq(u1, uw, "w2") == rc.SLOT_NOT_YOUR_TURN
+        assert await aq(u1, uw, "w1") == rc.SLOT_OK
         assert await client.zscore(uw, "w1") is None and await client.zscore(gw, "w1") is None
-        assert await client.zscore(u1, "w1") is not None
-        # A stale waiter (dead worker) is dropped and its line moves on.
-        await client.zadd(uw, {"dead": 1}); await client.zadd(gw, {"dead": 1})
-        await rc.release_slot((u1, g), "w1")
-        assert await rc.acquire_queued_slot(u1, g, uw, gw, "w2", 1, 0, 60, 120) == rc.SLOT_OK
-        assert await rc.acquire_queued_slot(u1, g, uw, gw, "gone", 1, 0, 60, 120) == rc.SLOT_NOT_QUEUED
-        # The server-wide line is bounded too.
-        await client.delete(uw, gw)
-        assert await rc.enqueue_waiter(uw, gw, "x", 0, 1, 120) == rc.SLOT_OK
-        assert await rc.enqueue_waiter("test:ocr:wait:u2", gw, "y", 0, 1, 120) == rc.SLOT_GLOBAL_FULL
+        assert not await client.exists(P + "w1")
+        # Someone waiting -> a newcomer for that account queues even if a slot is free.
+        await rc.leave_slot((u1, g), P + "w1", "w1")
+        assert await tq(u1, uw, "late") == rc.SLOT_QUEUED
+        assert await aq(u1, uw, "late") == rc.SLOT_NOT_YOUR_TURN
+        # A dead waiter (liveness lapsed) is dropped and the line moves on.
+        await client.delete(P + "w2")
+        assert await aq(u1, uw, "late") == rc.SLOT_OK
+        assert await client.zscore(uw, "w2") is None
+        assert await aq(u1, uw, "gone") == rc.SLOT_NOT_QUEUED
+        # The server-wide line is bounded, but a free slot is still taken.
+        await client.delete(*everything)
+        assert await tq(u2, uw2, "x", ul=0, gl=0) == rc.SLOT_OK
+        assert await rc.acquire_slot(u1, g, "y", 1, 0, 60) == rc.SLOT_OK
+        assert await tq(u1, uw, "z", wgl=1) == rc.SLOT_QUEUED
+        assert await tq(u1, uw, "q", wgl=1) == rc.SLOT_WAIT_GLOBAL_FULL
+        # ... while an account with room and nobody waiting still gets in.
+        assert await tq("test:ocr:u3", "test:ocr:wait:u3", "r", wgl=1) == rc.SLOT_OK
     finally:
-        await client.delete(u1, u2, g, "test:ocr:wait:u1", "test:ocr:wait:u2", "test:ocr:wait:all")
+        await client.delete(*everything, "test:ocr:u3", "test:ocr:wait:u3",
+                            *[P + t for t in ("h", "w1", "w2", "w3", "late", "z", "q")])
         await client.aclose()
 
 
@@ -996,6 +1234,19 @@ _CONFIG = {"enabled": True, "model": "dots.MOCR", "chunk_size": 4, "overlap": 1,
            "dpi": 150, "max_file_size_mb": 10, "prompt_ocr": "p", "prompt_ocrmd": "q"}
 
 
+def _fake_service(order, quota_error=None):
+    """InferenceService stand-in: records the per-document quota/RPM check."""
+    class Svc:
+        def __init__(self, db):
+            pass
+
+        async def _check_quota(self, user, api_key, check_rpm=True):
+            order.append(("quota", check_rpm))
+            if quota_error is not None:
+                raise quota_error
+    return Svc
+
+
 async def _call(api, handler, perform, **form):
     registry = SimpleNamespace(resolve_alias=lambda m: (m, None))
     form = {"model": None, "chunk_size": None, "overlap": None, "dpi": None, **form}
@@ -1006,6 +1257,7 @@ async def _call(api, handler, perform, **form):
         patch.object(api, "get_registry", lambda: registry),
         patch.object(api, "model_availability", AsyncMock(return_value=api.AVAILABLE)),
         patch.object(api, "bind_request_context"),
+        patch.object(api, "InferenceService", _fake_service([])),
     ):
         return await handler(request=SimpleNamespace(), file=_Upload(), db=db,
                              auth=(SimpleNamespace(id=1), SimpleNamespace(id=2)), **form), db
@@ -1070,10 +1322,46 @@ async def test_request_session_is_released_before_ocr_starts(api, handler_name):
         patch.object(api, "get_registry", lambda: registry),
         patch.object(api, "model_availability", AsyncMock(return_value=api.AVAILABLE)),
         patch.object(api, "bind_request_context"),
+        patch.object(api, "InferenceService", _fake_service(order)),
     ):
         await getattr(api, handler_name)(request=SimpleNamespace(), file=_Upload(), db=db,
                                          auth=(SimpleNamespace(id=1), SimpleNamespace(id=2)), **form)
-    assert order == ["commit", "ocr"]
+    # One per-minute/quota check per document (RPM included), before the
+    # session is released and before any OCR work.
+    assert order == [("quota", True), "commit", "ocr"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_name", ["ocr", "ocrmd"])
+async def test_a_document_over_quota_or_rate_is_refused_before_any_work(api, handler_name):
+    from fastapi import HTTPException
+
+    order = []
+    perform = AsyncMock()
+    registry = SimpleNamespace(resolve_alias=lambda m: (m, None))
+    db = SimpleNamespace(commit=AsyncMock())
+    form = {"model": None, "chunk_size": None, "overlap": None, "dpi": None}
+    if handler_name == "ocr":
+        form["output_format"] = "markdown"
+    refusal = HTTPException(status_code=429, detail="Rate limit exceeded: 200 requests per minute (current: 200)")
+    with (
+        patch("backend.app.services.ocr.get_ocr_config", AsyncMock(return_value=dict(_CONFIG))),
+        patch("backend.app.services.ocr.perform_ocr", perform),
+        patch.object(api, "get_registry", lambda: registry),
+        patch.object(api, "model_availability", AsyncMock(return_value=api.AVAILABLE)),
+        patch.object(api, "bind_request_context"),
+        patch.object(api, "InferenceService", _fake_service(order, refusal)),
+    ):
+        call = getattr(api, handler_name)(request=SimpleNamespace(), file=_Upload(), db=db,
+                                          auth=(SimpleNamespace(id=1), SimpleNamespace(id=2)), **form)
+        if handler_name == "ocr":
+            with pytest.raises(HTTPException) as exc:
+                await call
+            assert exc.value.status_code == 429
+        else:
+            resp = await call
+            assert resp.status_code == 429 and b"Rate limit exceeded" in resp.body
+    perform.assert_not_awaited()
 
 
 def test_admin_form_saves_the_load_limits():
@@ -1131,6 +1419,20 @@ async def test_uses_are_summed_and_written_once_per_key(key_usage):
     assert writes == [(5, 3, ku.LOCK_WAIT_SECONDS), "commit", (9, 1, ku.LOCK_WAIT_SECONDS), "commit"]
     assert ku.pending() == {}
     assert await ku.flush() == 0
+
+
+def test_the_flush_never_waits_for_a_busy_row(key_usage):
+    """Review: while the flush's X-lock request waits, InnoDB queues new
+    requests' FK S-locks on that row behind it (0.81 s measured at a 1 s
+    wait). With 0 it fails at once with 1205 and retries next interval."""
+    ku, _, _ = key_usage
+    assert ku.LOCK_WAIT_SECONDS == 0
+
+
+def test_the_dashboard_releases_its_connection_before_ocr():
+    src = (REPO_ROOT / "backend/app/dashboard/chat.py").read_text()
+    i = src.index("ocr_result = await perform_ocr(")
+    assert "await db.commit()" in src[i - 400:i]
 
 
 @pytest.mark.asyncio
