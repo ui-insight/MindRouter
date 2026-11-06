@@ -31,6 +31,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
+# kwargs each stubbed InferenceService.chat_completion call received
+calls_kw: list = []
+
 
 class _Session:
     async def __aenter__(self):
@@ -72,7 +75,8 @@ def _stub_backend_chain(chat_completion):
         def __init__(self, db):
             self.db = db
 
-        async def chat_completion(self, canonical, user, api_key, http_request):
+        async def chat_completion(self, canonical, user, api_key, http_request, **kw):
+            calls_kw.append(kw)
             return await chat_completion(canonical)
 
     inf.InferenceService = InferenceService

@@ -117,6 +117,195 @@ async def release_lease(key: str, token: str) -> None:
         logger.exception("lease_release_failed", extra={"key": key})
 
 
+# ── Concurrency slots (fleet-wide "at most N in flight") ──────────────────
+# Each holder is a member of a sorted set scored by its expiry time, so a
+# worker that dies holding a slot frees it when the score passes instead of
+# leaking it forever. Holders renew while they work.
+_SLOT_ACQUIRE_LUA = """
+local now = tonumber(ARGV[1])
+local expiry = tonumber(ARGV[2])
+local token = ARGV[3]
+local ttl = tonumber(ARGV[6])
+for i = 1, #KEYS do
+  redis.call('zremrangebyscore', KEYS[i], '-inf', now)
+end
+local user_limit = tonumber(ARGV[4])
+if user_limit > 0 and redis.call('zcard', KEYS[1]) >= user_limit then
+  return 1
+end
+local global_limit = tonumber(ARGV[5])
+if global_limit > 0 and redis.call('zcard', KEYS[2]) >= global_limit then
+  return 2
+end
+for i = 1, #KEYS do
+  redis.call('zadd', KEYS[i], expiry, token)
+  redis.call('expire', KEYS[i], ttl)
+end
+return 0
+"""
+
+SLOT_OK, SLOT_USER_FULL, SLOT_GLOBAL_FULL = 0, 1, 2
+
+
+async def acquire_slot(
+    user_key: str, global_key: str, token: str,
+    user_limit: int, global_limit: int, ttl_seconds: int,
+) -> Optional[int]:
+    """Take one slot in both sets, or none if either is full.
+
+    Returns SLOT_OK, SLOT_USER_FULL or SLOT_GLOBAL_FULL, or None when Redis
+    is unavailable (the caller falls back to an in-process count). A limit of
+    0 means unlimited.
+    """
+    if not _available or not _redis:
+        return None
+    now = time.time()
+    try:
+        return int(await _redis.eval(
+            _SLOT_ACQUIRE_LUA, 2, user_key, global_key,
+            now, now + ttl_seconds, token, user_limit, global_limit, ttl_seconds,
+        ))
+    except Exception:
+        logger.exception("slot_acquire_failed", key=user_key)
+        return None
+
+
+# Waiting for a slot. Waiters sit in sorted sets scored by arrival time;
+# entries older than `stale_before` belong to waiters that died (no waiter
+# waits that long) and are dropped. Within one user, slots go to the OLDEST
+# waiter, so an account's documents start in the order they arrived.
+_WAIT_ENQUEUE_LUA = """
+local now = tonumber(ARGV[1])
+local token = ARGV[2]
+local stale_before = tonumber(ARGV[5])
+local ttl = tonumber(ARGV[6])
+for i = 1, #KEYS do
+  redis.call('zremrangebyscore', KEYS[i], '-inf', stale_before)
+end
+local user_limit = tonumber(ARGV[3])
+if user_limit > 0 and redis.call('zcard', KEYS[1]) >= user_limit then
+  return 1
+end
+local global_limit = tonumber(ARGV[4])
+if global_limit > 0 and redis.call('zcard', KEYS[2]) >= global_limit then
+  return 2
+end
+for i = 1, #KEYS do
+  redis.call('zadd', KEYS[i], now, token)
+  redis.call('expire', KEYS[i], ttl)
+end
+return 0
+"""
+
+_SLOT_ACQUIRE_QUEUED_LUA = """
+local now = tonumber(ARGV[1])
+local expiry = tonumber(ARGV[2])
+local token = ARGV[3]
+local ttl = tonumber(ARGV[6])
+local stale_before = tonumber(ARGV[7])
+redis.call('zremrangebyscore', KEYS[1], '-inf', now)
+redis.call('zremrangebyscore', KEYS[2], '-inf', now)
+redis.call('zremrangebyscore', KEYS[3], '-inf', stale_before)
+redis.call('zremrangebyscore', KEYS[4], '-inf', stale_before)
+if not redis.call('zscore', KEYS[3], token) then
+  return 3
+end
+local head = redis.call('zrange', KEYS[3], 0, 0)[1]
+if head ~= token then
+  return 4
+end
+local user_limit = tonumber(ARGV[4])
+if user_limit > 0 and redis.call('zcard', KEYS[1]) >= user_limit then
+  return 1
+end
+local global_limit = tonumber(ARGV[5])
+if global_limit > 0 and redis.call('zcard', KEYS[2]) >= global_limit then
+  return 2
+end
+redis.call('zadd', KEYS[1], expiry, token)
+redis.call('zadd', KEYS[2], expiry, token)
+redis.call('expire', KEYS[1], ttl)
+redis.call('expire', KEYS[2], ttl)
+redis.call('zrem', KEYS[3], token)
+redis.call('zrem', KEYS[4], token)
+return 0
+"""
+
+SLOT_NOT_QUEUED, SLOT_NOT_YOUR_TURN = 3, 4
+
+
+async def enqueue_waiter(
+    user_wait_key: str, global_wait_key: str, token: str,
+    user_limit: int, global_limit: int, stale_seconds: int,
+) -> Optional[int]:
+    """Join the wait line for a slot, or not if the line itself is full.
+
+    Returns SLOT_OK, SLOT_USER_FULL or SLOT_GLOBAL_FULL (the WAITING limits),
+    or None when Redis is unavailable. A limit of 0 means unlimited.
+    """
+    if not _available or not _redis:
+        return None
+    now = time.time()
+    try:
+        return int(await _redis.eval(
+            _WAIT_ENQUEUE_LUA, 2, user_wait_key, global_wait_key,
+            now, token, user_limit, global_limit, now - stale_seconds, stale_seconds,
+        ))
+    except Exception:
+        logger.exception("slot_enqueue_failed", key=user_wait_key)
+        return None
+
+
+async def acquire_queued_slot(
+    user_key: str, global_key: str, user_wait_key: str, global_wait_key: str,
+    token: str, user_limit: int, global_limit: int, ttl_seconds: int,
+    stale_seconds: int,
+) -> Optional[int]:
+    """Move a waiter into a slot if it is first in its user's line and
+    both limits have room. Returns SLOT_OK, SLOT_USER_FULL, SLOT_GLOBAL_FULL,
+    SLOT_NOT_QUEUED (its wait entry is gone), SLOT_NOT_YOUR_TURN, or None
+    when Redis is unavailable."""
+    if not _available or not _redis:
+        return None
+    now = time.time()
+    try:
+        return int(await _redis.eval(
+            _SLOT_ACQUIRE_QUEUED_LUA, 4, user_key, global_key, user_wait_key, global_wait_key,
+            now, now + ttl_seconds, token, user_limit, global_limit, ttl_seconds,
+            now - stale_seconds,
+        ))
+    except Exception:
+        logger.exception("slot_acquire_failed", key=user_key)
+        return None
+
+
+async def renew_slot(keys: Iterable[str], token: str, ttl_seconds: int) -> None:
+    """Push the holder's expiry forward (XX: never re-adds a released slot)."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.zadd(key, {token: time.time() + ttl_seconds}, xx=True)
+            pipe.expire(key, ttl_seconds)
+        await pipe.execute()
+    except Exception:
+        logger.exception("slot_renew_failed")
+
+
+async def release_slot(keys: Iterable[str], token: str) -> None:
+    """Give the slot back (safe no-op if it already expired)."""
+    if not _available or not _redis:
+        return
+    try:
+        pipe = _redis.pipeline(transaction=False)
+        for key in keys:
+            pipe.zrem(key, token)
+        await pipe.execute()
+    except Exception:
+        logger.exception("slot_release_failed")
+
+
 async def incr_tokens(user_id: int, amount: int) -> Optional[int]:
     """Atomically increment token counter. Returns new value or None on failure."""
     if not _available or not _redis:

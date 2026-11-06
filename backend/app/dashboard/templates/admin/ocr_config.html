@@ -136,6 +136,42 @@
                                     <label for="max_retries" class="form-label">Max Retries (per chunk)</label>
                                     <input type="number" class="form-control" id="max_retries" name="max_retries" value="{{ max_retries }}" min="0" max="5">
                                 </div>
+
+                                <div class="mb-3">
+                                    <label for="max_documents_per_user" class="form-label">Max Documents in Progress (per user)</label>
+                                    <input type="number" class="form-control" id="max_documents_per_user" name="max_documents_per_user" value="{{ max_documents_per_user }}" min="0" max="50">
+                                    <div class="form-text">How many documents one account may have in OCR at once, across all its keys. More are refused with 429 and Retry-After. 0 = no limit.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_documents" class="form-label">Max Documents in Progress (whole server)</label>
+                                    <input type="number" class="form-control" id="max_documents" name="max_documents" value="{{ max_documents }}" min="0" max="500">
+                                    <div class="form-text">Documents in OCR at once from everyone together. 0 = no limit.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_concurrent_conversions" class="form-label">Max Page Conversions at Once (per app worker)</label>
+                                    <input type="number" class="form-control" id="max_concurrent_conversions" name="max_concurrent_conversions" value="{{ max_concurrent_conversions }}" min="1" max="32">
+                                    <div class="form-text">PDF and Office pages are turned into images on the gateway's own CPUs. This caps those conversions per app worker so OCR cannot starve the rest of MindRouter.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="queue_wait_seconds" class="form-label">Max Wait for a Slot (seconds)</label>
+                                    <input type="number" class="form-control" id="queue_wait_seconds" name="queue_wait_seconds" value="{{ queue_wait_seconds }}" min="0" max="600">
+                                    <div class="form-text">A document over the limits above waits this long for a slot before it is refused with 429. 0 = refuse at once.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_waiting_per_user" class="form-label">Max Documents Waiting (per user)</label>
+                                    <input type="number" class="form-control" id="max_waiting_per_user" name="max_waiting_per_user" value="{{ max_waiting_per_user }}" min="0" max="100">
+                                    <div class="form-text">Each waiting request holds its uploaded file in memory, so the line is bounded. Over this, a new document is refused at once. 0 = no limit.</div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label for="max_waiting" class="form-label">Max Documents Waiting (whole server)</label>
+                                    <input type="number" class="form-control" id="max_waiting" name="max_waiting" value="{{ max_waiting }}" min="0" max="1000">
+                                    <div class="form-text">0 = no limit.</div>
+                                </div>
                             </div>
                         </div>
                     </div>
