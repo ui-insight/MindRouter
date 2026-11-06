@@ -279,6 +279,54 @@ def _image_to_png_bytes(img: Image.Image, max_dim: int = 2048) -> bytes:
     return buf.getvalue()
 
 
+# An upload that is not a readable document is the client's problem: answer
+# 400 with this (ValueError, which the OCR endpoints map to 400), not a 500.
+# pdf2image raises PDFPageCountError for anything pdfinfo cannot read (not a
+# PDF, truncated, empty, password-protected); PIL raises OSError subclasses
+# (UnidentifiedImageError, "image file is truncated", "broken data stream")
+# for an image it cannot decode, and DecompressionBombError for one whose
+# declared size is absurd.
+UNREADABLE_PDF_MESSAGE = (
+    "The uploaded file could not be read as a PDF. It may be corrupt, "
+    "password-protected, or not a PDF."
+)
+UNREADABLE_IMAGE_MESSAGE = (
+    "The uploaded file could not be read as an image. It may be corrupt or "
+    "not an image."
+)
+OVERSIZED_IMAGE_MESSAGE = (
+    "The uploaded image is too large to process (too many pixels)."
+)
+
+
+class OcrConversionError(Exception):
+    """Page conversion failed on our side (poppler killed or crashed): a
+    500, unlike an unreadable upload (ValueError, 400)."""
+
+
+def _pdf_rejected(err: Exception) -> bool:
+    """Did poppler reject the PDF itself, rather than fail on our side?
+
+    pdf2image raises PDFPageCountError whenever pdfinfo's output has no
+    "Pages:" line.  For a bad file poppler always says why on the lines after
+    "Unable to get page count." ("Document stream is empty", "Couldn't find
+    trailer dictionary", "Incorrect password").  A pdfinfo killed under memory
+    pressure says nothing, and that is our failure: it must stay a 500, not
+    tell the user their (valid) file is corrupt.
+    """
+    from pdf2image.exceptions import PDFPageCountError
+    if not isinstance(err, PDFPageCountError):
+        return False
+    _first, _, detail = str(err).partition("\n")
+    return bool(detail.strip())
+
+
+def _unreadable(message: str, err: Exception) -> ValueError:
+    # Poppler's own words stay in the log; the client gets a plain sentence.
+    logger.info("ocr_unreadable_upload", reason=message, error=str(err)[:300])
+    return ValueError(message)
+
+
 def _image_bytes_to_pages(file_bytes: bytes, max_frames: int) -> List[bytes]:
     """Decode an image (possibly multi-frame) to a list of PNG byte buffers.
 
@@ -286,25 +334,33 @@ def _image_bytes_to_pages(file_bytes: bytes, max_frames: int) -> List[bytes]:
     ``max_frames`` so a crafted animated GIF / multi-page TIFF cannot force
     unbounded decoding.
     """
-    img = Image.open(io.BytesIO(file_bytes))
-    pages: List[bytes] = []
+    # Image.open reads only the header; a damaged file fails later, while
+    # seek/copy/convert decode it, so the whole walk is guarded.  All I/O is
+    # on an in-memory buffer, so an OSError here is the file's, never ours.
     try:
-        frame = 0
-        while True:
-            if frame >= max_frames:
-                logger.warning(
-                    "ocr_image_frame_cap",
-                    max_frames=max_frames,
-                )
-                break
-            img.seek(frame)
-            pages.append(_image_to_png_bytes(img.copy()))
-            frame += 1
-    except EOFError:
-        pass
-    if not pages:
-        pages.append(_image_to_png_bytes(img))
-    return pages
+        img = Image.open(io.BytesIO(file_bytes))
+        pages: List[bytes] = []
+        try:
+            frame = 0
+            while True:
+                if frame >= max_frames:
+                    logger.warning(
+                        "ocr_image_frame_cap",
+                        max_frames=max_frames,
+                    )
+                    break
+                img.seek(frame)
+                pages.append(_image_to_png_bytes(img.copy()))
+                frame += 1
+        except EOFError:
+            pass
+        if not pages:
+            pages.append(_image_to_png_bytes(img))
+        return pages
+    except Image.DecompressionBombError as e:
+        raise _unreadable(OVERSIZED_IMAGE_MESSAGE, e) from e
+    except (OSError, SyntaxError) as e:
+        raise _unreadable(UNREADABLE_IMAGE_MESSAGE, e) from e
 
 
 async def document_to_images(
@@ -357,7 +413,12 @@ async def _pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> List[bytes]:
     from pdf2image import convert_from_bytes
 
     def _convert():
-        pil_images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
+        try:
+            pil_images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png")
+        except Exception as e:
+            if _pdf_rejected(e):
+                raise _unreadable(UNREADABLE_PDF_MESSAGE, e) from e
+            raise
         return [_image_to_png_bytes(img) for img in pil_images]
 
     return await _convert_in_thread(_convert)
@@ -367,7 +428,13 @@ async def _pdf_page_count(pdf_bytes: bytes) -> int:
     """Get the number of pages in a PDF without converting to images."""
     from pdf2image.pdf2image import pdfinfo_from_bytes
     def _count():
-        info = pdfinfo_from_bytes(pdf_bytes)
+        try:
+            info = pdfinfo_from_bytes(pdf_bytes)
+        except Exception as e:
+            # Before any pdftoppm process starts for the document.
+            if _pdf_rejected(e):
+                raise _unreadable(UNREADABLE_PDF_MESSAGE, e) from e
+            raise
         return info.get("Pages", 0)
     return await asyncio.to_thread(_count)
 
@@ -379,10 +446,19 @@ async def _pdf_to_images_range(
     from pdf2image import convert_from_bytes
 
     def _convert():
+        # Not translated: the pipeline counted the pages of these same bytes
+        # first, so a failure here is poppler's (killed, crashed), not the
+        # file's.  A pdftoppm that died returns no pages at all: fail the
+        # chunk rather than send the model an empty page set.
         pil_images = convert_from_bytes(
             pdf_bytes, dpi=dpi, fmt="png",
             first_page=first_page, last_page=last_page,
         )
+        if not pil_images:
+            raise OcrConversionError(
+                f"PDF page conversion produced no images for pages "
+                f"{first_page}-{last_page}"
+            )
         return [_image_to_png_bytes(img) for img in pil_images]
 
     return await _convert_in_thread(_convert)
