@@ -298,6 +298,146 @@ class TestTokenizeGate:
         assert client.calls == 2  # memo dropped, /tokenize re-called
 
     @pytest.mark.asyncio
+    async def test_auto_truncate_recounts_after_dropping_only_reasoning(self):
+        """truncation:"auto" first drops earlier turns' reasoning; when that
+        alone fits, no message is dropped but the count must still be redone
+        (a stale over-limit count would cap the reply at the 256 fallback)."""
+        svc, client = _make_service()
+        counts = iter([9000, 200])  # before / after the earlier reasoning is gone
+
+        async def post(url, json=None):
+            client.calls += 1
+            return _FakeTokenizeResponse(next(counts))
+
+        client.post = post
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="q1"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="word " * 8000),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+            ],
+            max_tokens=1000,
+            auto_truncate=True,
+            request_id="req-1",
+        )
+        await svc.cap_max_tokens(request, _vllm_backend(), 8192)
+        assert client.calls == 2
+        assert len(request.messages) == 3 and request.messages[1].reasoning is None
+        assert request.max_tokens == 1000
+
+    async def test_overflow_strips_forwarded_reasoning_on_every_api(self):
+        """Review: only Responses truncation:"auto" stripped reasoning, so a
+        chat/Anthropic/Ollama session whose forwarded reasoning outgrew the
+        context fell to the 256-token fallback (or a backend 400). Now the
+        reasoning goes first for every API — older turns' before the current
+        loop's — and the count is redone; no turn is dropped."""
+        svc, client = _make_service()
+        counts = iter([9000, 300])
+
+        async def post(url, json=None):
+            client.calls += 1
+            return _FakeTokenizeResponse(next(counts))
+
+        client.post = post
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="q1"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="word " * 8000),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="step", reasoning="loop"),
+            ],
+            max_tokens=1000,
+            request_id="req-1",
+        )
+        await svc.cap_max_tokens(request, _vllm_backend(), 8192)
+        assert client.calls == 2
+        assert len(request.messages) == 4
+        assert request.messages[1].reasoning is None
+        assert request.messages[3].reasoning == "loop", "current loop kept when older is enough"
+        assert request.max_tokens == 1000
+
+    async def test_tool_heavy_overflow_still_strips_reasoning(self):
+        """Review of PR #38: the strip measured messages with tiktoken, which
+        leaves out tool schemas, so an agent session with ~25k tokens of
+        tools read as "fits", nothing was stripped and max_tokens fell to
+        256. The cut is now sized from the exact /tokenize count."""
+        svc, client = _make_service()
+        counts = iter([8600, 6000])  # exact: messages + ~5k of tools; then after the strip
+
+        async def post(url, json=None):
+            client.calls += 1
+            return _FakeTokenizeResponse(next(counts))
+
+        client.post = post
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="q1"),
+                # ~2.5k tokens of earlier reasoning: by tiktoken alone the
+                # messages are well under the 8192 context.
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="word " * 2500),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+            ],
+            max_tokens=1000,
+            request_id="req-1",
+        )
+        # The quick estimate never sees tool schemas, so in production this
+        # passes the shortcut, the backend answers context-length 400, and the
+        # retry recounts exactly (force_exact) — the path that must strip.
+        await svc.cap_max_tokens(request, _vllm_backend(), 8192, force_exact=True)
+        assert client.calls == 2, "recounted after stripping"
+        assert request.messages[1].reasoning is None
+        assert request.max_tokens == 1000
+
+    async def test_auto_truncate_drops_old_turns_before_the_current_loops_reasoning(self):
+        """Review of PR #38: cap_max_tokens' strip ran first with the current
+        loop included, so truncation:"auto" lost the current loop's reasoning
+        although dropping an old turn alone would have fit."""
+        svc, client = _make_service()
+        counts = iter([12000, 6000])
+
+        async def post(url, json=None):
+            client.calls += 1
+            return _FakeTokenizeResponse(next(counts))
+
+        client.post = post
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="old " * 6000),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1"),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="step", reasoning="loop " * 3000),
+                CanonicalMessage(role=MessageRole.TOOL, content="r", tool_call_id="t1"),
+            ],
+            max_tokens=1000,
+            auto_truncate=True,
+            request_id="req-1",
+        )
+        await svc.cap_max_tokens(request, _vllm_backend(), 8192)
+        assert [m.content for m in request.messages][:1] != ["old " * 6000], "old turn dropped"
+        loop = [m for m in request.messages if m.content == "step"][0]
+        assert loop.reasoning == "loop " * 3000, "current loop's reasoning kept"
+
+    async def test_ollama_overflow_strips_reasoning_with_the_estimate(self):
+        svc, client = _make_service()
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="q1"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="word " * 6000),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+            ],
+            max_tokens=500,
+            request_id="req-1",
+        )
+        backend = SimpleNamespace(engine=_OLLAMA_SENTINEL, url="http://backend", id=2)
+        await svc.cap_max_tokens(request, backend, 4096)
+        assert client.calls == 0
+        assert request.messages[1].reasoning is None and request.max_tokens == 500
+
     async def test_ollama_never_calls_tokenize(self):
         svc, client = _make_service()
         request = _make_request()

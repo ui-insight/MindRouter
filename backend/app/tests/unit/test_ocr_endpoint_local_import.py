@@ -49,6 +49,19 @@ class _Upload:
         return self._data
 
 
+class _Db:
+    """Request session stand-in: records whether it was released (committed)
+    before OCR started, since a document can run for minutes."""
+
+    def __init__(self, perform):
+        self._perform = perform
+        self.committed_before_ocr = None
+
+    async def commit(self):
+        if self.committed_before_ocr is None:
+            self.committed_before_ocr = not self._perform.await_count
+
+
 def _auth():
     return SimpleNamespace(id=1), SimpleNamespace(id=2)
 
@@ -68,8 +81,9 @@ async def _call(handler, upload, **form):
         patch.object(api, "get_registry", lambda: registry),
         patch.object(api, "model_availability", AsyncMock(return_value=api.AVAILABLE)),
         patch.object(api, "bind_request_context"),
+        patch.object(api, "InferenceService", lambda db: SimpleNamespace(_check_quota=AsyncMock())),
     ):
-        result = await handler(request=SimpleNamespace(), file=upload, db=None, auth=_auth(), **form)
+        result = await handler(request=SimpleNamespace(), file=upload, db=_Db(perform), auth=_auth(), **form)
     return result, perform
 
 

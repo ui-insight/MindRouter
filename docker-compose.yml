@@ -33,8 +33,10 @@ services:
       - 129.101.254.173
     # Worker count is deployment-tunable (Dockerfile default: 2). With
     # Redis-shared admission (mr:adm:* counters), backends.max_concurrent is a
-    # FLEET-WIDE cap independent of worker count. Size DATABASE_POOL_SIZE so
-    # workers x (async+sync pools) stays under MariaDB max_connections (512).
+    # FLEET-WIDE cap independent of worker count. Size the pools so
+    # UVICORN_WORKERS x (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW) stays well
+    # under MariaDB max_connections (512) — see .env.prod.example. Exceeding it
+    # turns one overloaded worker into "Too many connections" for everyone.
     command: ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "${UVICORN_WORKERS:-2}", "--timeout-graceful-shutdown", "60"]
     environment:
       - DATABASE_URL=mysql+pymysql://mindrouter:${MYSQL_PASSWORD:-mindrouter_password}@127.0.0.1:3306/mindrouter

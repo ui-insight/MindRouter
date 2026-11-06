@@ -55,6 +55,7 @@ from backend.app.core.canonical_schemas import (
     ResponseFormatType,
     TextContent,
 )
+from backend.app.core.reasoning import history_reasoning_text
 
 # reasoning.effort values outside the vLLM/Ollama-supported set are
 # clamped to the nearest supported effort.
@@ -326,10 +327,27 @@ class ResponsesInTranslator:
             raise ValueError("'input' must be a string or an array of items")
 
         messages: List[CanonicalMessage] = []
+        # A turn arrives as its reasoning item(s), then its message and/or
+        # function_calls: hold the reasoning until the assistant message it
+        # belongs to. Reasoning followed by anything else — a non-assistant
+        # message, or an item that becomes no message at all, such as a
+        # hosted web_search_call (that round's reasoning belongs to the
+        # search, not to the final answer) — is dropped.
+        pending_reasoning: List[str] = []
         for item in input_value:
             if not isinstance(item, dict):
                 raise ValueError("input items must be objects")
-            for msg in ResponsesInTranslator._translate_item(item):
+            if item.get("type") == "reasoning":
+                text = ResponsesInTranslator._reasoning_item_text(item)
+                if text:
+                    pending_reasoning.append(text)
+                continue
+            translated = ResponsesInTranslator._translate_item(item)
+            if not translated:
+                pending_reasoning = []
+            for msg in translated:
+                if msg.role != MessageRole.ASSISTANT:
+                    pending_reasoning = []
                 # Merge a function_call into the preceding assistant
                 # message (content + tool_calls in one message is the
                 # chat-completions shape for a single model turn).
@@ -343,9 +361,36 @@ class ResponsesInTranslator:
                 ):
                     prev = messages[-1]
                     prev.tool_calls = (prev.tool_calls or []) + msg.tool_calls
-                    continue
-                messages.append(msg)
+                    target = prev
+                else:
+                    messages.append(msg)
+                    target = msg
+                if pending_reasoning and target.role == MessageRole.ASSISTANT:
+                    target.reasoning = "\n\n".join(
+                        ([target.reasoning] if target.reasoning else []) + pending_reasoning
+                    )
+                    pending_reasoning = []
         return messages
+
+    @staticmethod
+    def _reasoning_item_text(item: Dict[str, Any]) -> Optional[str]:
+        """The raw reasoning a ``reasoning`` input item carries, if any.
+
+        Only ``content`` parts of type ``reasoning_text`` (what MindRouter
+        itself emits) are the model's own reasoning. ``summary`` is a
+        summary, not what the model produced, and ``encrypted_content`` is
+        opaque provider state; neither can be replayed to a chat backend.
+        """
+        parts = item.get("content")
+        if not isinstance(parts, list):
+            return None
+        texts = [
+            part.get("text")
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "reasoning_text"
+            and history_reasoning_text(part.get("text"))
+        ]
+        return "\n\n".join(texts) if texts else None
 
     @staticmethod
     def _translate_item(item: Dict[str, Any]) -> List[CanonicalMessage]:
@@ -391,8 +436,8 @@ class ResponsesInTranslator:
             return ResponsesInTranslator._translate_function_call_output(item)
 
         if item_type == "reasoning":
-            # Opaque provider state (encrypted_content) / raw CoT: chat
-            # backends cannot replay it. Dropped by design.
+            # Raw reasoning is attached to the next assistant message by
+            # _translate_input; on its own it yields no message.
             return []
 
         if item_type == "item_reference":

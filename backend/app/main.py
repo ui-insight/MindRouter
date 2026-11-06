@@ -348,6 +348,7 @@ _cache_warm_task: Optional[asyncio.Task] = None
 _trend_warm_task: Optional[asyncio.Task] = None
 _dlp_task: Optional[asyncio.Task] = None
 _dlp_digest_task: Optional[asyncio.Task] = None
+_key_usage_task: Optional[asyncio.Task] = None
 
 
 async def _run_migrations() -> None:
@@ -415,6 +416,7 @@ async def _run_migrations() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     """Application lifespan manager."""
     global _cleanup_task, _redis_sync_task, _dlp_task, _dlp_digest_task, _cache_warm_task, _trend_warm_task
+    global _key_usage_task
     logger.info("Starting MindRouter...")
 
     # Opt-in: bring the schema to head before anything reads it (init_registry
@@ -478,6 +480,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     from backend.app.services.dlp_worker import dlp_digest_loop, dlp_worker_loop
     _dlp_task = asyncio.create_task(dlp_worker_loop())
     _dlp_digest_task = asyncio.create_task(dlp_digest_loop())
+
+    # API key usage counters are written in batches (services/key_usage.py)
+    from backend.app.services import key_usage
+    _key_usage_task = asyncio.create_task(key_usage.flush_loop())
 
     # DLP scans STORED audit content — with capture disabled it has
     # nothing to scan, which an operator should hear about once.
@@ -565,6 +571,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
             await _dlp_digest_task
         except asyncio.CancelledError:
             pass
+    if _key_usage_task:
+        _key_usage_task.cancel()
+        try:
+            await _key_usage_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            from backend.app.services import key_usage
+            await key_usage.flush()
+        except Exception:
+            logger.exception("key_usage_final_flush_failed")
     if _video_task:
         _video_task.cancel()
         try:

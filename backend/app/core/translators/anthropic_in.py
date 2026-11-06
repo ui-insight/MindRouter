@@ -31,6 +31,7 @@ from backend.app.core.canonical_schemas import (
     ResponseFormatType,
     TextContent,
 )
+from backend.app.core.reasoning import history_reasoning_text
 
 
 class AnthropicInTranslator:
@@ -292,6 +293,7 @@ class AnthropicInTranslator:
             content_blocks: List[ContentBlock] = []
             tool_calls: List[CanonicalToolCall] = []
             tool_results: List[Dict[str, Any]] = []
+            thinking_parts: List[str] = []
 
             for item in content:
                 if isinstance(item, str):
@@ -315,10 +317,23 @@ class AnthropicInTranslator:
                     elif item_type == "tool_result":
                         # User's tool result → will expand to separate TOOL messages
                         tool_results.append(item)
+                    elif item_type == "thinking":
+                        # An earlier assistant turn's reasoning (Claude Code and
+                        # the SDKs return thinking blocks as received). Its
+                        # signature is Anthropic's and means nothing here;
+                        # redacted_thinking is opaque and is skipped below.
+                        text = history_reasoning_text(item.get("thinking"))
+                        if text:
+                            thinking_parts.append(text)
                     else:
                         block = AnthropicInTranslator._translate_content_block(item)
                         if block:
                             content_blocks.append(block)
+
+            reasoning = (
+                "\n\n".join(thinking_parts)
+                if role == MessageRole.ASSISTANT and thinking_parts else None
+            )
 
             # Assistant message with tool_use blocks
             if role == MessageRole.ASSISTANT and tool_calls:
@@ -331,6 +346,7 @@ class AnthropicInTranslator:
                 return CanonicalMessage(
                     role=role,
                     content=text_content,
+                    reasoning=reasoning,
                     tool_calls=tool_calls,
                 )
 
@@ -364,8 +380,8 @@ class AnthropicInTranslator:
                 return result_messages
 
             if content_blocks:
-                return CanonicalMessage(role=role, content=content_blocks)
-            return CanonicalMessage(role=role, content="")
+                return CanonicalMessage(role=role, content=content_blocks, reasoning=reasoning)
+            return CanonicalMessage(role=role, content="", reasoning=reasoning)
 
         return CanonicalMessage(role=role, content=content or "")
 

@@ -1289,17 +1289,44 @@ async def delete_api_key(db: AsyncSession, api_key_id: int) -> bool:
 
 
 async def update_api_key_usage(db: AsyncSession, api_key_id: int) -> None:
-    """Update API key last used timestamp and usage count.
+    """Update API key last used timestamp and usage count by one use."""
+    await add_api_key_usage(db, api_key_id, 1)
 
-    Uses an atomic UPDATE to avoid loading the row into the ORM session,
-    which prevents holding an exclusive row lock for the entire request.
+
+async def add_api_key_usage(
+    db: AsyncSession, api_key_id: int, count: int,
+    lock_wait_seconds: Optional[int] = None,
+) -> None:
+    """Add ``count`` uses to a key and stamp last_used_at.
+
+    Atomic UPDATE (no ORM load). Request accounting does not call this inline
+    any more: services/key_usage.py batches uses and writes them in short
+    transactions of their own, so a busy key's row lock never holds up a
+    request's accounting write.
+
+    ``lock_wait_seconds`` bounds the row-lock wait for THIS statement only
+    (MariaDB ``SET STATEMENT ... FOR``), so the pooled connection keeps the
+    server default for whoever uses it next.
     """
+    if lock_wait_seconds is not None:
+        from sqlalchemy import text
+
+        await db.execute(
+            text(
+                "SET STATEMENT innodb_lock_wait_timeout = :wait FOR "
+                "UPDATE api_keys SET last_used_at = NOW(), "
+                "usage_count = usage_count + :count, updated_at = NOW() "
+                "WHERE id = :id"
+            ),
+            {"wait": int(lock_wait_seconds), "count": int(count), "id": api_key_id},
+        )
+        return
     await db.execute(
         update(ApiKey)
         .where(ApiKey.id == api_key_id)
         .values(
             last_used_at=func.now(),
-            usage_count=ApiKey.usage_count + 1,
+            usage_count=ApiKey.usage_count + count,
         )
     )
 
@@ -1350,7 +1377,8 @@ async def update_quota_usage(
     bursty single user touches, and the previous SELECT-then-flush pattern
     made concurrent completion transactions deadlock (MariaDB 1213) — which
     aborted the whole completion write. No row load, no read-modify-write
-    window, deadlock-free ordering with update_api_key_usage.
+    window. (The completion writers no longer touch api_keys at all — see
+    services/key_usage.py — so there is no cross-row ordering to keep.)
     """
     from backend.app.core.redis_client import is_available
 
@@ -1385,11 +1413,10 @@ async def reset_quota_if_needed(db: AsyncSession, user_id: int) -> Optional[Quot
             # Commit the rollover HERE, in its own short transaction (an
             # explicit exception to the caller-commits convention). Every
             # caller goes on to INSERT a requests / web_search_logs row in the
-            # same session, and that INSERT takes FK S locks on api_keys —
-            # while the completion writers take api_keys BEFORE quotas (see
-            # InferenceService._run_completion_db). Holding X(quotas) into the
-            # INSERT would be the opposite order and a (rare, once-per-period)
-            # deadlock with an in-flight completion for the same user.
+            # same session, and that INSERT takes FK S locks on api_keys. The
+            # completion writers no longer take X on api_keys (2.9.95), so
+            # S/S cannot deadlock any more; committing here still keeps the
+            # X(quotas) hold short instead of spanning the INSERT.
             await db.commit()
             # Also reset Redis counter if available
             from backend.app.core.redis_client import reset_tokens, is_available
@@ -2056,11 +2083,23 @@ async def upsert_model(
         model.family = model.family_override if model.family_override is not None else model.family
         model.parameter_count = model.parameter_count_override if model.parameter_count_override is not None else model.parameter_count
     else:
-        # INSERT new model record
+        # INSERT new model record. A new replica takes the model's
+        # reasoning-history override from its siblings (the admin toggle sets
+        # every row of the name), so every backend serving it decides alike.
+        sibling_rh = await db.execute(
+            select(Model.reasoning_history_override).where(
+                and_(
+                    Model.name == name,
+                    Model.backend_id != backend_id,
+                    Model.reasoning_history_override.is_not(None),
+                )
+            ).limit(1)
+        )
         model = Model(
             backend_id=backend_id,
             name=name,
             modality=modality,
+            reasoning_history_override=sibling_rh.scalar_one_or_none(),
             context_length=context_length,
             model_max_context=model_max_context,
             supports_multimodal=effective_multimodal,
@@ -2170,6 +2209,21 @@ async def set_thinking_override_by_name(
         m.thinking_override = value
         if value is not None:
             m.supports_thinking = value
+    await db.flush()
+    return len(models)
+
+
+async def set_reasoning_history_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set the reasoning-history override for ALL model rows with the given name.
+
+    None returns the model to the fleet setting (reasoning.forward_history).
+    """
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.reasoning_history_override = value
     await db.flush()
     return len(models)
 
