@@ -1858,6 +1858,9 @@ async def admin_models(
     aliases = await crud.get_all_model_aliases(db)
     model_names = sorted(grouped_models.keys())
 
+    from backend.app.core.reasoning import FORWARD_HISTORY_DEFAULT, FORWARD_HISTORY_KEY
+    forward_history = bool(await crud.get_config_json(db, FORWARD_HISTORY_KEY, FORWARD_HISTORY_DEFAULT))
+
     masq = await _admin_masquerade_context(request, user, db)
     return templates.TemplateResponse(
         "admin/models.html",
@@ -1865,6 +1868,7 @@ async def admin_models(
             "request": request,
             "user": user,
             **masq,
+            "forward_history": forward_history,
             "grouped_models": grouped_models,
             "ollama_backends": ollama_backends,
             "aliases": aliases,
@@ -2087,6 +2091,82 @@ async def reset_model_thinking(
     await crud.set_thinking_override_by_name(db, model_name, None)
     await crud.log_admin_action(
         db, user_id=user_id, action="model.reset_thinking",
+        entity_type="model", entity_id=model_name,
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+
+    return RedirectResponse(
+        url="/admin/models?success=reset", status_code=302
+    )
+
+
+@dashboard_router.post("/admin/models/toggle-reasoning-history")
+async def toggle_model_reasoning_history(
+    request: Request,
+    model_name: str = Form(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Flip whether earlier reasoning is forwarded to all instances of a model.
+
+    The new value is the opposite of what the model gets now (its override,
+    else the fleet setting) and is stored as an override.
+    """
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    from backend.app.db.models import Model
+    from sqlalchemy import select
+    from backend.app.core.reasoning import FORWARD_HISTORY_DEFAULT, FORWARD_HISTORY_KEY, forward_history_for
+    result = await db.execute(select(Model.reasoning_history_override).where(Model.name == model_name))
+    overrides = [row[0] for row in result.all()]
+    if not overrides:
+        return RedirectResponse(
+            url="/admin/models?error=Model+not+found", status_code=302
+        )
+
+    # Every row of the name carries the same override (set together, inherited
+    # by new replicas); read any set one, else the fleet setting applies.
+    current = next((o for o in overrides if o is not None), None)
+    fleet = bool(await crud.get_config_json(db, FORWARD_HISTORY_KEY, FORWARD_HISTORY_DEFAULT))
+    new_value = not forward_history_for(current, fleet)
+    await crud.set_reasoning_history_override_by_name(db, model_name, new_value)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.toggle_reasoning_history",
+        entity_type="model", entity_id=model_name,
+        after_value={"reasoning_history_override": new_value},
+        ip_address=get_client_ip(request),
+    )
+    await db.commit()
+
+    return RedirectResponse(
+        url="/admin/models?success=updated", status_code=302
+    )
+
+
+@dashboard_router.post("/admin/models/reset-reasoning-history")
+async def reset_model_reasoning_history(
+    request: Request,
+    model_name: str = Form(...),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Return all instances of a model to the fleet reasoning-history setting."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    await crud.set_reasoning_history_override_by_name(db, model_name, None)
+    await crud.log_admin_action(
+        db, user_id=user_id, action="model.reset_reasoning_history",
         entity_type="model", entity_id=model_name,
         ip_address=get_client_ip(request),
     )
@@ -5832,8 +5912,11 @@ async def admin_settings(
     site_url = await crud.get_config_json(db, "app.base_url", get_settings().app_base_url)
     current_tz = await crud.get_config_json(db, "app.timezone", "America/Los_Angeles")
     enforce_num_ctx = await crud.get_config_json(db, "ollama.enforce_num_ctx", True)
-    from backend.app.core.reasoning import FALLBACK_DEFAULT_EFFORT, GATEWAY_LEVELS
+    from backend.app.core.reasoning import (
+        FALLBACK_DEFAULT_EFFORT, FORWARD_HISTORY_DEFAULT, FORWARD_HISTORY_KEY, GATEWAY_LEVELS,
+    )
     default_effort = await crud.get_config_json(db, "reasoning.default_effort", FALLBACK_DEFAULT_EFFORT)
+    forward_history = bool(await crud.get_config_json(db, FORWARD_HISTORY_KEY, FORWARD_HISTORY_DEFAULT))
     from backend.app.core.sampling_policy import CONFIG_KEY as _SAMPLING_KEY
     _sampling_raw = await crud.get_config_json(db, _SAMPLING_KEY, {}) or {}
     sampling_policies_json = json.dumps(_sampling_raw, indent=2) if _sampling_raw else ""
@@ -5879,6 +5962,7 @@ async def admin_settings(
             "now_in_tz": now_in_tz,
             "enforce_num_ctx": enforce_num_ctx,
             "default_effort": default_effort,
+            "forward_history": forward_history,
             "reasoning_levels": [lvl for lvl in GATEWAY_LEVELS if lvl != "none"],
             "sampling_policies_json": sampling_policies_json,
             "decisions_enabled": decisions_cfg["enabled"],
@@ -5999,6 +6083,20 @@ async def admin_settings_post(
         )
         await db.commit()
         return RedirectResponse(url="/admin/settings?success=default_effort_updated", status_code=302)
+
+    elif action == "set_forward_history":
+        from backend.app.core.reasoning import FORWARD_HISTORY_KEY
+        val = form.get("forward_history") == "on"
+        await crud.set_config(
+            db, FORWARD_HISTORY_KEY, val,
+            description="Forward the earlier assistant reasoning clients send back to models without their own override"
+        )
+        await crud.log_admin_action(
+            db, user_id=user_id, action="settings.set_forward_history",
+            entity_type="config", detail=f"forward_history={val}", ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/settings?success=forward_history_updated", status_code=302)
 
     elif action == "set_sampling_policies":
         from backend.app.core.sampling_policy import CONFIG_KEY as _SAMPLING_KEY

@@ -29,6 +29,10 @@ broken (an orphaned ``tool`` message without its assistant
   messages form one group.
 
 The most recent group is never dropped.
+
+Before any group is dropped, the reasoning carried by earlier assistant
+turns (kept for models whose templates replay it) is removed from every
+group but the last: it is the cheapest context to lose.
 """
 
 from typing import Callable, List, Tuple
@@ -75,6 +79,8 @@ def _message_tokens(
     for tc in msg.tool_calls or []:
         total += estimator(tc.function.arguments or "")
         total += estimator(tc.function.name or "")
+    if msg.reasoning:
+        total += estimator(msg.reasoning)
     return total
 
 
@@ -85,10 +91,12 @@ def trim_messages_to_fit(
 ) -> Tuple[List[CanonicalMessage], int]:
     """Drop oldest turn groups until the estimated total fits the budget.
 
-    Returns (trimmed_messages, dropped_message_count).  Leading system
-    messages and the final turn group are always kept, so the result may
-    still exceed the budget in the degenerate case — callers should
-    treat this as best-effort.
+    Earlier assistant reasoning goes first (from every group but the last);
+    then whole groups, oldest first.  Returns (trimmed_messages,
+    dropped_message_count); the list is a new object whenever anything
+    changed, the same object otherwise.  Leading system messages and the
+    final turn group are always kept, so the result may still exceed the
+    budget in the degenerate case — callers should treat this as best-effort.
     """
     head, groups = _group_messages(messages)
     if not groups:
@@ -100,6 +108,17 @@ def trim_messages_to_fit(
     ]
 
     total = head_cost + sum(group_costs)
+    if total > budget_tokens:
+        stripped = False
+        for i, group in enumerate(groups[:-1]):
+            if any(m.reasoning for m in group):
+                groups[i] = [m.model_copy(update={"reasoning": None}) if m.reasoning else m for m in group]
+                group_costs[i] = sum(_message_tokens(m, estimator) for m in groups[i])
+                stripped = True
+        if stripped:
+            total = head_cost + sum(group_costs)
+            if total <= budget_tokens:
+                return head + [m for g in groups for m in g], 0
     dropped = 0
     start = 0
     # Never drop the final group
@@ -108,8 +127,7 @@ def trim_messages_to_fit(
         dropped += len(groups[start])
         start += 1
 
-    if dropped == 0:
-        return messages, 0
-
     trimmed = head + [m for g in groups[start:] for m in g]
+    if dropped == 0 and len(trimmed) == len(messages) and all(a is b for a, b in zip(trimmed, messages)):
+        return messages, 0
     return trimmed, dropped

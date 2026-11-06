@@ -46,7 +46,7 @@ from backend.app.db.models import ApiKey, BackendEngine, Modality, RequestStatus
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
 from backend.app.services.image_policy import CATEGORY_OK
-from backend.app.services.inference import InferenceService, count_request_text_chars
+from backend.app.services.inference import InferenceService, apply_reasoning_history_policy, count_request_text_chars
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
@@ -417,6 +417,8 @@ async def tokenize(
     target = next((m for m in models if m.name == model), None)
     max_model_len = target.context_length if target else None
 
+    # Count what would be sent: earlier reasoning is kept or dropped per model.
+    await apply_reasoning_history_policy(canonical, model, target)
     count, is_estimate = await service._count_input_tokens(canonical, backend)
 
     return {

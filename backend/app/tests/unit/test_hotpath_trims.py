@@ -298,6 +298,34 @@ class TestTokenizeGate:
         assert client.calls == 2  # memo dropped, /tokenize re-called
 
     @pytest.mark.asyncio
+    async def test_auto_truncate_recounts_after_dropping_only_reasoning(self):
+        """truncation:"auto" first drops earlier turns' reasoning; when that
+        alone fits, no message is dropped but the count must still be redone
+        (a stale over-limit count would cap the reply at the 256 fallback)."""
+        svc, client = _make_service()
+        counts = iter([9000, 200])  # before / after the earlier reasoning is gone
+
+        async def post(url, json=None):
+            client.calls += 1
+            return _FakeTokenizeResponse(next(counts))
+
+        client.post = post
+        request = CanonicalChatRequest(
+            model="test-model",
+            messages=[
+                CanonicalMessage(role=MessageRole.USER, content="q1"),
+                CanonicalMessage(role=MessageRole.ASSISTANT, content="a1", reasoning="word " * 8000),
+                CanonicalMessage(role=MessageRole.USER, content="q2"),
+            ],
+            max_tokens=1000,
+            auto_truncate=True,
+            request_id="req-1",
+        )
+        await svc.cap_max_tokens(request, _vllm_backend(), 8192)
+        assert client.calls == 2
+        assert len(request.messages) == 3 and request.messages[1].reasoning is None
+        assert request.max_tokens == 1000
+
     async def test_ollama_never_calls_tokenize(self):
         svc, client = _make_service()
         request = _make_request()

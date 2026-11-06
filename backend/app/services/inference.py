@@ -94,6 +94,8 @@ def count_request_text_chars(request: "CanonicalChatRequest") -> int:
                 text = getattr(block, "text", None)
                 if text:
                     total += len(text)
+        if msg.reasoning:  # an earlier turn's reasoning, when the client sent it back
+            total += len(msg.reasoning)
     if request.tools:
         total += len(json.dumps([t.model_dump() for t in request.tools]))
     return total
@@ -125,6 +127,7 @@ def _tiktoken_estimate_sync(request: "CanonicalChatRequest", encoder, max_chars:
         elif isinstance(content, list):
             for block in content:
                 total += _encode_capped(getattr(block, "text", None))
+        total += _encode_capped(msg.reasoning)
         # Per-message overhead (role, separators)
         total += 4
 
@@ -229,6 +232,64 @@ async def _get_default_effort() -> Optional[str]:
         logger.warning("reasoning_default_effort_unreadable", error=str(exc))
     _default_effort_cache = (value, now)
     return value
+
+
+# reasoning.forward_history (core/reasoning.py): whether earlier assistant
+# reasoning reaches the backend when a model has no override of its own.
+# Cached like reasoning.default_effort.
+_FORWARD_HISTORY_TTL_S = 30.0
+_forward_history_cache: Optional[Tuple[bool, float]] = None
+
+
+async def _get_forward_history_default() -> bool:
+    """Read reasoning.forward_history (a bool) with a 30s TTL cache."""
+    global _forward_history_cache
+    from backend.app.core.reasoning import FORWARD_HISTORY_DEFAULT, FORWARD_HISTORY_KEY
+
+    cached = _forward_history_cache
+    now = time.monotonic()
+    if cached is not None and now - cached[1] < _FORWARD_HISTORY_TTL_S:
+        return cached[0]
+    value = FORWARD_HISTORY_DEFAULT
+    try:
+        from backend.app.db.session import get_async_db_context
+        async with get_async_db_context() as cfg_db:
+            value = bool(await crud.get_config_json(cfg_db, FORWARD_HISTORY_KEY, FORWARD_HISTORY_DEFAULT))
+    except Exception as exc:  # config unreadable → the built-in default (off)
+        logger.warning("reasoning_forward_history_unreadable", error=str(exc))
+    _forward_history_cache = (value, now)
+    return value
+
+
+async def apply_reasoning_history_policy(request, model_name: str, model_row) -> None:
+    """Keep or drop earlier assistant reasoning for the model this attempt hits.
+
+    The inbound translators keep every earlier turn's reasoning the client
+    sent back; this decides whether the backend sees it: the model's
+    ``reasoning_history_override`` if set, else ``reasoning.forward_history``.
+    Reasoning is only ever forwarded on assistant messages. Runs per attempt
+    BEFORE max_tokens is capped, so the token count matches what is sent;
+    a failover attempt targets the same model name, so it decides the same.
+    """
+    messages = getattr(request, "messages", None)
+    if not messages or not any(m.reasoning for m in messages):
+        return
+    from backend.app.core.reasoning import forward_history_for
+
+    override = getattr(model_row, "reasoning_history_override", None)
+    fleet_default = await _get_forward_history_default() if override is None else False
+    keep = forward_history_for(override, fleet_default)
+    stripped = 0
+    for m in messages:
+        if m.reasoning and (not keep or m.role != MessageRole.ASSISTANT):
+            m.reasoning = None
+            stripped += 1
+    if stripped:
+        _invalidate_token_memos(request)
+    logger.debug(
+        "reasoning_history", model=model_name, forwarded=keep,
+        override=override, stripped_messages=stripped,
+    )
 
 
 # Per-model sampling floor / token cap (core/sampling_policy.py), read from
@@ -608,11 +669,14 @@ class InferenceService:
             _ensure_encoder()  # ensure the module-level encoder is ready
             reserve = min(request.max_tokens or 1024, 4096)
             budget = context_length - _TOKEN_BUFFER - reserve
+            before = request.messages
             request.messages, dropped = trim_messages_to_fit(
                 request.messages, budget,
                 lambda s: len(_tiktoken_encoder.encode(s)),
             )
-            if dropped:
+            # A new list means something changed: whole turns dropped, or
+            # only earlier reasoning removed (dropped == 0).
+            if request.messages is not before:
                 _invalidate_token_memos(request)
                 input_tokens, is_estimate = await self._count_input_tokens(
                     request, backend
@@ -737,13 +801,16 @@ class InferenceService:
     def _apply_prompt_redactions(request: Any, redactions: list) -> None:
         """Redact offending values in the OUTBOUND canonical request in place.
 
-        Walks message contents (str or multimodal text parts) and the raw
-        prompt. The audit record is built from the original before this runs, so
-        only what is dispatched to the backend is altered.
+        Walks message contents (str or multimodal text parts), an earlier
+        turn's reasoning (scanned too, and forwarded when the policy keeps it)
+        and the raw prompt. The audit record is built from the original before
+        this runs, so only what is dispatched to the backend is altered.
         """
         from backend.app.services.dlp_enforcement import redact_text
 
         for msg in getattr(request, "messages", None) or []:
+            if isinstance(getattr(msg, "reasoning", None), str):
+                msg.reasoning = redact_text(msg.reasoning, redactions)
             content = getattr(msg, "content", None)
             if isinstance(content, str):
                 msg.content = redact_text(content, redactions)
@@ -2118,6 +2185,14 @@ class InferenceService:
                 else:
                     raise
 
+            # The model this attempt hits (the gateway policies below read its row).
+            _policy_target = (
+                next((m for m in models if m.name == job.model), models[0]) if models else None
+            )
+            # Earlier reasoning is kept or dropped first, so the token count
+            # below matches what is sent.
+            await apply_reasoning_history_policy(request, job.model, _policy_target)
+
             # Cap max_tokens using actual token count (vLLM /tokenize) or
             # tiktoken estimate (Ollama / fallback).
             cap_context_length = None
@@ -2144,9 +2219,6 @@ class InferenceService:
             # high, Qwen3.8: low/medium/xhigh) or dropped when the family has
             # none. gpt-oss has no switch, so it is left to its own default
             # when nothing is said (preserves its reasoning-promotion handling).
-            _policy_target = (
-                next((m for m in models if m.name == job.model), models[0]) if models else None
-            )
             await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
             await apply_sampling_policy(request, job.model)
 
@@ -2431,6 +2503,12 @@ class InferenceService:
                 # routing failed (see _release_request_session).
                 await self._release_request_session()
 
+            # Earlier reasoning first (see the non-streaming path).
+            _policy_target = (
+                next((m for m in _models if m.name == job.model), _models[0]) if _models else None
+            )
+            await apply_reasoning_history_policy(request, job.model, _policy_target)
+
             # Cap max_tokens (same logic as non-streaming path).
             cap_context_length = None
             if _models and hasattr(request, 'max_tokens'):
@@ -2448,9 +2526,6 @@ class InferenceService:
                     request.think = None
 
             # Gateway reasoning policy (see the non-streaming path).
-            _policy_target = (
-                next((m for m in _models if m.name == job.model), _models[0]) if _models else None
-            )
             await apply_reasoning_policy(request, job.model, _policy_target, self._settings)
             await apply_sampling_policy(request, job.model)
 

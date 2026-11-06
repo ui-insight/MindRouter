@@ -66,7 +66,7 @@ from backend.app.services import (
     responses_store,
     responses_websearch,
 )
-from backend.app.services.inference import InferenceService, count_request_text_chars
+from backend.app.services.inference import InferenceService, apply_reasoning_history_policy, count_request_text_chars
 from backend.app.settings import get_settings
 
 logger = get_logger(__name__)
@@ -537,6 +537,12 @@ async def count_input_tokens(
         (b for b in backends if getattr(b.engine, "value", b.engine) == "vllm"),
         backends[0],
     )
+    # Count what would be sent: earlier reasoning is kept or dropped per model.
+    target = next(
+        (m for m in await crud.get_models_for_backend(db, backend.id) if m.name == canonical.model),
+        None,
+    )
+    await apply_reasoning_history_policy(canonical, canonical.model, target)
     count, _is_estimate = await service._count_input_tokens(canonical, backend)
 
     return {"object": "response.input_tokens", "input_tokens": count}

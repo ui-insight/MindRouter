@@ -728,6 +728,10 @@ class Model(Base, TimestampMixin):
     supports_tools: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     tools_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
+    # Earlier assistant reasoning sent back by clients: forward it to this model?
+    # NULL = the fleet setting (app_config reasoning.forward_history).
+    reasoning_history_override: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     # Admin-editable fields
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     model_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
