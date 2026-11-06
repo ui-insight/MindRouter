@@ -1088,6 +1088,25 @@ def merge_chunks(chunks_text: List[str]) -> str:
     return "\n".join(merged_lines)
 
 
+def failure_note(err: Exception) -> str:
+    """What to tell a chat user whose scanned PDF could not be OCR'd.
+
+    perform_ocr raises ValueError for the document itself (no pages, more
+    than ``ocr.max_pages``): the same upload fails the same way every time,
+    so say what is wrong.  Anything else (no healthy backend, a timeout, the
+    service busy) may pass, so suggest trying again.
+    """
+    if isinstance(err, ValueError):
+        return (
+            f"This PDF appears to be scanned, but OCR could not process it ({err}), "
+            "so little or no text could be extracted."
+        )
+    return (
+        "This PDF appears to be scanned, but OCR is unavailable right now, "
+        "so little or no text could be extracted. Try again later."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
@@ -1173,8 +1192,18 @@ async def _perform_ocr_admitted(
     """
     import time as _time
 
+    from backend.app.core.telemetry.registry import get_registry
+
     t_total_start = _time.monotonic()
     is_pdf = (content_type == "application/pdf")
+
+    # Routing looks backends up by the real model name, so an alias that
+    # reaches the chunks unresolved 404s every one of them.  Prod's OCR model
+    # is the alias `default-ocr`: /v1/ocr resolved it before calling here, but
+    # the dashboard chat's scanned-PDF path passed it through, and every
+    # scanned PDF uploaded in chat failed OCR ("Model 'default-ocr' not
+    # found").  Resolving here covers every caller; a real name is unchanged.
+    model, _ = get_registry().resolve_alias(model)
 
     # For Office docs, convert to PDF first (then treat as PDF)
     office_types = {

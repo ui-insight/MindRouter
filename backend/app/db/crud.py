@@ -1505,6 +1505,29 @@ async def update_node_status(
     return node
 
 
+_TELEMETRY_DELETE_BATCH = 10000
+
+
+async def _delete_telemetry_in_batches(db: AsyncSession, model, condition) -> None:
+    """Delete one node's or backend's raw telemetry in committed LIMIT batches.
+
+    At a 90-day Tier 1 that is millions of rows: one DELETE would hold their
+    row locks in a single transaction while the poller keeps inserting, and
+    the ORM cascade would load every row into memory first.
+    """
+    while True:
+        deleted = (
+            await db.execute(
+                delete(model)
+                .where(condition)
+                .with_dialect_options(mysql_limit=_TELEMETRY_DELETE_BATCH)
+            )
+        ).rowcount or 0
+        await db.commit()
+        if deleted < _TELEMETRY_DELETE_BATCH:
+            return
+
+
 async def delete_node(db: AsyncSession, node_id: int) -> bool:
     """Delete a node. Fails if backends still reference it."""
     # Check for backends referencing this node
@@ -1514,7 +1537,22 @@ async def delete_node(db: AsyncSession, node_id: int) -> bool:
     if result.scalar_one_or_none():
         return False
 
-    # Delete GPU devices on this node (cascade deletes their telemetry)
+    # Bulk-delete the node's raw telemetry first, in committed batches.  Left to
+    # the ORM cascade below, every reading (millions at a 90-day Tier 1) is
+    # loaded into memory just to be deleted.  Averages already in the archive
+    # are kept; readings not yet averaged (the last ~hour) go with the node.
+    device_ids = list(
+        (await db.execute(select(GPUDevice.id).where(GPUDevice.node_id == node_id)))
+        .scalars()
+        .all()
+    )
+    if device_ids:
+        await _delete_telemetry_in_batches(
+            db, GPUDeviceTelemetry, GPUDeviceTelemetry.gpu_device_id.in_(device_ids)
+        )
+    await _delete_telemetry_in_batches(db, NodeTelemetry, NodeTelemetry.node_id == node_id)
+
+    # Delete GPU devices on this node (their telemetry is already gone)
     gpu_result = await db.execute(
         select(GPUDevice).where(GPUDevice.node_id == node_id)
     )
@@ -1777,10 +1815,12 @@ async def update_node(
 
 async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
     """Delete a backend and its associated data."""
-    # Bulk-delete child rows with NOT NULL FK
-    await db.execute(
-        delete(BackendTelemetry).where(BackendTelemetry.backend_id == backend_id)
+    # Its raw telemetry first, in committed batches (see delete_node).
+    # Averages already in the archive are kept.
+    await _delete_telemetry_in_batches(
+        db, BackendTelemetry, BackendTelemetry.backend_id == backend_id
     )
+    # Bulk-delete the other child rows with NOT NULL FK
     await db.execute(
         delete(Model).where(Model.backend_id == backend_id)
     )
@@ -1903,6 +1943,33 @@ async def get_backends_with_model(
         query = query.where(Model.modality == modality)
     result = await db.execute(query.options(selectinload(Backend.models)))
     return list(result.scalars().all())
+
+
+async def get_model_backend_statuses(
+    db: AsyncSession, model_name: str, modality: Optional[Modality] = None
+) -> set:
+    """Statuses of every backend carrying this model, healthy or not.
+
+    The same name / modality / model-less-engine filter as
+    ``get_backends_with_model``, without its HEALTHY condition, so anything
+    routable shows up here.  Empty means the fleet does not have the model
+    (for this modality).  Routing uses it to tell an unknown name (404) from
+    a model whose backends may come back (wait briefly) from one an admin
+    took out of service (answer at once).
+    """
+    conditions = [
+        Model.name == model_name,
+        Backend.engine.notin_(MODELLESS_ENGINES),
+    ]
+    if modality:
+        conditions.append(Model.modality == modality)
+    result = await db.execute(
+        select(Backend.status)
+        .join(Model, Model.backend_id == Backend.id)
+        .where(and_(*conditions))
+        .distinct()
+    )
+    return {status for (status,) in result.all()}
 
 
 async def get_servable_video_models(db: AsyncSession) -> List[str]:
@@ -2043,11 +2110,23 @@ async def upsert_model(
         model.family = model.family_override if model.family_override is not None else model.family
         model.parameter_count = model.parameter_count_override if model.parameter_count_override is not None else model.parameter_count
     else:
-        # INSERT new model record
+        # INSERT new model record. A new replica takes the model's
+        # reasoning-history override from its siblings (the admin toggle sets
+        # every row of the name), so every backend serving it decides alike.
+        sibling_rh = await db.execute(
+            select(Model.reasoning_history_override).where(
+                and_(
+                    Model.name == name,
+                    Model.backend_id != backend_id,
+                    Model.reasoning_history_override.is_not(None),
+                )
+            ).limit(1)
+        )
         model = Model(
             backend_id=backend_id,
             name=name,
             modality=modality,
+            reasoning_history_override=sibling_rh.scalar_one_or_none(),
             context_length=context_length,
             model_max_context=model_max_context,
             supports_multimodal=effective_multimodal,
@@ -2157,6 +2236,21 @@ async def set_thinking_override_by_name(
         m.thinking_override = value
         if value is not None:
             m.supports_thinking = value
+    await db.flush()
+    return len(models)
+
+
+async def set_reasoning_history_override_by_name(
+    db: AsyncSession, model_name: str, value: Optional[bool]
+) -> int:
+    """Set the reasoning-history override for ALL model rows with the given name.
+
+    None returns the model to the fleet setting (reasoning.forward_history).
+    """
+    result = await db.execute(select(Model).where(Model.name == model_name))
+    models = list(result.scalars().all())
+    for m in models:
+        m.reasoning_history_override = value
     await db.flush()
     return len(models)
 
@@ -2835,26 +2929,6 @@ async def get_latest_gpu_device_telemetry(
     return list(result.scalars().all())
 
 
-async def delete_old_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete backend telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(BackendTelemetry).where(BackendTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
-
-
-async def delete_old_gpu_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete per-GPU telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(GPUDeviceTelemetry).where(GPUDeviceTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
 
 
 async def create_node_telemetry(
@@ -2972,16 +3046,6 @@ async def get_cluster_power_history(
         for row in rows
     ]
 
-
-async def delete_old_node_telemetry(
-    db: AsyncSession, older_than: datetime
-) -> int:
-    """Delete node telemetry data older than the given datetime."""
-    result = await db.execute(
-        delete(NodeTelemetry).where(NodeTelemetry.timestamp < older_than)
-    )
-    await db.flush()
-    return result.rowcount
 
 
 async def delete_expired_api_keys(

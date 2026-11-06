@@ -790,10 +790,19 @@ def extract_scannable_text(
                     # Multipart content — only extract text parts
                     for part in content:
                         if isinstance(part, dict):
-                            if part.get("type") == "text":
+                            if part.get("type") in ("text", "reasoning_text"):
                                 parts.append(part.get("text", ""))
+                            elif part.get("type") == "thinking":
+                                parts.append(part.get("thinking", ""))
                             elif part.get("type") in ("image_url", "image"):
                                 continue  # skip images
+                # An earlier turn's reasoning sent back by the client (canonical
+                # `reasoning`, OpenAI `reasoning_content`, Ollama `thinking`):
+                # client-supplied text, so it is scanned like content.
+                for key in ("reasoning", "reasoning_content", "thinking"):
+                    value = msg.get(key)
+                    if isinstance(value, str):
+                        parts.append(value)
 
     # Extract from raw prompt
     if prompt:

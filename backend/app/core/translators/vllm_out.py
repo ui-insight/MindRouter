@@ -868,6 +868,13 @@ class VLLMOutTranslator:
         if msg.name:
             result["name"] = msg.name
 
+        # An earlier turn's reasoning, present only when the gateway policy
+        # kept it for this model (services/inference.apply_reasoning_history_policy).
+        # vLLM reads `reasoning` (and the older `reasoning_content`) on
+        # assistant messages; each chat template decides what it renders.
+        if msg.reasoning and msg.role == MessageRole.ASSISTANT:
+            result["reasoning"] = msg.reasoning
+
         # Add tool_calls for assistant messages
         if msg.tool_calls:
             result["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
