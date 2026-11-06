@@ -52,12 +52,25 @@ counts growing each cycle.
 ## If the archive breaks later
 
 A table whose rollup fails keeps its raw readings (they have no averages yet)
-and logs `retention_telemetry_rollup_failed` every cycle. After 14 days of
-failures, readings more than 14 days past Tier 1 are deleted anyway, with
+and logs `retention_telemetry_rollup_failed` every cycle. The first failure is
+recorded in `app_config` (`telemetry.rollup_failing_since.<table>`) and the next
+success clears it. Once a table has failed for more than 14 days in a row,
+readings more than 14 days past Tier 1 are deleted anyway, with
 `retention_telemetry_backstop_delete` logged as an **error**. Those readings
 are lost, never averaged. Watch for either event.
 
 ## Rollback
+
+The old code's registry loop deletes raw telemetry older than 30 days in **one
+unbatched transaction per table, in all 8 workers at once**. After this release
+has kept up to 90 days, that is tens of millions of rows: seven workers hit
+lock-wait timeouts and one builds a huge undo log on `/var`. So first let this
+release prune in batches:
+
+1. Admin → Retention → Telemetry Tier 1 = **30**, save.
+2. **Run Retention Now** at the top of the page (or wait one cycle), and check the logs for
+   `retention_telemetry_batch` lines and no `_delete_failed`.
+3. Then roll the code back:
 
 ```bash
 cd /opt/mindrouter
@@ -65,5 +78,6 @@ git checkout <previous tag>
 docker compose build app && docker compose up -d app && docker compose restart mcp
 ```
 
-The `*_5m` tables stay in the archive DB, unused by the old code. The old
-registry loop resumes deleting raw telemetry at 30 days.
+The `*_5m` tables and any `telemetry.rollup_failing_since.*` rows in `app_config`
+stay, unused by the old code. The old registry loop resumes deleting raw
+telemetry at 30 days, which after step 2 finds little to delete.

@@ -152,6 +152,8 @@ async def _scratch(app_time_zone=None):
                     m_.Node.__table__, m_.GPUDevice.__table__, m_.Backend.__table__,
                     m_.NodeTelemetry.__table__, m_.GPUDeviceTelemetry.__table__,
                     m_.BackendTelemetry.__table__,
+                    # where a table's rollup failures are recorded
+                    m_.AppConfig.__table__,
                 ],
             )
         async with archive_engine.begin() as conn:
@@ -917,8 +919,16 @@ async def test_rollups_failing_for_weeks_only_delete_past_the_backstop():
             for d in range(50, 0, -1)
         ])
         raw = env.mods.models.NodeTelemetry
+        # The rollups started failing 15 days ago; that first failure deleted
+        # nothing.
+        start = now - timedelta(days=15)
+        first = await _run(env, cutoff=start - timedelta(days=30), now=start,
+                           archive_wrapper=_UnreachableArchive, tier2_days=365)
+        assert first["node_telemetry"]["deleted"] == 0
+        assert first["node_telemetry"]["failing_since"] == start.isoformat()
         failed = await _run(env, cutoff=now - timedelta(days=30), now=now,
                             archive_wrapper=_UnreachableArchive, tier2_days=365)
+        assert failed["node_telemetry"]["failing_since"] == start.isoformat()
         # Days 50..44 (stamped an hour before each day mark) are older than
         # 30 + 14 days; day 43 and newer stay, although past Tier 1.
         assert failed["node_telemetry"]["deleted"] == 7
@@ -927,6 +937,40 @@ async def test_rollups_failing_for_weeks_only_delete_past_the_backstop():
         ]
         errors = [(e, k.get("table")) for (lvl, e, k) in env.mods.log.records if lvl == "error"]
         assert errors == [("retention_telemetry_backstop_delete", "node_telemetry")]
+
+
+async def _failure_markers(env):
+    async with env.app_engine.connect() as conn:
+        return set((await conn.execute(text(
+            "SELECT `key` FROM app_config WHERE `key` LIKE 'telemetry.rollup_failing_since.%'"
+        ))).scalars())
+
+
+async def test_one_transient_failure_during_a_backfill_leaves_no_hole():
+    # Review finding: the backstop measured distance from the cutoff, so one
+    # failed cycle during a backfill deleted readings 44+ days old that the
+    # backfill had not reached yet, and they were never averaged.
+    async with _scratch() as env:
+        await _seed_dimensions(env)
+        now = datetime(2026, 10, 30, 12, 0)
+        days = list(range(60, 0, -1))
+        await _insert_readings(env, node=[
+            _node(1, now - timedelta(days=d), 1000 + d, 10.0) for d in days
+        ])
+        node_m = _models(env)[0]
+        cutoff = now - timedelta(days=30)
+        await _run(env, cutoff=cutoff, now=now, tier2_days=365)
+        failed = await _run(env, cutoff=cutoff, now=now,
+                            archive_wrapper=_UnreachableArchive, tier2_days=365)
+        assert failed["node_telemetry"]["deleted"] == 0
+        assert len(await _failure_markers(env)) == 3
+        for _ in range(4):
+            await _run(env, cutoff=cutoff, now=now, tier2_days=365)
+        archived = sorted(b for _, b in await _rollups(env, node_m, "node_id"))
+        assert archived == [now - timedelta(days=d) for d in days]
+        # The successes cleared every recorded failure.
+        assert await _failure_markers(env) == set()
+        assert [e for (lvl, e, _) in env.mods.log.records if lvl == "error"] == []
 
 
 async def test_workers_creating_the_archive_tables_at_once_all_succeed():

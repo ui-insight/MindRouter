@@ -732,10 +732,22 @@ def orchestration(monkeypatch):
             "backend_telemetry": None,
         },
         failing=set(),
+        # table -> when its rollups began failing (absent: this failure is
+        # the first, so it began now)
+        failing_since={},
+        marked=[],
+        cleared=[],
         rollup_now=[],
         rollup_kw=[],
         deletes=[],
     )
+
+    async def fake_failing_since(app_db, table, now):
+        state.marked.append(table)
+        return state.failing_since.setdefault(table, now)
+
+    async def fake_clear(app_db, table):
+        state.cleared.append(table)
 
     async def fake_rollup(app_db, archive_db, spec, model, now, **kw):
         state.rollup_now.append(now)
@@ -756,6 +768,8 @@ def orchestration(monkeypatch):
 
     monkeypatch.setattr(retention, "_rollup_telemetry_table", fake_rollup)
     monkeypatch.setattr(retention, "_delete_telemetry_before", fake_delete)
+    monkeypatch.setattr(retention, "_rollup_failing_since", fake_failing_since)
+    monkeypatch.setattr(retention, "_clear_rollup_failure", fake_clear)
     monkeypatch.setattr(retention, "_telemetry_db_now", fake_db_now)
     monkeypatch.setattr(retention, "_rollup_models", lambda: dict(ROLLUP_MODELS))
     return state
@@ -788,13 +802,14 @@ class TestArchiveExpiredTelemetry:
         summary = await retention.archive_expired_telemetry(
             app, archive, self.CUTOFF, 500
         )
-        # node: the capped delete.  gpu: only the backstop, 14 days past the
-        # tier-1 cutoff, not the cutoff itself.
-        assert orchestration.deletes == [
-            ("node_telemetry", dt(2026, 9, 1), 10000),
-            ("gpu_device_telemetry", dt(2026, 8, 18), 10000),
-        ]
+        # A first failure: the GPU table deletes nothing at all.
+        assert [d[0] for d in orchestration.deletes] == ["node_telemetry"]
         assert "boom" in summary["gpu_device_telemetry"]["error"]
+        assert summary["gpu_device_telemetry"]["deleted"] == 0
+        assert summary["gpu_device_telemetry"]["failing_since"] == "2026-10-30T12:13:00"
+        # The failure is recorded; the tables that rolled up clear theirs.
+        assert orchestration.marked == ["gpu_device_telemetry"]
+        assert orchestration.cleared == ["node_telemetry", "backend_telemetry"]
         warnings = [(e, k) for (lvl, e, k) in _LOG.records if lvl == "warning"]
         assert ("retention_telemetry_rollup_failed", "gpu_device_telemetry") in [
             (e, k.get("table")) for e, k in warnings
@@ -805,12 +820,43 @@ class TestArchiveExpiredTelemetry:
         # Both sessions were reset so the next table starts clean.
         assert app.rollbacks == 1 and archive.rollbacks == 1
 
+    @pytest.mark.parametrize("failing_for, backstop", [
+        # One transient failure during a backfill (old readings legitimately
+        # not averaged yet) must not delete them: that left a permanent hole.
+        (timedelta(0), False),
+        (timedelta(days=14), False),
+        (timedelta(days=14, minutes=1), True),
+        (timedelta(days=40), True),
+    ])
+    async def test_backstop_waits_for_two_weeks_of_failures(self, orchestration, failing_for, backstop):
+        orchestration.failing = {"gpu_device_telemetry"}
+        orchestration.failing_since["gpu_device_telemetry"] = dt(2026, 10, 30, 12, 13) - failing_for
+        await retention.archive_expired_telemetry(_NullDb(), _NullDb(), self.CUTOFF, 500)
+        gpu = [d for d in orchestration.deletes if d[0] == "gpu_device_telemetry"]
+        # Never the tier-1 cutoff itself: 14 days before it.
+        assert gpu == ([("gpu_device_telemetry", dt(2026, 8, 18), 10000)] if backstop else [])
+
+    async def test_an_unrecordable_failure_deletes_nothing(self, orchestration, monkeypatch):
+        orchestration.failing = {"gpu_device_telemetry"}
+
+        async def broken(app_db, table, now):
+            raise RuntimeError("app DB gone too")
+
+        monkeypatch.setattr(retention, "_rollup_failing_since", broken)
+        app = _NullDb()
+        summary = await retention.archive_expired_telemetry(app, _NullDb(), self.CUTOFF, 500)
+        assert [d[0] for d in orchestration.deletes] == ["node_telemetry"]
+        assert "failing_since" not in summary["gpu_device_telemetry"]
+        assert "retention_telemetry_failure_not_recorded" in _LOG.events("warning")
+        assert app.rollbacks == 2  # after the rollup, and after the marker
+
     @pytest.mark.parametrize("backstop_rows, logged", [(11, True), (0, False)])
     async def test_backstop_deletes_are_logged_as_errors(self, orchestration, monkeypatch, backstop_rows, logged):
         # Rollups failing for weeks would otherwise grow the app DB without
         # limit (the registry's own 30-day delete is gone).  Anything the
         # backstop removes had no averages, so it is an error, not routine.
         orchestration.failing = {"gpu_device_telemetry"}
+        orchestration.failing_since["gpu_device_telemetry"] = dt(2026, 10, 1)
 
         async def fake_delete(app_db, spec, before, batch):
             return backstop_rows if spec.table == "gpu_device_telemetry" else 5
@@ -833,8 +879,23 @@ class TestArchiveExpiredTelemetry:
 
     async def test_a_failed_rollup_without_a_cutoff_deletes_nothing(self, orchestration):
         orchestration.failing = {"gpu_device_telemetry"}
+        orchestration.failing_since["gpu_device_telemetry"] = dt(2026, 9, 1)
         await retention.archive_expired_telemetry(_NullDb(), _NullDb(), None, 500)
         assert orchestration.deletes == []
+        assert orchestration.marked == ["gpu_device_telemetry"]
+
+    async def test_a_partly_failed_delete_counts_the_committed_batches(self, orchestration, monkeypatch):
+        async def fake_delete(app_db, spec, before, batch):
+            exc = RuntimeError("deadlock")
+            exc.deleted_before_failure = 20000
+            raise exc
+
+        monkeypatch.setattr(retention, "_delete_telemetry_before", fake_delete)
+        summary = await retention.archive_expired_telemetry(
+            _NullDb(), _NullDb(), self.CUTOFF, 500
+        )
+        assert summary["node_telemetry"]["deleted"] == 20000
+        assert "deadlock" in summary["node_telemetry"]["delete_error"]
 
     async def test_a_failed_delete_does_not_stop_the_other_tables(self, orchestration, monkeypatch):
         # A lock-wait timeout deleting node_telemetry used to abort the whole
@@ -942,6 +1003,21 @@ class TestDeleteTelemetryBefore:
             assert event[1] == spec.delete_sql
             assert event[2] == {"cutoff": self.BEFORE, "batch": 500}
 
+    async def test_a_failure_carries_the_rows_already_deleted(self):
+        db = _DeletingAppDb([500, 500])
+
+        async def execute(stmt, params=None):
+            if not db.rowcounts:
+                raise RuntimeError("Lock wait timeout exceeded")
+            return _Result(rowcount=db.rowcounts.pop(0))
+
+        db.execute = execute
+        with pytest.raises(RuntimeError) as info:
+            await retention._delete_telemetry_before(
+                db, SPECS["node_telemetry"], self.BEFORE, 500
+            )
+        assert info.value.deleted_before_failure == 1000
+
     async def test_a_full_last_batch_takes_one_more_round(self):
         db = _DeletingAppDb([500, 0])
         total = await retention._delete_telemetry_before(
@@ -1034,7 +1110,7 @@ def _config(**overrides):
 def wiring(monkeypatch):
     calls = []
     state = types.SimpleNamespace(
-        calls=calls, config=_config(), rollup_error=None, rollup_kw=[],
+        calls=calls, config=_config(), rollup_error=None, rollup_kw=[], backstops=[],
         rollup_result={t: {"rolled_up": 1, "deleted": 0} for t in _TABLES},
     )
 
@@ -1061,8 +1137,16 @@ def wiring(monkeypatch):
     async def cleanup_expired_request_images(*a, **k):
         return {}
 
+    async def telemetry_backstop_without_archive(app_db, cutoff, batch_size):
+        assert app_db.kind == "app"
+        state.backstops.append(cutoff)
+        return {}
+
     monkeypatch.setattr(retention, "get_retention_config", get_retention_config)
     monkeypatch.setattr(retention, "archive_expired_telemetry", archive_expired_telemetry)
+    monkeypatch.setattr(
+        retention, "telemetry_backstop_without_archive", telemetry_backstop_without_archive
+    )
     monkeypatch.setattr(retention, "cleanup_expired_telemetry", cleanup_expired_telemetry)
     monkeypatch.setattr(retention, "purge_expired_archives", purge_expired_archives)
     monkeypatch.setattr(
@@ -1168,8 +1252,18 @@ class TestRetentionCycleWiring:
         with _pinned_modules(_wiring_modules(True)):
             summary = await retention.run_retention_cycle()
         assert summary["failed_steps"] == ["telemetry"]
+        assert "rollup exploded" in summary["telemetry"]["error"]
         assert "purge_expired_archives" in [c[0] for c in wiring.calls]
         assert "orphan_attachments" in summary and "request_images" in summary
+        # Failing before the per-table loop still counts toward the backstop.
+        assert len(wiring.backstops) == 1
+        _assert_days_ago(wiring.backstops[0], 90)
+
+    async def test_a_clean_cycle_runs_no_fallback_backstop(self, wiring):
+        wiring.config = _config(tier1_days=90, tier2_days=730)
+        with _pinned_modules(_wiring_modules(True)):
+            await retention.run_retention_cycle()
+        assert wiring.backstops == []
 
     async def test_a_clean_cycle_reports_no_failed_steps(self, wiring):
         wiring.config = _config(tier1_days=90, tier2_days=730)
@@ -1312,7 +1406,10 @@ class TestSingleTelemetryDeleter:
         # Pins the callers, not the SQL text: a new deleter that went through
         # the retention service's own functions (as the removed registry loop
         # last did) would pass the text scan above but fails here.
-        names = {"cleanup_expired_telemetry", "archive_expired_telemetry", "_delete_telemetry_before"}
+        names = {
+            "cleanup_expired_telemetry", "archive_expired_telemetry", "_delete_telemetry_before",
+            "_delete_table_telemetry", "_after_rollup_failure", "telemetry_backstop_without_archive",
+        }
         for path in sorted(_APP.rglob("*.py")):
             rel = path.relative_to(_APP).as_posix()
             if rel.startswith("tests/") or rel == "services/retention.py":
@@ -1339,9 +1436,17 @@ class TestSingleTelemetryDeleter:
         }
         assert callers == {
             # the scheduled cycle's telemetry step (nested in run_retention_cycle)
-            "_telemetry": {"archive_expired_telemetry", "cleanup_expired_telemetry"},
+            "_telemetry": {
+                "archive_expired_telemetry", "cleanup_expired_telemetry",
+                # the archive could not be opened: backstop only
+                "telemetry_backstop_without_archive",
+            },
             # Admin -> Retention -> Purge
             "run_purge": {"archive_expired_telemetry", "cleanup_expired_telemetry"},
+            "archive_expired_telemetry": {"_delete_table_telemetry", "_after_rollup_failure"},
+            "telemetry_backstop_without_archive": {"_after_rollup_failure"},
+            # the backstop, only after two weeks of failed rollups
+            "_after_rollup_failure": {"_delete_table_telemetry"},
             # its per-table delete (the capped delete and the backstop)
             "_delete_table_telemetry": {"_delete_telemetry_before"},
         }
@@ -1609,7 +1714,7 @@ class TestRetentionPage:
         help_text = _element_text(_render_policies(True)[0], "retention_telemetry_tier1_help")
         assert "deleted only after its average is in the archive" in help_text
         assert "Apart from the Purge tab and deleting a node or backend, this is the only setting that deletes raw readings." in help_text
-        assert "readings 14 days past this limit are deleted anyway" in help_text
+        assert "if averaging has failed for more than 14 days in a row, readings 14 days past this limit are deleted anyway" in help_text
         assert "TELEMETRY_RETENTION_DAYS" not in help_text
 
     def test_tier2_zero_is_described_as_keeping_archived_averages(self):
@@ -1661,13 +1766,15 @@ class TestDocs:
         assert "0 = telemetry is not archived" not in page
         assert "5-minute averages in <code>archived_*_telemetry_5m</code>" in page
         assert "The only scheduled deletion of raw telemetry" in page
-        assert "14 days past this limit if averaging keeps failing" in page
+        assert "once averaging has failed for more than 14 days in a row, 14 days past this limit" in page
         assert "Each category runs on its own" in page
 
     def test_docs_describe_isolation_and_entity_deletes(self):
         docs = " ".join(self.DOCS.split())
         assert "listed in the cycle summary's `failed_steps`" in docs
-        assert "readings not yet averaged (up to about the last hour) go with it" in docs
+        assert "readings not yet averaged go with it: normally the last hour, but everything past the rollup frontier" in docs
+        assert "a single failed cycle never deletes un-averaged readings" in docs
+        assert "except telemetry Tier 2, where `0` means no averages are written" in docs
 
     def test_docs_match_the_review_fixes(self):
         docs = " ".join(self.DOCS.split())
@@ -1675,7 +1782,7 @@ class TestDocs:
         # registry's TELEMETRY_RETENTION_DAYS loop and its settings are gone.
         assert "by the retention cycle (the only scheduled deleter of raw telemetry)" in docs
         assert "retention_telemetry_backstop_delete" in docs
-        assert "were removed in this release and are ignored if set" in docs
+        assert "were removed in 2.9.97 and are ignored if set" in docs
         assert "| `TELEMETRY_RETENTION_DAYS`" not in docs
         # Backfill never reaches past tier 2.
         assert "starting no further back than Tier 2" in docs

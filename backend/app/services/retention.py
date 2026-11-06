@@ -833,12 +833,17 @@ _ROLLUP_INSERT_BATCH = 1000
 # expire millions of rows at once.
 _ROLLUP_PURGE_BATCH = 10000
 # While a table's rollup keeps failing, its expired raw readings are kept
-# (they have no averages yet) -- but not forever.  Readings this far past
-# the tier-1 cutoff are deleted anyway, logged as an error: a broken
-# archive must not grow the app DB without limit (~80M rows a month).
-# Under normal operation nothing is that old, so this deletes only after
-# ~2 weeks of failed rollups.
+# (they have no averages yet) -- but not forever.  Once a table's rollups
+# have failed without a success in between for longer than this, readings
+# this far past the tier-1 cutoff are deleted anyway, logged as an error: a
+# broken archive must not grow the app DB without limit (~80M rows a
+# month).  The time is measured from the first failure, recorded in
+# app_config (shared by every worker; cleared by the next success), never
+# from the readings' age: a backfill legitimately leaves old readings
+# un-averaged for a few cycles, and one transient failure must not delete
+# them.
 _TELEMETRY_BACKSTOP_GRACE = timedelta(days=14)
+_ROLLUP_FAILING_KEY = "telemetry.rollup_failing_since.{table}"
 # Seek origin for a table that has never been rolled up, and the epoch of the
 # bucket expression below.  No reading predates it.
 _ROLLUP_EPOCH = datetime(2000, 1, 1)
@@ -1317,12 +1322,18 @@ async def _delete_telemetry_before(
     """
     total = 0
     while True:
-        result = await app_db.execute(
-            text(spec.delete_sql), {"cutoff": before, "batch": batch}
-        )
-        deleted = result.rowcount
+        try:
+            result = await app_db.execute(
+                text(spec.delete_sql), {"cutoff": before, "batch": batch}
+            )
+            deleted = result.rowcount
+            await app_db.commit()
+        except Exception as exc:
+            # The batches already committed are deleted; let the caller
+            # report them.
+            exc.deleted_before_failure = total
+            raise
         total += deleted
-        await app_db.commit()
         if deleted > 0:
             logger.info(
                 "retention_telemetry_batch",
@@ -1361,11 +1372,11 @@ async def archive_expired_telemetry(
        but never past the table's rollup frontier: a reading goes only after
        its bucket has been committed to the archive (or when it is older
        than tier 2 keeps).  When a table's rollup fails, its raw rows are
-       left alone this cycle, except readings more than
-       _TELEMETRY_BACKSTOP_GRACE past ``cutoff`` (only rollups failing for
-       that long leaves any), which are deleted with an error logged.  A
-       failed delete is recorded as that table's ``delete_error`` and the
-       other tables still run.
+       left alone this cycle, unless its rollups have been failing for
+       longer than _TELEMETRY_BACKSTOP_GRACE (recorded in app_config, cleared
+       by a success): then readings that far past ``cutoff`` are deleted,
+       with an error logged.  A failed delete is recorded as that table's
+       ``delete_error`` and the other tables still run.
 
     Raw readings are not copied to the archive one by one; the rollups are
     the long-term record.  The raw archived_*_telemetry tables only hold
@@ -1409,18 +1420,18 @@ async def archive_expired_telemetry(
                 error=entry["error"],
                 exc_info=True,
             )
-            if cutoff is not None:
-                backstop = _as_naive_utc(cutoff) - _TELEMETRY_BACKSTOP_GRACE
-                logger.warning(
-                    "retention_telemetry_delete_skipped",
-                    table=spec.table,
-                    reason="rollup_failed",
-                    backstop_before=_iso(backstop),
-                )
-                await _delete_table_telemetry(
-                    app_db, spec, backstop, tel_batch, entry, backstop=True
-                )
+            await _after_rollup_failure(app_db, spec, cutoff, now, tel_batch, entry)
             continue
+
+        try:
+            await _clear_rollup_failure(app_db, spec.table)
+        except Exception as exc:
+            await _rollback_quietly(app_db)
+            logger.warning(
+                "retention_telemetry_failure_not_cleared",
+                table=spec.table,
+                error=f"{type(exc).__name__}: {exc}"[:500],
+            )
 
         entry["rolled_up"] = progress["rows_written"]
         entry["windows"] = progress["windows"]
@@ -1447,6 +1458,101 @@ async def archive_expired_telemetry(
     return summary
 
 
+async def _rollup_failing_since(
+    app_db: AsyncSession, table: str, now: datetime
+) -> datetime:
+    """Record that ``table``'s rollup failed at ``now`` unless an earlier
+    failure is already recorded; return when the failures began."""
+    key = _ROLLUP_FAILING_KEY.format(table=table)
+    await app_db.execute(
+        text(
+            "INSERT IGNORE INTO app_config (`key`, value, description)"
+            " VALUES (:key, :value, :description)"
+        ),
+        {
+            "key": key,
+            "value": _json.dumps(_iso(_as_naive_utc(now))),
+            "description": "Telemetry rollups failing since (DB clock); "
+            "cleared by the next successful rollup",
+        },
+    )
+    raw = (
+        await app_db.execute(
+            text("SELECT value FROM app_config WHERE `key` = :key"), {"key": key}
+        )
+    ).scalar()
+    await app_db.commit()
+    return datetime.fromisoformat(_json.loads(raw))
+
+
+async def _clear_rollup_failure(app_db: AsyncSession, table: str) -> None:
+    """Forget a recorded failure: ``table`` just rolled up successfully."""
+    await app_db.execute(
+        text("DELETE FROM app_config WHERE `key` = :key"),
+        {"key": _ROLLUP_FAILING_KEY.format(table=table)},
+    )
+    await app_db.commit()
+
+
+async def _after_rollup_failure(
+    app_db: AsyncSession,
+    spec: _RollupSpec,
+    cutoff: Optional[datetime],
+    now: datetime,
+    batch: int,
+    entry: dict[str, Any],
+) -> None:
+    """A table's rollup failed: keep its raw readings, unless its rollups
+    have been failing for longer than _TELEMETRY_BACKSTOP_GRACE, in which
+    case readings that far past ``cutoff`` go anyway (the backstop)."""
+    try:
+        since = await _rollup_failing_since(app_db, spec.table, now)
+    except Exception as exc:
+        # Cannot tell how long it has been failing: delete nothing.
+        await _rollback_quietly(app_db)
+        logger.warning(
+            "retention_telemetry_failure_not_recorded",
+            table=spec.table,
+            error=f"{type(exc).__name__}: {exc}"[:500],
+        )
+        return
+    entry["failing_since"] = _iso(since)
+    if cutoff is None:
+        return
+    if _as_naive_utc(now) - _as_naive_utc(since) <= _TELEMETRY_BACKSTOP_GRACE:
+        logger.warning(
+            "retention_telemetry_delete_skipped",
+            table=spec.table,
+            reason="rollup_failed",
+            failing_since=entry["failing_since"],
+        )
+        return
+    backstop = _as_naive_utc(cutoff) - _TELEMETRY_BACKSTOP_GRACE
+    logger.warning(
+        "retention_telemetry_delete_skipped",
+        table=spec.table,
+        reason="rollup_failed",
+        failing_since=entry["failing_since"],
+        backstop_before=_iso(backstop),
+    )
+    await _delete_table_telemetry(app_db, spec, backstop, batch, entry, backstop=True)
+
+
+async def telemetry_backstop_without_archive(
+    app_db: AsyncSession, cutoff: Optional[datetime], batch_size: int
+) -> dict[str, Any]:
+    """The archive could not even be opened (or the pass failed before its
+    per-table loop): every table counts as failed for the backstop."""
+    now = await _telemetry_db_now(app_db)
+    tel_batch = _telemetry_delete_batch(batch_size)
+    summary: dict[str, Any] = {}
+    for spec in _ROLLUP_SPECS:
+        entry: dict[str, Any] = {"deleted": 0}
+        summary[spec.table] = entry
+        await _after_rollup_failure(app_db, spec, cutoff, now, tel_batch, entry)
+    return summary
+
+
 async def _delete_table_telemetry(
     app_db: AsyncSession,
     spec: _RollupSpec,
@@ -1467,6 +1573,9 @@ async def _delete_table_telemetry(
         deleted = await _delete_telemetry_before(app_db, spec, before, batch)
     except Exception as exc:
         await _rollback_quietly(app_db)
+        # Batches committed before the failure are gone: count them.
+        deleted = getattr(exc, "deleted_before_failure", 0)
+        entry["deleted"] = deleted
         entry["delete_error"] = f"{type(exc).__name__}: {exc}"[:500]
         logger.warning(
             "retention_telemetry_delete_failed",
@@ -2467,12 +2576,23 @@ async def run_retention_cycle() -> dict[str, Any]:
                 else None
             )
             async with get_async_db_context() as app_db:
-                async with get_archive_db_context() as archive_db:
-                    return await archive_expired_telemetry(
-                        app_db, archive_db, cutoff,
-                        config.get("retention.batch_size", 500),
-                        tier2_days=telemetry_tier2,
+                try:
+                    async with get_archive_db_context() as archive_db:
+                        return await archive_expired_telemetry(
+                            app_db, archive_db, cutoff,
+                            config.get("retention.batch_size", 500),
+                            tier2_days=telemetry_tier2,
+                        )
+                except Exception:
+                    # Failed before the per-table loop (the archive could
+                    # not be opened, say).  Count it as a failed rollup for
+                    # every table, so the backstop still applies, and report
+                    # the step as failed.
+                    await _rollback_quietly(app_db)
+                    await telemetry_backstop_without_archive(
+                        app_db, cutoff, config.get("retention.batch_size", 500)
                     )
+                    raise
         if telemetry_tier1 > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=telemetry_tier1)
             async with get_async_db_context() as app_db:
