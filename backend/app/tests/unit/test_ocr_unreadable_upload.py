@@ -63,6 +63,10 @@ def ocr():
         st = ModuleType("backend.app.settings")
         st.get_settings = lambda: SimpleNamespace(ocr_max_frames=50, chat_upload_max_uncompressed_mb=100)
         sys.modules["backend.app.settings"] = st
+        # perform_ocr resolves model aliases through the registry (2.9.98).
+        reg = ModuleType("backend.app.core.telemetry.registry")
+        reg.get_registry = lambda: SimpleNamespace(resolve_alias=lambda m: (m, None))
+        sys.modules["backend.app.core.telemetry.registry"] = reg
         spec = importlib.util.spec_from_file_location(
             "ocr_unreadable_under_test", REPO_ROOT / "backend/app/services/ocr.py")
         mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
