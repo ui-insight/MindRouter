@@ -397,10 +397,16 @@ class Pixal3DEngine(_TrellisFamilyEngine):
                 if getattr(m, "use_naf_upsample", False):
                     m._load_naf()
         if self.config.pixal3d_fov <= 0:
-            # UNVERIFIED: MoGe-2 API (moge.model.v2.MoGeModel) as in inference.py.
+            # MoGe-2 API (moge.model.v2.MoGeModel) as in inference.py. Its
+            # from_pretrained() takes a checkpoint FILE or a repo id; given a
+            # staged local repo directory it fails with IsADirectoryError
+            # (found in the 2026-11-23 bake-off), so resolve it to model.pt.
             from moge.model.v2 import MoGeModel
 
-            self._moge = MoGeModel.from_pretrained(self.config.moge).to("cuda").eval()
+            source = self.config.moge
+            if os.path.isdir(source):
+                source = os.path.join(source, "model.pt")
+            self._moge = MoGeModel.from_pretrained(source).to("cuda").eval()
 
     def _camera_params(self, image: Image.Image) -> Dict[str, float]:  # pragma: no cover
         if self.config.pixal3d_fov > 0:

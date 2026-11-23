@@ -63,7 +63,10 @@ RUN git clone https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /opt/Hunyuan3
 RUN sed -e '/^--extra-index-url/d' -e '/^gradio==/d' -e '/^cupy-cuda12x==/d' \
         -e '/^deepspeed/d' -e '/^pythreejs/d' \
         /opt/Hunyuan3D-2.1/requirements.txt > /tmp/requirements-upstream.txt \
-    && pip install -r /tmp/requirements-upstream.txt
+    && pip install --extra-index-url https://download.blender.org/pypi/ -r /tmp/requirements-upstream.txt
+# ^ bpy 4.0.0 for Python 3.10 is published only on Blender's official index
+#   (PyPI's bpy starts at cp311); upstream reached it through the Tencent and
+#   Aliyun PyPI mirrors stripped above.
 COPY docker/hunyuan3d21/requirements-engine.txt /tmp/requirements-engine.txt
 RUN pip install -r /tmp/requirements-engine.txt
 
@@ -73,9 +76,16 @@ RUN cd /opt/Hunyuan3D-2.1/hy3dpaint/DifferentiableRenderer && bash compile_mesh_
     && ls mesh_inpaint_processor*.so
 # Fail the build (not the first job) if the extensions or bpy are missing:
 # MeshRender otherwise only prints "InPaint Function CAN NOT BE Imported!!!".
-# UNVERIFIED: the import names below (custom_rasterizer package name, the
-# DifferentiableRenderer namespace import) — adjust on first build if needed.
-RUN cd /opt/Hunyuan3D-2.1/hy3dpaint && python -c "import bpy, custom_rasterizer; from DifferentiableRenderer import mesh_inpaint_processor"
+# torch first: the rasterizer extension needs libc10.so already loaded.
+RUN cd /opt/Hunyuan3D-2.1/hy3dpaint && python -c "import torch, bpy, custom_rasterizer; from DifferentiableRenderer import mesh_inpaint_processor"
+
+# pytorch_lightning (imported by the paint model) still needs pkg_resources,
+# which recent setuptools no longer ships, and the base step upgrades
+# setuptools to the latest. Pin it back, then import the paint model's own
+# modules so a missing dependency fails the build, not the first job.
+RUN pip install "setuptools<80" \
+    && cd /opt/Hunyuan3D-2.1/hy3dpaint \
+    && python -c "import torch, pkg_resources, pytorch_lightning; from hunyuanpaintpbr.unet.modules import Dino_v2; import textureGenPipeline; print('paint imports ok')"
 
 COPY app.py config.py worker.py inputs.py glb.py preview.py /opt/mesh-worker/
 COPY engines /opt/mesh-worker/engines

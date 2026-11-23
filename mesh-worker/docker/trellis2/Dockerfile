@@ -90,11 +90,18 @@ RUN pip install "git+https://github.com/EasternJournalist/utils3d.git@${UTILS3D_
 RUN git clone https://github.com/TencentARC/Pixal3D.git /opt/Pixal3D \
     && cd /opt/Pixal3D && git checkout ${PIXAL3D_COMMIT}
 RUN pip install "git+https://github.com/microsoft/MoGe.git@${MOGE_COMMIT}"
-RUN pip install natten==0.21.0 --no-build-isolation
+# natten builds with CMake (+ Ninja); neither is in the CUDA devel base image.
+RUN pip install cmake ninja && pip install natten==0.21.0 --no-build-isolation
 RUN pip install "${PIXAL3D_UTILS3D_WHEEL}"
 # NAF feature upsampler (Apache-2.0), loaded via torch.hub source="local" so
 # no GitHub call happens at runtime (MESH_WORKER_NAF_DIR).
 RUN git clone https://github.com/valeoai/NAF.git /opt/NAF && cd /opt/NAF && git checkout ${NAF_COMMIT}
+
+# The git installs above (MoGe, utils3d) pull huggingface_hub unpinned and
+# upgrade it past 1.0, which transformers 4.57 refuses to import with
+# ("huggingface-hub>=0.34.0,<1.0 is required"). Pin it back last; the import
+# check below fails the build if anything still conflicts.
+RUN pip install "huggingface_hub>=0.34.0,<1.0"
 
 # Expose ONLY the two packages (not the repo roots: both have an app.py that
 # would shadow the worker's).
@@ -108,7 +115,8 @@ RUN mkdir -p /opt/engine-pkgs \
 COPY app.py config.py worker.py inputs.py glb.py preview.py /opt/mesh-worker/
 COPY engines /opt/mesh-worker/engines
 RUN pip freeze > /opt/mesh-worker/pip-freeze.txt \
-    && python -c "import sys; sys.path.insert(0, '/opt/mesh-worker'); import app"
+    && python -c "import sys; sys.path.insert(0, '/opt/mesh-worker'); import app" \
+    && python -c "import transformers, diffusers, huggingface_hub; from transformers import AutoModelForImageSegmentation; print('deps ok', huggingface_hub.__version__)"
 
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin mesh \
     && mkdir -p /data /weights && chown mesh:mesh /data
@@ -117,6 +125,7 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin mesh \
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_HOME=/weights/hf \
+    HF_MODULES_CACHE=/data/cache/hf_modules \
     TORCH_HOME=/weights/torch \
     MESH_WORKER_NAF_DIR=/opt/NAF \
     MESH_WORKER_OUTPUT_DIR=/data/out \
