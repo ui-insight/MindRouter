@@ -1,0 +1,8 @@
+# Build context = mesh-worker/. The Dockerfiles COPY an explicit file list;
+# this only keeps the context small.
+**/__pycache__
+**/*.pyc
+.pytest_cache
+tests/
+deploy/
+*.md

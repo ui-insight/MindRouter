@@ -9,7 +9,8 @@ services:
     volumes:
       - ${VIDEO_HOST_PATH:-./data/video}:/data/video
       - ${ARTIFACT_HOST_PATH:-./data/artifacts}:/data/artifacts
-    command: sh -c "mkdir -p /data/video /data/artifacts && chown 1000:1000 /data/video /data/artifacts"
+      - ${MESH_HOST_PATH:-./data/mesh}:/data/mesh
+    command: sh -c "mkdir -p /data/video /data/artifacts /data/mesh && chown 1000:1000 /data/video /data/artifacts /data/mesh"
     restart: "no"
 
   app:
@@ -148,12 +149,26 @@ services:
       - VIDEO_RUNNER_LEASE_TTL_SECONDS=${VIDEO_RUNNER_LEASE_TTL_SECONDS:-30}
       - VIDEO_MAX_UPLOAD_MB=${VIDEO_MAX_UPLOAD_MB:-64}
       - VIDEO_WEBHOOK_SIGNING_KEY=${VIDEO_WEBHOOK_SIGNING_KEY:-}
+      # Image-to-mesh generation (see backend/app/settings.py — keep in sync)
+      - MESH_STORAGE_PATH=${MESH_STORAGE_PATH:-/data/mesh}
+      - MESH_RUNNER_ENABLED=${MESH_RUNNER_ENABLED:-true}
+      - MESH_RUNNER_POLL_INTERVAL_SECONDS=${MESH_RUNNER_POLL_INTERVAL_SECONDS:-3}
+      - MESH_WORKER_TIMEOUT_SECONDS=${MESH_WORKER_TIMEOUT_SECONDS:-60}
+      - MESH_WORKER_FETCH_TIMEOUT_SECONDS=${MESH_WORKER_FETCH_TIMEOUT_SECONDS:-600}
+      - MESH_WORKER_API_KEY=${MESH_WORKER_API_KEY:-}
+      - MESH_WORKER_FETCH_MAX_MB=${MESH_WORKER_FETCH_MAX_MB:-512}
+      - MESH_JOB_MAX_WALL_SECONDS=${MESH_JOB_MAX_WALL_SECONDS:-1800}
+      - MESH_JOB_STALE_HEARTBEAT_SECONDS=${MESH_JOB_STALE_HEARTBEAT_SECONDS:-120}
+      - MESH_RECONCILE_INTERVAL_SECONDS=${MESH_RECONCILE_INTERVAL_SECONDS:-20}
+      - MESH_RUNNER_LEASE_TTL_SECONDS=${MESH_RUNNER_LEASE_TTL_SECONDS:-30}
+      - MESH_MAX_RETRIES=${MESH_MAX_RETRIES:-2}
       # UI branding (see backend/app/settings.py — keep in sync)
       - BRANDING_STORAGE_PATH=${BRANDING_STORAGE_PATH:-/data/branding}
       - BRANDING_MAX_LOGO_MB=${BRANDING_MAX_LOGO_MB:-4}
     volumes:
       - ${ARTIFACT_HOST_PATH:-./data/artifacts}:/data/artifacts
       - ${VIDEO_HOST_PATH:-./data/video}:/data/video
+      - ${MESH_HOST_PATH:-./data/mesh}:/data/mesh
       - chat_data:/data/chat_files
       - branding_data:/data/branding
       - ./backend:/app/backend:ro

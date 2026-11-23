@@ -86,6 +86,11 @@ class BackendEngine(str, PyEnum):
     # images API. Like DLP and DECISION it discovers NO models. The images
     # path reaches it through img.matting_url (matched by URL). Health: /health.
     MATTING = "matting"
+    # Image-to-3D mesh worker (migration 091): mesh-worker/, driven
+    # asynchronously by mesh_runner through /v1/meshes. Like `video` it speaks
+    # OpenAI-compatible /health + /v1/models, so it reuses VLLMAdapter for
+    # health and discovery; its models get modality `mesh_generation`.
+    MESH = "mesh"
 
 
 # Engines that serve no chat models: fleet members for status and telemetry
@@ -143,6 +148,17 @@ class Modality(str, PyEnum):
     STT = "stt"
     IMAGE_GENERATION = "image_generation"
     VIDEO_GENERATION = "video_generation"
+    MESH_GENERATION = "mesh_generation"
+
+
+# --- Image-to-mesh enums (see docs/mesh-api.md) ----------------------------
+class MeshJobStatus(str, PyEnum):
+    """Lifecycle of an image-to-mesh job (gateway-side view)."""
+    QUEUED = "queued"
+    RENDERING = "rendering"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # --- Video generation enums (see docs/video-generation-plan.md) -----------
@@ -291,6 +307,8 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     image_generation_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     # Video remains a plain opt-in boolean — deliberately not changed here.
     video_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
+    # Image-to-mesh (3D) access: a plain opt-in boolean, like video.
+    mesh_generation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
 
     # Agreement tracking
     agreement_version_accepted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -1258,6 +1276,75 @@ class VideoShot(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("job_id", "shot_index", name="uq_video_shots_job_index"),
         Index("ix_video_shots_status", "status"),
+    )
+
+
+class MeshJob(Base, TimestampMixin):
+    """One image-to-mesh job: an input image in, a GLB (+ PNG preview) out.
+
+    Claimed and driven by mesh_runner, which talks to a mesh-worker backend
+    by submit/poll/fetch/cancel. Unlike video there are no projects, shots or
+    asset rows: the input and outputs are files under
+    ``<mesh_storage_path>/<user_id>/`` whose sizes are recorded here, and the
+    per-user storage cap sums these three columns.
+    """
+
+    __tablename__ = "mesh_jobs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_uuid: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)  # "mesh-<24hex>"
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    api_key_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("api_keys.id"), nullable=True
+    )
+    request_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("requests.id"), nullable=True
+    )
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[MeshJobStatus] = mapped_column(
+        Enum(MeshJobStatus, values_callable=_enum_values),
+        nullable=False, default=MeshJobStatus.QUEUED,
+    )
+    progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    stage: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    priority: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # Request parameters (echoed on the job object).
+    seed: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    texture: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    texture_size: Mapped[int] = mapped_column(Integer, nullable=False, default=2048)
+    target_faces: Mapped[int] = mapped_column(Integer, nullable=False, default=100000)
+    remove_background: Mapped[str] = mapped_column(String(8), nullable=False, default="auto")
+
+    # Files (server-generated names under the user's mesh dir) + their sizes.
+    input_content_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    input_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    output_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    output_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    preview_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    faces: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    vertices: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # Runner bookkeeping (crash re-adoption by backend_job_id).
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    backend_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("backends.id"), nullable=True)
+    backend_job_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    gpu_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    token_equivalent: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        # THE claim-query index: ORDER BY priority DESC, id within status='queued'.
+        Index("ix_mesh_jobs_status_priority", "status", "priority", "id"),
+        Index("ix_mesh_jobs_user_id", "user_id"),
+        Index("ix_mesh_jobs_created_at", "created_at"),
+        Index("ix_mesh_jobs_heartbeat", "status", "heartbeat_at"),  # crash re-adoption
     )
 
 

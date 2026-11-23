@@ -1,0 +1,9 @@
+# Python deps of the hunyuan3d21 image ON TOP of upstream's own
+# requirements.txt (installed first by the Dockerfile, filtered — see there).
+# torch 2.5.1 + cu124 is installed by the Dockerfile (upstream README).
+#
+# Service layer: upstream already pins fastapi==0.115.12 / uvicorn==0.34.3
+# (its demo server); we only add uvicorn's standard extras + Pillow, which
+# upstream pulls in transitively.
+uvicorn[standard]==0.34.3
+pillow>=10.0

@@ -5880,6 +5880,157 @@ async def admin_video_config_post(request: Request, db: AsyncSession = Depends(g
 
 
 # ---------------------------------------------------------------------------
+# Admin 3D (image-to-mesh) configuration
+# ---------------------------------------------------------------------------
+
+_MESH_INT_CONFIGS = {
+    # key: (form field, default, min, max)
+    "mesh.max_concurrent_jobs_per_user": ("max_concurrent_jobs_per_user", 2, 1, 10),
+    "mesh.token_cost_textured": ("token_cost_textured", 10000, 0, 10_000_000),
+    "mesh.token_cost_untextured": ("token_cost_untextured", 5000, 0, 10_000_000),
+    "mesh.user_storage_cap_gb": ("user_storage_cap_gb", 20, 0, 10_000),
+    "mesh.max_image_upload_mb": ("max_image_upload_mb", 10, 1, 64),
+    "mesh.default_texture_size": ("default_texture_size", 2048, 256, 8192),
+    "mesh.default_target_faces": ("default_target_faces", 100000, 1000, 5_000_000),
+    "mesh.min_target_faces": ("min_target_faces", 5000, 100, 5_000_000),
+    "mesh.max_target_faces": ("max_target_faces", 1000000, 1000, 10_000_000),
+}
+
+
+@dashboard_router.get("/admin/mesh-config")
+async def admin_mesh_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin 3D (image-to-mesh) configuration page."""
+    from sqlalchemy import func, select
+    from backend.app.db.models import Modality, User as UserModel
+
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    all_models = await crud.get_all_models_with_backends(db)
+    mesh_models = sorted({m.name for m in all_models if m.modality == Modality.MESH_GENERATION})
+
+    per_page = 50
+    users_list, total_count = await crud.get_users(
+        db, skip=(page - 1) * per_page, limit=per_page,
+        search=search, is_active=True, sort_by="username", sort_dir="asc",
+    )
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+    enabled_count = (await db.execute(
+        select(func.count()).select_from(UserModel).where(
+            UserModel.mesh_generation_enabled == True,  # noqa: E712
+            UserModel.deleted_at.is_(None),
+            UserModel.is_active == True,  # noqa: E712
+        )
+    )).scalar() or 0
+
+    values = {
+        field: await crud.get_config_json(db, key, default)
+        for key, (field, default, _lo, _hi) in _MESH_INT_CONFIGS.items()
+    }
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/mesh_config.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "mesh_models": mesh_models,
+            "users": users_list,
+            "total_pages": total_pages,
+            "current_page": page,
+            "search": search,
+            "enabled_count": enabled_count,
+            "total_count": total_count,
+            "success": success,
+            "error": error,
+            "enabled": await crud.get_config_json(db, "mesh.enabled", False),
+            "default_model": await crud.get_config_json(db, "mesh.default_model", "default-mesh"),
+            "allowed_texture_sizes": await crud.get_config_json(db, "mesh.allowed_texture_sizes", "1024,2048,4096"),
+            "background_removal": await crud.get_config_json(db, "mesh.background_removal", True),
+            **values,
+        },
+    )
+
+
+@dashboard_router.post("/admin/mesh-config")
+async def admin_mesh_config_post(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Handle 3D config form submissions."""
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action", "")
+    _ip = get_client_ip(request)
+
+    if action == "save_config":
+        await crud.set_config(db, "mesh.enabled", "enabled" in form)
+        await crud.set_config(db, "mesh.background_removal", "background_removal" in form)
+        await crud.set_config(db, "mesh.default_model", form.get("default_model", "").strip() or "default-mesh")
+        sizes = []
+        for part in str(form.get("allowed_texture_sizes", "")).split(","):
+            try:
+                size = int(part)
+            except ValueError:
+                continue
+            if 256 <= size <= 8192 and size not in sizes:
+                sizes.append(size)
+        await crud.set_config(db, "mesh.allowed_texture_sizes", ",".join(str(s) for s in sizes) or "1024,2048,4096")
+        for key, (field, default, lo, hi) in _MESH_INT_CONFIGS.items():
+            try:
+                val = max(lo, min(hi, int(form.get(field, str(default)))))
+            except (ValueError, TypeError):
+                val = default
+            await crud.set_config(db, key, val)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="mesh_config.save", entity_type="config",
+            after_value={"enabled": "enabled" in form, "model": form.get("default_model")},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/mesh-config?success=config_updated", status_code=302)
+
+    if action == "toggle_user":
+        try:
+            target_id = int(form.get("user_id", 0))
+        except (TypeError, ValueError):
+            target_id = 0
+        target_user = await crud.get_user_by_id(db, target_id)
+        if not target_user:
+            return RedirectResponse(url="/admin/mesh-config?error=User+not+found", status_code=302)
+        new_val = not target_user.mesh_generation_enabled
+        target_user.mesh_generation_enabled = new_val
+        await crud.log_admin_action(
+            db, user_id=user_id, action="mesh_config.toggle_user",
+            entity_type="user", entity_id=str(target_id),
+            before_value={"mesh_generation_enabled": not new_val},
+            after_value={"mesh_generation_enabled": new_val},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(
+            url=f"/admin/mesh-config?success={'user_enabled' if new_val else 'user_disabled'}",
+            status_code=302,
+        )
+
+    return RedirectResponse(url="/admin/mesh-config?error=Unknown+action", status_code=302)
+
+
+# ---------------------------------------------------------------------------
 # Admin Site Settings (timezone, etc.)
 # ---------------------------------------------------------------------------
 
@@ -6702,6 +6853,7 @@ async def admin_retention_post(
             "retention.conversations_days",
             "retention.dlp_alerts_days",
             "retention.web_search_logs_days",
+            "retention.user_meshes_days",
             "retention.cleanup_interval",
             "retention.batch_size",
         ]:

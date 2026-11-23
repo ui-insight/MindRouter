@@ -1,0 +1,29 @@
+# Python deps of the trellis2 image (serves MESH_WORKER_MODE=trellis2 AND
+# pixal3d). torch/torchvision, flash-attn and the compiled extensions (CuMesh,
+# FlexGEMM, nvdiffrast, nvdiffrec, o-voxel, natten) are installed by the
+# Dockerfile itself, in upstream order.
+#
+# Pins: Pixal3D requirements-hfdemo.txt @ f7cf38429b0b — the H-series Hugging
+# Face Space running torch 2.6.0 + cu124 on the TRELLIS.2 stack. TRELLIS.2's
+# setup.sh --basic installs the same packages unpinned.
+
+# Service layer (same pins as Hunyuan3D 2.1's requirements.txt).
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+
+ninja==1.11.1.1
+triton==3.2.0
+pillow==12.0.0
+imageio==2.37.2
+imageio-ffmpeg==0.6.0
+tqdm==4.67.1
+easydict==1.13
+opencv-python-headless==4.12.0.88
+trimesh==4.10.1
+transformers==4.57.3
+zstandard==0.25.0
+kornia==0.8.2
+timm==1.0.22
+diffusers==0.37.1
+accelerate==1.13.0
+plyfile==1.1.3

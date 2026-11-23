@@ -294,6 +294,7 @@ class TestDashboardSurfacesApplyTheFilter:
             ("routes.py", "admin_ocr_config"),
             ("routes.py", "admin_images_config"),
             ("routes.py", "admin_video_config"),
+            ("routes.py", "admin_mesh_config"),
         }
         offenders = []
         for path in sorted(_DASHBOARD.rglob("*.py")):
@@ -354,8 +355,8 @@ class TestEveryCatalogAppliesTheFilter:
                 # admin operational telemetry: seeing every backend's models,
                 # including image/video/voice, is the point
                 continue
-            # video/image discovery filter by engine instead, which is fine
-            if re.search(r"engine.*!=.*BackendEngine\.(VIDEO|DIFFUSION)", src):
+            # video/image/mesh discovery filter by engine instead, which is fine
+            if re.search(r"engine.*!=.*BackendEngine\.(VIDEO|DIFFUSION|MESH)", src):
                 continue
             offenders.append(path.name)
         assert not offenders, (
@@ -374,6 +375,11 @@ class TestPerModalityDiscoveryExists:
     def test_videos_have_a_discovery_endpoint(self):
         src = (_APP / "api" / "video_api.py").read_text()
         assert '@router.get("/videos/models")' in src
+
+    def test_meshes_have_a_discovery_endpoint(self):
+        src = (_APP / "api" / "mesh_api.py").read_text()
+        assert '@router.get("/meshes/models")' in src
+        assert "!= BackendEngine.MESH" in src
 
     def test_image_endpoint_selects_by_diffusion_engine(self):
         src = (_APP / "api" / "v1_openai.py").read_text()

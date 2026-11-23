@@ -72,6 +72,10 @@ _DEFAULTS: dict[str, Any] = {
     # verbatim provider response and grow fastest of any audit table, which is
     # why they get their own dial rather than riding on requests.
     "retention.web_search_logs_days": 0,
+    # Finished image-to-mesh jobs and their files (input image, GLB, preview).
+    # 0 = keep forever. Shipped with a window from day one (the user storage
+    # cap alone never frees space for users who stop logging in).
+    "retention.user_meshes_days": 90,
     "retention.cleanup_interval": 3600,
     "retention.batch_size": 500,
 }
@@ -433,6 +437,7 @@ async def _detach_request_references(
         return
     from backend.app.db.models import (
         DlpAlert,
+        MeshJob,
         StoredResponse,
         UserImage,
         VideoJob,
@@ -447,6 +452,11 @@ async def _detach_request_references(
     await app_db.execute(
         update(VideoJob)
         .where(VideoJob.request_id.in_(request_ids))
+        .values(request_id=None)
+    )
+    await app_db.execute(
+        update(MeshJob)
+        .where(MeshJob.request_id.in_(request_ids))
         .values(request_id=None)
     )
     await app_db.execute(
@@ -2059,6 +2069,39 @@ async def cleanup_expired_request_images(
     return result
 
 
+async def cleanup_expired_mesh_jobs(
+    app_db: AsyncSession, cutoff: datetime, batch_size: int, storage_root: str
+) -> dict[str, int]:
+    """Delete finished mesh jobs older than ``cutoff`` and their files.
+
+    Row-driven: each job's files are rebuilt from (root, user_id, job uuid) and
+    removed AFTER its row is committed away, so a crash leaves orphan files
+    (harmless) rather than rows pointing at nothing. Jobs still queued or
+    rendering are never touched.
+    """
+    from backend.app.db import crud
+    from backend.app.db.models import MeshJob
+    from backend.app.services.mesh_store import remove_job_files
+
+    deleted = files = 0
+    batch = max(1, int(batch_size))
+    while True:
+        jobs = await crud.list_expired_mesh_jobs(app_db, cutoff, batch)
+        if not jobs:
+            break
+        owned = [(j.user_id, j.job_uuid, j.input_content_type) for j in jobs]
+        await app_db.execute(delete(MeshJob).where(MeshJob.id.in_([j.id for j in jobs])))
+        await app_db.commit()
+        deleted += len(owned)
+        for user_id, job_uuid, ctype in owned:
+            files += await asyncio.to_thread(remove_job_files, storage_root, user_id, job_uuid, ctype)
+        if len(jobs) < batch:
+            break
+    if deleted:
+        logger.info("retention_mesh_jobs_deleted", deleted=deleted, files=files)
+    return {"deleted": deleted, "files_removed": files}
+
+
 async def cleanup_expired_stored_responses(
     app_db: AsyncSession, cutoff: datetime, batch_size: int
 ) -> dict[str, int]:
@@ -2669,6 +2712,18 @@ async def run_retention_cycle() -> dict[str, Any]:
                 app_db, cutoff, config.get("retention.batch_size", 5000)
             )
 
+    # Finished image-to-mesh jobs + their files (delete-only).
+    async def _meshes():
+        mesh_days = config.get("retention.user_meshes_days", 90)
+        if mesh_days <= 0:
+            return None
+        cutoff = datetime.now(timezone.utc) - timedelta(days=mesh_days)
+        async with get_async_db_context() as app_db:
+            return await cleanup_expired_mesh_jobs(
+                app_db, cutoff, config.get("retention.batch_size", 5000),
+                settings.mesh_storage_path,
+            )
+
     for name, run in (
         ("requests", _requests),
         ("chats", _chats),
@@ -2680,6 +2735,7 @@ async def run_retention_cycle() -> dict[str, Any]:
         ("conversations", _conversations),
         ("dlp_alerts", _dlp_alerts),
         ("web_search_logs", _web_search_logs),
+        ("meshes", _meshes),
     ):
         await _step(name, run)
 

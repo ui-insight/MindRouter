@@ -28,6 +28,7 @@ from backend.app.api.telemetry_api import router as telemetry_router
 from backend.app.api.search_api import router as search_router
 from backend.app.api.voice_api import router as voice_router
 from backend.app.api.video_api import router as video_router
+from backend.app.api.mesh_api import router as mesh_router
 from backend.app.api.apps_api import router as apps_router
 from backend.app.api.me_api import router as me_router
 from backend.app.api.decisions_api import router as decisions_router
@@ -48,6 +49,7 @@ api_router.include_router(telemetry_router, prefix="/api/admin/telemetry", tags=
 api_router.include_router(search_router)
 api_router.include_router(voice_router)
 api_router.include_router(video_router)
+api_router.include_router(mesh_router)
 api_router.include_router(apps_router)
 api_router.include_router(me_router)
 api_router.include_router(decisions_router)

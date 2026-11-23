@@ -1489,8 +1489,15 @@ class TestEngine:
         assert module.revision == "089" and module.down_revision == "088"
         assert callable(module.upgrade) and callable(module.downgrade)
         # Same values, same order: a mismatch would make the ORM write a value the column rejects.
-        assert module.NEW_ENGINE == ",".join(f"'{e.value}'" for e in BackendEngine)
+        # 091 (mesh) appended one engine after matting, so 089 must end exactly
+        # where 091 starts, and 091 must end where the ORM is now.
         assert module.NEW_ENGINE == module.OLD_ENGINE + ",'matting'"
+        later = versions / "20261123_000000_091_add_mesh_generation.py"
+        later_spec = importlib.util.spec_from_file_location("migration_091", later)
+        later_module = importlib.util.module_from_spec(later_spec)
+        later_spec.loader.exec_module(later_module)
+        assert later_module.OLD_ENGINE == module.NEW_ENGINE
+        assert later_module.NEW_ENGINE == ",".join(f"'{e.value}'" for e in BackendEngine)
         previous = (versions / "20261004_000000_087_add_decision_backend_engine.py").read_text()
         assert f'NEW_ENGINE = "{module.OLD_ENGINE}"' in previous       # 089 starts where 087 ended
         assert sorted(p.name for p in versions.glob("*_089_*.py")) == [path.name]

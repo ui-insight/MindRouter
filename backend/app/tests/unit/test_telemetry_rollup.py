@@ -1101,6 +1101,7 @@ def _config(**overrides):
         "retention.conversations_days": 0,
         "retention.dlp_alerts_days": 0,
         "retention.web_search_logs_days": 0,
+        "retention.user_meshes_days": 0,
     })
     config.update({f"retention.telemetry.{k}": v for k, v in overrides.items()})
     return config

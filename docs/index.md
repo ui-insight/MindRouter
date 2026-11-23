@@ -34,6 +34,7 @@ the in-app [`/documentation`](#api-reference) page):
 
 - [Image generation & image-to-image](images-api.md) — `/v1/images/generations`, `/v1/images/edits`
 - [Video generation](video-api.md) — `/v1/videos`, keyframe assets, async job model
+- [Image to 3D mesh](mesh-api.md) — `/v1/meshes`, one picture in, a textured GLB out (async)
 - [Voice (TTS / STT)](voice-api.md) — `/v1/audio/speech`, `/v1/audio/transcriptions`
 - [Media studio integration guide](media-studio-integration.md) — end-to-end recipe: images → video keyframes → clips → stitch → narration (for building a storyboarding / ad-mockup app)
 - [Decisions API / System One (experimental)](decisions-api.md) — `/v1/systemone` (alias `/v1/decisions`): TypeSafe's System One wire format (Jev) for typed `noul` / `choice` / `score` decisions with probabilities; `model` selects letter scoring on a vLLM model or an upstream decision server such as Laya
@@ -317,6 +318,12 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | GET | `/v1/videos/{video_id}` | API Key | Get a video job's status |
 | GET | `/v1/videos/{video_id}/content` | API Key | Stream the rendered MP4 (HTTP range requests supported) |
 | DELETE | `/v1/videos/{video_id}` | API Key | Delete a video job and its artifacts |
+| POST | `/v1/meshes` | API Key | Submit an async image-to-3D job: one picture in, a textured GLB out (202 Accepted; requires per-account enablement). See [mesh-api.md](mesh-api.md) |
+| GET | `/v1/meshes` | API Key | List your 3D jobs |
+| GET | `/v1/meshes/models` | API Key | List available 3D models and their limits |
+| GET | `/v1/meshes/{mesh_id}` | API Key | Get a 3D job's status (stage, progress, queue position) |
+| GET | `/v1/meshes/{mesh_id}/content` | API Key | Download the GLB, or `?variant=preview` for the PNG preview |
+| DELETE | `/v1/meshes/{mesh_id}` | API Key | Cancel a running 3D job (refunded), or delete a finished one and its files |
 | GET | `/v1/models` | API Key | List available models (including aliases) |
 
 #### Chat Completions
@@ -1373,8 +1380,9 @@ Node: gpu-server-1 (4x A100-80GB, sidecar at :8007)
 | **DLP** (`dlp`) | `GET /healthz` (must report warm) | None: serves no models, never routable | Sidecar GPU data only |
 | **Decision server** (`decision`) | `GET /health` (200, and not reporting `loading`) | None: serves no chat models; reached through `/v1/systemone` via `decisions.upstreams` (same URL) | Sidecar GPU data only |
 | **Matting server** (`matting`) | `GET /health` (200, and not reporting `loading` or `unhealthy`; it answers 503 `unhealthy` when its model is stuck on a picture) | None: serves no chat models; reached by the images API for `background: "transparent"` via `img.matting_url` (same URL) | Sidecar GPU data only |
+| **Mesh** (`mesh`) | `GET /health` (fallback: `GET /v1/models`) | `GET /v1/models` | Sidecar GPU data only |
 
-The `BackendEngine` enum has exactly these nine values. The registry builds an `OllamaAdapter` for `ollama` backends, a `DlpAdapter` for `dlp`, a `DecisionAdapter` for `decision` (migration 087: a System One decision server such as Clef, monitored like any backend and skipped by `/v1/systemone` when unhealthy; see [decisions-api.md](decisions-api.md)) and for `matting` (migration 089: the background-removal server in `matting_service/`, skipped by the images API when unhealthy, in which case callers get the opaque picture; see [images-api.md](images-api.md#transparent-backgrounds)), and a `VLLMAdapter` for every other engine, so diffusion, video and voice servers must expose the same OpenAI-compatible `/health` and `/v1/models` surface as vLLM. Discovery then assigns modality by engine before looking at the model name: every model found on a `diffusion` backend becomes `IMAGE_GENERATION`, every model on a `video` backend becomes `VIDEO_GENERATION`, every model on a `tts` backend becomes `TTS`, and every model on an `stt` backend becomes `STT`.
+The `BackendEngine` enum has exactly these ten values. The registry builds an `OllamaAdapter` for `ollama` backends, a `DlpAdapter` for `dlp`, a `DecisionAdapter` for `decision` (migration 087: a System One decision server such as Clef, monitored like any backend and skipped by `/v1/systemone` when unhealthy; see [decisions-api.md](decisions-api.md)) and for `matting` (migration 089: the background-removal server in `matting_service/`, skipped by the images API when unhealthy, in which case callers get the opaque picture; see [images-api.md](images-api.md#transparent-backgrounds)), and a `VLLMAdapter` for every other engine, so diffusion, video, mesh and voice servers must expose the same OpenAI-compatible `/health` and `/v1/models` surface as vLLM. Discovery then assigns modality by engine before looking at the model name: every model found on a `diffusion` backend becomes `IMAGE_GENERATION`, every model on a `video` backend becomes `VIDEO_GENERATION`, every model on a `mesh` backend (the image-to-3D `mesh-worker/`, reached through `/v1/meshes`; see [mesh-api.md](mesh-api.md)) becomes `MESH_GENERATION`, every model on a `tts` backend becomes `TTS`, and every model on an `stt` backend becomes `STT`.
 
 > **The model catalog lists text models only.** `GET /v1/models`, `GET /api/tags` and
 > `GET /anthropic/v1/models` publish chat, completion, multimodal, embedding and

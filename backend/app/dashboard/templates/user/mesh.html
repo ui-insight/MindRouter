@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+
+{% block title %}3D Generation - MindRouter{% endblock %}
+
+{% block content %}
+<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+<style>
+  .mesh-shell { max-width: 1100px; margin: 0 auto; }
+  .mesh-viewer { width: 100%; aspect-ratio: 4 / 3; border-radius: .5rem;
+    background: radial-gradient(circle at 50% 40%, var(--bs-tertiary-bg), var(--bs-secondary-bg)); }
+  .mesh-drop { border: 2px dashed var(--bs-border-color); border-radius: .5rem; padding: 1rem; text-align: center; }
+  .mesh-drop.mesh-drag { border-color: var(--bs-primary); background: rgba(13,110,253,.06); }
+  .mesh-drop img { max-width: 100%; max-height: 220px; object-fit: contain; border-radius: .375rem; }
+  .mesh-lib-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .mesh-lib-card img, .mesh-lib-card .mesh-lib-ph { width: 100%; aspect-ratio: 1; object-fit: contain;
+    border-radius: .375rem; background: var(--bs-secondary-bg); }
+  .mesh-lib-ph { display: flex; align-items: center; justify-content: center; color: var(--bs-secondary-color); }
+  .mesh-bar { height: .6rem; border-radius: .3rem; background: var(--bs-secondary-bg); overflow: hidden; }
+  .mesh-bar > span { display: block; height: 100%; background: var(--bs-primary); transition: width .4s ease; }
+</style>
+
+<div class="mesh-shell py-3">
+  <h1 class="h3 mb-1">3D Generation</h1>
+  <p class="text-body-secondary mb-4">
+    Turn one picture of an object into a textured 3D model (GLB) you can rotate here,
+    download, and open in Blender, Unity, Unreal, Godot or a web viewer. A clear photo
+    or drawing of a single object on a plain background works best.
+  </p>
+
+  {% if not service_enabled %}
+  <div class="alert alert-warning" role="alert">3D generation is currently turned off by the administrators.</div>
+  {% elif not mesh_models %}
+  <div class="alert alert-warning" role="alert">No 3D model server is online right now, so new models can't be started. Please try again later.</div>
+  {% endif %}
+  {% if not has_api_key %}
+  <div class="alert alert-warning" role="alert">
+    You need an active API key to generate 3D models.
+    <a href="/dashboard" class="alert-link">Create one in your dashboard</a>.
+  </div>
+  {% endif %}
+
+  <div class="row g-4">
+    <div class="col-lg-5">
+      <section class="card" aria-labelledby="mesh-controls-heading">
+        <form class="card-body" id="mesh-form" novalidate>
+          <h2 id="mesh-controls-heading" class="h5 mb-3">New model</h2>
+
+          <div class="mb-3">
+            <label for="mesh-image" class="form-label">Picture</label>
+            <div class="mesh-drop" id="mesh-drop">
+              <img id="mesh-input-preview" alt="The picture you chose" class="d-none mb-2">
+              <input id="mesh-image" name="image" type="file" class="form-control"
+                     accept="image/png,image/jpeg,image/webp" aria-describedby="mesh-image-help" required>
+              <div id="mesh-image-help" class="form-text">PNG, JPEG or WebP, up to {{ max_image_mb }} MB. You can also drop a file here.</div>
+            </div>
+          </div>
+
+          <div class="row g-3">
+            {% if mesh_models|length > 1 %}
+            <div class="col-12">
+              <label for="mesh-model" class="form-label">Model</label>
+              <select id="mesh-model" name="model" class="form-select">
+                {% for m in mesh_models %}
+                <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            {% endif %}
+            <div class="col-sm-6">
+              <label for="mesh-faces" class="form-label">Detail (faces)</label>
+              <select id="mesh-faces" name="target_faces" class="form-select" aria-describedby="mesh-faces-help">
+                {% for n, label in [(10000, "Low"), (50000, "Medium"), (100000, "High"), (300000, "Very high")] %}
+                {% if min_faces <= n <= max_faces %}
+                <option value="{{ n }}" {% if n == default_faces %}selected{% endif %}>{{ label }} ({{ "{:,}".format(n) }})</option>
+                {% endif %}
+                {% endfor %}
+              </select>
+              <div id="mesh-faces-help" class="form-text">Fewer faces load faster in games and on the web.</div>
+            </div>
+            <div class="col-sm-6">
+              <label for="mesh-texture-size" class="form-label">Texture size</label>
+              <select id="mesh-texture-size" name="texture_size" class="form-select">
+                {% for s in texture_sizes %}
+                <option value="{{ s }}" {% if s == default_texture_size %}selected{% endif %}>{{ s }} px</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-sm-6">
+              <label for="mesh-bg" class="form-label">Remove background</label>
+              <select id="mesh-bg" name="remove_background" class="form-select" aria-describedby="mesh-bg-help">
+                <option value="auto" selected>Automatic</option>
+                <option value="on">Always</option>
+                <option value="off">Never</option>
+              </select>
+              <div id="mesh-bg-help" class="form-text">Automatic skips pictures that are already cut out.</div>
+            </div>
+            <div class="col-sm-6">
+              <label for="mesh-seed" class="form-label">Seed <span class="text-body-secondary">(optional)</span></label>
+              <input id="mesh-seed" name="seed" type="number" class="form-control" placeholder="random" min="0" max="2147483647">
+            </div>
+            <div class="col-12">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" role="switch" id="mesh-texture" name="texture" checked>
+                <label class="form-check-label" for="mesh-texture">Paint textures (turn off for shape only, which is faster and uses fewer tokens)</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="d-flex gap-2 mt-4">
+            <button type="submit" class="btn btn-primary" id="mesh-submit" {% if not has_api_key %}disabled{% endif %}>
+              <i class="bi bi-box" aria-hidden="true"></i> Generate 3D model
+            </button>
+            <button type="button" class="btn btn-outline-secondary d-none" id="mesh-cancel">Cancel</button>
+          </div>
+          <div id="mesh-error" class="alert alert-danger mt-3 d-none" role="alert"></div>
+        </form>
+      </section>
+    </div>
+
+    <div class="col-lg-7">
+      <section class="card" aria-labelledby="mesh-result-heading">
+        <div class="card-body">
+          <h2 id="mesh-result-heading" class="h5 mb-3">Result</h2>
+          <div id="mesh-status" class="mb-2" aria-live="polite">Choose a picture and generate a model.</div>
+          <div class="mesh-bar mb-3 d-none" id="mesh-progress" role="progressbar" aria-label="Generation progress"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span style="width:0%"></span></div>
+          <model-viewer id="mesh-viewer" class="mesh-viewer d-none" camera-controls auto-rotate
+                        shadow-intensity="1" exposure="1" alt="The generated 3D model"></model-viewer>
+          <div class="d-flex flex-wrap gap-2 mt-3 d-none" id="mesh-actions">
+            <a class="btn btn-outline-primary" id="mesh-download" download><i class="bi bi-download" aria-hidden="true"></i> Download GLB</a>
+            <span class="text-body-secondary small align-self-center" id="mesh-stats"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <section class="mt-5" aria-labelledby="mesh-lib-heading">
+    <div class="d-flex justify-content-between align-items-end mb-2">
+      <h2 id="mesh-lib-heading" class="h5 mb-0">Your models</h2>
+      <span class="small text-body-secondary" id="mesh-storage">{{ storage_used_gb }} GB of {{ storage_cap_gb }} GB used</span>
+    </div>
+    <p class="small text-body-secondary">Finished models are kept for a limited time (see the retention policy); download any you want to keep.</p>
+    <div id="mesh-lib" class="mesh-lib-grid"></div>
+    <p id="mesh-lib-empty" class="text-body-secondary d-none">No models yet.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  const form = document.getElementById("mesh-form");
+  const fileInput = document.getElementById("mesh-image");
+  const drop = document.getElementById("mesh-drop");
+  const inputPreview = document.getElementById("mesh-input-preview");
+  const submitBtn = document.getElementById("mesh-submit");
+  const cancelBtn = document.getElementById("mesh-cancel");
+  const errorBox = document.getElementById("mesh-error");
+  const statusEl = document.getElementById("mesh-status");
+  const bar = document.getElementById("mesh-progress");
+  const viewer = document.getElementById("mesh-viewer");
+  const actions = document.getElementById("mesh-actions");
+  const download = document.getElementById("mesh-download");
+  const stats = document.getElementById("mesh-stats");
+  const lib = document.getElementById("mesh-lib");
+  const libEmpty = document.getElementById("mesh-lib-empty");
+  const storage = document.getElementById("mesh-storage");
+  const STAGES = { queued: "Waiting for the GPU", preprocess: "Preparing the picture", shape: "Building the shape",
+                   texture: "Painting textures", export: "Exporting the model", done: "Done" };
+  let currentId = null, timer = null;
+
+  function showError(msg) { errorBox.textContent = msg; errorBox.classList.toggle("d-none", !msg); }
+  function setProgress(p) {
+    bar.classList.remove("d-none");
+    bar.querySelector("span").style.width = Math.max(2, p) + "%";
+    bar.setAttribute("aria-valuenow", Math.round(p));
+  }
+  function errMessage(body, fallback) {
+    return (body && body.error && (body.error.message || body.error)) || fallback;
+  }
+
+  function choose(file) {
+    if (!file) return;
+    const dt = new DataTransfer(); dt.items.add(file); fileInput.files = dt.files;
+    inputPreview.src = URL.createObjectURL(file); inputPreview.classList.remove("d-none");
+  }
+  fileInput.addEventListener("change", () => choose(fileInput.files[0]));
+  ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("mesh-drag"); }));
+  ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("mesh-drag"); }));
+  drop.addEventListener("drop", e => { if (e.dataTransfer.files.length) choose(e.dataTransfer.files[0]); });
+
+  function showResult(job) {
+    viewer.src = "/3d/serve/" + encodeURIComponent(job.id);
+    viewer.classList.remove("d-none");
+    download.href = viewer.src; download.setAttribute("download", job.id + ".glb");
+    const parts = [];
+    if (job.faces) parts.push(job.faces.toLocaleString() + " faces");
+    if (job.size_bytes) parts.push((job.size_bytes / 1048576).toFixed(1) + " MB");
+    if (job.usage && job.usage.gpu_seconds) parts.push(job.usage.gpu_seconds + " s on the GPU");
+    stats.textContent = parts.join(" · ");
+    actions.classList.remove("d-none");
+  }
+
+  function render(job) {
+    if (job.status === "queued") {
+      const pos = job.queue_position ? " (position " + job.queue_position + " of " + job.queue_depth + ")" : "";
+      statusEl.textContent = "Queued" + pos + ".";
+      setProgress(1);
+    } else if (job.status === "in_progress") {
+      statusEl.textContent = (STAGES[job.stage] || "Working") + "… " + Math.round(job.progress) + "%";
+      setProgress(job.progress);
+    } else if (job.status === "completed") {
+      statusEl.textContent = "Done. Drag to rotate; scroll to zoom.";
+      setProgress(100); showResult(job);
+    } else if (job.status === "failed") {
+      statusEl.textContent = "Failed: " + ((job.error && job.error.message) || "unknown error") + " (your tokens were refunded).";
+    } else if (job.status === "cancelled") {
+      statusEl.textContent = "Cancelled (your tokens were refunded).";
+    }
+    const running = job.status === "queued" || job.status === "in_progress";
+    cancelBtn.classList.toggle("d-none", !running);
+    submitBtn.disabled = running;
+    return running;
+  }
+
+  async function poll() {
+    if (!currentId) return;
+    try {
+      const r = await fetch("/3d/api/jobs/" + encodeURIComponent(currentId));
+      const job = await r.json();
+      if (!r.ok) { showError(errMessage(job, "Could not read the job status.")); return; }
+      if (render(job)) { timer = setTimeout(poll, 3000); } else { loadLibrary(); }
+    } catch (e) { timer = setTimeout(poll, 5000); }
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault(); showError("");
+    if (!fileInput.files.length) { showError("Choose a picture first."); fileInput.focus(); return; }
+    const fd = new FormData(form);
+    fd.set("texture", document.getElementById("mesh-texture").checked ? "true" : "false");
+    if (!fd.get("seed")) fd.delete("seed");
+    submitBtn.disabled = true; viewer.classList.add("d-none"); actions.classList.add("d-none");
+    statusEl.textContent = "Uploading…";
+    try {
+      const r = await fetch("/3d/api/meshes", { method: "POST", body: fd });
+      const body = await r.json();
+      if (!r.ok) { showError(errMessage(body, "The job could not be created.")); submitBtn.disabled = false; statusEl.textContent = ""; return; }
+      currentId = body.id; clearTimeout(timer); render(body); timer = setTimeout(poll, 1500); loadLibrary();
+    } catch (err) { showError("Network error. Try again."); submitBtn.disabled = false; }
+  });
+
+  cancelBtn.addEventListener("click", async () => {
+    if (!currentId) return;
+    await fetch("/3d/api/jobs/" + encodeURIComponent(currentId), { method: "DELETE" });
+    poll();
+  });
+
+  async function remove(id) {
+    if (!confirm("Delete this model and its files?")) return;
+    const r = await fetch("/3d/api/jobs/" + encodeURIComponent(id), { method: "DELETE" });
+    if (r.ok) { if (id === currentId) { viewer.classList.add("d-none"); actions.classList.add("d-none"); } loadLibrary(); }
+  }
+
+  async function loadLibrary() {
+    try {
+      const r = await fetch("/3d/api/jobs?limit=60");
+      const body = await r.json();
+      if (!r.ok) return;
+      storage.textContent = body.storage_used_gb + " GB of {{ storage_cap_gb }} GB used";
+      lib.replaceChildren();
+      libEmpty.classList.toggle("d-none", body.data.length > 0);
+      for (const job of body.data) {
+        const card = document.createElement("div");
+        card.className = "card mesh-lib-card";
+        const inner = document.createElement("div"); inner.className = "card-body p-2";
+        let thumb;
+        if (job.preview_url) {
+          thumb = document.createElement("img");
+          thumb.src = "/3d/serve/" + encodeURIComponent(job.id) + "?variant=preview";
+          thumb.alt = "Preview of model " + job.id; thumb.loading = "lazy";
+        } else {
+          thumb = document.createElement("div"); thumb.className = "mesh-lib-ph";
+          thumb.textContent = job.status === "completed" ? "No preview" : job.status.replace("_", " ");
+        }
+        inner.appendChild(thumb);
+        const row = document.createElement("div"); row.className = "d-flex gap-1 mt-2";
+        if (job.status === "completed") {
+          const view = document.createElement("button"); view.type = "button"; view.className = "btn btn-sm btn-outline-primary flex-grow-1";
+          view.textContent = "View"; view.addEventListener("click", () => { currentId = job.id; render(job); });
+          row.appendChild(view);
+        } else if (job.status === "queued" || job.status === "in_progress") {
+          const watch = document.createElement("button"); watch.type = "button"; watch.className = "btn btn-sm btn-outline-secondary flex-grow-1";
+          watch.textContent = "Show progress"; watch.addEventListener("click", () => { currentId = job.id; clearTimeout(timer); poll(); });
+          row.appendChild(watch);
+        }
+        if (["completed", "failed", "cancelled"].includes(job.status)) {
+          const del = document.createElement("button"); del.type = "button"; del.className = "btn btn-sm btn-outline-danger";
+          del.setAttribute("aria-label", "Delete model " + job.id);
+          del.innerHTML = '<i class="bi bi-trash" aria-hidden="true"></i>';
+          del.addEventListener("click", () => remove(job.id));
+          row.appendChild(del);
+        }
+        inner.appendChild(row); card.appendChild(inner); lib.appendChild(card);
+      }
+    } catch (e) { /* the library is best effort */ }
+  }
+  loadLibrary();
+})();
+</script>
+{% endblock %}

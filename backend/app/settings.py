@@ -191,6 +191,24 @@ class Settings(BaseSettings):
     video_max_upload_mb: int = 64
     video_webhook_signing_key: str = ""             # host .env only, never in repo
 
+    # Image-to-mesh (3D) generation — the same async design as video (see
+    # docs/mesh-api.md). Every value here MUST also be in docker-compose.yml.
+    # Per-request tunables (costs, caps, defaults) are mesh.* rows in app_config.
+    mesh_storage_path: str = "/data/mesh"
+    mesh_runner_enabled: bool = True
+    mesh_runner_poll_interval_seconds: int = 3
+    mesh_worker_timeout_seconds: int = 60           # control-plane calls (submit/poll/cancel)
+    mesh_worker_fetch_timeout_seconds: int = 600    # GLB + preview fetch (worker -> gateway)
+    # Shared secret sent to the worker as X-Worker-Key (host .env only, never in
+    # repo). Set the SAME value as the worker's MESH_WORKER_API_KEY.
+    mesh_worker_api_key: str = ""
+    mesh_worker_fetch_max_mb: int = 512             # per-artifact download cap (<=0 disables)
+    mesh_job_max_wall_seconds: int = 1800
+    mesh_job_stale_heartbeat_seconds: int = 120
+    mesh_reconcile_interval_seconds: int = 20
+    mesh_runner_lease_ttl_seconds: int = 30
+    mesh_max_retries: int = 2                       # submit/lost-job retries before failing
+
     # UI Branding / Theming
     # Admin-configurable look-and-feel (org name, logos, accent colors) stored as
     # branding.* rows in app_config; uploaded logo/favicon files live on disk here.
