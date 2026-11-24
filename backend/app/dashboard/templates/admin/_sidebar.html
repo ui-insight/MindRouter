@@ -124,6 +124,11 @@
             </a>
         </li>
         <li class="nav-item">
+            <a class="nav-link {% if active == 'meshes' %}active{% endif %}" href="/admin/meshes" {% if active == 'meshes' %}aria-current="page"{% endif %}>
+                <i class="bi bi-box"></i> Meshes
+            </a>
+        </li>
+        <li class="nav-item">
             <a class="nav-link {% if active == 'blog' %}active{% endif %}" href="/admin/blog" {% if active == 'blog' %}aria-current="page"{% endif %}>
                 <i class="bi bi-pencil-square"></i> Blog Posts
             </a>

@@ -132,6 +132,34 @@ VIDEO_DIALECT_HINTS: Dict[str, str] = {
 }
 
 
+# --- Image-to-mesh dialect (POST /v1/meshes) -------------------------------
+# Fields submit_mesh_job consumes (multipart form fields or JSON keys).
+MESH_ACCEPTED: Set[str] = {
+    "model", "image", "seed", "texture", "texture_size", "target_faces",
+    "remove_background",
+}
+
+MESH_IGNORED: Set[str] = {"user", "metadata"}
+
+MESH_DIALECT_HINTS: Dict[str, str] = {
+    "prompt": "Text-to-3D is not available yet: generate an image with /v1/images/generations, then send it as 'image'.",
+    "images": "One input image per job: send it as 'image'.",
+    "image_url": "Send the image itself as 'image' (a file upload, or base64 / a data: URL in JSON).",
+    "format": "Meshes are produced as GLB; fetch '/v1/meshes/{id}/content'.",
+    "output_format": "Meshes are produced as GLB; fetch '/v1/meshes/{id}/content'.",
+    "faces": "Use 'target_faces'.",
+    "face_count": "Use 'target_faces'.",
+    "polycount": "Use 'target_faces'.",
+    "texture_resolution": "Use 'texture_size' (one of the sizes /v1/meshes/models lists).",
+    "remove_bg": "Use 'remove_background' (auto, on or off).",
+    "background": "Use 'remove_background' (auto, on or off).",
+    "steps": "Sampling steps are fixed by the model.",
+    "num_inference_steps": "Sampling steps are fixed by the model.",
+    "guidance_scale": "Guidance is fixed by the model.",
+    "n": "One mesh is generated per job.",
+}
+
+
 def _error(field: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=400,

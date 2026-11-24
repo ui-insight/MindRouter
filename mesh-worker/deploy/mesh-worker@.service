@@ -1,0 +1,42 @@
+# systemd template unit: one mesh-worker container pinned to ONE GPU.
+#
+# Instance name = a short label, e.g. mesh-worker@trellis2-gpu3. Each instance
+# reads /etc/mindrouter/mesh-worker-<instance>.env (copy
+# mesh-worker.env.example; chmod 600 root:root — it holds the worker key).
+#
+# Install:
+#   cp mesh-worker@.service /etc/systemd/system/
+#   install -m 600 mesh-worker.env.example /etc/mindrouter/mesh-worker-trellis2-gpu3.env  # then edit
+#   systemctl daemon-reload && systemctl enable --now mesh-worker@trellis2-gpu3
+#
+# The container listens on 18400 inside; it is published ONLY on loopback
+# (127.0.0.1:${MESH_HOST_PORT}). The nginx vhost (nginx-mesh-worker.conf)
+# terminates TLS and proxies there. Never publish on 0.0.0.0 — that bypasses
+# nginx TLS.
+[Unit]
+Description=MindRouter Mesh Worker (%i)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/mindrouter/mesh-worker-%i.env
+# A stale container from a crash would block the name.
+ExecStartPre=-/usr/bin/docker rm -f mesh-worker-%i
+ExecStart=/usr/bin/docker run --rm --name mesh-worker-%i \
+    --gpus device=${MESH_GPU} \
+    -p 127.0.0.1:${MESH_HOST_PORT}:18400 \
+    --env-file /etc/mindrouter/mesh-worker-%i.env \
+    -v ${MESH_WEIGHTS_DIR}:/weights:ro \
+    -v ${MESH_DATA_DIR}:/data \
+    --shm-size 8g \
+    --ulimit memlock=-1 \
+    ${MESH_IMAGE}
+ExecStop=/usr/bin/docker stop -t 30 mesh-worker-%i
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

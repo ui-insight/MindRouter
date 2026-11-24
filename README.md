@@ -6,7 +6,7 @@ MindRouter is a production-ready, self-hosted **AI inference gateway** that fron
 
 *The public Cluster Status page (shown here with University of Idaho branding): real-time token-flow throughput across the backend cluster, healthy-backend and active-user counts, queue depth, and total tokens served.*
 
-The platform is multi-modal, spanning chat and text completion, embeddings, vision, **image and video generation**, **speech (TTS/STT)**, and document OCR. It also provides the governance and operations layers a shared deployment needs: **fair-share scheduling** across users and groups, **per-user token and request quotas**, **role-based access with optional SSO (Azure AD/Entra, Google, any OIDC provider, or SAML 2.0)**, **full audit logging**, and real-time **GPU, health, and energy monitoring**.
+The platform is multi-modal, spanning chat and text completion, embeddings, vision, **image, video and 3D model generation**, **speech (TTS/STT)**, and document OCR. It also provides the governance and operations layers a shared deployment needs: **fair-share scheduling** across users and groups, **per-user token and request quotas**, **role-based access with optional SSO (Azure AD/Entra, Google, any OIDC provider, or SAML 2.0)**, **full audit logging**, and real-time **GPU, health, and energy monitoring**.
 
 Because all inference runs on hardware the operator owns, MindRouter is built to support **institutional and organizational AI sovereignty**: scalable on-premises hosting that keeps prompts, documents, and generated media on local infrastructure instead of third-party clouds.
 
@@ -32,6 +32,7 @@ Interactive API docs are also available at `/docs` (Swagger UI) and `/redoc` (Re
 - **Multi-Modal Support**: Text, embeddings, and vision-language models
 - **Image Generation**: Text-to-image and image-to-image / reference edit via `/v1/images/generations` and `/v1/images/edits` (diffusion backends; per-account enablement)
 - **Video Generation**: Asynchronous text-to-video with keyframe conditioning via `/v1/videos` (per-account enablement, per-user storage quota)
+- **Image to 3D**: Asynchronous image-to-mesh via `/v1/meshes`: one picture in, a textured GLB (PBR) and a preview out, with a 3D viewer tab. Models: Hunyuan3D 2.1 (default), TRELLIS.2 and Pixal3D, each on its own GPU worker (`mesh-worker/`). Admin → Meshes sets the service switch, default model, face/texture ranges, per-model caps and settings, and license acceptance (per-account enablement, per-user storage quota). See [docs/mesh-api.md](docs/mesh-api.md)
 - **Document OCR**: Text extraction from PDFs and images via `/v1/ocr`
 - **Structured Outputs**: JSON schema validation across all backends
 - **Quota Management**: Per-user token budgets with role-based weights
@@ -417,6 +418,40 @@ make docker-migrate # Run Alembic migrations via docker-compose
 |--------|------|-------------|
 | POST | `/v1/audio/speech` | OpenAI-compatible text-to-speech |
 | POST | `/v1/audio/transcriptions` | OpenAI-compatible speech-to-text |
+
+#### Image to 3D Endpoints (`/v1/meshes`)
+
+Asynchronous: one picture in, a textured 3D model (binary glTF, PBR) out.
+Requires per-account enablement and the service switch on Admin → Meshes.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/meshes` | Create a job (multipart `image`, or JSON with base64 `image`) → `202` + job object |
+| GET | `/v1/meshes/{id}` | Poll a job (status, stage, progress, queue position) |
+| GET | `/v1/meshes/{id}/content` | Download the GLB; `?variant=preview` for the PNG preview |
+| GET | `/v1/meshes` | List your jobs, newest first |
+| DELETE | `/v1/meshes/{id}` | Cancel a running job (refunded) or delete a finished one |
+| GET | `/v1/meshes/models` | Models with their own limits, settings, license and availability |
+
+Request fields: `model` (default `default-mesh` → Hunyuan3D 2.1), `texture`
+(default true), `texture_size` (1024 / 2048 / 4096, default 2048),
+`target_faces` (default 40,000; 5,000–300,000, Hunyuan3D capped at 100,000),
+`remove_background` (`auto` / `on` / `off`), `seed`. Results use glTF's
+convention (+Y up, front facing +Z) for every model.
+
+```bash
+MESH=$(curl -s -X POST https://mindrouter.example.edu/v1/meshes \
+  -H "Authorization: Bearer $MINDROUTER_API_KEY" -F image=@chair.jpg | jq -r .id)
+curl -s https://mindrouter.example.edu/v1/meshes/$MESH -H "Authorization: Bearer $MINDROUTER_API_KEY" | jq .status
+curl -L https://mindrouter.example.edu/v1/meshes/$MESH/content -H "Authorization: Bearer $MINDROUTER_API_KEY" -o chair.glb
+```
+
+Hunyuan3D 2.1 is used under the Tencent Hunyuan 3D 2.1 Community License
+Agreement: not licensed in the EU, the UK or South Korea; outputs may not
+be used to improve other AI models; Tencent is not affiliated with or
+endorsing the service. It takes no jobs until an admin accepts its license
+on Admin → Meshes. Full reference: [docs/mesh-api.md](docs/mesh-api.md);
+the GPU worker: [mesh-worker/README.md](mesh-worker/README.md).
 
 #### Health & Metrics
 

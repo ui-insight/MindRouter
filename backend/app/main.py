@@ -43,6 +43,7 @@ from backend.app.dashboard.email_routes import email_router
 from backend.app.dashboard.chat import chat_router
 from backend.app.dashboard.images import images_router
 from backend.app.dashboard.video import video_router
+from backend.app.dashboard.mesh import mesh_router
 from backend.app.dashboard.routes import dashboard_router
 from backend.app.logging_config import (
     bind_request_context,
@@ -509,6 +510,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         from backend.app.services.video_runner import run_video_runner_loop
         _video_task = asyncio.create_task(run_video_runner_loop())
 
+    # Start the image-to-mesh runner (claims queued mesh jobs, drives the worker)
+    _mesh_task = None
+    if get_settings().mesh_runner_enabled:
+        from backend.app.services.mesh_runner import run_mesh_runner_loop
+        _mesh_task = asyncio.create_task(run_mesh_runner_loop())
+
     # The Streamable HTTP session manager owns the task group that runs each
     # request's MCP server task, so it must be running for POST /mcp to work.
     # run() may only be called once per instance.
@@ -586,6 +593,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _video_task.cancel()
         try:
             await _video_task
+        except asyncio.CancelledError:
+            pass
+    if _mesh_task:
+        _mesh_task.cancel()
+        try:
+            await _mesh_task
         except asyncio.CancelledError:
             pass
     if _branding_task:
@@ -776,6 +789,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(images_router)
     app.include_router(video_router)
+    app.include_router(mesh_router)
     app.include_router(blog_router)
     app.include_router(email_router)
     app.include_router(dlp_router)

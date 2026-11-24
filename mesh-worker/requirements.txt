@@ -1,0 +1,15 @@
+# mesh-worker service deps (own venv / container — NOT the gateway's).
+# Enough for MESH_WORKER_MODE=mock, the HTTP layer, GLB validation and the
+# software preview renderer:
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pillow>=10.0
+numpy>=1.24
+# Tests:
+httpx>=0.27
+pytest>=8.0
+#
+# GPU engines are NOT listed here. Each real engine has its own pinned stack,
+# installed only inside its container (never on a laptop):
+#   trellis2 / pixal3d -> docker/trellis2/requirements-engine.txt + Dockerfile
+#   hunyuan3d21        -> docker/hunyuan3d21/requirements-engine.txt + Dockerfile

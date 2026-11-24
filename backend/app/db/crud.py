@@ -44,6 +44,8 @@ from backend.app.db.models import (
     GPUDevice,
     GPUDeviceTelemetry,
     Group,
+    MeshJob,
+    MeshJobStatus,
     Model,
     ModelAlias,
     ModelArchivedStats,
@@ -641,6 +643,9 @@ async def delete_user(db: AsyncSession, user_id: int) -> bool:
     await db.execute(delete(VideoAsset).where(VideoAsset.user_id == user_id))
     await db.execute(delete(VideoProject).where(VideoProject.user_id == user_id))
 
+    # --- Mesh jobs (rows now; the user's mesh directory after the flush) ---
+    await db.execute(delete(MeshJob).where(MeshJob.user_id == user_id))
+
     # --- Image gallery (paths are relative to the artifact store) ---
     img_result = await db.execute(
         select(UserImage.storage_path).where(UserImage.user_id == user_id)
@@ -813,6 +818,15 @@ async def delete_user(db: AsyncSession, user_id: int) -> bool:
                 remove_conversation_artifacts(conversation_id)
             except OSError:
                 pass
+        try:
+            import shutil
+
+            mesh_user_dir = os.path.join(_settings.mesh_storage_path, str(user_id))
+            safe_dir = resolve_under(_settings.mesh_storage_path, mesh_user_dir)
+            if os.path.isdir(safe_dir):
+                shutil.rmtree(safe_dir, ignore_errors=True)
+        except (OSError, PathEscapeError):
+            pass
 
     return result.rowcount > 0
 
@@ -1263,6 +1277,7 @@ async def count_api_key_references(db: AsyncSession, api_key_id: int) -> Dict[st
         ("stored_responses", StoredResponse, StoredResponse.api_key_id),
         ("conversations", Conversation, Conversation.api_key_id),
         ("video_jobs", VideoJob, VideoJob.api_key_id),
+        ("mesh_jobs", MeshJob, MeshJob.api_key_id),
     ):
         result = await db.execute(
             select(func.count()).select_from(model).where(column == api_key_id)
@@ -1835,6 +1850,9 @@ async def delete_backend(db: AsyncSession, backend_id: int) -> bool:
     await db.execute(
         update(VideoShot).where(VideoShot.backend_id == backend_id).values(backend_id=None)
     )
+    await db.execute(
+        update(MeshJob).where(MeshJob.backend_id == backend_id).values(backend_id=None)
+    )
 
     # Delete the backend
     result = await db.execute(select(Backend).where(Backend.id == backend_id))
@@ -1986,6 +2004,27 @@ async def get_servable_video_models(db: AsyncSession) -> List[str]:
                 Backend.engine == BackendEngine.VIDEO,
                 Backend.status == BackendStatus.HEALTHY,
                 Model.modality == Modality.VIDEO_GENERATION,
+            )
+        )
+        .distinct()
+        .order_by(Model.name)
+    )
+    return [name for (name,) in result.all()]
+
+
+async def get_servable_mesh_models(db: AsyncSession) -> List[str]:
+    """Mesh models with at least one healthy mesh backend right now, by name.
+
+    The mesh runner claims only jobs for these, and the 3D tab offers only
+    these (the video equivalent is get_servable_video_models)."""
+    result = await db.execute(
+        select(Model.name)
+        .join(Backend, Backend.id == Model.backend_id)
+        .where(
+            and_(
+                Backend.engine == BackendEngine.MESH,
+                Backend.status == BackendStatus.HEALTHY,
+                Model.modality == Modality.MESH_GENERATION,
             )
         )
         .distinct()
@@ -6092,3 +6131,487 @@ async def delete_video_job(db: AsyncSession, job: VideoJob) -> list[str]:
         await db.execute(delete(VideoProject).where(VideoProject.id == project_id))
     await db.commit()
     return paths
+
+
+# ===========================================================================
+# Image-to-mesh jobs (see docs/mesh-api.md, services/mesh_runner.py)
+# ===========================================================================
+
+MESH_ACTIVE_STATUSES = (MeshJobStatus.QUEUED, MeshJobStatus.RENDERING)
+MESH_TERMINAL_STATUSES = (MeshJobStatus.COMPLETED, MeshJobStatus.FAILED, MeshJobStatus.CANCELLED)
+
+# Job status as exposed to clients (the runner's RENDERING is "in_progress").
+EXTERNAL_MESH_STATUS = {
+    MeshJobStatus.QUEUED: "queued",
+    MeshJobStatus.RENDERING: "in_progress",
+    MeshJobStatus.COMPLETED: "completed",
+    MeshJobStatus.FAILED: "failed",
+    MeshJobStatus.CANCELLED: "cancelled",
+}
+
+
+async def create_mesh_job(db: AsyncSession, **fields) -> MeshJob:
+    """Insert a QUEUED mesh job. Its audit request row goes to PROCESSING (the
+    queued-request orphan sweeps would otherwise mark it failed); the job's
+    end sets it to completed / failed / cancelled. Flushes; the caller commits."""
+    job = MeshJob(status=MeshJobStatus.QUEUED, **fields)
+    db.add(job)
+    if fields.get("request_id"):
+        await _set_mesh_request_status(db, fields["request_id"], RequestStatus.PROCESSING)
+    await db.flush()
+    return job
+
+
+async def _set_mesh_request_status(
+    db: AsyncSession, request_id: Optional[int], status: "RequestStatus", error_message: Optional[str] = None
+) -> None:
+    """Mirror a mesh job's state onto its audit request row."""
+    if not request_id:
+        return
+    values: dict = {"status": status}
+    if error_message:
+        values["error_message"] = error_message[:1000]
+    await db.execute(update(Request).where(Request.id == request_id).values(**values))
+
+
+async def get_mesh_job_by_uuid(
+    db: AsyncSession, job_uuid: str, user_id: Optional[int] = None
+) -> Optional[MeshJob]:
+    """A job by its public id; with ``user_id`` only that user's job."""
+    conditions = [MeshJob.job_uuid == job_uuid]
+    if user_id is not None:
+        conditions.append(MeshJob.user_id == user_id)
+    result = await db.execute(select(MeshJob).where(and_(*conditions)))
+    return result.scalar_one_or_none()
+
+
+async def get_mesh_job_by_id(db: AsyncSession, job_id: int) -> Optional[MeshJob]:
+    return await db.get(MeshJob, job_id)
+
+
+async def list_mesh_jobs(
+    db: AsyncSession,
+    user_id: int,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[MeshJob], int]:
+    """A user's jobs, newest first, plus the total count (for paging).
+
+    ``status`` filters on the EXTERNAL status word (queued, in_progress,
+    completed, failed, cancelled)."""
+    conditions = [MeshJob.user_id == user_id]
+    if status:
+        internal = [k for k, v in EXTERNAL_MESH_STATUS.items() if v == status]
+        if not internal:
+            return [], 0
+        conditions.append(MeshJob.status.in_(internal))
+    total = (
+        await db.execute(select(func.count(MeshJob.id)).where(and_(*conditions)))
+    ).scalar() or 0
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    result = await db.execute(
+        select(MeshJob)
+        .where(and_(*conditions))
+        .order_by(MeshJob.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(result.scalars().all()), int(total)
+
+
+async def lock_user_for_mesh_submit(db: AsyncSession, user_id: int) -> None:
+    """Row-lock the user for the rest of the transaction, so one user's
+    concurrent submits run their in-flight count + quota reservation + insert
+    one at a time (otherwise N parallel POSTs all see the same count). Other
+    users are not blocked."""
+    await db.execute(select(User.id).where(User.id == user_id).with_for_update())
+
+
+async def count_active_mesh_jobs_for_user(db: AsyncSession, user_id: int) -> int:
+    """A user's in-flight jobs (queued or rendering): the fairness lever."""
+    result = await db.execute(
+        select(func.count(MeshJob.id)).where(
+            and_(MeshJob.user_id == user_id, MeshJob.status.in_(MESH_ACTIVE_STATUSES))
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def get_user_mesh_storage_bytes(db: AsyncSession, user_id: int) -> int:
+    """Bytes a user's mesh files occupy (inputs + GLBs + previews). Backs the
+    per-user cap (mesh.user_storage_cap_gb)."""
+    total = (
+        MeshJob.input_size_bytes + MeshJob.output_size_bytes + MeshJob.preview_size_bytes
+    )
+    result = await db.execute(
+        select(func.coalesce(func.sum(total), 0)).where(MeshJob.user_id == user_id)
+    )
+    return int(result.scalar() or 0)
+
+
+async def compute_mesh_token_cost(db: AsyncSession, *, texture: bool) -> int:
+    """Token-equivalent charged for one job (flat per job; admin-tunable)."""
+    key = "mesh.token_cost_textured" if texture else "mesh.token_cost_untextured"
+    default = 10000 if texture else 5000
+    try:
+        return max(0, int(await get_config_json(db, key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+async def reserve_mesh_tokens(db: AsyncSession, user: User, cost: int) -> bool:
+    """Reserve a job's cost against the user's budget (same model as video:
+    charged up front, refunded on fail/cancel). Caller commits, then calls
+    incr_quota_redis(user.id, cost)."""
+    return await reserve_video_tokens(db, user, cost)
+
+
+async def refund_mesh_tokens(db: AsyncSession, user_id: int, amount: int) -> None:
+    """Return a reservation (failed or cancelled job) in the DB now; the Redis
+    counter is decremented only after the caller's commit succeeds
+    (apply_pending_quota_redis), so a failed commit never leaves Redis
+    refunded while the job is still active. Caller commits."""
+    if amount <= 0:
+        return
+    quota = await get_user_quota(db, user_id)
+    if quota:
+        quota.tokens_used = max(0, quota.tokens_used - amount)
+        quota.lifetime_tokens_used = max(0, quota.lifetime_tokens_used - amount)
+        await db.flush()
+    db.info.setdefault("pending_quota_redis", []).append((user_id, -amount))
+
+
+async def apply_pending_quota_redis(db: AsyncSession) -> None:
+    """Apply the Redis quota deltas queued by this session's refunds. Call
+    right after a successful commit."""
+    for user_id, delta in db.info.pop("pending_quota_redis", []):
+        await incr_quota_redis(user_id, delta)
+
+
+async def _end_mesh_job(db: AsyncSession, job_id: int, status: MeshJobStatus, **values) -> bool:
+    """Move an ACTIVE (queued or rendering) job to a terminal ``status`` and
+    refund its reservation, exactly once: the UPDATE is conditional on the
+    job still being active, and only the caller whose UPDATE matched refunds.
+    Two racing callers (runner vs. API cancel, or two runners) cannot both
+    refund. Returns whether this call ended the job. Caller commits."""
+    row = (
+        await db.execute(
+            select(MeshJob.user_id, MeshJob.token_equivalent, MeshJob.request_id).where(MeshJob.id == job_id)
+        )
+    ).first()
+    if row is None:
+        return False
+    result = await db.execute(
+        update(MeshJob)
+        .where(and_(MeshJob.id == job_id, MeshJob.status.in_(MESH_ACTIVE_STATUSES)))
+        .values(status=status, completed_at=datetime.now(timezone.utc), **values)
+    )
+    ended = (result.rowcount or 0) == 1
+    if ended and row.token_equivalent:
+        await refund_mesh_tokens(db, row.user_id, row.token_equivalent)
+    if ended:
+        await _set_mesh_request_status(
+            db, row.request_id,
+            RequestStatus.CANCELLED if status == MeshJobStatus.CANCELLED else RequestStatus.FAILED,
+            values.get("error_message"),
+        )
+    return ended
+
+
+async def request_cancel_mesh_job(db: AsyncSession, job: MeshJob) -> None:
+    """Flag a job for cancellation; the runner tells the worker. A job still
+    QUEUED is cancelled outright and refunded (if the runner claimed it in the
+    meantime, the flag alone stands and the runner cancels it). Caller commits."""
+    await db.execute(update(MeshJob).where(MeshJob.id == job.id).values(cancel_requested=True))
+    result = await db.execute(
+        update(MeshJob)
+        .where(and_(MeshJob.id == job.id, MeshJob.status == MeshJobStatus.QUEUED))
+        .values(status=MeshJobStatus.CANCELLED, completed_at=datetime.now(timezone.utc))
+    )
+    if (result.rowcount or 0) == 1:
+        if job.token_equivalent:
+            await refund_mesh_tokens(db, job.user_id, job.token_equivalent)
+        await _set_mesh_request_status(db, job.request_id, RequestStatus.CANCELLED)
+    await db.flush()
+
+
+async def claim_next_mesh_job(
+    db: AsyncSession, worker_id: str, models: Optional[List[str]] = None,
+) -> Optional[MeshJob]:
+    """Atomically claim the highest-priority QUEUED job (SELECT ... FOR UPDATE
+    SKIP LOCKED) and mark it RENDERING. Commits. With ``models``, only jobs for
+    those models are eligible, so a job whose model is down waits without
+    blocking the others. A job flagged for cancellation IS claimed: the runner
+    sees the flag first thing and cancels it with a refund (filtering it out
+    here would strand a requeued, cancel-flagged job in the queue forever)."""
+    if models is not None and not models:
+        return None
+    query = select(MeshJob.id).where(MeshJob.status == MeshJobStatus.QUEUED)
+    if models is not None:
+        query = query.where(MeshJob.model.in_(list(models)))
+    candidate = (
+        await db.execute(
+            query.order_by(MeshJob.priority.desc(), MeshJob.id.asc())
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalar_one_or_none()
+    if candidate is None:
+        return None
+    await db.execute(
+        update(MeshJob)
+        .where(MeshJob.id == candidate)
+        .values(
+            status=MeshJobStatus.RENDERING,
+            claimed_by=worker_id,
+            started_at=func.coalesce(MeshJob.started_at, func.now()),
+            heartbeat_at=func.now(),
+            stage="queued",
+        )
+    )
+    await db.commit()
+    return (await db.execute(select(MeshJob).where(MeshJob.id == candidate))).scalar_one_or_none()
+
+
+def mesh_job_snapshot(job: MeshJob) -> dict:
+    """A detached dict of everything the runner needs (never a session-bound
+    ORM object: a job is driven across many awaits)."""
+    return {
+        "id": job.id,
+        "job_uuid": job.job_uuid,
+        "user_id": job.user_id,
+        "model": job.model,
+        "seed": job.seed,
+        "texture": bool(job.texture),
+        "texture_size": job.texture_size,
+        "target_faces": job.target_faces,
+        "remove_background": job.remove_background,
+        "model_options": dict(job.model_options or {}),
+        "input_content_type": job.input_content_type,
+        "attempts": job.attempts or 0,
+        "token_equivalent": job.token_equivalent,
+        "backend_id": job.backend_id,
+        "backend_job_id": job.backend_job_id,
+        "started_at": _ensure_aware(job.started_at),
+    }
+
+
+async def list_stale_rendering_mesh_jobs(db: AsyncSession, threshold_seconds: int) -> list[dict]:
+    """Snapshots of RENDERING jobs whose heartbeat lapsed (their runner is
+    gone); the reconcile loop asks the worker what happened to each."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_seconds)
+    result = await db.execute(
+        select(MeshJob)
+        .where(
+            and_(
+                MeshJob.status == MeshJobStatus.RENDERING,
+                or_(MeshJob.heartbeat_at.is_(None), MeshJob.heartbeat_at < cutoff),
+            )
+        )
+        .order_by(MeshJob.id.asc())
+    )
+    return [mesh_job_snapshot(j) for j in result.scalars().all()]
+
+
+async def readopt_mesh_job(
+    db: AsyncSession, job_id: int, worker_id: str, threshold_seconds: int
+) -> bool:
+    """Claim a stale RENDERING job for ``worker_id`` only if it is still
+    RENDERING and still stale, so two runners never reconcile the same job."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_seconds)
+    result = await db.execute(
+        update(MeshJob)
+        .where(
+            and_(
+                MeshJob.id == job_id,
+                MeshJob.status == MeshJobStatus.RENDERING,
+                or_(MeshJob.heartbeat_at.is_(None), MeshJob.heartbeat_at < cutoff),
+            )
+        )
+        .values(claimed_by=worker_id, heartbeat_at=datetime.now(timezone.utc))
+    )
+    await db.commit()
+    return (result.rowcount or 0) > 0
+
+
+async def update_mesh_job(db: AsyncSession, job_id: int, **fields) -> None:
+    """Set fields on a job (progress, stage, backend ids, attempts...) and bump
+    its heartbeat. Commits."""
+    fields.setdefault("heartbeat_at", datetime.now(timezone.utc))
+    await db.execute(update(MeshJob).where(MeshJob.id == job_id).values(**fields))
+    await db.commit()
+
+
+async def requeue_mesh_job(db: AsyncSession, job_id: int, *, attempts: Optional[int] = None,
+                           clear_backend: bool = False) -> None:
+    """Put a RENDERING job back in the queue (worker lost it, or no backend).
+    A job already terminal is left alone, and a job flagged for cancellation
+    is cancelled (and refunded) instead of requeued. Commits."""
+    job = await get_mesh_job_by_id(db, job_id)
+    if job is None or job.status != MeshJobStatus.RENDERING:
+        return
+    if job.cancel_requested:
+        await _end_mesh_job(db, job_id, MeshJobStatus.CANCELLED)
+        await db.commit()
+        await apply_pending_quota_redis(db)
+        return
+    # started_at is cleared so the next attempt gets the full wall-clock limit
+    # (the retry cap, not the clock, bounds how often a job re-runs).
+    values: dict = {"status": MeshJobStatus.QUEUED, "claimed_by": None, "stage": None, "started_at": None}
+    if attempts is not None:
+        values["attempts"] = attempts
+    if clear_backend:
+        values.update(backend_id=None, backend_job_id=None)
+    await db.execute(
+        update(MeshJob)
+        .where(and_(MeshJob.id == job_id, MeshJob.status == MeshJobStatus.RENDERING))
+        .values(**values)
+    )
+    await db.commit()
+
+
+async def complete_mesh_job(
+    db: AsyncSession,
+    job_id: int,
+    *,
+    output_size_bytes: int,
+    output_sha256: Optional[str],
+    preview_size_bytes: int,
+    faces: Optional[int],
+    vertices: Optional[int],
+    gpu_seconds: int,
+) -> bool:
+    """Mark a RENDERING job COMPLETED with its outputs (the reservation stays
+    charged). Returns False when the job had already ended (cancelled or
+    failed meanwhile) or no longer exists: it is never resurrected. Commits."""
+    result = await db.execute(
+        update(MeshJob)
+        .where(and_(MeshJob.id == job_id, MeshJob.status == MeshJobStatus.RENDERING))
+        .values(
+            status=MeshJobStatus.COMPLETED,
+            progress=100.0,
+            stage="done",
+            completed_at=datetime.now(timezone.utc),
+            output_size_bytes=output_size_bytes,
+            output_sha256=output_sha256,
+            preview_size_bytes=preview_size_bytes,
+            faces=faces,
+            vertices=vertices,
+            gpu_seconds=gpu_seconds,
+        )
+    )
+    done = (result.rowcount or 0) == 1
+    if done:
+        request_id = (await db.execute(select(MeshJob.request_id).where(MeshJob.id == job_id))).scalar_one_or_none()
+        await _set_mesh_request_status(db, request_id, RequestStatus.COMPLETED)
+    await db.commit()
+    return done
+
+
+async def expire_stale_queued_mesh_jobs(db: AsyncSession, max_age_seconds: int) -> int:
+    """Fail (and refund) QUEUED jobs older than ``max_age_seconds``: their
+    model's worker never came back, and they would otherwise hold their token
+    reservation and the user's in-flight slots forever. Returns how many."""
+    if max_age_seconds <= 0:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    ids = (
+        await db.execute(
+            select(MeshJob.id).where(and_(MeshJob.status == MeshJobStatus.QUEUED, MeshJob.created_at < cutoff))
+        )
+    ).scalars().all()
+    ended = 0
+    for job_id in ids:
+        if await _end_mesh_job(
+            db, job_id, MeshJobStatus.FAILED, error_code="queue_timeout",
+            error_message=f"no 3D server picked up the job within {max_age_seconds // 3600} hours",
+        ):
+            ended += 1
+    await db.commit()
+    await apply_pending_quota_redis(db)
+    return ended
+
+
+async def fail_mesh_job(db: AsyncSession, job_id: int, *, error_code: str, error_message: str) -> None:
+    """Mark an active job FAILED and refund its reservation, exactly once. Commits."""
+    await _end_mesh_job(
+        db, job_id, MeshJobStatus.FAILED,
+        error_code=(error_code or "failed")[:64],
+        error_message=error_message[:1000] if error_message else error_message,
+    )
+    await db.commit()
+    await apply_pending_quota_redis(db)
+
+
+async def mark_mesh_job_cancelled(db: AsyncSession, job_id: int) -> None:
+    """Mark an active job CANCELLED and refund its reservation, exactly once. Commits."""
+    await _end_mesh_job(db, job_id, MeshJobStatus.CANCELLED)
+    await db.commit()
+    await apply_pending_quota_redis(db)
+
+
+async def is_mesh_job_cancel_requested(db: AsyncSession, job_id: int) -> bool:
+    """True when the job is flagged for cancellation, or its row is gone (the
+    user or the job was deleted mid-run): either way the runner must stop."""
+    result = await db.execute(select(MeshJob.cancel_requested).where(MeshJob.id == job_id))
+    row = result.first()
+    return True if row is None else bool(row[0])
+
+
+async def get_mesh_queue_position(db: AsyncSession, job: MeshJob) -> tuple[int, int]:
+    """(position, depth) of a QUEUED job in the shared queue (1 = next).
+    Position 0 means the job is not waiting."""
+    depth = int(
+        (await db.execute(
+            select(func.count(MeshJob.id)).where(MeshJob.status == MeshJobStatus.QUEUED)
+        )).scalar() or 0
+    )
+    if job.status != MeshJobStatus.QUEUED:
+        return 0, depth
+    ahead = int(
+        (await db.execute(
+            select(func.count(MeshJob.id)).where(
+                and_(
+                    MeshJob.status == MeshJobStatus.QUEUED,
+                    or_(
+                        MeshJob.priority > job.priority,
+                        and_(MeshJob.priority == job.priority, MeshJob.id < job.id),
+                    ),
+                )
+            )
+        )).scalar() or 0
+    )
+    return ahead + 1, depth
+
+
+async def delete_mesh_job(db: AsyncSession, job: MeshJob) -> None:
+    """Delete a terminal job's row and its files. Commits.
+
+    Files are rebuilt from (root, user_id, job_uuid), never from a stored path,
+    and removed after the commit (a crash in between leaves orphan files, which
+    retention ignores but are harmless)."""
+    from backend.app.services.mesh_store import remove_job_files
+    from backend.app.settings import get_settings
+
+    user_id, job_uuid, ctype = job.user_id, job.job_uuid, job.input_content_type
+    await db.execute(delete(MeshJob).where(MeshJob.id == job.id))
+    await db.commit()
+    remove_job_files(get_settings().mesh_storage_path, user_id, job_uuid, ctype)
+
+
+async def list_expired_mesh_jobs(db: AsyncSession, cutoff: datetime, limit: int) -> list[MeshJob]:
+    """Terminal jobs finished (or created, if never finished) before cutoff."""
+    result = await db.execute(
+        select(MeshJob)
+        .where(
+            and_(
+                MeshJob.status.in_(MESH_TERMINAL_STATUSES),
+                func.coalesce(MeshJob.completed_at, MeshJob.created_at) < cutoff,
+            )
+        )
+        .order_by(MeshJob.id.asc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())

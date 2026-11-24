@@ -1421,6 +1421,8 @@ class BackendRegistry:
                                     modality = Modality.IMAGE_GENERATION
                                 elif backend.engine == BackendEngine.VIDEO:
                                     modality = Modality.VIDEO_GENERATION
+                                elif backend.engine == BackendEngine.MESH:
+                                    modality = Modality.MESH_GENERATION
                                 elif backend.engine == BackendEngine.TTS:
                                     # Kokoro advertises tts-1 / tts-1-hd / kokoro
                                     modality = Modality.TTS

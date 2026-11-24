@@ -240,6 +240,12 @@
                                        value="{{ config['retention.web_search_logs_days'] }}" min="0">
                                 <div class="form-text">Outbound web-search audit records, swept by search time. They store the verbatim provider response, so they grow fastest of any audit table. 0 = never delete (default).</div>
                             </div>
+                            <div class="col-md-4">
+                                <label class="form-label">3D Meshes (days)</label>
+                                <input type="number" class="form-control" name="retention.user_meshes_days"
+                                       value="{{ config['retention.user_meshes_days'] }}" min="0">
+                                <div class="form-text">Finished image-to-mesh jobs with their input image, model and preview, swept by finish time. Jobs still running are never touched. 0 = never delete; default 90.</div>
+                            </div>
                         </div>
                     </div>
                 </div>

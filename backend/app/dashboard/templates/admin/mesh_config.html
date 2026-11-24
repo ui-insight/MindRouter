@@ -1,0 +1,356 @@
+{% extends "base.html" %}
+
+{% block title %}Meshes - MindRouter{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-md-3 col-lg-2 px-0">
+      {% include "admin/_sidebar.html" %}
+    </div>
+
+    <div class="col-md-9 col-lg-10 py-4 px-4">
+      <h1 class="h3 mb-1">Meshes</h1>
+      <p class="text-body-secondary mb-4">
+        Image to 3D: one picture in, a textured 3D model (GLB) out. Jobs run asynchronously on
+        <code>mesh</code> backends (<code>mesh-worker/</code>); users reach the service through
+        <code>/v1/meshes</code> and the 3D tab.
+      </p>
+
+      {% if success %}
+      <div class="alert alert-success" role="alert">
+        {% if success == 'model_saved' %}Model settings saved.
+        {% elif success == 'accept_license' %}License accepted. The model can now take jobs.
+        {% elif success == 'revoke_license' %}License acceptance withdrawn. The model no longer takes new jobs.
+        {% else %}Saved.{% endif %}
+      </div>
+      {% endif %}
+      {% if error %}
+      <div class="alert alert-danger" role="alert">{{ error }}</div>
+      {% endif %}
+
+      {% if user.group and user.group.is_admin %}
+      <form method="post" action="/admin/meshes" class="mb-4">
+        <input type="hidden" name="action" value="save_config">
+
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Service</h2>
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="meshcfg-enabled" name="enabled" role="switch"
+                     aria-describedby="meshcfg-enabled-help" {% if enabled %}checked{% endif %}>
+              <label class="form-check-label fw-semibold" for="meshcfg-enabled">Enable <code>/v1/meshes</code> and the 3D tab</label>
+              <div id="meshcfg-enabled-help" class="form-text">
+                Off: <code>/v1/meshes</code> answers 503 and the 3D tab says the service is off. On: users still need
+                3D access on their account (User access, below).
+              </div>
+            </div>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="meshcfg-bg" name="background_removal" role="switch"
+                     aria-describedby="meshcfg-bg-help" {% if background_removal %}checked{% endif %}>
+              <label class="form-check-label" for="meshcfg-bg">Remove backgrounds with the matting server</label>
+              <div id="meshcfg-bg-help" class="form-text">
+                Uses the server set in <code>img.matting_url</code> (Images settings) whenever a request asks for it
+                (<code>remove_background</code> on, or auto with an opaque picture). If the server is unavailable,
+                the original picture is sent unchanged.
+              </div>
+            </div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label for="meshcfg-default-model" class="form-label">Default model</label>
+                <select class="form-select" id="meshcfg-default-model" name="default_model" aria-describedby="meshcfg-model-help">
+                  {% set listed = [] %}
+                  {% for alias, target in mesh_aliases.items() %}
+                  <option value="{{ alias }}" {% if alias == default_model %}selected{% endif %}>{{ alias }} (alias for {{ target }})</option>
+                  {% set _ = listed.append(alias) %}
+                  {% endfor %}
+                  {% for m in mesh_models %}
+                  <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                  {% set _ = listed.append(m) %}
+                  {% endfor %}
+                  {% if default_model not in listed %}
+                  <option value="{{ default_model }}" selected>{{ default_model }} (not a registered mesh model)</option>
+                  {% endif %}
+                </select>
+                <div id="meshcfg-model-help" class="form-text">
+                  Used when a request names no model. Now: <code>{{ default_model }}</code>{% if default_model_resolved != default_model %} &rarr; <code>{{ default_model_resolved }}</code>{% endif %}.
+                  Repoint the <code>default-mesh</code> alias under Model Aliases, or pick a model here.
+                </div>
+              </div>
+              <div class="col-md-6">
+                <label for="meshcfg-sizes" class="form-label">Allowed texture sizes (px, comma-separated)</label>
+                <input type="text" class="form-control" id="meshcfg-sizes" name="allowed_texture_sizes" value="{{ allowed_texture_sizes }}">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-1">Defaults &amp; ranges</h2>
+            <p class="form-text mt-0 mb-3">Service-wide; each model below can narrow its own maximums.</p>
+            <div class="row g-3">
+              <div class="col-md-3">
+                <label for="meshcfg-default-tex" class="form-label">Default texture size</label>
+                <input type="number" class="form-control" id="meshcfg-default-tex" name="default_texture_size"
+                       value="{{ default_texture_size }}" min="256" max="8192">
+              </div>
+              <div class="col-md-3">
+                <label for="meshcfg-default-faces" class="form-label">Default target faces</label>
+                <input type="number" class="form-control" id="meshcfg-default-faces" name="default_target_faces"
+                       value="{{ default_target_faces }}" min="1000" max="5000000">
+              </div>
+              <div class="col-md-3">
+                <label for="meshcfg-min-faces" class="form-label">Min target faces</label>
+                <input type="number" class="form-control" id="meshcfg-min-faces" name="min_target_faces"
+                       value="{{ min_target_faces }}" min="100" max="5000000">
+              </div>
+              <div class="col-md-3">
+                <label for="meshcfg-max-faces" class="form-label">Max target faces</label>
+                <input type="number" class="form-control" id="meshcfg-max-faces" name="max_target_faces"
+                       value="{{ max_target_faces }}" min="1000" max="10000000">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Limits &amp; cost</h2>
+            <div class="row g-3">
+              <div class="col-md-2">
+                <label for="meshcfg-max-concurrent" class="form-label">In-flight jobs / user</label>
+                <input type="number" class="form-control" id="meshcfg-max-concurrent" name="max_concurrent_jobs_per_user"
+                       value="{{ max_concurrent_jobs_per_user }}" min="1" max="10">
+              </div>
+              <div class="col-md-3">
+                <label for="meshcfg-cost-tex" class="form-label">Tokens / textured job</label>
+                <input type="number" class="form-control" id="meshcfg-cost-tex" name="token_cost_textured"
+                       value="{{ token_cost_textured }}" min="0" max="10000000">
+              </div>
+              <div class="col-md-3">
+                <label for="meshcfg-cost-shape" class="form-label">Tokens / shape-only job</label>
+                <input type="number" class="form-control" id="meshcfg-cost-shape" name="token_cost_untextured"
+                       value="{{ token_cost_untextured }}" min="0" max="10000000">
+              </div>
+              <div class="col-md-2">
+                <label for="meshcfg-cap" class="form-label">Storage cap / user (GB)</label>
+                <input type="number" class="form-control" id="meshcfg-cap" name="user_storage_cap_gb"
+                       value="{{ user_storage_cap_gb }}" min="0" max="10000">
+              </div>
+              <div class="col-md-2">
+                <label for="meshcfg-upload" class="form-label">Max image (MB)</label>
+                <input type="number" class="form-control" id="meshcfg-upload" name="max_image_upload_mb"
+                       value="{{ max_image_upload_mb }}" min="1" max="64">
+              </div>
+            </div>
+            <p class="form-text mt-2 mb-0">Finished jobs are deleted after the 3D Meshes window on the Retention page.</p>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Save service settings</button>
+      </form>
+
+      <h2 class="h5 mt-5 mb-2">Models</h2>
+      <p class="text-body-secondary small mb-3">
+        Settings are snapshotted onto each job when it is submitted and sent to the worker, which checks them
+        against its own limits. Blank fields use the service-wide value or the worker's default.
+      </p>
+      {% if not model_rows %}
+      <div class="alert alert-secondary">
+        No mesh backend is registered yet. Register a mesh-worker under Backends (engine <code>mesh</code>);
+        its model then appears here.
+      </div>
+      {% endif %}
+      {% for m in model_rows %}
+      <div class="card mb-3">
+        <div class="card-body">
+          <form method="post" action="/admin/meshes">
+            <input type="hidden" name="action" value="save_model">
+            <input type="hidden" name="model" value="{{ m.name }}">
+            <div class="d-flex flex-wrap align-items-baseline gap-2 mb-1">
+              <h3 class="h6 mb-0"><code>{{ m.name }}</code></h3>
+              <span class="text-body-secondary small">{{ m.label }}</span>
+              {% if m.license %}
+                {% if m.license.requires_acceptance and not m.license_ok %}
+                <span class="badge bg-warning text-dark">License not accepted: takes no jobs</span>
+                {% elif m.license.requires_acceptance %}
+                <span class="badge bg-success">License accepted</span>
+                {% else %}
+                <span class="badge bg-secondary">{{ m.license.name }}</span>
+                {% endif %}
+              {% endif %}
+            </div>
+            <div class="row g-3 mt-1">
+              <div class="col-md-3">
+                {% set fid = "meshm-" ~ loop.index %}
+                <label for="{{ fid }}-faces" class="form-label">Max target faces</label>
+                <input type="number" class="form-control" id="{{ fid }}-faces" name="max_faces" value="{{ m.max_faces }}"
+                       min="1000" max="10000000" placeholder="service max ({{ max_target_faces }})"
+                       aria-describedby="{{ fid }}-faces-help">
+                <div id="{{ fid }}-faces-help" class="form-text">
+                  {% if m.recommended.max_faces %}Recommended: {{ "{:,}".format(m.recommended.max_faces) }}.{% endif %}
+                </div>
+              </div>
+              <div class="col-md-3">
+                <label for="{{ fid }}-tex" class="form-label">Max texture size</label>
+                <select class="form-select" id="{{ fid }}-tex" name="max_texture_size">
+                  <option value="" {% if not m.max_texture_size %}selected{% endif %}>Service-wide sizes</option>
+                  {% for s in [1024, 2048, 4096] %}
+                  <option value="{{ s }}" {% if m.max_texture_size == s %}selected{% endif %}>{{ s }} px</option>
+                  {% endfor %}
+                </select>
+              </div>
+              {% for o in m.options %}
+              {% set oid = fid ~ "-opt-" ~ o.name %}
+              <div class="col-md-3">
+                <label for="{{ oid }}" class="form-label"><code>{{ o.name }}</code></label>
+                {% if o.type == 'choice' %}
+                <select class="form-select" id="{{ oid }}" name="opt_{{ o.name }}" aria-describedby="{{ oid }}-help">
+                  <option value="" {% if o.value == '' %}selected{% endif %}>Worker default ({{ o.default }})</option>
+                  {% for c in o.choices %}
+                  <option value="{{ c }}" {% if o.value != '' and o.value|string == c|string %}selected{% endif %}>{{ c }}</option>
+                  {% endfor %}
+                </select>
+                {% else %}
+                <input type="number" class="form-control" id="{{ oid }}" name="opt_{{ o.name }}"
+                       value="{{ o.value }}" min="{{ o.min }}" max="{{ o.max }}" step="{{ '1' if o.type == 'int' else '0.1' }}"
+                       placeholder="worker default ({{ o.default }})" aria-describedby="{{ oid }}-help">
+                {% endif %}
+                <div id="{{ oid }}-help" class="form-text">{{ o.description }}{% if o.type != 'choice' %} ({{ o.min }} to {{ o.max }}){% endif %}.</div>
+              </div>
+              {% endfor %}
+            </div>
+            <button type="submit" class="btn btn-outline-primary btn-sm mt-3">Save {{ m.name }}</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+
+      <h2 class="h5 mt-5 mb-2">Licenses &amp; terms</h2>
+      <p class="text-body-secondary small mb-3">
+        What each model's license asks of the University as the operator of a hosted service. This is a summary,
+        not legal advice: read the license itself before accepting.
+      </p>
+      {% for lic in licenses %}
+      <div class="card mb-3 {% if lic.requires_acceptance and not lic.acceptance %}border-warning{% endif %}">
+        <div class="card-body">
+          <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
+            <h3 class="h6 mb-0">{{ lic.label }}</h3>
+            <a href="{{ lic.url }}" target="_blank" rel="noopener">{{ lic.name }}</a>
+            {% if not lic.registered %}<span class="badge bg-light text-dark border">No backend registered</span>{% endif %}
+          </div>
+          <ul class="small mb-3">
+            {% for item in lic.obligations %}<li>{{ item }}</li>{% endfor %}
+          </ul>
+          {% if lic.user_notice %}
+          <p class="small mb-3"><strong>Notice shown to users</strong> (3D tab, <code>/v1/meshes</code> job and model objects):
+            <span class="text-body-secondary">{{ lic.user_notice }}</span></p>
+          {% endif %}
+          {% if lic.requires_acceptance %}
+            {% if lic.acceptance %}
+            <form method="post" action="/admin/meshes" class="d-flex flex-wrap align-items-center gap-3">
+              <input type="hidden" name="action" value="revoke_license">
+              <input type="hidden" name="family" value="{{ lic.family }}">
+              <span class="small"><span class="badge bg-success">Accepted</span>
+                by {{ lic.acceptance.accepted_by }} on {{ lic.acceptance.accepted_at }}</span>
+              <button type="submit" class="btn btn-outline-danger btn-sm">Withdraw acceptance</button>
+            </form>
+            {% else %}
+            <form method="post" action="/admin/meshes">
+              <input type="hidden" name="action" value="accept_license">
+              <input type="hidden" name="family" value="{{ lic.family }}">
+              <p class="small mb-2"><span class="badge bg-warning text-dark">Not accepted</span>
+                Until an admin accepts these terms, this model takes no jobs (<code>/v1/meshes</code> answers 503 for it).</p>
+              <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="lic-{{ lic.family }}" name="confirm" value="yes" required>
+                <label class="form-check-label small" for="lic-{{ lic.family }}">
+                  I have read the {{ lic.name }} and its Acceptable Use Policy, and the University will meet these
+                  obligations (including not offering the model in the EU, the UK or South Korea).
+                </label>
+              </div>
+              <button type="submit" class="btn btn-warning btn-sm">Accept license terms</button>
+            </form>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+
+      <div class="d-flex justify-content-between align-items-center mt-5 mb-3">
+        <h2 class="h5 mb-0">User access</h2>
+        <span class="badge bg-secondary">{{ enabled_count }} of {{ total_count }} enabled</span>
+      </div>
+
+      <form method="get" action="/admin/meshes" class="input-group mb-3" role="search">
+        <label for="meshcfg-search" class="visually-hidden">Search users</label>
+        <input type="text" class="form-control" id="meshcfg-search" name="search" value="{{ search or '' }}"
+               placeholder="Search users by name or email…">
+        <button class="btn btn-outline-secondary" type="submit">Search</button>
+      </form>
+
+      <div class="card">
+        <div class="table-responsive">
+          <table class="table table-hover mb-0">
+            <caption class="px-3">Users and their 3D generation access</caption>
+            <thead class="table-light">
+              <tr>
+                <th scope="col">User</th>
+                <th scope="col">Email</th>
+                <th scope="col">Group</th>
+                <th scope="col">Role</th>
+                <th scope="col" class="text-center">3D access</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for u in users %}
+              <tr>
+                <th scope="row" class="fw-normal">
+                  <a href="/admin/users/{{ u.id }}">{{ u.username }}</a>
+                  {% if u.full_name %}<br><small class="text-body-secondary">{{ u.full_name }}</small>{% endif %}
+                </th>
+                <td class="small">{{ u.email }}</td>
+                <td>
+                  {% if u.group %}
+                  <span class="badge bg-info text-dark">{{ u.group.display_name or u.group.name }}</span>
+                  {% else %}<span class="text-body-secondary">None</span>{% endif %}
+                </td>
+                <td><span class="badge bg-secondary">{{ u.role.value }}</span></td>
+                <td class="text-center">
+                  <form method="post" action="/admin/meshes" class="d-inline">
+                    <input type="hidden" name="action" value="toggle_user">
+                    <input type="hidden" name="user_id" value="{{ u.id }}">
+                    <div class="form-check form-switch d-flex justify-content-center">
+                      <input class="form-check-input" type="checkbox" role="switch"
+                             {% if u.mesh_generation_enabled %}checked{% endif %}
+                             onchange="this.form.submit()"
+                             aria-label="Toggle 3D generation for {{ u.username }}">
+                    </div>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {% if total_pages > 1 %}
+      <nav class="mt-3" aria-label="User pagination">
+        <ul class="pagination justify-content-center">
+          {% for p in range(1, total_pages + 1) %}
+          <li class="page-item {% if p == current_page %}active{% endif %}">
+            <a class="page-link" href="/admin/meshes?page={{ p }}{% if search %}&search={{ search|urlencode }}{% endif %}">{{ p }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+      </nav>
+      {% endif %}
+
+      {% else %}
+      <div class="alert alert-info">You have read-only admin access. Configuration changes require full admin privileges.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

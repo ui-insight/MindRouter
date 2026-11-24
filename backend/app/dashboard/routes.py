@@ -5880,6 +5880,304 @@ async def admin_video_config_post(request: Request, db: AsyncSession = Depends(g
 
 
 # ---------------------------------------------------------------------------
+# Admin 3D (image-to-mesh) configuration
+# ---------------------------------------------------------------------------
+
+_MESH_INT_CONFIGS = {
+    # key: (form field, default, min, max)
+    "mesh.max_concurrent_jobs_per_user": ("max_concurrent_jobs_per_user", 2, 1, 10),
+    "mesh.token_cost_textured": ("token_cost_textured", 10000, 0, 10_000_000),
+    "mesh.token_cost_untextured": ("token_cost_untextured", 5000, 0, 10_000_000),
+    "mesh.user_storage_cap_gb": ("user_storage_cap_gb", 20, 0, 10_000),
+    "mesh.max_image_upload_mb": ("max_image_upload_mb", 10, 1, 64),
+    "mesh.default_texture_size": ("default_texture_size", 2048, 256, 8192),
+    "mesh.default_target_faces": ("default_target_faces", 40000, 1000, 5_000_000),
+    "mesh.min_target_faces": ("min_target_faces", 5000, 100, 5_000_000),
+    "mesh.max_target_faces": ("max_target_faces", 300000, 1000, 10_000_000),
+}
+
+
+async def _mesh_json_config(db: AsyncSession, key: str) -> dict:
+    raw = await crud.get_config_json(db, key, {})
+    return raw if isinstance(raw, dict) else {}
+
+
+@dashboard_router.get("/admin/mesh-config")
+async def admin_mesh_config_old_path():
+    """The page's pre-release path."""
+    return RedirectResponse(url="/admin/meshes", status_code=301)
+
+
+@dashboard_router.get("/admin/meshes")
+async def admin_mesh_config(
+    request: Request,
+    success: Optional[str] = None,
+    error: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Admin -> Meshes: the image-to-mesh service (/v1/meshes and the 3D tab),
+    its models' settings, licenses, and per-user access."""
+    from sqlalchemy import func, select
+    from backend.app.db.models import Modality, User as UserModel
+    from backend.app.services import mesh_models as mm
+
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.has_admin_read):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    all_models = await crud.get_all_models_with_backends(db)
+    mesh_models = sorted({m.name for m in all_models if m.modality == Modality.MESH_GENERATION})
+    aliases = {a.alias_name: a.target_model for a in await crud.get_all_model_aliases(db)}
+    default_model = await crud.get_config_json(db, "mesh.default_model", "default-mesh")
+    settings = await _mesh_json_config(db, "mesh.model_settings")
+    acceptance = await _mesh_json_config(db, "mesh.license_acceptance")
+
+    model_rows = []
+    for name in mesh_models:
+        family = mm.family_for_model(name)
+        own = settings.get(name) if isinstance(settings.get(name), dict) else {}
+        defaults = mm.FAMILY_OPTION_DEFAULTS.get(family, {})
+        model_rows.append({
+            "name": name,
+            "family": family,
+            "label": mm.FAMILY_LABELS.get(family, "Unknown model family (no tunable settings)"),
+            "license": mm.LICENSES.get(family),
+            "license_ok": not (mm.LICENSES.get(family) or {}).get("requires_acceptance") or family in acceptance,
+            "max_faces": own.get("max_faces") or "",
+            "max_texture_size": own.get("max_texture_size") or "",
+            "recommended": mm.RECOMMENDED_CAPS.get(family, {}),
+            "options": [
+                {"name": opt, **spec, "default": defaults.get(opt), "value": (own.get("options") or {}).get(opt, "")}
+                for opt, spec in mm.FAMILY_OPTIONS.get(family, {}).items()
+            ],
+        })
+    # Licenses for every known family, registered or not (so terms can be
+    # accepted before the model goes live).
+    licenses = [
+        {"family": fam, "label": mm.FAMILY_LABELS[fam], **lic, "acceptance": acceptance.get(fam),
+         "registered": any(r["family"] == fam for r in model_rows)}
+        for fam, lic in mm.LICENSES.items()
+    ]
+
+    per_page = 50
+    users_list, total_count = await crud.get_users(
+        db, skip=(page - 1) * per_page, limit=per_page,
+        search=search, is_active=True, sort_by="username", sort_dir="asc",
+    )
+    total_pages = max(1, (total_count + per_page - 1) // per_page)
+    enabled_count = (await db.execute(
+        select(func.count()).select_from(UserModel).where(
+            UserModel.mesh_generation_enabled == True,  # noqa: E712
+            UserModel.deleted_at.is_(None),
+            UserModel.is_active == True,  # noqa: E712
+        )
+    )).scalar() or 0
+
+    values = {
+        field: await crud.get_config_json(db, key, default)
+        for key, (field, default, _lo, _hi) in _MESH_INT_CONFIGS.items()
+    }
+    masq = await _admin_masquerade_context(request, user, db)
+    return templates.TemplateResponse(
+        "admin/mesh_config.html",
+        {
+            "request": request,
+            "user": user,
+            **masq,
+            "mesh_models": mesh_models,
+            "users": users_list,
+            "total_pages": total_pages,
+            "current_page": page,
+            "search": search,
+            "enabled_count": enabled_count,
+            "total_count": total_count,
+            "success": success,
+            "error": error,
+            "active": "meshes",
+            "enabled": await crud.get_config_json(db, "mesh.enabled", False),
+            "default_model": default_model,
+            "default_model_resolved": aliases.get(default_model, default_model),
+            "mesh_aliases": {a: t for a, t in aliases.items() if t in mesh_models or a.startswith("default-mesh")},
+            "model_rows": model_rows,
+            "licenses": licenses,
+            "allowed_texture_sizes": await crud.get_config_json(db, "mesh.allowed_texture_sizes", "1024,2048,4096"),
+            "background_removal": await crud.get_config_json(db, "mesh.background_removal", True),
+            **values,
+        },
+    )
+
+
+@dashboard_router.post("/admin/meshes")
+async def admin_mesh_config_post(request: Request, db: AsyncSession = Depends(get_async_db)):
+    """Handle Admin -> Meshes form submissions."""
+    from urllib.parse import quote_plus
+
+    from backend.app.services import mesh_models as mm
+
+    user_id = get_session_user_id(request)
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=302)
+    user = await crud.get_user_by_id(db, user_id)
+    if not user or (not user.group or not user.group.is_admin):
+        return RedirectResponse(url="/dashboard", status_code=302)
+
+    form = await request.form()
+    action = form.get("action", "")
+    _ip = get_client_ip(request)
+
+    if action == "save_config":
+        # Validate the whole form first (nothing is saved on an error): the
+        # texture sizes and face range must be ones every mesh worker accepts,
+        # and min <= default <= max, default size among the allowed sizes.
+        sizes: list = []
+        for part in str(form.get("allowed_texture_sizes", "")).split(","):
+            try:
+                size = int(part)
+            except ValueError:
+                continue
+            if size in mm.WORKER_TEXTURE_SIZES and size not in sizes:
+                sizes.append(size)
+        sizes = sorted(sizes) or list(mm.WORKER_TEXTURE_SIZES)
+        new: dict = {
+            "mesh.enabled": "enabled" in form,
+            "mesh.background_removal": "background_removal" in form,
+            "mesh.default_model": form.get("default_model", "").strip() or "default-mesh",
+            "mesh.allowed_texture_sizes": ",".join(str(s) for s in sizes),
+        }
+        for key, (field, default, lo, hi) in _MESH_INT_CONFIGS.items():
+            try:
+                new[key] = max(lo, min(hi, int(form.get(field, str(default)))))
+            except (ValueError, TypeError):
+                new[key] = default
+        w_lo, w_hi = mm.WORKER_FACE_RANGE
+        problems = []
+        if not w_lo <= new["mesh.min_target_faces"] <= new["mesh.max_target_faces"] <= w_hi:
+            problems.append(f"faces must satisfy {w_lo:,} <= min <= max <= {w_hi:,}")
+        if not new["mesh.min_target_faces"] <= new["mesh.default_target_faces"] <= new["mesh.max_target_faces"]:
+            problems.append("the default target faces must be between the min and the max")
+        if new["mesh.default_texture_size"] not in sizes:
+            problems.append(f"the default texture size must be one of the allowed sizes ({', '.join(map(str, sizes))})")
+        if problems:
+            return RedirectResponse(url="/admin/meshes?error=" + quote_plus("Not saved: " + "; ".join(problems)), status_code=302)
+        before = {key: await crud.get_config_json(db, key, None) for key in new}
+        for key, val in new.items():
+            await crud.set_config(db, key, val)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="mesh_config.save", entity_type="config",
+            before_value=before, after_value=new, ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/meshes?success=config_updated", status_code=302)
+
+    if action == "toggle_user":
+        try:
+            target_id = int(form.get("user_id", 0))
+        except (TypeError, ValueError):
+            target_id = 0
+        target_user = await crud.get_user_by_id(db, target_id)
+        if not target_user:
+            return RedirectResponse(url="/admin/meshes?error=User+not+found", status_code=302)
+        new_val = not target_user.mesh_generation_enabled
+        target_user.mesh_generation_enabled = new_val
+        await crud.log_admin_action(
+            db, user_id=user_id, action="mesh_config.toggle_user",
+            entity_type="user", entity_id=str(target_id),
+            before_value={"mesh_generation_enabled": not new_val},
+            after_value={"mesh_generation_enabled": new_val},
+            ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(
+            url=f"/admin/meshes?success={'user_enabled' if new_val else 'user_disabled'}",
+            status_code=302,
+        )
+
+    if action == "save_model":
+        # One model's caps and settings, stored in mesh.model_settings.
+        model = str(form.get("model", "")).strip()
+        if not model:
+            return RedirectResponse(url="/admin/meshes?error=No+model+given", status_code=302)
+        family = mm.family_for_model(model)
+        entry: dict = {}
+        # A model's caps must sit inside the service-wide range (a cap below the
+        # service minimum, or a texture cap below every allowed size, could not
+        # be honoured).
+        from backend.app.api.mesh_api import _limits as _mesh_limits
+
+        svc = await _mesh_limits(db)          # sanitized service-wide limits
+        svc_min, svc_max, svc_sizes = svc["min_faces"], svc["max_faces"], svc["texture_sizes"]
+        try:
+            raw = str(form.get("max_faces", "")).strip()
+            if raw:
+                value = int(raw)
+                if not svc_min <= value <= svc_max:
+                    raise ValueError(f"'max_faces' must be within the service range, {svc_min:,} to {svc_max:,}")
+                entry["max_faces"] = value
+            raw = str(form.get("max_texture_size", "")).strip()
+            if raw:
+                value = int(raw)
+                if value not in svc_sizes:
+                    raise ValueError(f"'max_texture_size' must be one of the allowed sizes ({', '.join(map(str, svc_sizes))})")
+                entry["max_texture_size"] = value
+            options = mm.clean_options(family, {
+                name: form.get(f"opt_{name}") for name in mm.FAMILY_OPTIONS.get(family, {})
+            })
+        except ValueError as exc:
+            msg = str(exc) if "must be" in str(exc) else "Invalid number"
+            return RedirectResponse(url=f"/admin/meshes?error={quote_plus(model + ': ' + msg)}", status_code=302)
+        if options:
+            entry["options"] = options
+        settings = await _mesh_json_config(db, "mesh.model_settings")
+        before = settings.get(model)
+        if entry:
+            settings[model] = entry
+        else:
+            settings.pop(model, None)
+        await crud.set_config(db, "mesh.model_settings", settings)
+        await crud.log_admin_action(
+            db, user_id=user_id, action="mesh_config.save_model", entity_type="config",
+            entity_id=model, before_value=before, after_value=entry or None, ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url="/admin/meshes?success=model_saved", status_code=302)
+
+    if action in ("accept_license", "revoke_license"):
+        family = str(form.get("family", ""))
+        lic = mm.LICENSES.get(family)
+        if not lic or not lic.get("requires_acceptance"):
+            return RedirectResponse(url="/admin/meshes?error=Unknown+license", status_code=302)
+        acceptance = await _mesh_json_config(db, "mesh.license_acceptance")
+        before = acceptance.get(family)
+        if action == "accept_license":
+            if form.get("confirm") != "yes":
+                return RedirectResponse(
+                    url="/admin/meshes?error=Tick+the+box+confirming+you+have+read+the+license+first",
+                    status_code=302,
+                )
+            acceptance[family] = {
+                "accepted_by": user.username,
+                "accepted_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                "license": lic["name"],
+            }
+        else:
+            acceptance.pop(family, None)
+        await crud.set_config(db, "mesh.license_acceptance", acceptance)
+        await crud.log_admin_action(
+            db, user_id=user_id, action=f"mesh_config.{action}", entity_type="config",
+            entity_id=family, before_value=before, after_value=acceptance.get(family), ip_address=_ip,
+        )
+        await db.commit()
+        return RedirectResponse(url=f"/admin/meshes?success={action}", status_code=302)
+
+    return RedirectResponse(url="/admin/meshes?error=Unknown+action", status_code=302)
+
+
+# ---------------------------------------------------------------------------
 # Admin Site Settings (timezone, etc.)
 # ---------------------------------------------------------------------------
 
@@ -6702,6 +7000,7 @@ async def admin_retention_post(
             "retention.conversations_days",
             "retention.dlp_alerts_days",
             "retention.web_search_logs_days",
+            "retention.user_meshes_days",
             "retention.cleanup_interval",
             "retention.batch_size",
         ]:

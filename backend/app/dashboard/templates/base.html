@@ -154,6 +154,11 @@
                         <a class="nav-link" href="/video"><i class="bi bi-camera-video"></i> Video</a>
                     </li>
                     {% endif %}
+                    {% if user.mesh_generation_enabled %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="/3d"><i class="bi bi-box"></i> 3D</a>
+                    </li>
+                    {% endif %}
                     <li class="nav-item">
                         <a class="nav-link" href="/dashboard">Dashboard</a>
                     </li>
