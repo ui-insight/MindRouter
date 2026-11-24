@@ -67,6 +67,7 @@
                 <li class="nav-item"><a class="nav-link" href="#api-reference">API Reference</a></li>
                 <li class="nav-item"><a class="nav-link ms-3" href="#image-generation">&mdash; Image Generation</a></li>
                 <li class="nav-item"><a class="nav-link ms-3" href="#video-generation">&mdash; Video Generation</a></li>
+                <li class="nav-item"><a class="nav-link ms-3" href="#mesh-generation">&mdash; Image to 3D (Meshes)</a></li>
                 <li class="nav-item"><a class="nav-link" href="#web-dashboard">Web Dashboard</a></li>
                 <li class="nav-item"><a class="nav-link" href="#branding">Branding &amp; Theming</a></li>
                 <li class="nav-item"><a class="nav-link" href="#users-groups-quotas">Users, Groups &amp; Quotas</a></li>
@@ -347,7 +348,7 @@ docker compose exec app python scripts/seed_dev_data.py</code></pre>
                         <tr><td>POST</td><td><code>/v1/videos</code></td><td>API Key</td><td><a href="#video-generation">Video generation</a> (async; text-to-video + keyframe conditioning)</td></tr>
                         <tr><td>POST</td><td><code>/v1/videos/assets</code></td><td>API Key</td><td>Upload a keyframe image for image-guided video</td></tr>
                         <tr><td>GET</td><td><code>/v1/videos/{id}</code></td><td>API Key</td><td>Poll a video job; <code>/content</code> downloads the MP4</td></tr>
-                        <tr><td>POST</td><td><code>/v1/meshes</code></td><td>API Key</td><td>Image to 3D (async): one picture in (multipart <code>image</code>, or base64 in JSON), a textured GLB out; requires per-account enablement</td></tr>
+                        <tr><td>POST</td><td><code>/v1/meshes</code></td><td>API Key</td><td><a href="#mesh-generation">Image to 3D</a> (async): one picture in (multipart <code>image</code>, or base64 in JSON), a textured GLB out; requires per-account enablement</td></tr>
                         <tr><td>GET</td><td><code>/v1/meshes/{id}</code></td><td>API Key</td><td>Poll a 3D job; <code>/content</code> downloads the GLB, <code>/content?variant=preview</code> the PNG preview; <code>GET /v1/meshes/models</code> lists models and limits</td></tr>
                         <tr><td>POST</td><td><code>/v1/audio/speech</code></td><td>API Key</td><td><a href="#voice">Text-to-speech</a></td></tr>
                         <tr><td>POST</td><td><code>/v1/audio/transcriptions</code></td><td>API Key</td><td><a href="#voice">Speech-to-text</a></td></tr>
