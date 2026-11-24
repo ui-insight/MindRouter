@@ -177,14 +177,28 @@ def pull_push_fill(tex: np.ndarray, known: np.ndarray) -> np.ndarray:
 def pull_push_fill_gpu(tex: np.ndarray, known: np.ndarray) -> np.ndarray:  # pragma: no cover - GPU path
     """pull_push_fill on the GPU with bilinear push (about 0.02 s for a 4096
     atlas on an H200, where upstream's OpenCV Navier-Stokes fill took 5-8 s).
-    Falls back to the CPU reference without torch/CUDA."""
+    Falls back to the CPU reference without torch/CUDA, or when the GPU pass
+    fails (e.g. out of memory on a shared GPU), so the job still finishes."""
     try:
         import torch
-        import torch.nn.functional as F
         if not torch.cuda.is_available():
             raise RuntimeError("no CUDA")
     except Exception:
         return pull_push_fill(tex, known)
+    try:
+        return _pull_push_torch(torch, tex, known)
+    except Exception:
+        log.warning("GPU atlas fill failed; using the CPU fill", exc_info=True)
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return pull_push_fill(tex, known)
+
+
+def _pull_push_torch(torch: Any, tex: np.ndarray, known: np.ndarray) -> np.ndarray:  # pragma: no cover - GPU path
+    import torch.nn.functional as F
+
     t = torch.from_numpy(np.ascontiguousarray(tex)).cuda().float().permute(2, 0, 1)[None]
     k = torch.from_numpy(np.ascontiguousarray(known, dtype=np.float32)).cuda()[None, None]
     levels = [(t * k, k)]

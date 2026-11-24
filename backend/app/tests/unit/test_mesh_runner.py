@@ -138,7 +138,7 @@ class FakeRepo:
     async def expire_queued(self):
         return self.expired
 
-    async def claim_next(self, worker_id, models=None):
+    async def claim_next(self, worker_id, models=None, exclude_ids=None):
         self.claim_models = models
         j, self._job = self._job, None
         return j
@@ -541,7 +541,7 @@ class TwoModelRepo(FakeRepo):
         self.claims = []
         self.completed = []
 
-    async def claim_next(self, worker_id, models=None):
+    async def claim_next(self, worker_id, models=None, exclude_ids=None):
         self.claims.append(list(models))
         for j in self.queue:
             if j["model"] in models:
@@ -667,6 +667,7 @@ class TwoWorkerRepo(FakeRepo):
     def __init__(self, jobs, backend_ids=(11, 12)):
         super().__init__()
         self.queue = list(jobs)
+        self.jobs_by_id = {j["id"]: j for j in jobs}
         self.ids = list(backend_ids)
         self.selected = []
         self.completed = []
@@ -674,8 +675,20 @@ class TwoWorkerRepo(FakeRepo):
     async def model_backends(self):
         return {MODEL: list(self.ids)}
 
-    async def claim_next(self, worker_id, models=None):
-        return self.queue.pop(0) if self.queue and MODEL in (models or []) else None
+    async def claim_next(self, worker_id, models=None, exclude_ids=None):
+        self.claims = getattr(self, "claims", [])
+        if MODEL not in (models or []):
+            return None
+        for j in sorted(self.queue, key=lambda j: j["id"]):     # priority, then id
+            if j["id"] not in (exclude_ids or ()):
+                self.queue.remove(j)
+                self.claims.append(j["id"])
+                return j
+        return None
+
+    async def requeue(self, job_id, *, attempts=None, clear_backend=False):
+        self.requeued = getattr(self, "requeued", []) + [job_id]
+        self.queue.append(dict(self.jobs_by_id[job_id], attempts=attempts or 0))
 
     async def select_backend(self, model, exclude=()):
         for i in self.ids:
@@ -756,3 +769,65 @@ def test_concurrent_selection_never_puts_two_jobs_on_one_worker(tmp_path):
     asyncio.run(go())
     assert sorted(urls) == ["https://w11:8006", "https://w12:8006"]
     assert sorted(repo.completed) == [1, 2]
+
+
+
+def test_a_requeued_job_sits_out_its_back_off_and_is_never_run_twice(tmp_path):
+    """Two workers; job 1's first submit gets a retryable 503. It goes back to
+    the queue but its task holds it for the back-off: claim() must not hand it
+    out again meanwhile (that ran it twice, untracked, and doubled up a
+    worker). Other jobs use the free slot; job 1 runs once the back-off ends."""
+    jobs = [_job(tmp_path, id=i, job_uuid="mesh-" + c * 24) for i, c in ((1, "a"), (2, "b"), (3, "c"))]
+    repo = TwoWorkerRepo(jobs)
+    running = {11: set(), 12: set()}
+    overlap = []
+
+    class Worker(FakeWorker):
+        first = True
+
+        async def submit(self, base_url, payload):
+            backend = int(base_url.split("w")[1].split(":")[0])
+            if self.first and payload is not None and len(self.submitted) == 0:
+                self.first = False
+                self.submitted.append(payload)
+                raise WorkerSubmitError("503 busy", retryable=True)
+            self.submitted.append(payload)
+            worker_job_id = f"w-{len(self.submitted)}"
+            running[backend].add(worker_job_id)
+            if len(running[backend]) > 1:
+                overlap.append(backend)
+            return worker_job_id
+
+        async def poll(self, base_url, worker_job_id):
+            await asyncio.sleep(0)
+            running[int(base_url.split("w")[1].split(":")[0])].discard(worker_job_id)
+            return DONE
+
+    runner = _runner(repo, Worker(), tmp_path, retry_backoff_seconds=0.05)
+
+    async def go():
+        runner.start(await runner.claim())                 # job 1 -> 503 -> requeued, backing off
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert repo.requeued == [1] and 1 in runner._active
+        second = await runner.claim()
+        assert second is not None and second["id"] == 2    # NOT job 1 again
+        runner.start(second)
+        assert await runner.claim() is None                # 2 slots: job 1 (backing off) + job 2
+        await asyncio.gather(*list(runner._tasks))         # back-off ends, both slots free
+        for _ in range(2):
+            job = await runner.claim()
+            if job:
+                runner.start(job)
+        await asyncio.gather(*list(runner._tasks))
+
+    asyncio.run(go())
+    assert repo.claims.count(1) == 2 and sorted(repo.completed) == [1, 2, 3]
+    assert overlap == [] and runner._active == {} and runner._backend_of == {}
+
+
+def test_tick_releases_its_backend(tmp_path):
+    repo = TwoWorkerRepo([_job(tmp_path, id=1), _job(tmp_path, id=2, job_uuid="mesh-" + "b" * 24)], backend_ids=(11,))
+    runner = _runner(repo, FakeWorker(polls=[DONE] * 2), tmp_path)
+    assert asyncio.run(runner.tick()) is True and runner._backend_of == {}
+    assert asyncio.run(runner.tick()) is True              # the one backend is free again

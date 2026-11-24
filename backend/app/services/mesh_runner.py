@@ -93,7 +93,8 @@ class MeshJobRepo(Protocol):
     async def model_backends(self) -> Dict[str, List[int]]: ...
     async def claimable(self, models: List[str]) -> List[str]: ...
     async def expire_queued(self) -> int: ...
-    async def claim_next(self, worker_id: str, models: Optional[List[str]] = None) -> Optional[Dict[str, Any]]: ...
+    async def claim_next(self, worker_id: str, models: Optional[List[str]] = None,
+                         exclude_ids: Optional[List[int]] = None) -> Optional[Dict[str, Any]]: ...
     async def is_cancelled(self, job_id: int) -> bool: ...
     async def update(self, job_id: int, **fields) -> None: ...
     async def requeue(self, job_id: int, *, attempts: Optional[int] = None, clear_backend: bool = False) -> None: ...
@@ -144,10 +145,11 @@ def prepare_image(image_bytes: bytes, max_side: int = MAX_INPUT_SIDE) -> Tuple[b
 
 
 class MeshRunner:
-    """One runner per gateway (elected by lease). Each model is served by its
-    own single-GPU worker, so the runner drives at most one job per model at a
-    time: jobs for different models run side by side, while a model's own
-    jobs wait their turn in the queue (its worker would only queue them)."""
+    """One runner per gateway (elected by lease). Each mesh worker runs one
+    job at a time, so the runner drives at most one job per healthy backend:
+    a model with one worker runs one job at a time, a model with two workers
+    two. Jobs for different models run side by side; the rest wait in the
+    queue (a busy worker would only queue them)."""
 
     def __init__(
         self,
@@ -236,7 +238,9 @@ class MeshRunner:
             models = await self.repo.claimable(models)
         if not models:
             return None
-        return await self.repo.claim_next(self.worker_id, models=models)
+        # A job this runner still holds (one sitting out its retry back-off
+        # after a requeue) is not claimed again until its task lets go.
+        return await self.repo.claim_next(self.worker_id, models=models, exclude_ids=sorted(self._active))
 
     def start(self, job: Dict[str, Any]) -> "asyncio.Task":
         """Drive a claimed job in its own task."""
@@ -253,8 +257,9 @@ class MeshRunner:
         try:
             pause = await work
             if pause:
-                # The job went back to the queue: hold its model for a while so
-                # the loop does not claim it again at once.
+                # The job went back to the queue: keep holding it (and its
+                # backend slot) for the back-off, so it is not claimed again at
+                # once; claim() skips the jobs in _active.
                 await asyncio.sleep(pause)
         except asyncio.CancelledError:
             raise
@@ -387,7 +392,10 @@ class MeshRunner:
         job = await self.claim()
         if job is None:
             return False
-        return await self.process_job(job) is None
+        try:
+            return await self.process_job(job) is None
+        finally:
+            self._backend_of.pop(job["id"], None)
 
     async def process_job(self, job: Dict[str, Any]) -> Optional[float]:
         """Drive one claimed job to a terminal state. Returns None when done, or
@@ -666,11 +674,12 @@ class CrudMeshJobRepo:
                 hours = 24.0
             return await crud.expire_stale_queued_mesh_jobs(db, int(hours * 3600))
 
-    async def claim_next(self, worker_id: str, models: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    async def claim_next(self, worker_id: str, models: Optional[List[str]] = None,
+                         exclude_ids: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
         from backend.app.db import crud
 
         async with self._ctx() as db:
-            job = await crud.claim_next_mesh_job(db, worker_id, models=models)
+            job = await crud.claim_next_mesh_job(db, worker_id, models=models, exclude_ids=exclude_ids)
             return crud.mesh_job_snapshot(job) if job else None
 
     async def is_cancelled(self, job_id: int) -> bool:

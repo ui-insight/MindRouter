@@ -214,7 +214,11 @@ container on the same H200, on its own port) lets it take two. Jobs for
 different models always run side by side. Two Hunyuan3D workers on one H200
 (fast post-processing on, 40k faces) finished 4 jobs in 70 s against ~96 s
 for one worker: 1.36× the throughput, each job ~30-50% slower (24 s → 32-36 s).
-Each worker needs its own port and backend registration. If the gateway restarts mid-job, the reconcile loop asks
+Each worker needs its own port and backend registration. One exception to
+one-job-per-worker: just after a gateway restart, jobs still running from
+before it are re-adopted only once their heartbeat goes stale (about two
+minutes), and in that window a worker can be sent a new job, which it queues
+behind the running one. If the gateway restarts mid-job, the reconcile loop asks
 the worker what happened (by `backend_job_id`) and finishes, resumes or
 requeues the job; a worker that lost the job (404) gets it again, up to
 `MESH_MAX_RETRIES`.

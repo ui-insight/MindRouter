@@ -6363,18 +6363,23 @@ async def request_cancel_mesh_job(db: AsyncSession, job: MeshJob) -> None:
 
 async def claim_next_mesh_job(
     db: AsyncSession, worker_id: str, models: Optional[List[str]] = None,
+    exclude_ids: Optional[List[int]] = None,
 ) -> Optional[MeshJob]:
     """Atomically claim the highest-priority QUEUED job (SELECT ... FOR UPDATE
     SKIP LOCKED) and mark it RENDERING. Commits. With ``models``, only jobs for
     those models are eligible, so a job whose model is down waits without
     blocking the others. A job flagged for cancellation IS claimed: the runner
     sees the flag first thing and cancels it with a refund (filtering it out
-    here would strand a requeued, cancel-flagged job in the queue forever)."""
+    here would strand a requeued, cancel-flagged job in the queue forever).
+    ``exclude_ids``: jobs the runner still holds (a requeued job sits out its
+    retry back-off in its old task; claiming it again would run it twice)."""
     if models is not None and not models:
         return None
     query = select(MeshJob.id).where(MeshJob.status == MeshJobStatus.QUEUED)
     if models is not None:
         query = query.where(MeshJob.model.in_(list(models)))
+    if exclude_ids:
+        query = query.where(MeshJob.id.notin_(list(exclude_ids)))
     candidate = (
         await db.execute(
             query.order_by(MeshJob.priority.desc(), MeshJob.id.asc())

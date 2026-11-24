@@ -402,3 +402,23 @@ def test_speed_switches_default_on(monkeypatch):
     monkeypatch.setenv("MESH_WORKER_GLB_JPEG", "0")
     cfg = WorkerConfig(mode="hunyuan3d21")
     assert cfg.hunyuan_fast_post is False and cfg.glb_jpeg is False
+
+
+def test_pull_push_gpu_failure_falls_back_to_the_cpu(monkeypatch):
+    """A CUDA error mid-fill (e.g. out of memory on a shared GPU) must not fail
+    the job: the CPU fill takes over."""
+    import engines.common as common
+
+    freed = []
+    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(
+        is_available=lambda: True, empty_cache=lambda: freed.append(True)))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    def boom(torch, tex, known):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(common, "_pull_push_torch", boom)
+    tex = np.zeros((16, 16, 3), np.uint8); tex[4:8, 4:8] = 90
+    known = np.zeros((16, 16), bool); known[4:8, 4:8] = True
+    assert np.array_equal(common.pull_push_fill_gpu(tex, known), pull_push_fill(tex, known))
+    assert freed == [True]
