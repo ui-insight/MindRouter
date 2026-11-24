@@ -63,6 +63,7 @@ def test_health_version_models_capabilities(tmp_path):
         assert cap["supports_texture"] is True
         assert cap["texture_sizes"] == [1024, 2048, 4096]
         assert cap["min_faces"] <= cap["default_faces"] <= cap["max_faces"]
+        assert cap["options"] == {}                         # mock: no per-job model settings
 
 
 def test_served_model_name_override(tmp_path):
@@ -253,6 +254,8 @@ def _gif() -> bytes:
     {"seed": True},
     {"seed": "42"},
     {"model": 7},
+    {"options": {"steps": 10}},                          # the mock engine takes no options
+    {"options": "fast"},
 ])
 def test_bad_input_is_400(tmp_path, overrides):
     with _client(tmp_path) as client:
@@ -567,3 +570,12 @@ def test_startup_removes_orphaned_outputs(tmp_path):
     with _client(tmp_path) as client:
         assert client.get(f"/v1/meshes/{orphan}").status_code == 404
         assert sorted(os.listdir(tmp_path)) == ["keep-me.txt"]
+
+
+def test_worker_logs_info_by_default(tmp_path, monkeypatch):
+    # The engines' INFO lines (model loading, the RMBG license guard) must
+    # reach the container log, not be dropped at Python's WARNING default.
+    import logging
+    monkeypatch.delenv("MESH_WORKER_LOG_LEVEL", raising=False)
+    with _client(tmp_path):
+        assert logging.getLogger("engines.trellis_family").isEnabledFor(logging.INFO)

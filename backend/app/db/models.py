@@ -1313,8 +1313,11 @@ class MeshJob(Base, TimestampMixin):
     seed: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     texture: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     texture_size: Mapped[int] = mapped_column(Integer, nullable=False, default=2048)
-    target_faces: Mapped[int] = mapped_column(Integer, nullable=False, default=100000)
+    target_faces: Mapped[int] = mapped_column(Integer, nullable=False, default=40000)
     remove_background: Mapped[str] = mapped_column(String(8), nullable=False, default="auto")
+    # Per-model settings the job ran with (Admin -> Meshes), snapshotted at
+    # submit so a result can be reproduced; sent to the worker as "options".
+    model_options: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Files (server-generated names under the user's mesh dir) + their sizes.
     input_content_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

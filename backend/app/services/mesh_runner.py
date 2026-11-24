@@ -533,10 +533,13 @@ class MeshRunner:
             "image": base64.b64encode(image).decode("ascii"),
             "texture": bool(job.get("texture", True)),
             "texture_size": int(job.get("texture_size") or 2048),
-            "target_faces": int(job.get("target_faces") or 100000),
+            "target_faces": int(job.get("target_faces") or 40000),
         }
         if job.get("seed") is not None:
             payload["seed"] = int(job["seed"])
+        if job.get("model_options"):
+            # Per-model settings snapshotted at submit; the worker validates them.
+            payload["options"] = dict(job["model_options"])
         return payload
 
 

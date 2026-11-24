@@ -30,7 +30,8 @@
 #     - DifferentiableRenderer/mesh_utils.py imports bpy at MODULE level, so
 #       bpy must be installed even though we never call it.
 #
-#   Nothing here ran on a GPU yet: calls into upstream are UNVERIFIED.
+#   Every call into upstream ran on an H200 in the Nov 2026 bake-off
+#   (18/18 inputs at 100k faces / 2048 px, plus 8k-1M faces, 4096 px).
 #
 # Luke Sheneman — University of Idaho RCDS — sheneman@uidaho.edu
 #
@@ -100,12 +101,12 @@ class Hunyuan3D21Engine:
         repo = self.config.hunyuan_repo
         ckpt = self.config.checkpoint
 
-        # UNVERIFIED: basicsr (RealESRGAN) imports the removed
+        # Verified on the GPU (bake-off, Nov 2026): basicsr (RealESRGAN) imports the removed
         # torchvision.transforms.functional_tensor; upstream patches it first.
         from torchvision_fix import apply_fix
         apply_fix()
 
-        # UNVERIFIED: import paths + from_pretrained signature at the pinned
+        # Verified on the GPU (bake-off, Nov 2026): import paths + from_pretrained signature at the pinned
         # commit. ckpt is an absolute dir holding hunyuan3d-dit-v2-1/, or the
         # repo id resolved from the HF cache (HF_HUB_OFFLINE=1).
         from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
@@ -121,7 +122,7 @@ class Hunyuan3D21Engine:
         # pre-staged in $U2NET_HOME or rembg downloads it on first use.
         self.rembg = BackgroundRemover()
 
-        # UNVERIFIED: paint config attributes. Every default path upstream is
+        # Verified on the GPU (bake-off, Nov 2026): paint config attributes. Every default path upstream is
         # relative to the CWD, so all are set absolute here. The multiview
         # weights are fetched with snapshot_download(repo_id=...), which needs a
         # REPO ID (HF cache, offline), never a local dir.
@@ -152,14 +153,15 @@ class Hunyuan3D21Engine:
 
     def _shape(self, image: Image.Image, spec) -> Any:  # pragma: no cover
         torch = self._torch
-        # UNVERIFIED: __call__ kwargs; returns a list of trimesh.Trimesh (an
+        # Verified on the GPU (bake-off, Nov 2026): __call__ kwargs; returns a list of trimesh.Trimesh (an
         # entry is None when surface extraction fails).
         generator = torch.Generator().manual_seed(int(spec.seed))
+        opts = spec.options   # validated in inputs.py; defaults from the worker env
         meshes = self.shape(
             image=image,
-            num_inference_steps=int(self.config.hunyuan_steps),
-            guidance_scale=5.0,
-            octree_resolution=int(self.config.hunyuan_octree),
+            num_inference_steps=int(opts.get("steps", self.config.hunyuan_steps)),
+            guidance_scale=float(opts.get("guidance_scale", self.config.hunyuan_guidance)),
+            octree_resolution=int(opts.get("octree_resolution", self.config.hunyuan_octree)),
             num_chunks=8000,
             generator=generator,
             output_type="trimesh",
@@ -179,12 +181,14 @@ class Hunyuan3D21Engine:
         white = os.path.join(workdir, "white.obj")
         mesh.export(white)
         render = self.paint.render
-        # UNVERIFIED: MeshRender.set_default_texture_resolution() takes effect
-        # for the next bake (texture buffers are created per load_mesh/bake).
+        # Runs on the GPU without error. Its effect on the internal bake
+        # resolution was not measured separately: the saved maps are resized
+        # to texture_size below either way. (Texture buffers are created per
+        # load_mesh/bake, so it applies to the next bake.)
         render.set_default_texture_resolution(plan["bake_atlas"])
         hooks = {"bake_from_multiview": ("texture", 70.0)}
         with stage_hooks(self.paint.view_processor, tracker, hooks):
-            # UNVERIFIED: returns the textured OBJ path; writes <base>.jpg,
+            # Verified on the GPU (bake-off, Nov 2026): returns the textured OBJ path; writes <base>.jpg,
             # <base>_metallic.jpg, <base>_roughness.jpg beside it.
             obj_path = self.paint(
                 mesh_path=white, image_path=image, output_mesh_path=os.path.join(workdir, "textured.obj"),
@@ -203,7 +207,7 @@ class Hunyuan3D21Engine:
         roughness = load_map(base + "_roughness.jpg", "L")
         # glTF metallicRoughness: G = roughness, B = metallic (R unused).
         mr = Image.merge("RGB", (Image.new("L", size, 255), roughness, metallic))
-        # UNVERIFIED: the OBJ loads as one Trimesh with per-vertex UVs.
+        # Verified on the GPU (bake-off, Nov 2026): the OBJ loads as one Trimesh with per-vertex UVs.
         textured = trimesh.load(obj_path, force="mesh", process=False)
         material = trimesh.visual.material.PBRMaterial(
             baseColorTexture=albedo, metallicRoughnessTexture=mr,

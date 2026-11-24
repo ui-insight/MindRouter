@@ -223,6 +223,16 @@ def test_happy_path_submits_polls_fetches_and_completes(tmp_path):
     assert payload["model"] == MODEL and payload["seed"] == 7
     assert payload["texture"] is True and payload["texture_size"] == 2048 and payload["target_faces"] == 50000
     assert base64.b64decode(payload["image"])[:4] == b"\x89PNG"
+    assert "options" not in payload                       # no per-model settings on this job
+
+
+def test_per_model_settings_ride_along_as_worker_options(tmp_path):
+    job = _job(tmp_path)
+    job["model_options"] = {"octree_resolution": 384, "steps": 20}
+    repo = FakeRepo(job=job)
+    worker = FakeWorker(polls=[DONE])
+    assert asyncio.run(_runner(repo, worker, tmp_path).tick()) is True
+    assert worker.submitted[0]["options"] == {"octree_resolution": 384, "steps": 20}
 
 
 def test_no_healthy_model_means_nothing_is_claimed(tmp_path):

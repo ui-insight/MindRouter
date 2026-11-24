@@ -25,8 +25,9 @@
 #   already carry an alpha mask (the gateway's matting output) never touch it:
 #   upstream preprocess_image() uses a non-opaque alpha as-is.
 #
-#   Nothing here ran on a GPU yet: every call into upstream code is marked
-#   UNVERIFIED and gets validated in the Phase 0 bake-off.
+#   Every call into upstream code ran on an H200 in the Nov 2026 bake-off
+#   (aspen1 GPU2: 18/18 inputs per engine at 100k faces / 2048 px, plus
+#   1M-face / 4096 px runs); the comments below record what was checked.
 #
 # Luke Sheneman — University of Idaho RCDS — sheneman@uidaho.edu
 #
@@ -43,7 +44,7 @@ from typing import Any, Dict
 
 from PIL import Image, ImageDraw
 
-from config import WorkerConfig
+from config import DEFAULT_PIPELINE_TYPE, ENGINE_OPTIONS, WorkerConfig
 from engines.base import EngineInputError, StageTracker
 from engines.common import (
     check_rembg_allowed, gltf_axes, patched_attr, release_cuda_memory, stage_hooks,
@@ -100,7 +101,7 @@ class _TrellisFamilyEngine:
             return remover
 
         with patched_attr(rembg_mod, "BiRefNet", safe_birefnet) as original, self._extra_load_patches():
-            # UNVERIFIED: from_pretrained(local_dir) resolves "ckpts/..." under
+            # Verified on the GPU (bake-off, Nov 2026): from_pretrained(local_dir) resolves "ckpts/..." under
             # the dir; TRELLIS.2's sparse_structure_decoder lives in ANOTHER
             # repo ("microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16")
             # and is found either at <ckpt>/microsoft/TRELLIS-image-large/ckpts/…
@@ -129,7 +130,7 @@ class _TrellisFamilyEngine:
         log.info("Loading %s from %s (pipeline_type=%s, low_vram=%s)…", self.package,
                  self.config.checkpoint, self.pipeline_type, self.config.low_vram)
         pipeline = self._build_pipeline()
-        # UNVERIFIED: low_vram=False + cuda() keeps every sub-model resident
+        # Verified on the GPU (bake-off, Nov 2026): low_vram=False + cuda() keeps every sub-model resident
         # (Pipeline.to() only moves models when low_vram is False).
         pipeline.low_vram = bool(self.config.low_vram)
         pipeline.cuda()
@@ -174,7 +175,7 @@ class _TrellisFamilyEngine:
         return {"supports_texture": True, "pipeline_type": self.pipeline_type}
 
     def _preprocess(self, image: Image.Image) -> Image.Image:  # pragma: no cover
-        # UNVERIFIED (GPU): upstream preprocess_image(): RGBA with a non-opaque
+        # Verified on the GPU (bake-off, Nov 2026): upstream preprocess_image(): RGBA with a non-opaque
         # alpha is used as-is; otherwise BiRefNet mattes it. Then crops to the
         # alpha>0.8 bbox (raises ValueError on an empty bbox) and flattens.
         try:
@@ -186,7 +187,7 @@ class _TrellisFamilyEngine:
         """Engine-specific final transform of the exported trimesh."""
 
     def _export_textured(self, mesh: Any, res: int, spec, glb_path: str):  # pragma: no cover
-        # UNVERIFIED: same call as TRELLIS.2 app.py extract_glb / Pixal3D
+        # Verified on the GPU (bake-off, Nov 2026): same call as TRELLIS.2 app.py extract_glb / Pixal3D
         # inference.py; decimation_target is a FACE count (app.py docstring).
         glb = self._o_voxel.postprocess.to_glb(
             vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
@@ -197,15 +198,16 @@ class _TrellisFamilyEngine:
             remesh=True, remesh_band=1, remesh_project=0,
         )
         self._post_transform(glb)
-        # UNVERIFIED: trimesh export kwarg pass-through (upstream uses
-        # extension_webp=True; we default to PNG textures for compatibility).
+        # Verified on the GPU with WebP off (the default; upstream uses
+        # extension_webp=True, we write PNG textures for compatibility).
+        # MESH_WORKER_GLB_WEBP=1 has not been exercised yet.
         glb.export(glb_path, extension_webp=bool(self.config.glb_webp))
         return glb
 
     def _export_shape_only(self, mesh: Any, spec, glb_path: str):  # pragma: no cover
         import trimesh
 
-        # UNVERIFIED: Mesh.simplify(target) is CuMesh quadric decimation to a
+        # Verified on the GPU (bake-off, Nov 2026): Mesh.simplify(target) is CuMesh quadric decimation to a
         # face count (same call to_glb makes).
         mesh.simplify(int(spec.target_faces))
         vertices = gltf_axes(mesh.vertices.detach().float().cpu().numpy())
@@ -246,8 +248,8 @@ class _TrellisFamilyEngine:
 class Trellis2Engine(_TrellisFamilyEngine):
     package = "trellis2"
     pipeline_class = "Trellis2ImageTo3DPipeline"
-    pipeline_types = ("512", "1024", "1024_cascade", "1536_cascade")
-    default_pipeline_type = "1024_cascade"   # pipeline.json default_pipeline_type
+    pipeline_types = tuple(ENGINE_OPTIONS["trellis2"]["pipeline_type"]["choices"])
+    default_pipeline_type = DEFAULT_PIPELINE_TYPE["trellis2"]   # pipeline.json default_pipeline_type
 
     def _extra_load_patches(self):
         """Point the DINOv3 extractor at MESH_WORKER_DINOV3 (an admin-staged
@@ -262,13 +264,13 @@ class Trellis2Engine(_TrellisFamilyEngine):
             kwargs.pop("model_name", None)
             return original(dinov3, *args[1:], **kwargs)
 
-        # UNVERIFIED: pipeline.json names DinoV3FeatureExtractor(model_name=...).
+        # Verified on the GPU (bake-off, Nov 2026): pipeline.json names DinoV3FeatureExtractor(model_name=...).
         original = stack.enter_context(patched_attr(ife, "DinoV3FeatureExtractor", dinov3_factory))
         return stack
 
     def _sample(self, image, spec, tracker):  # pragma: no cover - GPU only
         p = self.pipeline
-        pt = self.pipeline_type
+        pt = spec.options.get("pipeline_type") or self.pipeline_type
         if spec.texture:
             hooks = {
                 "sample_sparse_structure": ("shape", 15.0),
@@ -277,7 +279,7 @@ class Trellis2Engine(_TrellisFamilyEngine):
                 "sample_tex_slat": ("texture", 60.0),
                 "decode_latent": ("texture", 75.0),
             }
-            # UNVERIFIED: run() signature at the pinned commit.
+            # Verified on the GPU (bake-off, Nov 2026): run() signature at the pinned commit.
             with stage_hooks(p, tracker, hooks):
                 meshes, (_shape, _tex, res) = p.run(
                     image, seed=int(spec.seed), preprocess_image=False,
@@ -288,7 +290,7 @@ class Trellis2Engine(_TrellisFamilyEngine):
         # Shape only: run() always samples texture, so drive the same public
         # stage methods run() uses and stop before the texture SLat (saves the
         # texture sampling + the UV bake). Mirrors run() at the pinned commit.
-        # UNVERIFIED: every call below.
+        # Verified on the GPU (bake-off, Nov 2026): every call below.
         torch = self._torch
         torch.manual_seed(int(spec.seed))
         cond_512 = p.get_cond([image], 512)
@@ -349,11 +351,16 @@ def pixal3d_camera_from_fov(camera_angle_x: float, mesh_scale: float = 1.0,
 class Pixal3DEngine(_TrellisFamilyEngine):
     package = "pixal3d"
     pipeline_class = "Pixal3DImageTo3DPipeline"
-    pipeline_types = ("1024_cascade", "1536_cascade")
-    default_pipeline_type = "1536_cascade"   # inference.py standard (non-low-VRAM) mode
+    pipeline_types = tuple(ENGINE_OPTIONS["pixal3d"]["pipeline_type"]["choices"])
+    default_pipeline_type = DEFAULT_PIPELINE_TYPE["pixal3d"]   # inference.py standard (non-low-VRAM) mode
 
-    # inference.py applies this after to_glb (on top of to_glb's own Y/Z swap).
-    ROTATION = [[-1, 0, 0, 0], [0, 0, -1, 0], [0, -1, 0, 0], [0, 0, 0, 1]]
+    # inference.py applies UPSTREAM_ROTATION after to_glb (on top of to_glb's
+    # own Y/Z swap). That leaves the object's front facing -Z, while glTF, and
+    # our TRELLIS.2 and Hunyuan3D outputs, put the front at +Z (seen on the
+    # GPU: a face came out looking backwards). So we also turn it 180 degrees
+    # about +Y: ROTATION = Ry(180) @ UPSTREAM_ROTATION. Up stays +Y.
+    UPSTREAM_ROTATION = [[-1, 0, 0, 0], [0, 0, -1, 0], [0, -1, 0, 0], [0, 0, 0, 1]]
+    ROTATION = [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
 
     def __init__(self, config: WorkerConfig):
         super().__init__(config)
@@ -366,7 +373,7 @@ class Pixal3DEngine(_TrellisFamilyEngine):
 
     def _after_load(self) -> None:  # pragma: no cover - GPU node only
         torch = self._torch
-        # UNVERIFIED: import path + constructor at the pinned commit.
+        # Verified on the GPU (bake-off, Nov 2026): import path + constructor at the pinned commit.
         from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjFeatureExtractor
 
         p = self.pipeline
@@ -380,7 +387,7 @@ class Pixal3DEngine(_TrellisFamilyEngine):
         # trust_repo=True) inside _load_naf(). Load it NOW (not mid-job) and,
         # when MESH_WORKER_NAF_DIR is set, from a local clone so no GitHub call
         # is attempted. Its pretrained weights come from $TORCH_HOME/hub/checkpoints.
-        # UNVERIFIED: hub entrypoint name + kwargs.
+        # Verified on the GPU (bake-off, Nov 2026): hub entrypoint name + kwargs.
         naf_dir = self.config.naf_dir
         original_hub_load = torch.hub.load
 
@@ -414,7 +421,7 @@ class Pixal3DEngine(_TrellisFamilyEngine):
         import numpy as np
 
         torch = self._torch
-        # UNVERIFIED: inference.py get_camera_params_wild_moge(), on the
+        # Verified on the GPU (bake-off, Nov 2026): inference.py get_camera_params_wild_moge(), on the
         # preprocessed image (it saves that image to disk and re-reads it).
         rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
         tensor = torch.from_numpy(rgb).permute(2, 0, 1).to("cuda")
@@ -437,10 +444,11 @@ class Pixal3DEngine(_TrellisFamilyEngine):
         }
         # Pixal3D's run() inlines its HR shape stage, so a shape-only job still
         # samples the texture latent (only the UV bake is skipped).
-        # UNVERIFIED: run() signature at the pinned commit.
+        # Verified on the GPU (bake-off, Nov 2026): run() signature at the pinned commit.
         with stage_hooks(self.pipeline, tracker, hooks):
             meshes, (_shape, _tex, res) = self.pipeline.run(
                 image, camera_params=camera, seed=int(spec.seed), preprocess_image=False,
-                return_latent=True, pipeline_type=self.pipeline_type, max_num_tokens=MAX_NUM_TOKENS,
+                return_latent=True, pipeline_type=spec.options.get("pipeline_type") or self.pipeline_type,
+                max_num_tokens=MAX_NUM_TOKENS,
             )
         return meshes[0], res

@@ -25,7 +25,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from config import WorkerConfig
+from config import WorkerConfig, options_schema
 from engines import build_engine
 from inputs import RequestError, validate_request
 from worker import JOB_ID_RE, Job, JobManager, QueueFull
@@ -72,7 +72,20 @@ async def lifespan(app: FastAPI):
         await app.state.manager.stop()
 
 
+def configure_logging() -> None:
+    """Show the worker's own INFO logs (model loading, the RMBG license guard,
+    job lifecycle). uvicorn configures only its own loggers, so without this
+    Python's default WARNING level silently drops them."""
+    level = os.environ.get("MESH_WORKER_LOG_LEVEL", "INFO").upper()
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    else:
+        root.setLevel(level)
+
+
 def create_app(config: Optional[WorkerConfig] = None) -> FastAPI:
+    configure_logging()
     app = FastAPI(title="mindrouter mesh-worker", version=VERSION, lifespan=lifespan)
     app.state.config = config or WorkerConfig()
 
@@ -108,6 +121,8 @@ def create_app(config: Optional[WorkerConfig] = None) -> FastAPI:
             "min_faces": cfg.min_faces,
             "max_faces": cfg.max_faces,
             "default_faces": cfg.default_faces,
+            # Per-job model settings a request may send in "options".
+            "options": options_schema(cfg),
             "max_image_bytes": cfg.max_image_bytes,
             "max_queue": cfg.max_queue,
         }

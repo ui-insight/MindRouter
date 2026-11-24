@@ -320,7 +320,7 @@ These endpoints accept and return data in the OpenAI API format. Any OpenAI-comp
 | DELETE | `/v1/videos/{video_id}` | API Key | Delete a video job and its artifacts |
 | POST | `/v1/meshes` | API Key | Submit an async image-to-3D job: one picture in, a textured GLB out (202 Accepted; requires per-account enablement). See [mesh-api.md](mesh-api.md) |
 | GET | `/v1/meshes` | API Key | List your 3D jobs |
-| GET | `/v1/meshes/models` | API Key | List available 3D models and their limits |
+| GET | `/v1/meshes/models` | API Key | List 3D models with their own limits, settings, license and availability |
 | GET | `/v1/meshes/{mesh_id}` | API Key | Get a 3D job's status (stage, progress, queue position) |
 | GET | `/v1/meshes/{mesh_id}/content` | API Key | Download the GLB, or `?variant=preview` for the PNG preview |
 | DELETE | `/v1/meshes/{mesh_id}` | API Key | Cancel a running 3D job (refunded), or delete a finished one and its files |

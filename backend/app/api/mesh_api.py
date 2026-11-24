@@ -37,7 +37,7 @@ from backend.app.db import crud
 from backend.app.db.models import ApiKey, BackendEngine, MeshJob, MeshJobStatus, Modality, User
 from backend.app.db.session import get_async_db
 from backend.app.logging_config import bind_request_context, get_logger
-from backend.app.services import mesh_store
+from backend.app.services import mesh_models, mesh_store
 from backend.app.settings import get_settings
 
 router = APIRouter(prefix="/v1", tags=["mesh"])
@@ -90,6 +90,8 @@ def job_to_dict(job: MeshJob, *, queue: Optional[Tuple[int, int]] = None) -> Dic
             {"code": job.error_code, "message": job.error_message} if job.error_code else None
         ),
         "usage": {"gpu_seconds": job.gpu_seconds, "token_equivalent": job.token_equivalent},
+        "model_options": dict(job.model_options or {}),
+        "license": license_summary(job.model),
     }
     if queue is not None and job.status == MeshJobStatus.QUEUED:
         obj["queue_position"], obj["queue_depth"] = queue
@@ -135,10 +137,45 @@ async def _limits(db: AsyncSession) -> Dict[str, Any]:
         ),
         "default_texture_size": int(await crud.get_config_json(db, "mesh.default_texture_size", 2048)),
         "min_faces": int(await crud.get_config_json(db, "mesh.min_target_faces", 5000)),
-        "max_faces": int(await crud.get_config_json(db, "mesh.max_target_faces", 1000000)),
-        "default_faces": int(await crud.get_config_json(db, "mesh.default_target_faces", 100000)),
+        "max_faces": int(await crud.get_config_json(db, "mesh.max_target_faces", 300000)),
+        "default_faces": int(await crud.get_config_json(db, "mesh.default_target_faces", 40000)),
         "max_image_mb": int(await crud.get_config_json(db, "mesh.max_image_upload_mb", 10)),
     }
+
+
+async def model_settings(db: AsyncSession) -> Dict[str, Dict[str, Any]]:
+    """Admin -> Meshes per-model settings: {model: {max_faces, max_texture_size,
+    options}}. Anything malformed reads as no settings."""
+    raw = await crud.get_config_json(db, "mesh.model_settings", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+
+
+async def license_acceptance(db: AsyncSession) -> Dict[str, Dict[str, Any]]:
+    """{family: {accepted_by, accepted_at}} for licenses an admin accepted."""
+    raw = await crud.get_config_json(db, "mesh.license_acceptance", {})
+    return raw if isinstance(raw, dict) else {}
+
+
+async def license_ready(db: AsyncSession, model: str) -> bool:
+    """False while the model's license needs an admin's acceptance."""
+    family = mesh_models.family_for_model(model)
+    lic = mesh_models.LICENSES.get(family) if family else None
+    if not lic or not lic.get("requires_acceptance"):
+        return True
+    return family in await license_acceptance(db)
+
+
+def license_summary(model: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The license block shown on job objects and /v1/meshes/models."""
+    lic = mesh_models.license_for_model(model)
+    if not lic:
+        return None
+    out = {"name": lic["name"], "url": lic["url"]}
+    if lic.get("user_notice"):
+        out["notice"] = lic["user_notice"]
+    return out
 
 
 def _parse_bool(param: str, value: Any, default: bool) -> bool:
@@ -236,13 +273,34 @@ async def submit_mesh_job(
         params, dialect="mesh", accepted=MESH_ACCEPTED, ignored=MESH_IGNORED, hints=MESH_DIALECT_HINTS,
     )
 
-    limits = await _limits(db)
-    max_bytes = limits["max_image_mb"] * 1024 * 1024
+    base_limits = await _limits(db)
+    max_bytes = base_limits["max_image_mb"] * 1024 * 1024
     if not image:
         raise _bad_request("image", "'image' is required")
     if len(image) > max_bytes:
-        raise _bad_request("image", f"'image' exceeds {limits['max_image_mb']} MB")
+        raise _bad_request("image", f"'image' exceeds {base_limits['max_image_mb']} MB")
     content_type = sniff_image(image)
+
+    # ── Model (first: its own caps and license apply below) ──────────────
+    registry = get_registry()
+    requested = params.get("model") or await crud.get_config_json(db, "mesh.default_model", "default-mesh")
+    model, _ = registry.resolve_alias(str(requested))
+    availability = await model_availability(registry, model)
+    if availability != AVAILABLE:
+        code, detail, headers = openai_error(model, availability)
+        raise HTTPException(status_code=code, detail=detail, headers=headers)
+    if model not in await mesh_model_names(registry):
+        raise _bad_request("model", f"'{requested}' is not a 3D mesh model (see GET /v1/meshes/models)")
+    if not await license_ready(db, model):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"{model} is not available yet: an administrator must accept its license "
+                "terms first (Admin -> Meshes)."
+            ),
+        )
+    settings = (await model_settings(db)).get(model, {})
+    limits = mesh_models.model_limits(base_limits, settings)
 
     texture = _parse_bool("texture", params.get("texture"), True)
     texture_size = _parse_int("texture_size", params.get("texture_size"), limits["default_texture_size"])
@@ -255,7 +313,7 @@ async def submit_mesh_job(
     if not limits["min_faces"] <= target_faces <= limits["max_faces"]:
         raise _bad_request(
             "target_faces",
-            f"'target_faces' must be between {limits['min_faces']:,} and {limits['max_faces']:,}",
+            f"'target_faces' must be between {limits['min_faces']:,} and {limits['max_faces']:,} for {model}",
         )
     seed = params.get("seed")
     seed = secrets.randbelow(2**31) if seed in (None, "") else _parse_int("seed", seed, 0)
@@ -267,17 +325,6 @@ async def submit_mesh_job(
     remove_background = _REMOVE_BACKGROUND.get(str(rb_raw or "auto").strip().lower())
     if remove_background is None:
         raise _bad_request("remove_background", "'remove_background' must be auto, on or off")
-
-    # ── Model ─────────────────────────────────────────────────────────────
-    registry = get_registry()
-    requested = params.get("model") or await crud.get_config_json(db, "mesh.default_model", "default-mesh")
-    model, _ = registry.resolve_alias(str(requested))
-    availability = await model_availability(registry, model)
-    if availability != AVAILABLE:
-        code, detail, headers = openai_error(model, availability)
-        raise HTTPException(status_code=code, detail=detail, headers=headers)
-    if model not in await mesh_model_names(registry):
-        raise _bad_request("model", f"'{requested}' is not a 3D mesh model (see GET /v1/meshes/models)")
 
     # ── Fairness, storage, quota ──────────────────────────────────────────
     max_active = int(await crud.get_config_json(db, "mesh.max_concurrent_jobs_per_user", 2))
@@ -312,15 +359,17 @@ async def submit_mesh_job(
         "texture": texture, "texture_size": texture_size, "target_faces": target_faces,
         "seed": seed, "remove_background": remove_background,
     }
+    model_options = dict(settings.get("options") or {})
     audit = await crud.create_request(
         db=db, user_id=user.id, api_key_id=api_key.id, endpoint=endpoint, model=model,
-        modality=Modality.MESH_GENERATION, prompt=None, parameters=options,
+        modality=Modality.MESH_GENERATION, prompt=None,
+        parameters={**options, "model_options": model_options} if model_options else options,
         client_ip=client_ip, user_agent=user_agent,
     )
     job = await crud.create_mesh_job(
         db, job_uuid=job_uuid, user_id=user.id, api_key_id=api_key.id, request_id=audit.id,
         model=model, input_content_type=content_type, input_size_bytes=len(image),
-        token_equivalent=cost, **options,
+        token_equivalent=cost, model_options=model_options or None, **options,
     )
     root = get_settings().mesh_storage_path
     path = mesh_store.input_path(root, user.id, job_uuid, content_type, create=True)
@@ -348,11 +397,20 @@ async def list_mesh_models(
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
 ):
-    """Capability discovery for clients and the 3D tab."""
-    limits = await _limits(db)
+    """Capability discovery for clients and the 3D tab: per-model limits (the
+    service-wide ones narrowed by Admin -> Meshes), the model's settings, its
+    license, and whether it can take jobs yet."""
+    base = await _limits(db)
+    settings = await model_settings(db)
     default = await crud.get_config_json(db, "mesh.default_model", "default-mesh")
-    data = [
-        {
+    registry = get_registry()
+    data = []
+    for name in await mesh_model_names(registry):
+        limits = mesh_models.model_limits(base, settings.get(name))
+        family = mesh_models.family_for_model(name)
+        options = dict(mesh_models.FAMILY_OPTION_DEFAULTS.get(family, {}))
+        options.update((settings.get(name) or {}).get("options") or {})
+        data.append({
             "id": name,
             "object": "model",
             "inputs": ["image"],
@@ -364,10 +422,16 @@ async def list_mesh_models(
             "max_faces": limits["max_faces"],
             "default_faces": limits["default_faces"],
             "max_image_mb": limits["max_image_mb"],
-        }
-        for name in await mesh_model_names(get_registry())
-    ]
-    return {"object": "list", "default_model": default, "data": data}
+            "options": options,
+            "license": license_summary(name),
+            "available": await license_ready(db, name),
+        })
+    return {
+        "object": "list",
+        "default_model": default,
+        "default_model_resolved": registry.resolve_alias(str(default))[0],
+        "data": data,
+    }
 
 
 @router.post("/meshes", status_code=status.HTTP_202_ACCEPTED)

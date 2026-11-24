@@ -6339,6 +6339,7 @@ def mesh_job_snapshot(job: MeshJob) -> dict:
         "texture_size": job.texture_size,
         "target_faces": job.target_faces,
         "remove_background": job.remove_background,
+        "model_options": dict(job.model_options or {}),
         "input_content_type": job.input_content_type,
         "attempts": job.attempts or 0,
         "token_equivalent": job.token_equivalent,

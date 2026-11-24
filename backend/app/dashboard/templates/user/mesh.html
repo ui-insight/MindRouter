@@ -59,23 +59,30 @@
             {% if mesh_models|length > 1 %}
             <div class="col-12">
               <label for="mesh-model" class="form-label">Model</label>
-              <select id="mesh-model" name="model" class="form-select">
+              <select id="mesh-model" name="model" class="form-select" aria-describedby="mesh-license">
                 {% for m in mesh_models %}
-                <option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m }}</option>
+                <option value="{{ m }}" {% if loop.first %}selected{% endif %}>{{ m }}</option>
                 {% endfor %}
               </select>
             </div>
             {% endif %}
+            <div class="col-12">
+              <p id="mesh-license" class="small text-body-secondary mb-0 {% if not first_notice %}d-none{% endif %}">
+                <span id="mesh-license-text">{{ first_notice }}</span>
+                <a id="mesh-license-link" href="{{ first_license.license_url or '#' }}" target="_blank" rel="noopener">Read the license</a>.
+              </p>
+            </div>
             <div class="col-sm-6">
               <label for="mesh-faces" class="form-label">Detail (faces)</label>
               <select id="mesh-faces" name="target_faces" class="form-select" aria-describedby="mesh-faces-help">
-                {% for n, label in [(10000, "Low"), (50000, "Medium"), (100000, "High"), (300000, "Very high")] %}
+                {% set presets = [(20000, "Low"), (40000, "Standard"), (100000, "High"), (300000, "Very high")] %}
+                {% for n, label in presets %}
                 {% if min_faces <= n <= max_faces %}
                 <option value="{{ n }}" {% if n == default_faces %}selected{% endif %}>{{ label }} ({{ "{:,}".format(n) }})</option>
                 {% endif %}
                 {% endfor %}
               </select>
-              <div id="mesh-faces-help" class="form-text">Fewer faces load faster in games and on the web.</div>
+              <div id="mesh-faces-help" class="form-text">Fewer faces load faster in games and on the web; below about 40,000, rounded shapes look faceted.</div>
             </div>
             <div class="col-sm-6">
               <label for="mesh-texture-size" class="form-label">Texture size</label>
@@ -146,7 +153,35 @@
   </section>
 </div>
 
+<script id="mesh-per-model" type="application/json">{{ per_model|tojson }}</script>
 <script>
+(function () {
+  // Follow the selected model: its own face/texture caps and license notice.
+  const PER_MODEL = JSON.parse(document.getElementById("mesh-per-model").textContent || "{}");
+  const modelSel = document.getElementById("mesh-model");
+  function applyModel() {
+    const name = modelSel ? modelSel.value : Object.keys(PER_MODEL)[0];
+    const m = PER_MODEL[name];
+    if (!m) return;
+    const faces = document.getElementById("mesh-faces");
+    let keep = null;
+    for (const opt of faces.options) {
+      const ok = +opt.value >= m.min_faces && +opt.value <= m.max_faces;
+      opt.disabled = !ok; opt.hidden = !ok;
+      if (ok && (keep === null || +opt.value <= m.default_faces)) keep = opt;
+    }
+    if (faces.selectedOptions[0] && faces.selectedOptions[0].disabled && keep) keep.selected = true;
+    const tex = document.getElementById("mesh-texture-size");
+    for (const opt of tex.options) { const ok = m.texture_sizes.includes(+opt.value); opt.disabled = !ok; opt.hidden = !ok; }
+    if (tex.selectedOptions[0] && tex.selectedOptions[0].disabled) tex.value = String(m.default_texture_size);
+    const lic = document.getElementById("mesh-license");
+    lic.classList.toggle("d-none", !m.notice);
+    document.getElementById("mesh-license-text").textContent = m.notice || "";
+    document.getElementById("mesh-license-link").href = m.license_url || "#";
+  }
+  if (modelSel) modelSel.addEventListener("change", applyModel);
+  applyModel();
+})();
 (function () {
   const form = document.getElementById("mesh-form");
   const fileInput = document.getElementById("mesh-image");

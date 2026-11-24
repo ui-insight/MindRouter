@@ -798,6 +798,49 @@ curl -L http://localhost:8000/v1/videos/$VID/content -H "Authorization: Bearer m
                 <p><strong>Errors:</strong> <code>401</code> missing/invalid key &middot; <code>400</code> bad size/duration/quality &middot; <code>403</code> not enabled &middot; <code>404</code> unknown model or job &middot; <code>429</code> concurrency/quota &middot; <code>507</code> storage cap &middot; <code>503</code> disabled.</p>
                 <p>Full reference: <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/video-api.md">docs/video-api.md</a>. End-to-end studio/storyboard recipe (images &rarr; keyframes &rarr; clips &rarr; stitch &rarr; narration): <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/media-studio-integration.md">docs/media-studio-integration.md</a>.</p>
 
+                <h4 id="mesh-generation">Image to 3D (meshes)</h4>
+                <p><code>POST /v1/meshes</code> turns one picture of an object into a textured 3D model: a binary glTF (<code>.glb</code>) with PBR materials, plus a PNG preview. Like video it is <strong>asynchronous</strong>: you get a job at once (<code>202</code>), poll it, then download the GLB. A dashboard playground with a 3D viewer is at <a href="/3d">/3d</a>. Requires per-account enablement (<code>403</code> otherwise) and the service switch on Admin &rarr; Meshes (<code>503</code> when off).</p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light"><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead>
+                    <tbody>
+                        <tr><td>POST</td><td><code>/v1/meshes</code></td><td>Create a job: multipart <code>image</code> field, or JSON with <code>image</code> as base64 / a <code>data:</code> URL &rarr; <code>202</code> + job object</td></tr>
+                        <tr><td>GET</td><td><code>/v1/meshes/{id}</code></td><td>Poll status, stage and progress (and <code>queue_position</code> while queued)</td></tr>
+                        <tr><td>GET</td><td><code>/v1/meshes/{id}/content</code></td><td>Download the GLB once completed; <code>?variant=preview</code> for the PNG preview</td></tr>
+                        <tr><td>GET</td><td><code>/v1/meshes</code></td><td>List your jobs, newest first (<code>status_filter</code>, <code>limit</code>, <code>offset</code>)</td></tr>
+                        <tr><td>DELETE</td><td><code>/v1/meshes/{id}</code></td><td>Cancel a running job (refunded), or delete a finished one and its files</td></tr>
+                        <tr><td>GET</td><td><code>/v1/meshes/models</code></td><td>Models with their own limits (face range, texture sizes), settings, license and availability</td></tr>
+                    </tbody>
+                </table>
+                <p><strong>Create parameters:</strong></p>
+                <table class="table table-bordered table-sm">
+                    <thead class="table-light"><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>image</code></td><td>file / base64</td><td><em>required</em></td><td>PNG, JPEG or WebP, 16&ndash;8192 px per side, up to 10 MB (admin setting). One object, fully in frame, works best; a transparent background is optional</td></tr>
+                        <tr><td><code>model</code></td><td>string</td><td><code>default-mesh</code> &rarr; Hunyuan3D 2.1</td><td>A mesh model or alias from <code>GET /v1/meshes/models</code></td></tr>
+                        <tr><td><code>texture</code></td><td>bool</td><td>true</td><td>Paint PBR textures; <code>false</code> = shape only (faster, fewer tokens)</td></tr>
+                        <tr><td><code>texture_size</code></td><td>int</td><td>2048</td><td>1024, 2048 or 4096 (per model; see <code>/v1/meshes/models</code>)</td></tr>
+                        <tr><td><code>target_faces</code></td><td>int</td><td>40,000</td><td>Decimation target, 5,000&ndash;300,000 service-wide; Hunyuan3D is capped at 100,000. Below about 40,000, rounded shapes look faceted</td></tr>
+                        <tr><td><code>remove_background</code></td><td>string</td><td>auto</td><td><code>auto</code> (cut out unless the picture already has transparency), <code>on</code>, <code>off</code></td></tr>
+                        <tr><td><code>seed</code></td><td>int</td><td>random</td><td>0&ndash;2147483647; echoed on the job so a result can be reproduced</td></tr>
+                    </tbody>
+                </table>
+                <pre><code># 1. submit a picture
+MESH=$(curl -s -X POST http://localhost:8000/v1/meshes \
+  -H "Authorization: Bearer mr2_your-api-key" -F image=@chair.jpg -F target_faces=40000 | jq -r .id)
+
+# 2. poll until completed (a Hunyuan3D job takes about 1-1.5 minutes once it starts)
+curl -s http://localhost:8000/v1/meshes/$MESH -H "Authorization: Bearer mr2_your-api-key" | jq '.status, .stage, .progress'
+
+# 3. download the model and its preview
+curl -L http://localhost:8000/v1/meshes/$MESH/content -H "Authorization: Bearer mr2_your-api-key" -o chair.glb
+curl -L "http://localhost:8000/v1/meshes/$MESH/content?variant=preview" -H "Authorization: Bearer mr2_your-api-key" -o chair.png</code></pre>
+                <p><strong>Job object:</strong> <code>{ id, object: "mesh", status, stage, progress, model, seed, texture, texture_size, target_faces, content_url, preview_url, faces, vertices, size_bytes, error, usage, model_options, license }</code>. Statuses: <code>queued &rarr; in_progress &rarr; completed</code> (or <code>failed</code> / <code>cancelled</code>); stages <code>preprocess</code>, <code>shape</code>, <code>texture</code>, <code>export</code>. <code>model_options</code> records the per-model settings the job ran with; <code>license</code> names the model's license (and, for Hunyuan3D, the notice its license requires).</p>
+                <p><strong>Output:</strong> every model returns glTF's convention (+Y up, the object's front facing +Z), so results from different models line up in the same viewer; textures are PBR (base color + metallic/roughness).</p>
+                <p><strong>Limits &amp; behavior:</strong> each model runs one job at a time on its own GPU, so jobs for different models run side by side; two in-flight jobs per user (<code>429</code>); a flat token charge per job (10,000 textured, 5,000 shape-only; refunded on failure or cancel); a 20&nbsp;GB per-user storage cap (<code>507</code>); finished jobs are deleted after 90 days.</p>
+                <p><strong>Hunyuan3D 2.1 license:</strong> the default model is provided by the University of Idaho under the Tencent Hunyuan 3D 2.1 Community License Agreement. Tencent is not affiliated with, associated with, sponsoring or endorsing this service. The license does not apply in the European Union, the United Kingdom or South Korea, its outputs may not be used to improve other AI models, and its Acceptable Use Policy applies (<a href="https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/blob/main/LICENSE">license text</a>). TRELLIS.2 and Pixal3D are MIT-licensed.</p>
+                <p><strong>Errors:</strong> <code>401</code> missing/invalid key &middot; <code>400</code> bad picture or option (the body names the field) &middot; <code>403</code> not enabled for your account &middot; <code>404</code> unknown model or job &middot; <code>409</code> content requested before the job finished &middot; <code>429</code> concurrency/quota &middot; <code>503</code> service off, model offline, or a model whose license an admin has not accepted &middot; <code>507</code> storage cap.</p>
+                <p>Full reference: <a href="https://github.com/ui-insight/MindRouter/blob/main/docs/mesh-api.md">docs/mesh-api.md</a>.</p>
+
                 <h3>Ollama-Compatible Endpoints</h3>
                 <p>These endpoints accept and return data in Ollama's native format. Ollama clients can be pointed at MindRouter as a drop-in replacement.</p>
                 <table class="table table-bordered table-sm">
@@ -1331,6 +1374,7 @@ client.conversations.delete(conv.id)               # delete state anytime</code>
                         <tr><td>OCR</td><td><code>/admin/ocr-config</code></td><td>OCR enable toggle, default model, prompts, DPI, page/file limits, chunk size and overlap, chunk concurrency, retries, load limits (documents in progress per account / for the whole service, page conversions per worker)</td></tr>
                         <tr><td>Images</td><td><code>/admin/images-config</code></td><td>Image generation enable toggle, default model, default/allowed sizes, steps and guidance defaults, safety judge models and policy, per-user access grants</td></tr>
                         <tr><td>Video</td><td><code>/admin/video-config</code></td><td>Video generation enable toggle, default model, allowed sizes and durations, per-user concurrent job cap and storage cap, token cost per second, per-user access grants</td></tr>
+                        <tr><td>Meshes</td><td><code>/admin/meshes</code></td><td>Image-to-3D: <code>/v1/meshes</code> on/off, default model, face and texture ranges, per-model caps and settings (Hunyuan3D octree resolution, steps and guidance; TRELLIS.2 / Pixal3D pipeline), license terms and acceptance (Hunyuan3D takes no jobs until an admin accepts its license), costs, storage cap, per-user access grants</td></tr>
                         <tr><td>Email</td><td><code>/admin/email</code></td><td>Compose and send announcement email to selected users or groups, with recipient count preview and test send</td></tr>
                         <tr><td>Data Retention</td><td><code>/admin/retention</code></td><td>Retention policies for request, conversation, telemetry, request-image, stored-response, and Conversations-API data; archive statistics; an archive browser; and a <strong>Purge</strong> tab for immediate, per-category deletion older than a chosen cutoff (typed <code>PURGE</code> confirmation)</td></tr>
                         <tr><td>Backup &amp; Restore</td><td><code>/admin/backup</code></td><td>Export or restore MindRouter configuration (nodes, backends, users, groups, API keys, quotas, models, settings, blog posts). Role-scoped since 2.9.9 &mdash; full admins get a restorable dump; read-only auditors get the same configuration with password hashes, API key hashes, and secret settings nulled, and that redacted file cannot be used to restore</td></tr>

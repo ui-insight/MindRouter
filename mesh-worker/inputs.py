@@ -17,12 +17,12 @@ import binascii
 import io
 import secrets
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict
 
 from PIL import Image
 
-from config import MAX_SEED, WorkerConfig
+from config import ENGINE_OPTIONS, MAX_SEED, WorkerConfig, option_defaults
 
 ALLOWED_FORMATS = {"PNG", "JPEG", "WEBP"}
 
@@ -47,6 +47,8 @@ class MeshSpec:
     texture: bool
     texture_size: int
     target_faces: int
+    # Per-job model settings, validated and complete (defaults filled in).
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
 def _int_field(body: Dict[str, Any], name: str, default: int) -> int:
@@ -59,6 +61,36 @@ def _int_field(body: Dict[str, Any], name: str, default: int) -> int:
             return int(value)
         raise RequestError(f"'{name}' must be an integer")
     return value
+
+
+def validate_options(raw: Any, config: WorkerConfig) -> Dict[str, Any]:
+    """Check a request's "options" against this engine's ENGINE_OPTIONS and
+    fill in the defaults for anything left out."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise RequestError("'options' must be an object")
+    schema = ENGINE_OPTIONS[config.mode]
+    unknown = sorted(set(raw) - set(schema))
+    if unknown:
+        allowed = ", ".join(sorted(schema)) or "none"
+        raise RequestError(f"unknown option(s) {', '.join(unknown)} for this model (allowed: {allowed})")
+    out = dict(option_defaults(config))
+    for name, value in raw.items():
+        spec = schema[name]
+        kind = spec["type"]
+        if kind == "choice":
+            if isinstance(value, bool) or value not in spec["choices"]:
+                raise RequestError(f"option '{name}' must be one of {spec['choices']}")
+        elif kind == "int":
+            if isinstance(value, bool) or not isinstance(value, int) or not spec["min"] <= value <= spec["max"]:
+                raise RequestError(f"option '{name}' must be an integer in [{spec['min']}, {spec['max']}]")
+        elif kind == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not spec["min"] <= value <= spec["max"]:
+                raise RequestError(f"option '{name}' must be a number in [{spec['min']}, {spec['max']}]")
+            value = float(value)
+        out[name] = value
+    return out
 
 
 def decode_image(b64: Any, config: WorkerConfig) -> tuple:
@@ -143,6 +175,8 @@ def validate_request(body: Any, config: WorkerConfig) -> MeshSpec:
     if not (config.min_faces <= target_faces <= config.max_faces):
         raise RequestError(f"'target_faces' must be in [{config.min_faces}, {config.max_faces}]")
 
+    options = validate_options(body.get("options"), config)
+
     raw, fmt, width, height, has_alpha = decode_image(body.get("image"), config)
     return MeshSpec(
         model=model or config.model_id,
@@ -155,6 +189,7 @@ def validate_request(body: Any, config: WorkerConfig) -> MeshSpec:
         texture=texture,
         texture_size=texture_size,
         target_faces=target_faces,
+        options=options,
     )
 
 

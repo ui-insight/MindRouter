@@ -59,7 +59,8 @@ _STUB_NAMES = [
     "backend", "backend.app", "backend.app.api", "backend.app.api.auth", "backend.app.api.model_availability",
     "backend.app.core", "backend.app.core.pathsafe", "backend.app.core.telemetry",
     "backend.app.core.telemetry.registry", "backend.app.db", "backend.app.db.session", "backend.app.db.models",
-    "backend.app.services", "backend.app.services.mesh_store", "backend.app.settings", "backend.app.logging_config",
+    "backend.app.services", "backend.app.services.mesh_store", "backend.app.services.mesh_models",
+    "backend.app.settings", "backend.app.logging_config",
 ]
 _prev = {n: sys.modules.get(n, _MISSING) for n in _STUB_NAMES}
 for _n in ["backend", "backend.app", "backend.app.api", "backend.app.api.auth", "backend.app.core",
@@ -74,6 +75,8 @@ _load("ma_for_mesh", _APP / "api" / "model_availability.py", "backend.app.api.mo
 _pathsafe = _load("ps_for_mesh_api", _APP / "core" / "pathsafe.py", "backend.app.core.pathsafe")
 _store = _load("store_for_mesh_api", _APP / "services" / "mesh_store.py", "backend.app.services.mesh_store")
 _services.mesh_store = _store
+_mesh_models = _load("models_for_mesh_api", _APP / "services" / "mesh_models.py", "backend.app.services.mesh_models")
+_services.mesh_models = _mesh_models
 api = _load("mesh_api_under_test", _APP / "api" / "mesh_api.py")
 for _n, _old in _prev.items():
     if _old is _MISSING:
@@ -97,7 +100,7 @@ def _job(status=_Status.QUEUED, **over):
     job = SimpleNamespace(
         id=1, job_uuid=UUID, user_id=7, model=MODEL, status=status, stage=None, progress=0.0,
         created_at=when, started_at=None, completed_at=None, seed=5, texture=True, texture_size=2048,
-        target_faces=100000, remove_background="auto", preview_size_bytes=0, output_size_bytes=0,
+        target_faces=100000, remove_background="auto", model_options=None, preview_size_bytes=0, output_size_bytes=0,
         faces=None, vertices=None, error_code=None, error_message=None, gpu_seconds=0, token_equivalent=10000,
     )
     for k, v in over.items():
@@ -124,7 +127,7 @@ def env(monkeypatch, tmp_path):
     crud.incr_quota_redis = AsyncMock()
     crud.create_request = AsyncMock(return_value=SimpleNamespace(id=100))
     crud.create_mesh_job = AsyncMock(side_effect=lambda db, **kw: _job(**{k: v for k, v in kw.items() if k in (
-        "seed", "texture", "texture_size", "target_faces", "remove_background")}))
+        "seed", "texture", "texture_size", "target_faces", "remove_background", "model_options")}))
     crud.get_mesh_job_by_uuid = AsyncMock(return_value=None)
     crud.get_mesh_queue_position = AsyncMock(return_value=(1, 1))
     crud.delete_mesh_job = AsyncMock()
@@ -397,3 +400,62 @@ def test_models_endpoint_lists_only_mesh_backends(env):
     assert [m["id"] for m in out["data"]] == [MODEL]
     assert out["data"][0]["texture_sizes"] == [1024, 2048, 4096]
     assert out["default_model"] == "default-mesh"
+    assert out["default_model_resolved"] == MODEL
+    m = out["data"][0]
+    assert m["options"] == {"pipeline_type": "1024_cascade"}      # worker default for TRELLIS.2
+    assert m["license"]["name"] == "MIT License" and m["available"] is True
+
+
+# -- per-model settings, caps and the Hunyuan license gate -------------------------
+
+HUNYUAN = "tencent/hunyuan3d-2.1"
+
+
+def _serve(env, name):
+    env.registry.model_exists = AsyncMock(side_effect=lambda m: m == name)
+    env.registry.get_backend_models = AsyncMock(
+        side_effect=lambda bid: [SimpleNamespace(name=name)] if bid == 1 else [])
+
+
+def test_hunyuan_needs_an_admin_to_accept_its_license(env):
+    _serve(env, HUNYUAN)
+    with pytest.raises(HTTPException) as e:
+        _submit(model=HUNYUAN)
+    assert _code(e) == 503 and "license" in e.value.detail
+    env.crud.create_mesh_job.assert_not_called()
+    out = asyncio.run(api.list_mesh_models(_db(), (_user(), None)))
+    assert out["data"][0]["available"] is False
+    assert "Tencent is not affiliated" in out["data"][0]["license"]["notice"]
+
+    env.config["mesh.license_acceptance"] = {"hunyuan3d21": {"accepted_by": "admin", "accepted_at": "2026-11-24"}}
+    _submit(model=HUNYUAN)
+    assert env.crud.create_mesh_job.call_args.kwargs["model"] == HUNYUAN
+    lic = api.license_summary(HUNYUAN)
+    assert lic["url"].endswith("Hunyuan3D-2.1/blob/main/LICENSE") and "University of Idaho" in lic["notice"]
+    assert api.license_summary("some/unknown-mesh") is None
+
+
+def test_per_model_caps_narrow_the_service_limits(env):
+    env.config["mesh.model_settings"] = {MODEL: {"max_faces": 50000, "max_texture_size": 2048}}
+    with pytest.raises(HTTPException) as e:
+        _submit(target_faces=60000)
+    assert _code(e) == 400 and "50,000" in e.value.detail["error"]["message"]
+    with pytest.raises(HTTPException) as e:
+        _submit(texture_size=4096)
+    assert _code(e) == 400
+    env.config["mesh.default_target_faces"] = 100000                 # above the model cap ...
+    _submit()
+    assert env.crud.create_mesh_job.call_args.kwargs["target_faces"] == 50000   # ... clamped
+    out = asyncio.run(api.list_mesh_models(_db(), (_user(), None)))
+    assert out["data"][0]["max_faces"] == 50000 and out["data"][0]["texture_sizes"] == [1024, 2048]
+
+
+def test_model_settings_are_snapshotted_on_the_job_and_audit(env):
+    env.config["mesh.model_settings"] = {MODEL: {"options": {"pipeline_type": "1536_cascade"}}}
+    job = _submit()
+    assert env.crud.create_mesh_job.call_args.kwargs["model_options"] == {"pipeline_type": "1536_cascade"}
+    assert env.crud.create_request.call_args.kwargs["parameters"]["model_options"] == {"pipeline_type": "1536_cascade"}
+    assert job["model_options"] == {"pipeline_type": "1536_cascade"}
+    env.config["mesh.model_settings"] = "garbage"                     # malformed reads as none
+    _submit()
+    assert env.crud.create_mesh_job.call_args.kwargs["model_options"] is None

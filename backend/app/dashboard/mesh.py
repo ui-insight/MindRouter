@@ -77,8 +77,9 @@ async def mesh_page(request: Request, db: AsyncSession = Depends(get_async_db)):
     if not user or not user.mesh_generation_enabled:
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    from backend.app.api.mesh_api import _csv_ints
+    from backend.app.api.mesh_api import _limits, license_ready, license_summary, model_settings
     from backend.app.core.telemetry.registry import get_registry
+    from backend.app.services import mesh_models as mm
 
     default_model = await crud.get_config_json(db, "mesh.default_model", "default-mesh")
     default_model, _ = get_registry().resolve_alias(default_model)
@@ -86,6 +87,24 @@ async def mesh_page(request: Request, db: AsyncSession = Depends(get_async_db)):
     if default_model in models:
         models.remove(default_model)
         models.insert(0, default_model)
+    # Per-model limits (Admin -> Meshes caps) and license notices, for the
+    # form to follow the selected model; models whose license an admin has
+    # not accepted are not offered.
+    base = await _limits(db)
+    settings = await model_settings(db)
+    per_model = {}
+    for name in list(models):
+        if not await license_ready(db, name):
+            models.remove(name)
+            continue
+        lim = mm.model_limits(base, settings.get(name))
+        lic = license_summary(name) or {}
+        per_model[name] = {
+            "max_faces": lim["max_faces"], "min_faces": lim["min_faces"], "default_faces": lim["default_faces"],
+            "texture_sizes": lim["texture_sizes"], "default_texture_size": lim["default_texture_size"],
+            "notice": lic.get("notice", ""), "license_name": lic.get("name", ""), "license_url": lic.get("url", ""),
+        }
+    first = per_model.get(models[0]) if models else None
 
     masquerade_user = None
     masq_id = get_masquerade_user_id(request)
@@ -102,15 +121,16 @@ async def mesh_page(request: Request, db: AsyncSession = Depends(get_async_db)):
             "mesh_models": models,
             "default_model": default_model,
             "service_enabled": bool(await crud.get_config_json(db, "mesh.enabled", False)),
-            "texture_sizes": _csv_ints(
-                await crud.get_config_json(db, "mesh.allowed_texture_sizes", "1024,2048,4096"),
-                [1024, 2048, 4096],
-            ),
-            "default_texture_size": int(await crud.get_config_json(db, "mesh.default_texture_size", 2048)),
-            "default_faces": int(await crud.get_config_json(db, "mesh.default_target_faces", 100000)),
-            "min_faces": int(await crud.get_config_json(db, "mesh.min_target_faces", 5000)),
-            "max_faces": int(await crud.get_config_json(db, "mesh.max_target_faces", 1000000)),
-            "max_image_mb": int(await crud.get_config_json(db, "mesh.max_image_upload_mb", 10)),
+            # The service-wide sizes; the form narrows them per selected model.
+            "texture_sizes": base["texture_sizes"],
+            "default_texture_size": (first or base)["default_texture_size"],
+            "default_faces": (first or base)["default_faces"],
+            "min_faces": base["min_faces"],
+            "max_faces": base["max_faces"],
+            "max_image_mb": base["max_image_mb"],
+            "per_model": per_model,
+            "first_notice": (first or {}).get("notice", ""),
+            "first_license": first or {},
             "has_api_key": first_live_api_key(api_keys) is not None,
             "storage_cap_gb": int(await crud.get_config_json(db, "mesh.user_storage_cap_gb", 20)),
             "storage_used_gb": round(await crud.get_user_mesh_storage_bytes(db, user_id) / 1024**3, 2),

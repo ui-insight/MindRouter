@@ -86,7 +86,7 @@ RUN pip install "git+https://github.com/EasternJournalist/utils3d.git@${UTILS3D_
 # Pixal3D (README steps 2-4, in order: requirements incl. MoGe, natten, its
 # utils3d wheel). Its utils3d replaces TRELLIS.2's pin; generation + GLB export
 # never import utils3d (only renderers / training do), so TRELLIS.2 serving is
-# unaffected. UNVERIFIED until the bake-off runs both modes in this image.
+# unaffected. Verified: the Nov 2026 bake-off ran both modes from this image.
 RUN git clone https://github.com/TencentARC/Pixal3D.git /opt/Pixal3D \
     && cd /opt/Pixal3D && git checkout ${PIXAL3D_COMMIT}
 RUN pip install "git+https://github.com/microsoft/MoGe.git@${MOGE_COMMIT}"

@@ -20,14 +20,62 @@ The feature ships **off**: deploying the migration changes nothing for users.
 2. Register it through the admin API (never a direct DB insert), with
    `"engine": "mesh"` and `"max_concurrent": 1`. Discovery reads the worker's
    `/v1/models`; every model on a mesh backend gets modality `mesh_generation`.
-3. Create the alias `default-mesh` (Admin → Model Aliases) pointing at the
-   chosen model, or set **Admin → 3D → Default model** to a model name.
-4. Switch on **Admin → 3D → 3D generation enabled**, then enable users one by
-   one on the same page (`users.mesh_generation_enabled`).
+3. The migration seeds the alias `default-mesh` → `tencent/hunyuan3d-2.1`
+   (Hunyuan3D 2.1, the default model). To use another model, repoint the
+   alias (Admin → Model Aliases) or pick one under **Admin → Meshes → Default
+   model**.
+4. **Accept Hunyuan3D's license** on Admin → Meshes (Licenses & terms). Until
+   an admin does, Hunyuan3D takes no jobs (`503`) and the 3D tab does not
+   offer it. Acceptance is logged (who, when) and can be withdrawn.
+5. Switch on **Admin → Meshes → Enable /v1/meshes and the 3D tab**, then
+   enable users one by one on the same page (`users.mesh_generation_enabled`).
 
 Background removal reuses the images feature's matting server
-(`img.matting_url`); **Admin → 3D → Remove backgrounds** controls whether mesh
-jobs use it, independently of the images feature's own switch.
+(`img.matting_url`); **Admin → Meshes → Remove backgrounds** controls whether
+mesh jobs use it, independently of the images feature's own switch.
+
+## Admin → Meshes
+
+One page (`/admin/meshes`) configures the whole service:
+
+- **Service**: the `/v1/meshes` + 3D tab switch (`mesh.enabled`), background
+  removal, the default model, allowed texture sizes.
+- **Defaults & ranges** (service-wide): default target faces (40,000), min
+  (5,000) and max (300,000); default texture size (2048).
+- **Limits & cost**: in-flight jobs per user, token cost per job, storage cap,
+  largest upload.
+- **Models**: per registered model, its own caps (max faces, max texture
+  size) and settings, stored in `mesh.model_settings`. Hunyuan3D starts
+  capped at 100,000 faces. The settings each model family takes:
+
+  | Model | Setting | Values | Worker default |
+  |---|---|---|---|
+  | Hunyuan3D 2.1 | `octree_resolution` | 256, 384, 512 | 256 |
+  | | `steps` (shape diffusion) | 5–50 | 30 |
+  | | `guidance_scale` | 1.0–10.0 | 5.0 |
+  | TRELLIS.2 | `pipeline_type` | 512, 1024, 1024_cascade, 1536_cascade | 1024_cascade |
+  | Pixal3D | `pipeline_type` | 1024_cascade, 1536_cascade | 1536_cascade |
+
+  A job snapshots its model's settings at submit (`model_options` on the job
+  and in the audit row) and sends them to the worker as `options`; the
+  worker checks them against its own table (`ENGINE_OPTIONS` in
+  `mesh-worker/config.py`, which a contract test keeps equal to the
+  gateway's `backend/app/services/mesh_models.py`).
+- **Licenses & terms**: each model's license and what it asks of the
+  University as a hosted-service operator; Hunyuan3D's acceptance.
+- **User access**: per-account enablement.
+
+### Why Hunyuan3D is capped
+
+A Hunyuan3D job is mostly CPU work around a short GPU burst. Profiled on an
+H200 (portrait picture, 40,000 faces, 2048 px, production settings, 82 s):
+mesh decimation (pymeshlab, one core) 41 s, texture inpainting 16 s, UV
+unwrapping (xatlas, one core) 4.5 s, export and other CPU work about 5 s; all
+the neural-network work (shape model, multiview paint model, upscaler) about
+12 s. Its VRAM use is modest (about 25 GB peak), so nothing spills from the
+GPU; the GPU simply waits for those CPU steps. Below 100,000 faces the time
+hardly changes (72-86 s from 8,000 to 100,000 faces), but UV unwrapping
+grows steeply with face count: a 1M-face, 4096 px job took about 11.5 minutes.
 
 ## Endpoints
 
@@ -53,7 +101,7 @@ PNG, JPEG or WebP, 16–8192 px per side, up to `mesh.max_image_upload_mb`.
 | `model` | `mesh.default_model` (`default-mesh`) | A mesh model or alias |
 | `texture` | `true` | Paint PBR textures; `false` = shape only (faster, cheaper) |
 | `texture_size` | `mesh.default_texture_size` (2048) | One of `mesh.allowed_texture_sizes` |
-| `target_faces` | `mesh.default_target_faces` (100,000) | Decimation target, within `mesh.min/max_target_faces` |
+| `target_faces` | `mesh.default_target_faces` (40,000) | Decimation target, within `mesh.min/max_target_faces` and the model's own cap (Hunyuan3D: 100,000) |
 | `remove_background` | `auto` | `auto` (cut out unless the picture already has transparency), `on`, `off` |
 | `seed` | random | 0 – 2147483647; echoed on the job so a result can be reproduced |
 
@@ -88,12 +136,14 @@ if job["status"] == "completed":
   "stage": "texture",
   "progress": 62.0,
   "model": "microsoft/trellis.2-4b",
-  "seed": 1872634, "texture": true, "texture_size": 2048, "target_faces": 100000,
+  "seed": 1872634, "texture": true, "texture_size": 2048, "target_faces": 40000,
   "remove_background": "auto",
   "content_url": null, "preview_url": null,
   "faces": null, "vertices": null, "size_bytes": null,
   "error": null,
-  "usage": {"gpu_seconds": 0, "token_equivalent": 10000}
+  "usage": {"gpu_seconds": 0, "token_equivalent": 10000},
+  "model_options": {"pipeline_type": "1536_cascade"},
+  "license": {"name": "MIT License", "url": "https://github.com/microsoft/TRELLIS.2/blob/main/LICENSE"}
 }
 ```
 
@@ -101,6 +151,10 @@ if job["status"] == "completed":
 `stage` is the worker's step (`queued`, `preprocess`, `shape`, `texture`,
 `export`, `done`). `content_url` and `preview_url` appear once the job is
 completed (a missing preview never fails a job).
+
+Every model returns a binary glTF (`.glb`) in glTF's convention: +Y is up and
+the object's front faces +Z, so results from different models line up in the
+same viewer. `faces` is at most `target_faces`.
 
 ### Errors
 
@@ -111,7 +165,7 @@ completed (a missing preview never fails a job).
 | 404 | Unknown model, or a job that is not yours |
 | 409 | Content requested before the job finished |
 | 429 | Too many jobs in progress (`mesh.max_concurrent_jobs_per_user`) or not enough token quota |
-| 503 | The service is off, or the model has no healthy server |
+| 503 | The service is off, the model has no healthy server, or its license has not been accepted by an admin |
 | 507 | Your 3D storage cap is reached; delete some models |
 
 ## Cost, storage and retention
@@ -149,7 +203,27 @@ requeues the job; a worker that lost the job (404) gets it again, up to
 TRELLIS.2 and Pixal3D are MIT. Their upstream pipelines download RMBG-2.0
 (non-commercial), which the worker replaces with BiRefNet (MIT), and Meta's
 gated DINOv3, whose weights an administrator must stage after accepting its
-license. Hunyuan3D 2.1 is under the Tencent Hunyuan 3D 2.1 Community License:
-not licensed in the European Union, the United Kingdom or South Korea, and its
-outputs may not be used to improve other AI models. The MindRouter terms of use
-carry a Third-Party Model Licenses section covering this.
+license.
+
+Hunyuan3D 2.1 is under the [Tencent Hunyuan 3D 2.1 Community License
+Agreement](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/blob/main/LICENSE).
+What it asks of the University as the operator of a hosted service:
+
+- **Territory**: the license does not apply in the European Union, the United
+  Kingdom or South Korea; the model and its outputs may not be used there.
+- **Provider disclosure**: users must be told who provides the service (the
+  University of Idaho) and that Tencent is not affiliated with, associated
+  with, sponsoring or endorsing it. MindRouter shows this notice on the 3D tab,
+  in `/v1/meshes/models` and on every Hunyuan3D job object (`license.notice`).
+- **A copy of the license** must be available to users: the notice links to it.
+- **Outputs** may not be used to improve any other AI model.
+- **Acceptable Use Policy** (part of the license): among other things, no
+  impersonation without consent, no high-stakes automated decisions, no
+  military use, and machine-generated content placed in public must be
+  identified as such.
+- **Scale**: above 1 million monthly active users (at 2.1's release) a
+  separate license from Tencent is required.
+
+An admin accepts these terms on Admin → Meshes before Hunyuan3D takes jobs.
+The MindRouter terms of use carry a Third-Party Model Licenses section
+covering this.

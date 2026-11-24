@@ -210,6 +210,20 @@ def test_pixal3d_camera_matches_upstream_formula():
     assert cam["distance"] == pytest.approx(expected)
 
 
+def test_pixal3d_output_faces_plus_z_like_the_other_engines():
+    up = np.array(Pixal3DEngine.UPSTREAM_ROTATION, dtype=float)
+    rot = np.array(Pixal3DEngine.ROTATION, dtype=float)
+    ry180 = np.diag([-1.0, 1.0, -1.0, 1.0])
+    # Our rotation is upstream's plus a half turn about +Y ...
+    assert np.allclose(rot, ry180 @ up)
+    # ... a proper rotation (no mirroring) ...
+    assert np.isclose(np.linalg.det(rot[:3, :3]), 1.0)
+    # ... that turns what upstream leaves facing -Z to +Z, keeping +Y up.
+    front_upstream = up[:3, :3] @ np.linalg.inv(up[:3, :3]) @ np.array([0.0, 0.0, -1.0])
+    assert np.allclose(ry180[:3, :3] @ front_upstream, [0.0, 0.0, 1.0])
+    assert np.allclose(rot[:3, :3] @ np.linalg.inv(up[:3, :3]) @ np.array([0.0, 1.0, 0.0]), [0.0, 1.0, 0.0])
+
+
 def test_hunyuan_paint_plan_honours_face_and_texture_budget():
     assert paint_plan(40_000, 2048) == {"use_remesh": 1, "bake_atlas": 4096}   # upstream default path
     assert paint_plan(200_000, 2048)["use_remesh"] == 0     # remesh would cut to 40k
@@ -225,3 +239,58 @@ def test_hunyuan_sys_path_and_no_utils_collision(monkeypatch):
     # hy3dpaint imports a top-level `utils` package: we must never shadow it.
     assert not os.path.exists(os.path.join(MESH_WORKER_DIR, "utils.py"))
     assert not os.path.exists(os.path.join(MESH_WORKER_DIR, "utils"))
+
+
+# ── per-job options ───────────────────────────────────────────────────────
+
+from config import ENGINE_OPTIONS, option_defaults, options_schema  # noqa: E402
+from inputs import RequestError, validate_options  # noqa: E402
+
+
+def test_option_defaults_come_from_the_worker_env(monkeypatch):
+    monkeypatch.setenv("MESH_WORKER_HY_OCTREE", "384")
+    monkeypatch.setenv("MESH_WORKER_HY_STEPS", "20")
+    cfg = WorkerConfig(mode="hunyuan3d21")
+    assert option_defaults(cfg) == {"octree_resolution": 384, "steps": 20, "guidance_scale": 5.0}
+    assert option_defaults(WorkerConfig(mode="trellis2")) == {"pipeline_type": "1024_cascade"}
+    assert option_defaults(WorkerConfig(mode="pixal3d")) == {"pipeline_type": "1536_cascade"}
+    assert option_defaults(WorkerConfig(mode="mock")) == {}
+    schema = options_schema(cfg)
+    assert schema["octree_resolution"]["default"] == 384 and schema["steps"]["max"] == 50
+
+
+def test_illegal_env_default_refused_at_startup(monkeypatch):
+    monkeypatch.setenv("MESH_WORKER_HY_OCTREE", "300")
+    with pytest.raises(ValueError, match="octree_resolution"):
+        WorkerConfig(mode="hunyuan3d21")
+
+
+def test_engine_pipeline_menus_match_the_option_table():
+    assert Trellis2Engine.pipeline_types == tuple(ENGINE_OPTIONS["trellis2"]["pipeline_type"]["choices"])
+    assert Pixal3DEngine.pipeline_types == tuple(ENGINE_OPTIONS["pixal3d"]["pipeline_type"]["choices"])
+
+
+@pytest.mark.parametrize("raw,match", [
+    ([1], "must be an object"),
+    ({"bogus": 1}, "unknown option"),
+    ({"octree_resolution": 300}, "one of"),
+    ({"octree_resolution": True}, "one of"),
+    ({"steps": 4}, r"\[5, 50\]"),
+    ({"steps": 20.5}, "integer"),
+    ({"guidance_scale": 11}, r"\[1.0, 10.0\]"),
+    ({"guidance_scale": "7"}, "number"),
+])
+def test_bad_options_refused(raw, match):
+    with pytest.raises(RequestError, match=match):
+        validate_options(raw, WorkerConfig(mode="hunyuan3d21"))
+
+
+def test_options_merged_over_defaults():
+    cfg = WorkerConfig(mode="hunyuan3d21")
+    assert validate_options({"steps": 12, "guidance_scale": 7}, cfg) == {
+        "octree_resolution": 256, "steps": 12, "guidance_scale": 7.0}
+    assert validate_options(None, cfg) == option_defaults(cfg)
+    with pytest.raises(RequestError, match="allowed: none"):
+        validate_options({"steps": 10}, WorkerConfig(mode="mock"))
+    assert validate_options({"pipeline_type": "1536_cascade"}, WorkerConfig(mode="trellis2")) == {
+        "pipeline_type": "1536_cascade"}

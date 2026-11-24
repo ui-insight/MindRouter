@@ -76,12 +76,26 @@ _DEFAULTS = [
     ("mesh.max_image_upload_mb", 10, "Largest input image accepted (MB)"),
     ("mesh.default_texture_size", 2048, "Default PBR texture size (px)"),
     ("mesh.allowed_texture_sizes", "1024,2048,4096", "Allowed PBR texture sizes (px)"),
-    ("mesh.default_target_faces", 100000, "Default face count the mesh is decimated toward"),
+    # 40k faces: smooth on organic shapes; fewer faces barely save time or
+    # size (textures dominate) but facet visibly. 300k: 1M-face jobs held a GPU
+    # for minutes (Nov 2026 measurements).
+    ("mesh.default_target_faces", 40000, "Default face count the mesh is decimated toward"),
     ("mesh.min_target_faces", 5000, "Smallest target face count a request may ask for"),
-    ("mesh.max_target_faces", 1000000, "Largest target face count a request may ask for"),
+    ("mesh.max_target_faces", 300000, "Largest target face count a request may ask for"),
+    # Per-model caps and settings (Admin -> Meshes). Hunyuan3D starts capped at
+    # 100k faces, the largest size measured (about 90 s per job on an H200).
+    ("mesh.model_settings", {"tencent/hunyuan3d-2.1": {"max_faces": 100000}},
+     "Per-model caps and settings: {model: {max_faces, max_texture_size, options}}"),
+    ("mesh.license_acceptance", {}, "Model licenses accepted by an admin: {family: {accepted_by, accepted_at}}"),
     ("mesh.background_removal", True, "Cut the subject out with the matting server (img.matting_url) before submitting"),
     ("retention.user_meshes_days", 90, "Days before a user's finished mesh jobs and files are purged (0 = keep forever)"),
 ]
+
+
+# The starting default mesh model: Hunyuan3D 2.1 (most realistic textures in
+# the Nov 2026 bake-off). mesh.default_model points at this alias; it is seeded
+# only when no default-mesh alias exists, and admins can repoint it.
+DEFAULT_MESH_ALIAS = ("default-mesh", "tencent/hunyuan3d-2.1", "Default image-to-mesh model (Hunyuan3D 2.1)")
 
 
 def upgrade() -> None:
@@ -121,8 +135,9 @@ def upgrade() -> None:
         sa.Column("seed", sa.BigInteger(), nullable=True),
         sa.Column("texture", sa.Boolean(), nullable=False, server_default="1"),
         sa.Column("texture_size", sa.Integer(), nullable=False, server_default="2048"),
-        sa.Column("target_faces", sa.Integer(), nullable=False, server_default="100000"),
+        sa.Column("target_faces", sa.Integer(), nullable=False, server_default="40000"),
         sa.Column("remove_background", sa.String(8), nullable=False, server_default="auto"),
+        sa.Column("model_options", sa.JSON(), nullable=True),
         sa.Column("input_content_type", sa.String(64), nullable=True),
         sa.Column("input_size_bytes", sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("output_size_bytes", sa.BigInteger(), nullable=False, server_default="0"),
@@ -171,6 +186,19 @@ def upgrade() -> None:
                 )
             )
 
+    # 7. The default-mesh alias (insert only when absent).
+    alias, target, description = DEFAULT_MESH_ALIAS
+    if not conn.execute(
+        sa.text("SELECT 1 FROM model_aliases WHERE alias_name = :a"), {"a": alias}
+    ).fetchone():
+        conn.execute(
+            sa.text(
+                "INSERT INTO model_aliases (alias_name, target_model, description) "
+                "VALUES (:a, :t, :d)"
+            ),
+            {"a": alias, "t": target, "d": description},
+        )
+
 
 def downgrade() -> None:
     bind = op.get_bind()
@@ -188,6 +216,12 @@ def downgrade() -> None:
 
     for key, _, _ in _DEFAULTS:
         op.execute(sa.text("DELETE FROM app_config WHERE `key` = :k").bindparams(k=key))
+    # Remove the alias only if it is still the one we seeded.
+    op.execute(
+        sa.text("DELETE FROM model_aliases WHERE alias_name = :a AND target_model = :t").bindparams(
+            a=DEFAULT_MESH_ALIAS[0], t=DEFAULT_MESH_ALIAS[1]
+        )
+    )
 
     # Dropping the table drops its indexes with it. Dropping the FK-backed
     # indexes one by one first would fail with MariaDB error 1553.

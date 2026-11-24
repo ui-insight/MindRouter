@@ -59,6 +59,41 @@ DEFAULT_TEXTURE_SIZE = 2048
 # Seeds are fed to torch.manual_seed and numpy; keep them in uint32 range.
 MAX_SEED = 2**32 - 1
 
+# Per-job model settings a request may carry in "options" (the gateway's
+# Admin -> Meshes page sets them per model). Every entry is validated in
+# inputs.py; the defaults come from the worker's own env (option_defaults).
+# The gateway mirrors this table (backend/app/services/mesh_models.py; a
+# contract test keeps the two equal).
+ENGINE_OPTIONS: Dict[str, Dict[str, Dict]] = {
+    "mock": {},
+    "trellis2": {
+        "pipeline_type": {
+            "type": "choice", "choices": ["512", "1024", "1024_cascade", "1536_cascade"],
+            "description": "Generation resolution; the cascades refine a coarse shape (1536 is the most detailed and slowest)",
+        },
+    },
+    "pixal3d": {
+        "pipeline_type": {
+            "type": "choice", "choices": ["1024_cascade", "1536_cascade"],
+            "description": "Generation resolution (1536 is the most detailed and slowest)",
+        },
+    },
+    "hunyuan3d21": {
+        "octree_resolution": {
+            "type": "choice", "choices": [256, 384, 512],
+            "description": "Surface-extraction grid; higher keeps finer shape detail but meshes and paints much more slowly",
+        },
+        "steps": {
+            "type": "int", "min": 5, "max": 50,
+            "description": "Shape diffusion steps",
+        },
+        "guidance_scale": {
+            "type": "float", "min": 1.0, "max": 10.0,
+            "description": "How closely the shape follows the picture",
+        },
+    },
+}
+
 
 def _env(name: str, default: str = "") -> str:
     raw = os.environ.get(name)
@@ -173,6 +208,7 @@ class WorkerConfig:
     # the pipeline's own call defaults are 50 / 384 — slower, finer).
     hunyuan_steps: int = field(default_factory=lambda: _env_int("MESH_WORKER_HY_STEPS", 30))
     hunyuan_octree: int = field(default_factory=lambda: _env_int("MESH_WORKER_HY_OCTREE", 256))
+    hunyuan_guidance: float = field(default_factory=lambda: _env_float("MESH_WORKER_HY_GUIDANCE", 5.0))
     # Embed textures as WebP (EXT_texture_webp, ~5x smaller) instead of PNG.
     # Off by default: not every DCC tool / game engine imports WebP.
     glb_webp: bool = field(default_factory=lambda: _env_flag("MESH_WORKER_GLB_WEBP", False))
@@ -207,6 +243,16 @@ class WorkerConfig:
             raise ValueError(f"default texture size {self.default_texture_size} not in {self.texture_sizes}")
         if self.max_queue < 1:
             raise ValueError("MESH_WORKER_MAX_QUEUE must be >= 1")
+        # The env defaults must themselves be legal per-job options.
+        envs = {"pipeline_type": "MESH_WORKER_PIPELINE_TYPE", "octree_resolution": "MESH_WORKER_HY_OCTREE",
+                "steps": "MESH_WORKER_HY_STEPS", "guidance_scale": "MESH_WORKER_HY_GUIDANCE"}
+        for name, value in option_defaults(self).items():
+            spec = ENGINE_OPTIONS[self.mode][name]
+            where = f"{envs.get(name, name)} ({name}) for {self.mode}"
+            if spec["type"] == "choice" and value not in spec["choices"]:
+                raise ValueError(f"{where} must be one of {spec['choices']}, not {value!r}")
+            if spec["type"] in ("int", "float") and not (spec["min"] <= value <= spec["max"]):
+                raise ValueError(f"{where} must be in [{spec['min']}, {spec['max']}], not {value!r}")
 
     @property
     def sweep_interval(self) -> float:
@@ -218,3 +264,25 @@ class WorkerConfig:
     def max_body_bytes(self) -> int:
         # base64 is 4/3 of the raw bytes, plus slack for the other JSON fields.
         return self.max_image_bytes * 4 // 3 + 64 * 1024
+
+
+# Upstream default pipeline per TRELLIS-family engine (pipeline.json /
+# inference.py); MESH_WORKER_PIPELINE_TYPE overrides it worker-wide.
+DEFAULT_PIPELINE_TYPE: Dict[str, str] = {"trellis2": "1024_cascade", "pixal3d": "1536_cascade"}
+
+
+def option_defaults(config: "WorkerConfig") -> Dict:
+    """The value each per-job option takes when a request leaves it out."""
+    if config.mode in DEFAULT_PIPELINE_TYPE:
+        return {"pipeline_type": config.pipeline_type or DEFAULT_PIPELINE_TYPE[config.mode]}
+    if config.mode == "hunyuan3d21":
+        return {"octree_resolution": int(config.hunyuan_octree), "steps": int(config.hunyuan_steps),
+                "guidance_scale": float(config.hunyuan_guidance)}
+    return {}
+
+
+def options_schema(config: "WorkerConfig") -> Dict:
+    """ENGINE_OPTIONS for this worker's mode with the effective defaults filled
+    in (served on /v1/capabilities)."""
+    defaults = option_defaults(config)
+    return {name: dict(spec, default=defaults.get(name)) for name, spec in ENGINE_OPTIONS[config.mode].items()}

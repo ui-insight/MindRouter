@@ -178,3 +178,18 @@ def test_mesh_models_stay_out_of_the_llm_catalogs():
     src = _read("backend/app/api/models_api.py")
     block = src[src.index("CATALOG_MODALITIES = frozenset("): src.index("def is_catalog_model")]
     assert "MESH" not in block
+
+
+def test_migration_seeds_hunyuan_as_default_mesh_alias():
+    """default-mesh starts out pointing at Hunyuan3D 2.1's served name (the
+    worker's DEFAULT_MODEL), seeded only when absent and removed on downgrade
+    only if still ours."""
+    mig = _read(MIGRATION_091)
+    seed = ast.literal_eval(_migration_list(mig, "DEFAULT_MESH_ALIAS"))
+    assert seed[:2] == ("default-mesh", "tencent/hunyuan3d-2.1")
+    worker_cfg = _read("mesh-worker/config.py")
+    assert '"hunyuan3d21": "tencent/hunyuan3d-2.1"' in worker_cfg
+    defaults = ast.literal_eval(_migration_list(mig, "_DEFAULTS"))
+    assert ("mesh.default_model", "default-mesh") in [(k, v) for k, v, _ in defaults]
+    assert "SELECT 1 FROM model_aliases WHERE alias_name = :a" in mig
+    assert "DELETE FROM model_aliases WHERE alias_name = :a AND target_model = :t" in mig

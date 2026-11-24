@@ -29,9 +29,11 @@ nginx TLS. It is a separate deploy artifact (own venv or container) and does
   its event loop, and ignores seed, face count and texture.
 
 The real-engine adapters were written from upstream source at pinned commits
-(listed in each Dockerfile) and have **not run on a GPU yet**. Every call into
-upstream code is marked `# UNVERIFIED:`; `grep -rn "UNVERIFIED" engines/`
-gives the bake-off worklist.
+(listed in each Dockerfile) and validated on an H200 (aspen1 GPU2) in the
+Nov 2026 bake-off: TRELLIS.2, Pixal3D and Hunyuan3D 2.1 each completed 18/18
+test images at 100k faces / 2048 px, plus 8k to 1M-face and 4096 px runs. The
+fixes that bake-off needed are in the Dockerfiles and adapters; the checklist
+below records what was and was not covered.
 
 ## Run (mock)
 
@@ -50,8 +52,8 @@ MESH_WORKER_MOCK_STAGE_DELAY=2 uvicorn app:app --host 127.0.0.1 --port 18401
 | GET | `/health` | open | `{"status":"ok","mode","model","busy","current_job","queue_depth"}`; answers <5 s mid-job (generation runs on its own executor thread). **503** `status:"stuck"` once a job's GPU thread outlives timeout + grace |
 | GET | `/version` | open | `{"version","mode","model"}` |
 | GET | `/v1/models` | open | `{"object":"list","data":[{"id":<served name>,"object":"model"}]}`, the same shape as video-worker, read by VLLMAdapter |
-| GET | `/v1/capabilities` | open | `{"model","inputs":["image"],"formats":["glb"],"supports_texture","texture_sizes":[1024,2048,4096],"min_faces","max_faces","default_faces"}` plus `default_texture_size`, `max_image_bytes`, `max_queue` |
-| POST | `/v1/meshes` | key | body `{"model","image"(base64 PNG/JPEG/WEBP, RGBA ok),"seed","texture","texture_size","target_faces"}` → **202** `{"id","status":"queued"}`; **400** bad input; **413** body too large; **503** queue full (`Retry-After`) |
+| GET | `/v1/capabilities` | open | `{"model","inputs":["image"],"formats":["glb"],"supports_texture","texture_sizes":[1024,2048,4096],"min_faces","max_faces","default_faces","options"}` plus `default_texture_size`, `max_image_bytes`, `max_queue`; `options` is the per-job settings schema with this worker's defaults |
+| POST | `/v1/meshes` | key | body `{"model","image"(base64 PNG/JPEG/WEBP, RGBA ok),"seed","texture","texture_size","target_faces","options"}` → **202** `{"id","status":"queued"}`; **400** bad input; **413** body too large; **503** queue full (`Retry-After`) |
 | GET | `/v1/meshes/{id}` | key | status object (below); **404** unknown id |
 | GET | `/v1/meshes/{id}/content?variant=glb\|preview` | key | `model/gltf-binary` (default) or a 512×512 `image/png`; **409** not completed; **400** bad variant; Range/206 capable |
 | DELETE | `/v1/meshes/{id}` | key | cancel: queued jobs cancel immediately; in-flight jobs stop at the next stage boundary. Returns **200** with the status object. Idempotent on finished jobs |
@@ -99,6 +101,13 @@ Error codes:
 - `texture` must be a boolean (default true).
 - `texture_size` must be one of `texture_sizes` (default 2048).
 - `target_faces` must be in [`min_faces`, `max_faces`].
+- `options` (optional) holds per-job model settings, checked against
+  `ENGINE_OPTIONS` in `config.py` (unknown names, wrong types and out-of-range
+  values are 400); anything left out takes the worker's env default. Hunyuan3D:
+  `octree_resolution` 256/384/512, `steps` 5-50, `guidance_scale` 1-10.
+  TRELLIS.2: `pipeline_type` 512/1024/1024_cascade/1536_cascade. Pixal3D:
+  `pipeline_type` 1024_cascade/1536_cascade. The mock engine takes none. The
+  gateway sends the settings an admin chose on Admin → Meshes.
 - `model` is not checked against the served name.
 
 **Lifecycle:**
@@ -142,7 +151,9 @@ Error codes:
 | `MESH_WORKER_HUNYUAN_REPO` | `/opt/Hunyuan3D-2.1` | checkout holding `hy3dshape/` + `hy3dpaint/` |
 | `MESH_WORKER_HY_DINO` | `facebook/dinov2-giant` | paint image encoder (Apache-2.0) |
 | `MESH_WORKER_REALESRGAN_CKPT` | `/weights/realesrgan/RealESRGAN_x4plus.pth` in the image | paint super-resolution (BSD-3) |
-| `MESH_WORKER_HY_STEPS` / `_HY_OCTREE` | `30` / `256` | shape sampler (upstream Gradio defaults; the pipeline's own are 50 / 384) |
+| `MESH_WORKER_HY_STEPS` / `_HY_OCTREE` | `30` / `256` | shape sampler defaults (upstream Gradio defaults; the pipeline's own are 50 / 384); a job's `options` override them |
+| `MESH_WORKER_HY_GUIDANCE` | `5.0` | shape guidance default; a job's `options` override it |
+| `MESH_WORKER_LOG_LEVEL` | `INFO` | the worker's own log level (model loading, license guard, jobs) |
 | `MESH_WORKER_GLB_WEBP` | `0` | embed textures as WebP (`EXT_texture_webp`, ~5× smaller) instead of PNG |
 | `MESH_WORKER_WARMUP` | `1` | TRELLIS family: one small job at startup |
 | `MESH_WORKER_MOCK_STAGE_DELAY` | `0` | mock: seconds per stage |
@@ -257,48 +268,57 @@ shows up in `/v1/meshes/models` and the 3D tab, and never in the LLM catalogs.
 
 ## Phase 0 bake-off checklist
 
-Run each engine on the same fixed set of about 50 images:
+Run Nov 2026 on aspen1 GPU2 (H200, 141 GB): 18 ISO3D images per engine at
+100k faces / 2048 px; a portrait and one object at 8k / 20k / 40k / 100k
+faces (Hunyuan3D); one 1M-face / 4096 px run per engine. Keep further test
+and profiling runs at or below 100k faces.
 
-- RGBA from gateway matting, plus RGB without alpha (exercises BiRefNet/u2net)
-- thin structures, glass or transparency, multiple objects, text on objects,
-  and people (policy check)
-
-Then work through:
-
-- [ ] **Time per asset**, from the status stages (preprocess / shape / texture
-      / export). Cover texture on and off, `texture_size` 1024/2048/4096, and
-      `target_faces` 20k / 200k / 1M. Compare against TRELLIS.2's own H100
-      numbers: 1024³ ≈ 17 s, 1536³ ≈ 60 s, before export.
-- [ ] **Peak VRAM** per configuration (`nvidia-smi --query-gpu=memory.used
-      --format=csv -lms 200`), resident and low-VRAM. Also check whether two
-      engines fit on one H200 together.
-- [ ] **Failure rate**: failed jobs by error code, plus any with an empty or
-      degenerate mesh.
-- [ ] **Import every GLB into Blender 4.x and a game engine** (Unity glTFast or
-      Godot 4). Check:
-      - orientation (+Y up) and scale
-      - PBR maps wired correctly (glTF metallicRoughness: G = roughness,
-        B = metallic)
-      - seams, normals, and face count against the target
-      - that the `MESH_WORKER_GLB_WEBP=1` variant imports
-- [ ] **Khronos glTF-Validator**: 0 errors on every output.
-- [ ] **Each `# UNVERIFIED:` line** in `engines/`: confirm it or fix it
-      (`grep -rn UNVERIFIED engines/`).
-- [ ] **Offline**: with `HF_HUB_OFFLINE=1` and no egress (e.g.
-      `docker run --network none … python -c '<one job>'`), startup and a job
-      both succeed.
-- [ ] **RMBG is never loaded**: the log shows "replaced by … (license guard)",
-      and `find /weights -iname '*rmbg*'` is empty.
-- [ ] **`/health` stays < 5 s** throughout a 1536-cascade / 4096-texture job.
-- [ ] **Cancel latency** per stage, and the timeout path with a deliberately
-      tiny `MESH_WORKER_JOB_TIMEOUT_SECONDS`.
-- [ ] **Seed determinism**: does the same seed give the same GLB sha256?
-      Record it either way (CUDA nondeterminism).
-- [ ] **Hunyuan:**
-  - [ ] the paint inpainting time (CPU; upstream issue #139)
-  - [ ] whether `use_remesh=False` above 40k faces paints cleanly
-  - [ ] the 4096 bake atlas (8192 internally): VRAM and time
-  - [ ] licensing sign-off
+- [x] **Time per asset** (GPU-seconds, median of 18, 100k / 2048): TRELLIS.2
+      30 s, Pixal3D 53 s, Hunyuan3D 68 s. Hunyuan3D at production settings:
+      72-86 s from 8k to 100k faces (the face count barely matters there).
+      1M / 4096: 127 s (TRELLIS.2, 1536 cascade), 124 s (Pixal3D), 689 s
+      (Hunyuan3D, octree 512). Shape-only jobs were not timed.
+- [x] **Peak VRAM** over the GPU's idle baseline at 100k: TRELLIS.2 34.8 GB,
+      Pixal3D 55.1 GB, Hunyuan3D 24.5 GB; resident 16.8 / 19.9 / 14.1 GB.
+      The three peaks together (~115 GB) fit one H200; they were not co-run.
+- [x] **Failure rate**: no failed jobs. Every GLB loads in trimesh. Hunyuan3D
+      gives one watertight part at exactly the target face count; the TRELLIS
+      family gives open, multi-part meshes.
+- [ ] **Blender / game-engine import**: not done. Outputs render correctly in
+      three.js and model-viewer. Orientation: TRELLIS.2 and Hunyuan3D come out
+      +Y up with the front at +Z; Pixal3D faced -Z and is now rotated to match
+      (`Pixal3DEngine.ROTATION`, checked on the GPU with a face landmarker).
+      `MESH_WORKER_GLB_WEBP=1` was not exercised.
+- [ ] **Khronos glTF-Validator**: not run (trimesh validity only).
+- [x] **Every upstream call** in `engines/` ran on the GPU; the fixes the
+      bake-off needed are in the adapters and Dockerfiles. One open detail is
+      noted in `hunyuan3d21.py`: the bake-atlas setting's own effect.
+- [ ] **No egress**: images run with `HF_HUB_OFFLINE=1` and only local
+      weights, but no run used `--network none` (the workers used host
+      networking, bound to 127.0.0.1).
+- [x] **RMBG is never loaded**: no RMBG weights exist on the node and the hub
+      is offline. The "license guard" log line was not visible because the
+      worker did not configure logging; it now logs at INFO
+      (`MESH_WORKER_LOG_LEVEL`).
+- [x] **The status endpoint stays responsive** during 1536-cascade / 4096 /
+      1M-face jobs (polled every 0.5 s); `/health` was not timed on its own.
+- [ ] **Cancel latency and the timeout path on the GPU**: covered only by the
+      mock tests.
+- [ ] **Seed determinism**: not checked.
+- [x] **Hunyuan3D:**
+  - [x] Where the time goes (py-spy; portrait, 40k / 2048; 82 s): mesh
+        decimation (pymeshlab, one core) 41 s; texture inpainting 16 s; UV
+        unwrapping (xatlas, one core) 4.5 s; export and other CPU work about
+        5 s; all neural-network work about 12 s. VRAM is not the bottleneck
+        (about 25 GB peak, nothing offloaded). At 1M faces UV unwrapping took
+        about 8 minutes, and inpainting the 8192 px atlas of a 4096 px
+        texture about 85 s.
+  - [x] `use_remesh=False` above 40k paints cleanly (the 100k runs); targets
+        at or below 40k come back at exactly the requested face count.
+  - [x] 4096 px textures: 32 GB peak VRAM; the CPU inpaint of the 8192 px
+        atlas is the cost.
+  - [x] Licensing: the gateway refuses Hunyuan3D jobs until an admin accepts
+        its license (Admin → Meshes) and shows users the notice it requires.
 
 ## Tests
 
