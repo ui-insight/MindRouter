@@ -90,6 +90,7 @@ class MeshJobRepo(Protocol):
     async def readopt(self, job_id: int, worker_id: str, threshold_seconds: int) -> bool: ...
     async def get_backend(self, backend_id: int) -> Optional[Dict[str, Any]]: ...
     async def servable_models(self) -> List[str]: ...
+    async def model_backends(self) -> Dict[str, List[int]]: ...
     async def claimable(self, models: List[str]) -> List[str]: ...
     async def expire_queued(self) -> int: ...
     async def claim_next(self, worker_id: str, models: Optional[List[str]] = None) -> Optional[Dict[str, Any]]: ...
@@ -99,7 +100,7 @@ class MeshJobRepo(Protocol):
     async def mark_cancelled(self, job_id: int) -> None: ...
     async def complete(self, job_id: int, **fields) -> bool: ...
     async def fail(self, job_id: int, *, error_code: str, error_message: str) -> None: ...
-    async def select_backend(self, model: str) -> Optional[Dict[str, Any]]: ...
+    async def select_backend(self, model: str, exclude: Any = ()) -> Optional[Dict[str, Any]]: ...
 
 
 def _alpha_is_used(img) -> bool:
@@ -177,14 +178,24 @@ class MeshRunner:
         self.retry_backoff_seconds = retry_backoff_seconds
         self.max_input_side = max_input_side
         # Jobs this runner is driving right now: id -> model. Reconcile never
-        # touches them (their heartbeat may lapse during a slow call), and
-        # their models are not claimed again until they finish.
+        # touches them (their heartbeat may lapse during a slow call).
         self._active: Dict[int, str] = {}
+        # Which backend each active job is using (set once one is chosen).
+        # Each mesh worker runs one job at a time, so a model takes as many
+        # jobs at once as it has free healthy backends.
+        self._backend_of: Dict[int, int] = {}
         self._tasks: set = set()
 
     @property
     def busy_models(self) -> set:
+        """Models with at least one job in flight here."""
         return set(self._active.values())
+
+    def _active_count(self, model: str) -> int:
+        return sum(1 for m in self._active.values() if m == model)
+
+    def _backends_in_use(self) -> set:
+        return set(self._backend_of.values())
 
     # -- lifecycle -----------------------------------------------------------
     async def run_forever(self) -> None:
@@ -215,11 +226,12 @@ class MeshRunner:
                 task.cancel()
 
     async def claim(self) -> Optional[Dict[str, Any]]:
-        """Claim the next job for a servable model that is not already busy
-        and may run now (service on, license accepted: re-checked here, so a
+        """Claim the next job for a model with a free healthy backend (one job
+        per backend: with one worker per model, one job per model) that may
+        run now (service on, license accepted: re-checked here, so a
         switch-off or a withdrawn license also holds back queued work)."""
-        busy = self.busy_models
-        models = [m for m in await self.repo.servable_models() if m not in busy]
+        capacity = await self.repo.model_backends()
+        models = [m for m, backends in capacity.items() if self._active_count(m) < len(backends)]
         if models:
             models = await self.repo.claimable(models)
         if not models:
@@ -251,6 +263,7 @@ class MeshRunner:
             await self.repo.fail(job["id"], error_code="runner_error", error_message=type(exc).__name__)
         finally:
             self._active.pop(job["id"], None)
+            self._backend_of.pop(job["id"], None)
 
     async def _safe_reconcile(self) -> None:
         try:
@@ -321,6 +334,7 @@ class MeshRunner:
             return  # another runner took it
         logger.info("mesh_reconcile_adopted", job=job.get("job_uuid"),
                     worker_status=(status or {}).get("status"))
+        self._backend_of[job_id] = backend["id"]     # an adopted job keeps its worker busy
         self._spawn(job, self._continue(job, backend, backend_job_id, status))
 
     async def _continue(
@@ -383,11 +397,19 @@ class MeshRunner:
             if await self.repo.is_cancelled(job_id):
                 await self.repo.mark_cancelled(job_id)
                 return None
-            backend = await self.repo.select_backend(job["model"])
+            # Another job may take a backend while select_backend awaits the
+            # registry: re-check after the await and record with no await in
+            # between, so two jobs never land on one worker. (Each retry
+            # excludes one more backend, so this ends.)
+            while True:
+                backend = await self.repo.select_backend(job["model"], exclude=self._backends_in_use())
+                if backend is None or backend["id"] not in self._backends_in_use():
+                    break
             if backend is None:
                 await self.repo.requeue(job_id)
                 logger.warning("mesh_runner_no_backend", job=job_uuid, model=job["model"])
                 return self.poll_interval
+            self._backend_of[job_id] = backend["id"]
 
             await self.repo.update(job_id, stage="preprocess", progress=1.0)
             try:
@@ -687,13 +709,22 @@ class CrudMeshJobRepo:
         async with self._ctx() as db:
             await crud.fail_mesh_job(db, job_id, error_code=error_code, error_message=error_message)
 
-    async def select_backend(self, model: str) -> Optional[Dict[str, Any]]:
+    async def model_backends(self) -> Dict[str, List[int]]:
+        from backend.app.db import crud
+
+        async with self._ctx() as db:
+            return await crud.get_mesh_model_backends(db)
+
+    async def select_backend(self, model: str, exclude: Any = ()) -> Optional[Dict[str, Any]]:
+        """A healthy backend for ``model`` that is not in ``exclude`` (the
+        backends this runner's other jobs are using): one job per worker."""
         from backend.app.core.telemetry.registry import get_registry
         from backend.app.db.models import Modality
 
         backends = await get_registry().get_backends_with_model(model, Modality.MESH_GENERATION)
-        for b in backends:
-            return {"id": b.id, "url": b.url}
+        for b in sorted(backends, key=lambda b: b.id):
+            if b.id not in exclude:
+                return {"id": b.id, "url": b.url}
         return None
 
 

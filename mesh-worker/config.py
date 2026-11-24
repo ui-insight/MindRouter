@@ -209,9 +209,19 @@ class WorkerConfig:
     hunyuan_steps: int = field(default_factory=lambda: _env_int("MESH_WORKER_HY_STEPS", 30))
     hunyuan_octree: int = field(default_factory=lambda: _env_int("MESH_WORKER_HY_OCTREE", 256))
     hunyuan_guidance: float = field(default_factory=lambda: _env_float("MESH_WORKER_HY_GUIDANCE", 5.0))
+    # Hunyuan3D 2.1 fast post-processing: fast-simplification for decimation
+    # and a GPU pull-push fill for the texture atlas, instead of upstream's
+    # single-core pymeshlab decimation and OpenCV Navier-Stokes inpainting
+    # (measured 72 -> 25 s per 40k-face job, same-looking results). 0 = upstream.
+    hunyuan_fast_post: bool = field(default_factory=lambda: _env_flag("MESH_WORKER_HY_FAST_POST", True))
     # Embed textures as WebP (EXT_texture_webp, ~5x smaller) instead of PNG.
     # Off by default: not every DCC tool / game engine imports WebP.
     glb_webp: bool = field(default_factory=lambda: _env_flag("MESH_WORKER_GLB_WEBP", False))
+    # Embed opaque PBR textures as JPEG (quality 92, no chroma subsampling)
+    # instead of PNG: PNG encoding was 5-10% of a TRELLIS-family job and the
+    # files are 2-3x larger (quality 92 = 42-48 dB PSNR on TRELLIS.2 atlases).
+    # Normal maps, and base colours of BLEND/MASK materials, stay PNG.
+    glb_jpeg: bool = field(default_factory=lambda: _env_flag("MESH_WORKER_GLB_JPEG", True))
     # Run one small job at startup so the first user job does not pay the
     # CUDA/autotune warm-up.
     warmup: bool = field(default_factory=lambda: _env_flag("MESH_WORKER_WARMUP", True))

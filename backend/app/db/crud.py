@@ -2033,6 +2033,30 @@ async def get_servable_mesh_models(db: AsyncSession) -> List[str]:
     return [name for (name,) in result.all()]
 
 
+async def get_mesh_model_backends(db: AsyncSession) -> Dict[str, List[int]]:
+    """Healthy mesh backends per model: {model name: [backend ids]}. Each mesh
+    worker runs one job at a time, so this is each model's capacity; the mesh
+    runner keeps one job per backend (two workers on one GPU = two at once)."""
+    result = await db.execute(
+        select(Model.name, Backend.id)
+        .join(Backend, Backend.id == Model.backend_id)
+        .where(
+            and_(
+                Backend.engine == BackendEngine.MESH,
+                Backend.status == BackendStatus.HEALTHY,
+                Model.modality == Modality.MESH_GENERATION,
+            )
+        )
+        .order_by(Model.name, Backend.id)
+    )
+    out: Dict[str, List[int]] = {}
+    for name, backend_id in result.all():
+        ids = out.setdefault(name, [])
+        if backend_id not in ids:
+            ids.append(backend_id)
+    return out
+
+
 async def model_is_configured(db: AsyncSession, model_name: str) -> bool:
     """Is this model known to the fleet at all, regardless of backend health?
 

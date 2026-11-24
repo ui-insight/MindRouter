@@ -7,3 +7,6 @@
 # upstream pulls in transitively.
 uvicorn[standard]==0.34.3
 pillow>=10.0
+# Fast post-processing (MESH_WORKER_HY_FAST_POST, default on): quadric
+# decimation ~60x faster than upstream's pymeshlab. MIT (pyvista).
+fast-simplification==0.2.0

@@ -125,6 +125,10 @@ class FakeRepo:
     async def servable_models(self):
         return list(self._servable)
 
+    async def model_backends(self):
+        # One worker per model by default (ids 11, 12, ... in servable order).
+        return {m: [11 + i] for i, m in enumerate(self._servable)}
+
     blocked = ()           # models the service-on / license gate holds back
     expired = 0
 
@@ -165,8 +169,12 @@ class FakeRepo:
         self.state = "failed"
         self.fail_kwargs = {"error_code": error_code, "error_message": error_message}
 
-    async def select_backend(self, model):
-        return self._backend or None
+    async def select_backend(self, model, exclude=()):
+        if not self._backend:
+            return None
+        i = self._servable.index(model) if model in self._servable else 0
+        backend = dict(self._backend, id=self._backend["id"] + i)
+        return None if backend["id"] in exclude else backend
 
 
 class FakeWorker:
@@ -649,3 +657,102 @@ def test_has_transparency():
     assert runner_mod.has_transparency(_png(rgba=True, transparent=False)) is False
     assert runner_mod.has_transparency(_png()) is False
     assert runner_mod.has_transparency(b"not an image") is False
+
+
+# -- one job per worker: two workers serving one model run two jobs at once ------
+
+class TwoWorkerRepo(FakeRepo):
+    """Two healthy backends serving the same model; records which got which job."""
+
+    def __init__(self, jobs, backend_ids=(11, 12)):
+        super().__init__()
+        self.queue = list(jobs)
+        self.ids = list(backend_ids)
+        self.selected = []
+        self.completed = []
+
+    async def model_backends(self):
+        return {MODEL: list(self.ids)}
+
+    async def claim_next(self, worker_id, models=None):
+        return self.queue.pop(0) if self.queue and MODEL in (models or []) else None
+
+    async def select_backend(self, model, exclude=()):
+        for i in self.ids:
+            if i not in exclude:
+                self.selected.append(i)
+                return {"id": i, "url": f"https://w{i}:8006"}
+        return None
+
+    async def complete(self, job_id, **fields):
+        self.completed.append(job_id)
+        return True
+
+
+def test_two_workers_for_one_model_run_two_jobs_at_once(tmp_path):
+    jobs = [_job(tmp_path, id=1, job_uuid="mesh-" + "a" * 24), _job(tmp_path, id=2, job_uuid="mesh-" + "b" * 24),
+            _job(tmp_path, id=3, job_uuid="mesh-" + "c" * 24)]
+    repo = TwoWorkerRepo(jobs)
+    runner = _runner(repo, FakeWorker(polls=[DONE] * 4), tmp_path)
+
+    async def go():
+        runner.start(await runner.claim())
+        runner.start(await runner.claim())          # a second backend is free
+        assert await runner.claim() is None          # both busy: the third job waits
+        await asyncio.gather(*list(runner._tasks))
+        return await runner.claim()                  # both free again
+
+    third = asyncio.run(go())
+    assert sorted(repo.selected) == [11, 12]         # each job on its own worker
+    assert sorted(repo.completed) == [1, 2] and third is not None and third["id"] == 3
+    assert runner._backend_of == {}                  # released when the jobs ended
+
+
+def test_one_worker_still_means_one_job_at_a_time(tmp_path):
+    jobs = [_job(tmp_path, id=1, job_uuid="mesh-" + "a" * 24), _job(tmp_path, id=2, job_uuid="mesh-" + "b" * 24)]
+    repo = TwoWorkerRepo(jobs, backend_ids=(11,))
+    runner = _runner(repo, FakeWorker(polls=[DONE] * 2), tmp_path)
+
+    async def go():
+        runner.start(await runner.claim())
+        assert await runner.claim() is None
+        await asyncio.gather(*list(runner._tasks))
+
+    asyncio.run(go())
+    assert repo.selected == [11]
+
+
+def test_concurrent_selection_never_puts_two_jobs_on_one_worker(tmp_path):
+    """select_backend awaits the registry: both jobs can ask before either has
+    recorded its choice. The runner must still give them different workers."""
+
+    class SlowSelectRepo(TwoWorkerRepo):
+        async def select_backend(self, model, exclude=()):
+            snapshot = set(exclude)
+            await asyncio.sleep(0)               # the registry call yields
+            await asyncio.sleep(0)
+            for i in self.ids:
+                if i not in snapshot:
+                    self.selected.append(i)
+                    return {"id": i, "url": f"https://w{i}:8006"}
+            return None
+
+    jobs = [_job(tmp_path, id=1, job_uuid="mesh-" + "a" * 24), _job(tmp_path, id=2, job_uuid="mesh-" + "b" * 24)]
+    repo = SlowSelectRepo(jobs)
+    urls = []
+
+    class UrlWorker(FakeWorker):
+        async def submit(self, base_url, payload):
+            urls.append(base_url)
+            return await super().submit(base_url, payload)
+
+    runner = _runner(repo, UrlWorker(polls=[DONE] * 2), tmp_path)
+
+    async def go():
+        a, b = await runner.claim(), await runner.claim()
+        runner.start(a); runner.start(b)
+        await asyncio.gather(*list(runner._tasks))
+
+    asyncio.run(go())
+    assert sorted(urls) == ["https://w11:8006", "https://w12:8006"]
+    assert sorted(repo.completed) == [1, 2]
