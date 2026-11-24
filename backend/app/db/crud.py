@@ -2033,6 +2033,30 @@ async def get_servable_mesh_models(db: AsyncSession) -> List[str]:
     return [name for (name,) in result.all()]
 
 
+async def get_mesh_model_backends(db: AsyncSession) -> Dict[str, List[int]]:
+    """Healthy mesh backends per model: {model name: [backend ids]}. Each mesh
+    worker runs one job at a time, so this is each model's capacity; the mesh
+    runner keeps one job per backend (two workers on one GPU = two at once)."""
+    result = await db.execute(
+        select(Model.name, Backend.id)
+        .join(Backend, Backend.id == Model.backend_id)
+        .where(
+            and_(
+                Backend.engine == BackendEngine.MESH,
+                Backend.status == BackendStatus.HEALTHY,
+                Model.modality == Modality.MESH_GENERATION,
+            )
+        )
+        .order_by(Model.name, Backend.id)
+    )
+    out: Dict[str, List[int]] = {}
+    for name, backend_id in result.all():
+        ids = out.setdefault(name, [])
+        if backend_id not in ids:
+            ids.append(backend_id)
+    return out
+
+
 async def model_is_configured(db: AsyncSession, model_name: str) -> bool:
     """Is this model known to the fleet at all, regardless of backend health?
 
@@ -6339,18 +6363,23 @@ async def request_cancel_mesh_job(db: AsyncSession, job: MeshJob) -> None:
 
 async def claim_next_mesh_job(
     db: AsyncSession, worker_id: str, models: Optional[List[str]] = None,
+    exclude_ids: Optional[List[int]] = None,
 ) -> Optional[MeshJob]:
     """Atomically claim the highest-priority QUEUED job (SELECT ... FOR UPDATE
     SKIP LOCKED) and mark it RENDERING. Commits. With ``models``, only jobs for
     those models are eligible, so a job whose model is down waits without
     blocking the others. A job flagged for cancellation IS claimed: the runner
     sees the flag first thing and cancels it with a refund (filtering it out
-    here would strand a requeued, cancel-flagged job in the queue forever)."""
+    here would strand a requeued, cancel-flagged job in the queue forever).
+    ``exclude_ids``: jobs the runner still holds (a requeued job sits out its
+    retry back-off in its old task; claiming it again would run it twice)."""
     if models is not None and not models:
         return None
     query = select(MeshJob.id).where(MeshJob.status == MeshJobStatus.QUEUED)
     if models is not None:
         query = query.where(MeshJob.model.in_(list(models)))
+    if exclude_ids:
+        query = query.where(MeshJob.id.notin_(list(exclude_ids)))
     candidate = (
         await db.execute(
             query.order_by(MeshJob.priority.desc(), MeshJob.id.asc())

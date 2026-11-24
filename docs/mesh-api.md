@@ -77,6 +77,14 @@ GPU; the GPU simply waits for those CPU steps. Below 100,000 faces the time
 hardly changes (72-86 s from 8,000 to 100,000 faces), but UV unwrapping
 grows steeply with face count: a 1M-face, 4096 px job took about 11.5 minutes.
 
+Since 2.9.103 the worker replaces the two slowest steps by default
+(`MESH_WORKER_HY_FAST_POST=1`): fast-simplification decimates in about 0.6 s
+instead of 41 s, and a GPU pull-push fill pads the texture atlas in about
+0.02 s instead of OpenCV's Navier-Stokes inpainting (upstream's mesh-aware
+vertex inpainting still runs first). The same 40,000-face, 2048 px jobs now
+take about 24 s (portrait 72 → 24 s, capybara 44 → 24 s) with output that
+looks the same. UV unwrapping is unchanged, so the 100,000-face cap stays.
+
 ## Endpoints
 
 All endpoints take the usual `Authorization: Bearer <api key>` header.
@@ -197,9 +205,20 @@ license, holds queued jobs (they start when allowed again). Jobs still queued
 after `mesh.max_queue_hours` (default 24) are failed and refunded. Models of a
 family MindRouter does not know (a worker served under a custom name that is
 not recognizably Hunyuan3D, TRELLIS.2 or Pixal3D) are refused with `503`, so
-no model can slip past its license gate or settings. It runs one job per model at a time (each model has its own
-single-GPU worker), so jobs for different models run side by side while a
-model's own jobs wait their turn in the queue. If the gateway restarts mid-job, the reconcile loop asks
+no model can slip past its license gate or settings.
+
+Each mesh worker runs one job at a time, so the runner keeps **one job per
+healthy backend**: a model served by one worker takes one job at a time, and
+registering a second worker for the same model (for example a second Hunyuan3D
+container on the same H200, on its own port) lets it take two. Jobs for
+different models always run side by side. Two Hunyuan3D workers on one H200
+(fast post-processing on, 40k faces) finished 4 jobs in 70 s against ~96 s
+for one worker: 1.36× the throughput, each job ~30-50% slower (24 s → 32-36 s).
+Each worker needs its own port and backend registration. One exception to
+one-job-per-worker: just after a gateway restart, jobs still running from
+before it are re-adopted only once their heartbeat goes stale (about two
+minutes), and in that window a worker can be sent a new job, which it queues
+behind the running one. If the gateway restarts mid-job, the reconcile loop asks
 the worker what happened (by `backend_job_id`) and finishes, resumes or
 requeues the job; a worker that lost the job (404) gets it again, up to
 `MESH_MAX_RETRIES`.

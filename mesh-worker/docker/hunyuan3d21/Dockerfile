@@ -90,7 +90,7 @@ RUN pip install "setuptools<80" \
 COPY app.py config.py worker.py inputs.py glb.py preview.py /opt/mesh-worker/
 COPY engines /opt/mesh-worker/engines
 RUN pip freeze > /opt/mesh-worker/pip-freeze.txt \
-    && python -c "import sys; sys.path.insert(0, '/opt/mesh-worker'); import app"
+    && python -c "import sys; sys.path.insert(0, '/opt/mesh-worker'); import app; import fast_simplification"
 
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin mesh \
     && mkdir -p /data /weights && chown mesh:mesh /data

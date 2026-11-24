@@ -47,7 +47,7 @@ from PIL import Image, ImageDraw
 from config import DEFAULT_PIPELINE_TYPE, ENGINE_OPTIONS, WorkerConfig
 from engines.base import EngineInputError, StageTracker
 from engines.common import (
-    check_rembg_allowed, gltf_axes, patched_attr, release_cuda_memory, stage_hooks,
+    check_rembg_allowed, gltf_axes, jpeg_textures, patched_attr, release_cuda_memory, stage_hooks,
     trimesh_preview_png,
 )
 
@@ -199,8 +199,11 @@ class _TrellisFamilyEngine:
         )
         self._post_transform(glb)
         # Verified on the GPU with WebP off (the default; upstream uses
-        # extension_webp=True, we write PNG textures for compatibility).
-        # MESH_WORKER_GLB_WEBP=1 has not been exercised yet.
+        # extension_webp=True). Opaque textures are written as JPEG
+        # (MESH_WORKER_GLB_JPEG, default on): encoding them as PNG was 5-10%
+        # of the job. MESH_WORKER_GLB_WEBP=1 has not been exercised yet.
+        if self.config.glb_jpeg and not self.config.glb_webp:
+            jpeg_textures(glb)
         glb.export(glb_path, extension_webp=bool(self.config.glb_webp))
         return glb
 

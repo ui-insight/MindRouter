@@ -294,3 +294,131 @@ def test_options_merged_over_defaults():
         validate_options({"steps": 10}, WorkerConfig(mode="mock"))
     assert validate_options({"pipeline_type": "1536_cascade"}, WorkerConfig(mode="trellis2")) == {
         "pipeline_type": "1536_cascade"}
+
+
+# ── speed helpers: pull-push fill, fast decimation, JPEG textures ──────────
+
+from engines.common import fast_decimate, jpeg_textures, pull_push_fill, pull_push_fill_gpu  # noqa: E402
+
+
+def test_pull_push_keeps_known_texels_and_fills_the_rest():
+    rng = np.random.default_rng(0)
+    tex = rng.integers(0, 255, (37, 53, 3), dtype=np.uint8)      # odd sizes on purpose
+    known = np.zeros((37, 53), bool)
+    known[5:20, 10:30] = True
+    out = pull_push_fill(tex, known)
+    assert out.shape == tex.shape and out.dtype == np.uint8
+    assert np.array_equal(out[known], tex[known])
+    # every hole now holds a colour within the range of the known ones
+    lo, hi = tex[known].min(axis=0), tex[known].max(axis=0)
+    assert ((out[~known] >= lo) & (out[~known] <= hi)).all()
+
+
+def test_pull_push_fills_a_flat_colour_exactly():
+    tex = np.zeros((64, 64, 3), np.uint8)
+    known = np.zeros((64, 64), bool)
+    tex[30:34, 30:34] = (200, 100, 50)
+    known[30:34, 30:34] = True
+    assert (pull_push_fill(tex, known) == (200, 100, 50)).all()
+
+
+def test_pull_push_degenerate_masks():
+    tex = np.full((8, 8, 3), 7, np.uint8)
+    for known in (np.ones((8, 8), bool), np.zeros((8, 8), bool)):
+        assert np.array_equal(pull_push_fill(tex, known), tex)
+
+
+def test_pull_push_gpu_falls_back_to_the_cpu_reference(monkeypatch):
+    # No CUDA here (and maybe no torch): the GPU entry point must still work.
+    tex = np.zeros((16, 16, 3), np.uint8); tex[4:8, 4:8] = 90
+    known = np.zeros((16, 16), bool); known[4:8, 4:8] = True
+    assert np.array_equal(pull_push_fill_gpu(tex, known), pull_push_fill(tex, known))
+
+
+def test_fast_decimate_is_a_no_op_at_or_below_the_target():
+    v = np.zeros((4, 3)); f = np.array([[0, 1, 2], [0, 2, 3]])
+    v2, f2 = fast_decimate(v, f, 10)
+    assert v2 is not None and np.array_equal(f2, f)
+
+
+def test_fast_decimate_reaches_the_target():
+    pytest.importorskip("fast_simplification")
+    n = 40
+    xs, ys = np.meshgrid(np.linspace(0, 1, n), np.linspace(0, 1, n))
+    v = np.c_[xs.ravel(), ys.ravel(), np.sin(xs.ravel() * 6) * 0.1]
+    idx = np.arange(n * n).reshape(n, n)
+    f = np.vstack([np.c_[idx[:-1, :-1].ravel(), idx[1:, :-1].ravel(), idx[:-1, 1:].ravel()],
+                   np.c_[idx[1:, :-1].ravel(), idx[1:, 1:].ravel(), idx[:-1, 1:].ravel()]])
+    v2, f2 = fast_decimate(v, f, 500)
+    assert abs(len(f2) - 500) <= 10 and f2.max() < len(v2)
+
+
+class _Mat:
+    def __init__(self, **kw):
+        self.alphaMode = kw.pop("alphaMode", None)
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _geom(material):
+    return types.SimpleNamespace(visual=types.SimpleNamespace(material=material))
+
+
+def test_jpeg_textures_converts_opaque_maps_only():
+    import io
+    from PIL import Image
+    rgb = Image.new("RGB", (32, 32), (120, 60, 30))
+    opaque_rgba = Image.new("RGBA", (32, 32), (1, 2, 3, 255))
+    cutout = Image.new("RGBA", (32, 32), (1, 2, 3, 0))
+    normal = Image.new("RGB", (32, 32), (128, 128, 255))
+    a = _Mat(baseColorTexture=rgb, metallicRoughnessTexture=rgb.copy(), normalTexture=normal)
+    b = _Mat(baseColorTexture=cutout, alphaMode="MASK")       # alpha is used: stays PNG
+    c = _Mat(baseColorTexture=opaque_rgba.copy(), alphaMode="BLEND")
+    d = _Mat(baseColorTexture=cutout.copy())                  # OPAQUE (default): alpha ignored by viewers
+    scene = types.SimpleNamespace(geometry={"a": _geom(a), "b": _geom(b), "c": _geom(c), "d": _geom(d)})
+    assert jpeg_textures(scene) == 3
+    assert a.baseColorTexture.format == "JPEG" and a.metallicRoughnessTexture.format == "JPEG"
+    assert a.normalTexture is normal and b.baseColorTexture is cutout
+    assert c.baseColorTexture.format != "JPEG" and d.baseColorTexture.format == "JPEG"
+    # trimesh's export calls img.save(f, format="JPEG"): it must get OUR bytes
+    # (quality 92, 4:4:4), not a quality-75 re-encode.
+    buf = io.BytesIO()
+    a.baseColorTexture.save(buf, format="JPEG")
+    again = Image.open(io.BytesIO(buf.getvalue()))
+    assert again.format == "JPEG" and again.getpixel((5, 5))[0] in range(115, 126)
+    assert buf.getvalue()[:2] == b"\xff\xd8"
+    # Already-JPEG textures are left alone; a PNG save still works.
+    assert jpeg_textures(_geom(a)) == 0
+    png = io.BytesIO(); a.baseColorTexture.save(png, format="PNG")
+    assert png.getvalue()[:4] == b"\x89PNG"
+
+
+def test_speed_switches_default_on(monkeypatch):
+    for var in ("MESH_WORKER_HY_FAST_POST", "MESH_WORKER_GLB_JPEG"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = WorkerConfig(mode="hunyuan3d21")
+    assert cfg.hunyuan_fast_post is True and cfg.glb_jpeg is True
+    monkeypatch.setenv("MESH_WORKER_HY_FAST_POST", "0")
+    monkeypatch.setenv("MESH_WORKER_GLB_JPEG", "0")
+    cfg = WorkerConfig(mode="hunyuan3d21")
+    assert cfg.hunyuan_fast_post is False and cfg.glb_jpeg is False
+
+
+def test_pull_push_gpu_failure_falls_back_to_the_cpu(monkeypatch):
+    """A CUDA error mid-fill (e.g. out of memory on a shared GPU) must not fail
+    the job: the CPU fill takes over."""
+    import engines.common as common
+
+    freed = []
+    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(
+        is_available=lambda: True, empty_cache=lambda: freed.append(True)))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    def boom(torch, tex, known):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(common, "_pull_push_torch", boom)
+    tex = np.zeros((16, 16, 3), np.uint8); tex[4:8, 4:8] = 90
+    known = np.zeros((16, 16), bool); known[4:8, 4:8] = True
+    assert np.array_equal(common.pull_push_fill_gpu(tex, known), pull_push_fill(tex, known))
+    assert freed == [True]

@@ -47,11 +47,19 @@ import sys
 import tempfile
 from typing import Any, Dict
 
+import numpy as np
 from PIL import Image
 
 from config import WorkerConfig
 from engines.base import EngineInputError, StageTracker
-from engines.common import release_cuda_memory, stage_hooks, trimesh_preview_png
+from engines.common import (
+    fast_decimate,
+    jpeg_textures,
+    pull_push_fill_gpu,
+    release_cuda_memory,
+    stage_hooks,
+    trimesh_preview_png,
+)
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +144,40 @@ class Hunyuan3D21Engine:
             repo, "hy3dpaint", "ckpt", "RealESRGAN_x4plus.pth")
         log.info("Loading Hunyuan3D 2.1 paint (multiview %s)…", conf.multiview_pretrained_path)
         self.paint = Hunyuan3DPaintPipeline(conf)
+        if self.config.hunyuan_fast_post:
+            import fast_simplification  # noqa: F401  (fail at startup, not mid-job)
+            self._install_fast_inpaint()
+            log.info("Hunyuan3D fast post-processing on: fast-simplification + GPU pull-push inpainting")
+
+    def _install_fast_inpaint(self) -> None:  # pragma: no cover - GPU node only
+        """Replace the paint renderer's uv_inpaint on THIS instance: keep
+        upstream's mesh-aware vertex inpainting (it fills texels inside the UV
+        charts from neighbouring painted vertices), then fill the rest of the
+        atlas with a GPU pull-push instead of OpenCV's Navier-Stokes over the
+        whole atlas (5-8 s per map at 4096 px -> ~0.02 s)."""
+        import types
+
+        import torch
+        from DifferentiableRenderer import MeshRender as mesh_render_module
+
+        vertex_inpaint = mesh_render_module.meshVerticeInpaint
+
+        def uv_inpaint(render, texture, mask, vertex_inpaint_on=True, method="NS", return_float=False):
+            if isinstance(texture, torch.Tensor):
+                texture_np = texture.cpu().numpy()
+            elif isinstance(texture, np.ndarray):
+                texture_np = texture
+            else:
+                texture_np = np.array(texture) / 255.0
+            if isinstance(mask, torch.Tensor):
+                mask = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)
+            if vertex_inpaint_on:
+                vtx_pos, pos_idx, vtx_uv, uv_idx = render.get_mesh()
+                texture_np, mask = vertex_inpaint(texture_np, mask, vtx_pos, vtx_uv, pos_idx, uv_idx)
+            return pull_push_fill_gpu((np.clip(texture_np, 0, 1) * 255).astype(np.uint8), np.asarray(mask) > 0)
+
+        render = self.paint.render
+        render.uv_inpaint = types.MethodType(uv_inpaint, render)
 
     # -- per job -----------------------------------------------------------
     def _rgba(self, image: Image.Image) -> Image.Image:  # pragma: no cover
@@ -172,6 +214,10 @@ class Hunyuan3D21Engine:
         floaters, degenerate, reducer = self._post
         mesh = floaters(mesh)
         mesh = degenerate(mesh)
+        if self.config.hunyuan_fast_post:
+            # 868k -> 40k faces in ~0.6 s instead of ~38 s (single-core pymeshlab).
+            vertices, faces = fast_decimate(mesh.vertices, mesh.faces, int(spec.target_faces))
+            return self._trimesh.Trimesh(vertices, faces, process=False)
         return reducer(mesh, max_facenum=int(spec.target_faces))
 
     def _paint(self, mesh: Any, image: Image.Image, spec, workdir: str,
@@ -234,6 +280,8 @@ class Hunyuan3D21Engine:
             else:
                 out = mesh
                 tracker.enter("export", 85.0)
+            if self.config.glb_jpeg and not self.config.glb_webp:
+                jpeg_textures(out)
             out.export(glb_path, extension_webp=bool(self.config.glb_webp))
             tracker.progress("export", 95.0)
             with open(preview_path, "wb") as fh:

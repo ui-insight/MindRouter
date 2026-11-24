@@ -155,6 +155,8 @@ Error codes:
 | `MESH_WORKER_HY_GUIDANCE` | `5.0` | shape guidance default; a job's `options` override it |
 | `MESH_WORKER_LOG_LEVEL` | `INFO` | the worker's own log level (model loading, license guard, jobs) |
 | `MESH_WORKER_GLB_WEBP` | `0` | embed textures as WebP (`EXT_texture_webp`, ~5× smaller) instead of PNG |
+| `MESH_WORKER_GLB_JPEG` | `1` | embed opaque PBR textures as JPEG (quality 92, 4:4:4) instead of PNG: PNG encoding was 5-10% of a TRELLIS-family job. TRELLIS.2 at 100k faces: ~2.5 s faster per job, GLB 12.9 → 5.5 MB, 42–48 dB PSNR against the PNG maps. Normal maps, and base colours of BLEND/MASK materials, stay PNG |
+| `MESH_WORKER_HY_FAST_POST` | `1` | Hunyuan3D: decimate with fast-simplification and fill the texture atlas with a GPU pull-push, instead of upstream's single-core pymeshlab decimation and OpenCV Navier-Stokes inpainting (40k faces / 2048 px: 72 → 25 s per job, same-looking output). `0` = upstream |
 | `MESH_WORKER_WARMUP` | `1` | TRELLIS family: one small job at startup |
 | `MESH_WORKER_MOCK_STAGE_DELAY` | `0` | mock: seconds per stage |
 
