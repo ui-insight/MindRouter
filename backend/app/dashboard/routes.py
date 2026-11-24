@@ -6031,28 +6031,45 @@ async def admin_mesh_config_post(request: Request, db: AsyncSession = Depends(ge
     _ip = get_client_ip(request)
 
     if action == "save_config":
-        await crud.set_config(db, "mesh.enabled", "enabled" in form)
-        await crud.set_config(db, "mesh.background_removal", "background_removal" in form)
-        await crud.set_config(db, "mesh.default_model", form.get("default_model", "").strip() or "default-mesh")
-        sizes = []
+        # Validate the whole form first (nothing is saved on an error): the
+        # texture sizes and face range must be ones every mesh worker accepts,
+        # and min <= default <= max, default size among the allowed sizes.
+        sizes: list = []
         for part in str(form.get("allowed_texture_sizes", "")).split(","):
             try:
                 size = int(part)
             except ValueError:
                 continue
-            if 256 <= size <= 8192 and size not in sizes:
+            if size in mm.WORKER_TEXTURE_SIZES and size not in sizes:
                 sizes.append(size)
-        await crud.set_config(db, "mesh.allowed_texture_sizes", ",".join(str(s) for s in sizes) or "1024,2048,4096")
+        sizes = sorted(sizes) or list(mm.WORKER_TEXTURE_SIZES)
+        new: dict = {
+            "mesh.enabled": "enabled" in form,
+            "mesh.background_removal": "background_removal" in form,
+            "mesh.default_model": form.get("default_model", "").strip() or "default-mesh",
+            "mesh.allowed_texture_sizes": ",".join(str(s) for s in sizes),
+        }
         for key, (field, default, lo, hi) in _MESH_INT_CONFIGS.items():
             try:
-                val = max(lo, min(hi, int(form.get(field, str(default)))))
+                new[key] = max(lo, min(hi, int(form.get(field, str(default)))))
             except (ValueError, TypeError):
-                val = default
+                new[key] = default
+        w_lo, w_hi = mm.WORKER_FACE_RANGE
+        problems = []
+        if not w_lo <= new["mesh.min_target_faces"] <= new["mesh.max_target_faces"] <= w_hi:
+            problems.append(f"faces must satisfy {w_lo:,} <= min <= max <= {w_hi:,}")
+        if not new["mesh.min_target_faces"] <= new["mesh.default_target_faces"] <= new["mesh.max_target_faces"]:
+            problems.append("the default target faces must be between the min and the max")
+        if new["mesh.default_texture_size"] not in sizes:
+            problems.append(f"the default texture size must be one of the allowed sizes ({', '.join(map(str, sizes))})")
+        if problems:
+            return RedirectResponse(url="/admin/meshes?error=" + quote_plus("Not saved: " + "; ".join(problems)), status_code=302)
+        before = {key: await crud.get_config_json(db, key, None) for key in new}
+        for key, val in new.items():
             await crud.set_config(db, key, val)
         await crud.log_admin_action(
             db, user_id=user_id, action="mesh_config.save", entity_type="config",
-            after_value={"enabled": "enabled" in form, "model": form.get("default_model")},
-            ip_address=_ip,
+            before_value=before, after_value=new, ip_address=_ip,
         )
         await db.commit()
         return RedirectResponse(url="/admin/meshes?success=config_updated", status_code=302)
@@ -6087,14 +6104,26 @@ async def admin_mesh_config_post(request: Request, db: AsyncSession = Depends(ge
             return RedirectResponse(url="/admin/meshes?error=No+model+given", status_code=302)
         family = mm.family_for_model(model)
         entry: dict = {}
+        # A model's caps must sit inside the service-wide range (a cap below the
+        # service minimum, or a texture cap below every allowed size, could not
+        # be honoured).
+        from backend.app.api.mesh_api import _limits as _mesh_limits
+
+        svc = await _mesh_limits(db)          # sanitized service-wide limits
+        svc_min, svc_max, svc_sizes = svc["min_faces"], svc["max_faces"], svc["texture_sizes"]
         try:
-            for field_name, lo, hi in (("max_faces", 1000, 10_000_000), ("max_texture_size", 256, 8192)):
-                raw = str(form.get(field_name, "")).strip()
-                if raw:
-                    value = int(raw)
-                    if not lo <= value <= hi:
-                        raise ValueError(f"'{field_name}' must be {lo:,} to {hi:,}")
-                    entry[field_name] = value
+            raw = str(form.get("max_faces", "")).strip()
+            if raw:
+                value = int(raw)
+                if not svc_min <= value <= svc_max:
+                    raise ValueError(f"'max_faces' must be within the service range, {svc_min:,} to {svc_max:,}")
+                entry["max_faces"] = value
+            raw = str(form.get("max_texture_size", "")).strip()
+            if raw:
+                value = int(raw)
+                if value not in svc_sizes:
+                    raise ValueError(f"'max_texture_size' must be one of the allowed sizes ({', '.join(map(str, svc_sizes))})")
+                entry["max_texture_size"] = value
             options = mm.clean_options(family, {
                 name: form.get(f"opt_{name}") for name in mm.FAMILY_OPTIONS.get(family, {})
             })

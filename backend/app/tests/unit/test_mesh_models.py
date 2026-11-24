@@ -49,11 +49,29 @@ def test_defaults_and_model_ids_match_the_worker():
 
 @pytest.mark.parametrize("name,family", [
     ("tencent/hunyuan3d-2.1", "hunyuan3d21"), ("Tencent/Hunyuan3D-2.1-custom", "hunyuan3d21"),
+    ("hunyuan-3d-2.1", "hunyuan3d21"), ("tencent/hy3d-2.1", "hunyuan3d21"), ("hy3dgen", "hunyuan3d21"),
     ("microsoft/trellis.2-4b", "trellis2"), ("tencentarc/pixal3d", "pixal3d"),
-    ("mindrouter/mesh-mock", None), (None, None),
+    ("mindrouter/mesh-mock", "mock"), ("someone/custom-3d", None), (None, None),
 ])
 def test_family_for_model(name, family):
     assert mm.family_for_model(name) == family
+
+
+def test_model_gate_fails_closed():
+    accepted = {"hunyuan3d21": {"accepted_by": "admin"}}
+    assert mm.model_gate("microsoft/trellis.2-4b", {}) is None          # MIT: no acceptance needed
+    assert mm.model_gate("mindrouter/mesh-mock", {}) is None
+    assert "license" in mm.model_gate("tencent/hunyuan3d-2.1", {})
+    assert mm.model_gate("tencent/hunyuan3d-2.1", accepted) is None
+    assert "license" in mm.model_gate("hy3d-renamed", {})                 # a renamed Hunyuan worker is still gated
+    assert "not a 3D model family" in mm.model_gate("someone/custom-3d", accepted)
+
+
+def test_worker_limits_match_the_worker():
+    assert list(mm.WORKER_TEXTURE_SIZES) == _worker_assign("TEXTURE_SIZES")
+    ranges = {lo_hi[:2] for k, lo_hi in _worker_assign("DEFAULT_FACES").items()}
+    assert ranges == {mm.WORKER_FACE_RANGE}
+    assert _worker_assign("DEFAULT_MODEL")["mock"] == mm.MOCK_MODEL_ID
 
 
 def test_only_hunyuan_needs_license_acceptance():

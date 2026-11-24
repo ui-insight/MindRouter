@@ -120,6 +120,8 @@ def env(monkeypatch, tmp_path):
         return config.get(key, default)
 
     crud.get_config_json = get_config_json
+    crud.lock_user_for_mesh_submit = AsyncMock()
+    crud.apply_pending_quota_redis = AsyncMock()
     crud.count_active_mesh_jobs_for_user = AsyncMock(return_value=0)
     crud.get_user_mesh_storage_bytes = AsyncMock(return_value=0)
     crud.compute_mesh_token_cost = AsyncMock(return_value=10000)
@@ -362,10 +364,52 @@ def test_delete_cancels_a_running_job_and_deletes_a_finished_one(env):
     env.crud.request_cancel_mesh_job.assert_awaited_once()
     env.crud.delete_mesh_job.assert_not_called()
 
+    env.crud.apply_pending_quota_redis.assert_awaited()          # Redis refund only after the commit
+
     env.crud.get_mesh_job_by_uuid.return_value = _job(_Status.COMPLETED)
     out = asyncio.run(api.delete_mesh(UUID, _db(), (_user(), None)))
     assert out["deleted"] is True
     env.crud.delete_mesh_job.assert_awaited_once()
+
+
+def test_cancel_only_never_deletes_a_job_that_already_finished(env):
+    # A Cancel click that races the completion must not delete the (charged) result.
+    env.crud.get_mesh_job_by_uuid.return_value = _job(_Status.COMPLETED)
+    out = asyncio.run(api.delete_mesh(UUID, _db(), (_user(), None), cancel_only=True))
+    assert out["object"] == "mesh" and out["status"] == "completed"
+    env.crud.delete_mesh_job.assert_not_called()
+
+
+def test_submit_locks_the_user_before_counting(env):
+    calls = []
+    env.crud.lock_user_for_mesh_submit = AsyncMock(side_effect=lambda db, uid: calls.append("lock"))
+    env.crud.count_active_mesh_jobs_for_user = AsyncMock(side_effect=lambda db, uid: calls.append("count") or 0)
+    _submit()
+    assert calls == ["lock", "count"]
+
+
+def test_unknown_model_family_is_refused(env):
+    _serve(env, "someone/custom-3d")
+    with pytest.raises(HTTPException) as e:
+        _submit(model="someone/custom-3d")
+    assert _code(e) == 503 and "not a 3D model family" in e.value.detail
+
+
+def test_malformed_config_falls_back_instead_of_500(env):
+    env.config.update({"mesh.min_target_faces": "lots", "mesh.max_target_faces": [1],
+                       "mesh.default_texture_size": 3000, "mesh.allowed_texture_sizes": "1024,4096,512",
+                       "mesh.user_storage_cap_gb": "x", "mesh.max_concurrent_jobs_per_user": None,
+                       "mesh.model_settings": {MODEL: {"max_faces": "abc", "options": "fast"}}})
+    _submit()
+    kw = env.crud.create_mesh_job.call_args.kwargs
+    assert kw["texture_size"] == 4096 and kw["model_options"] is None   # 2048 not allowed -> largest allowed
+
+
+def test_limits_are_always_consistent(env):
+    env.config.update({"mesh.min_target_faces": 300000, "mesh.max_target_faces": 200000,
+                       "mesh.default_target_faces": 5_000_000})
+    lim = asyncio.run(api._limits(_db()))
+    assert lim["min_faces"] <= lim["default_faces"] <= lim["max_faces"] <= 1_000_000
 
 
 def test_content_before_completion_is_409(env):

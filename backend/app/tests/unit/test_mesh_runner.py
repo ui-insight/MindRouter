@@ -125,7 +125,17 @@ class FakeRepo:
     async def servable_models(self):
         return list(self._servable)
 
+    blocked = ()           # models the service-on / license gate holds back
+    expired = 0
+
+    async def claimable(self, models):
+        return [m for m in models if m not in self.blocked]
+
+    async def expire_queued(self):
+        return self.expired
+
     async def claim_next(self, worker_id, models=None):
+        self.claim_models = models
         j, self._job = self._job, None
         return j
 
@@ -393,6 +403,46 @@ def test_reconcile_fails_a_job_past_the_wall_limit(tmp_path):
     asyncio.run(_runner(repo, worker, tmp_path, max_wall_seconds=60).reconcile())
     assert repo.fail_kwargs["error_code"] == "wall_timeout"
     assert worker.cancelled == ["w-1"]          # the worker's copy is stopped too
+
+
+def test_reconcile_collects_a_finished_result_even_past_the_wall_limit(tmp_path):
+    # The worker finished while the gateway was down for longer than the limit:
+    # the result is fetched, not thrown away.
+    old = datetime.now(timezone.utc) - timedelta(hours=3)
+    repo = FakeRepo(stale=[_job(tmp_path, started_at=old, backend_id=11, backend_job_id="w-1")])
+    asyncio.run(_reconcile_and_wait(_runner(repo, FakeWorker(polls=[DONE]), tmp_path, max_wall_seconds=60)))
+    assert repo.state == "completed"
+
+
+def test_reconcile_requeue_counts_as_an_attempt_and_is_capped(tmp_path):
+    repo = FakeRepo(stale=[_job(tmp_path, attempts=0)])
+    asyncio.run(_runner(repo, FakeWorker(), tmp_path).reconcile())
+    assert repo.state == "requeued" and repo.requeue_kwargs["attempts"] == 1
+    repo = FakeRepo(stale=[_job(tmp_path, attempts=5)])
+    asyncio.run(_runner(repo, FakeWorker(), tmp_path).reconcile())
+    assert repo.state == "failed" and repo.fail_kwargs["error_code"] == "worker_lost"
+
+
+def test_gated_models_are_not_claimed(tmp_path):
+    # Service switched off or license withdrawn: queued jobs wait, unclaimed.
+    repo = FakeRepo(job=_job(tmp_path))
+    repo.blocked = (MODEL,)
+    assert asyncio.run(_runner(repo, FakeWorker(), tmp_path).tick()) is False
+    assert repo.state is None and not hasattr(repo, "claim_models")
+
+
+def test_reconcile_expires_long_queued_jobs(tmp_path):
+    repo = FakeRepo()
+    repo.expired = 2
+    asyncio.run(_runner(repo, FakeWorker(), tmp_path).reconcile())   # logs, no error
+
+
+def test_worker_urls_never_reach_the_user(tmp_path):
+    req = httpx.Request("GET", "https://node7.internal:8006/v1/meshes/w-1/content?variant=glb")
+    err = httpx.HTTPStatusError("boom", request=req, response=httpx.Response(502, request=req))
+    text = runner_mod._fetch_error_text(err)
+    assert "node7" not in text and "502" in text
+    assert "internal" not in runner_mod._public_text("failed fetching https://node7.internal:8006/x")
 
 
 # -- review fixes: no self-adoption, exactly-once, backoff, big pictures -------------

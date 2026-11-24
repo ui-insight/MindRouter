@@ -129,17 +129,40 @@ def _csv_ints(value: Any, default: list) -> list:
         return default
 
 
+def _cfg_int(value: Any, default: int) -> int:
+    """A config value as an int; anything malformed reads as the default
+    (a bad row must never turn every request into a 500)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 async def _limits(db: AsyncSession) -> Dict[str, Any]:
+    """Service-wide limits, always self-consistent and inside what every
+    mesh worker accepts (mesh_models.WORKER_*): min <= default <= max, and the
+    default texture size is one of the allowed sizes."""
+    sizes = [
+        s for s in _csv_ints(
+            await crud.get_config_json(db, "mesh.allowed_texture_sizes", "1024,2048,4096"), [1024, 2048, 4096]
+        ) if s in mesh_models.WORKER_TEXTURE_SIZES
+    ] or list(mesh_models.WORKER_TEXTURE_SIZES)
+    sizes = sorted(set(sizes))
+    lo_w, hi_w = mesh_models.WORKER_FACE_RANGE
+    min_faces = max(lo_w, min(hi_w, _cfg_int(await crud.get_config_json(db, "mesh.min_target_faces", 5000), 5000)))
+    max_faces = max(min_faces, min(hi_w, _cfg_int(await crud.get_config_json(db, "mesh.max_target_faces", 300000), 300000)))
+    default_faces = max(min_faces, min(max_faces, _cfg_int(
+        await crud.get_config_json(db, "mesh.default_target_faces", 40000), 40000)))
+    default_tex = _cfg_int(await crud.get_config_json(db, "mesh.default_texture_size", 2048), 2048)
+    if default_tex not in sizes:
+        default_tex = 2048 if 2048 in sizes else sizes[-1]
     return {
-        "texture_sizes": _csv_ints(
-            await crud.get_config_json(db, "mesh.allowed_texture_sizes", "1024,2048,4096"),
-            [1024, 2048, 4096],
-        ),
-        "default_texture_size": int(await crud.get_config_json(db, "mesh.default_texture_size", 2048)),
-        "min_faces": int(await crud.get_config_json(db, "mesh.min_target_faces", 5000)),
-        "max_faces": int(await crud.get_config_json(db, "mesh.max_target_faces", 300000)),
-        "default_faces": int(await crud.get_config_json(db, "mesh.default_target_faces", 40000)),
-        "max_image_mb": int(await crud.get_config_json(db, "mesh.max_image_upload_mb", 10)),
+        "texture_sizes": sizes,
+        "default_texture_size": default_tex,
+        "min_faces": min_faces,
+        "max_faces": max_faces,
+        "default_faces": default_faces,
+        "max_image_mb": max(1, _cfg_int(await crud.get_config_json(db, "mesh.max_image_upload_mb", 10), 10)),
     }
 
 
@@ -158,13 +181,15 @@ async def license_acceptance(db: AsyncSession) -> Dict[str, Dict[str, Any]]:
     return raw if isinstance(raw, dict) else {}
 
 
+async def model_gate(db: AsyncSession, model: str) -> Optional[str]:
+    """Why ``model`` may not take jobs (unknown family, or a license not yet
+    accepted), or None when it may."""
+    return mesh_models.model_gate(model, await license_acceptance(db))
+
+
 async def license_ready(db: AsyncSession, model: str) -> bool:
-    """False while the model's license needs an admin's acceptance."""
-    family = mesh_models.family_for_model(model)
-    lic = mesh_models.LICENSES.get(family) if family else None
-    if not lic or not lic.get("requires_acceptance"):
-        return True
-    return family in await license_acceptance(db)
+    """True when the model may take jobs (known family, license accepted)."""
+    return await model_gate(db, model) is None
 
 
 def license_summary(model: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -291,14 +316,9 @@ async def submit_mesh_job(
         raise HTTPException(status_code=code, detail=detail, headers=headers)
     if model not in await mesh_model_names(registry):
         raise _bad_request("model", f"'{requested}' is not a 3D mesh model (see GET /v1/meshes/models)")
-    if not await license_ready(db, model):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                f"{model} is not available yet: an administrator must accept its license "
-                "terms first (Admin -> Meshes)."
-            ),
-        )
+    blocked = await model_gate(db, model)
+    if blocked:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=blocked + ".")
     settings = (await model_settings(db)).get(model, {})
     limits = mesh_models.model_limits(base_limits, settings)
 
@@ -327,14 +347,17 @@ async def submit_mesh_job(
         raise _bad_request("remove_background", "'remove_background' must be auto, on or off")
 
     # ── Fairness, storage, quota ──────────────────────────────────────────
-    max_active = int(await crud.get_config_json(db, "mesh.max_concurrent_jobs_per_user", 2))
+    # Serialize this user's submits: the count, the reservation and the insert
+    # below happen under a row lock released by the commit (or rollback).
+    await crud.lock_user_for_mesh_submit(db, user.id)
+    max_active = _cfg_int(await crud.get_config_json(db, "mesh.max_concurrent_jobs_per_user", 2), 2)
     active = await crud.count_active_mesh_jobs_for_user(db, user.id)
     if active >= max_active:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"You already have {active} mesh job(s) in progress (limit {max_active}). Wait for one to finish.",
         )
-    cap_gb = int(await crud.get_config_json(db, "mesh.user_storage_cap_gb", 20))
+    cap_gb = _cfg_int(await crud.get_config_json(db, "mesh.user_storage_cap_gb", 20), 20)
     if cap_gb > 0:
         used = await crud.get_user_mesh_storage_bytes(db, user.id)
         if used + len(image) > cap_gb * 1024**3:
@@ -359,7 +382,7 @@ async def submit_mesh_job(
         "texture": texture, "texture_size": texture_size, "target_faces": target_faces,
         "seed": seed, "remove_background": remove_background,
     }
-    model_options = dict(settings.get("options") or {})
+    model_options = mesh_models.model_options(settings)
     audit = await crud.create_request(
         db=db, user_id=user.id, api_key_id=api_key.id, endpoint=endpoint, model=model,
         modality=Modality.MESH_GENERATION, prompt=None,
@@ -409,7 +432,7 @@ async def list_mesh_models(
         limits = mesh_models.model_limits(base, settings.get(name))
         family = mesh_models.family_for_model(name)
         options = dict(mesh_models.FAMILY_OPTION_DEFAULTS.get(family, {}))
-        options.update((settings.get(name) or {}).get("options") or {})
+        options.update(mesh_models.model_options(settings.get(name)))
         data.append({
             "id": name,
             "object": "model",
@@ -500,17 +523,23 @@ async def delete_mesh(
     mesh_id: str,
     db: AsyncSession = Depends(get_async_db),
     auth: Tuple[User, ApiKey] = Depends(authenticate_request),
+    cancel_only: bool = False,
 ):
-    """Cancel a running job (refunded), or delete a finished one with its files."""
+    """Cancel a running job (refunded), or delete a finished one with its
+    files. With ``cancel_only=true`` a job that already finished is left alone
+    (and returned), so a cancel racing a completion never deletes the result."""
     user, _ = auth
     job = await crud.get_mesh_job_by_uuid(db, mesh_id, user_id=user.id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mesh not found")
     if job.status in crud.MESH_TERMINAL_STATUSES:
+        if cancel_only:
+            return job_to_dict(job)
         await crud.delete_mesh_job(db, job)
         return {"id": mesh_id, "object": "mesh", "deleted": True}
     await crud.request_cancel_mesh_job(db, job)
     await db.commit()
+    await crud.apply_pending_quota_redis(db)
     await db.refresh(job)
     return job_to_dict(job)
 

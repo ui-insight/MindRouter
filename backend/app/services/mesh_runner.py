@@ -26,6 +26,7 @@ import asyncio
 import base64
 import io
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Protocol, Tuple
@@ -59,6 +60,25 @@ MAX_CONSECUTIVE_POLL_ERRORS = 5
 # inference nodes' 64 MB request limit once base64-encoded.
 MAX_INPUT_SIDE = 2048
 
+_URL_RE = re.compile(r"\b(?:https?|wss?)://\S+", re.IGNORECASE)
+
+
+def _public_text(message: Any, limit: int = 300) -> str:
+    """An error message safe to show users: no internal URLs, bounded."""
+    return _URL_RE.sub("[worker]", str(message)).strip()[:limit] or "the worker reported a failure"
+
+
+def _fetch_error_text(exc: BaseException) -> str:
+    """What a user sees when the result could not be fetched (never the
+    worker's URL; the details go to the gateway log)."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        return f"could not download the result from the 3D worker (HTTP {exc.response.status_code})"
+    if isinstance(exc, WorkerFetchError):
+        return _public_text(exc)
+    if isinstance(exc, OSError):
+        return "could not store the result on the gateway"
+    return f"could not download the result from the 3D worker ({type(exc).__name__})"
+
 
 class MeshJobRepo(Protocol):
     """Everything the runner needs from the database. Every return is a plain
@@ -70,6 +90,8 @@ class MeshJobRepo(Protocol):
     async def readopt(self, job_id: int, worker_id: str, threshold_seconds: int) -> bool: ...
     async def get_backend(self, backend_id: int) -> Optional[Dict[str, Any]]: ...
     async def servable_models(self) -> List[str]: ...
+    async def claimable(self, models: List[str]) -> List[str]: ...
+    async def expire_queued(self) -> int: ...
     async def claim_next(self, worker_id: str, models: Optional[List[str]] = None) -> Optional[Dict[str, Any]]: ...
     async def is_cancelled(self, job_id: int) -> bool: ...
     async def update(self, job_id: int, **fields) -> None: ...
@@ -193,9 +215,13 @@ class MeshRunner:
                 task.cancel()
 
     async def claim(self) -> Optional[Dict[str, Any]]:
-        """Claim the next job for a servable model that is not already busy."""
+        """Claim the next job for a servable model that is not already busy
+        and may run now (service on, license accepted: re-checked here, so a
+        switch-off or a withdrawn license also holds back queued work)."""
         busy = self.busy_models
         models = [m for m in await self.repo.servable_models() if m not in busy]
+        if models:
+            models = await self.repo.claimable(models)
         if not models:
             return None
         return await self.repo.claim_next(self.worker_id, models=models)
@@ -237,6 +263,12 @@ class MeshRunner:
         """Adopt every stale RENDERING job whose runner is gone and drive it to
         a correct state from the worker's ground truth. Jobs this runner is
         driving are skipped. Returns how many were looked at."""
+        try:
+            expired = await self.repo.expire_queued()
+            if expired:
+                logger.warning("mesh_runner_expired_queued", count=expired)
+        except Exception:
+            logger.exception("mesh_runner_expire_queued_error")
         stale = [
             j for j in await self.repo.list_stale_rendering(self.stale_threshold_seconds)
             if j["id"] not in self._active
@@ -252,19 +284,18 @@ class MeshRunner:
         job_id = job["id"]
         backend_id, backend_job_id = job.get("backend_id"), job.get("backend_job_id")
         backend = await self.repo.get_backend(backend_id) if backend_id else None
-        if self._over_wall(job):
-            if await self.repo.readopt(job_id, self.worker_id, self.stale_threshold_seconds):
-                if backend and backend_job_id:
-                    await self.worker.cancel(backend["url"], backend_job_id)
-                await self.repo.fail(
-                    job_id, error_code="wall_timeout",
-                    error_message=f"job exceeded the {self.max_wall_seconds}s time limit",
-                )
-            return
         if not backend_job_id or backend is None:
-            # Died before or during submit, or the backend is gone: requeue.
+            # Died before or during submit, or the backend is gone: requeue,
+            # counted as an attempt so a job that keeps dying cannot loop.
             if await self.repo.readopt(job_id, self.worker_id, self.stale_threshold_seconds):
-                await self.repo.requeue(job_id, clear_backend=True)
+                attempts = int(job.get("attempts") or 0) + 1
+                if attempts > self.max_retries:
+                    await self.repo.fail(
+                        job_id, error_code="worker_lost",
+                        error_message=f"the job could not be started after {attempts} attempt(s)",
+                    )
+                else:
+                    await self.repo.requeue(job_id, attempts=attempts, clear_backend=True)
             return
         status: Optional[Dict[str, Any]] = None
         try:
@@ -276,6 +307,16 @@ class MeshRunner:
                 return
         except Exception:
             pass  # unreachable for now: resume polling, which tolerates errors
+        # Ask the worker first: a result it finished while the gateway was away
+        # is collected even if the job is now past its wall-clock limit.
+        if self._over_wall(job) and (status or {}).get("status") != "completed":
+            if await self.repo.readopt(job_id, self.worker_id, self.stale_threshold_seconds):
+                await self.worker.cancel(backend["url"], backend_job_id)
+                await self.repo.fail(
+                    job_id, error_code="wall_timeout",
+                    error_message=f"job exceeded the {self.max_wall_seconds}s time limit",
+                )
+            return
         if not await self.repo.readopt(job_id, self.worker_id, self.stale_threshold_seconds):
             return  # another runner took it
         logger.info("mesh_reconcile_adopted", job=job.get("job_uuid"),
@@ -430,8 +471,8 @@ class MeshRunner:
         if state == "failed":
             err = status.get("error") or {}
             await self.repo.fail(
-                job["id"], error_code=str(err.get("code") or "generation_failed"),
-                error_message=str(err.get("message") or "the worker reported a failure"),
+                job["id"], error_code=str(err.get("code") or "generation_failed")[:64],
+                error_message=_public_text(err.get("message") or "the worker reported a failure"),
             )
             return True
         if state == "cancelled":
@@ -467,7 +508,8 @@ class MeshRunner:
             try:
                 glb = await self.worker.fetch(backend["url"], worker_job_id, VARIANT_GLB, glb_path)
             except (WorkerFetchError, httpx.HTTPError, OSError) as exc:
-                await self.repo.fail(job["id"], error_code="fetch_failed", error_message=str(exc)[:300])
+                logger.warning("mesh_runner_fetch_failed", job=job_uuid, error=str(exc)[:300])
+                await self.repo.fail(job["id"], error_code="fetch_failed", error_message=_fetch_error_text(exc))
                 return
             preview_size = 0
             try:
@@ -576,6 +618,31 @@ class CrudMeshJobRepo:
 
         async with self._ctx() as db:
             return await crud.get_servable_mesh_models(db)
+
+    async def claimable(self, models: List[str]) -> List[str]:
+        """The models whose queued jobs may start now: none while the service
+        is switched off (queued jobs wait), and none whose family is unknown
+        or whose license is not (or no longer) accepted."""
+        from backend.app.db import crud
+        from backend.app.services import mesh_models
+
+        async with self._ctx() as db:
+            if not await crud.get_config_json(db, "mesh.enabled", False):
+                return []
+            acceptance = await crud.get_config_json(db, "mesh.license_acceptance", {})
+        acceptance = acceptance if isinstance(acceptance, dict) else {}
+        return [m for m in models if mesh_models.model_gate(m, acceptance) is None]
+
+    async def expire_queued(self) -> int:
+        """Fail and refund jobs queued longer than mesh.max_queue_hours."""
+        from backend.app.db import crud
+
+        async with self._ctx() as db:
+            try:
+                hours = float(await crud.get_config_json(db, "mesh.max_queue_hours", 24))
+            except (TypeError, ValueError):
+                hours = 24.0
+            return await crud.expire_stale_queued_mesh_jobs(db, int(hours * 3600))
 
     async def claim_next(self, worker_id: str, models: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         from backend.app.db import crud

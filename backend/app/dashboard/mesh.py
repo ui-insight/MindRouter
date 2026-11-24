@@ -193,8 +193,12 @@ async def mesh_get(mesh_id: str, request: Request, db: AsyncSession = Depends(ge
 
 
 @mesh_router.delete("/3d/api/jobs/{mesh_id}")
-async def mesh_delete(mesh_id: str, request: Request, db: AsyncSession = Depends(get_async_db)):
-    """Cancel a running job, or delete a finished one with its files."""
+async def mesh_delete(
+    mesh_id: str, request: Request, cancel_only: bool = False, db: AsyncSession = Depends(get_async_db)
+):
+    """Cancel a running job, or delete a finished one with its files. The
+    Cancel button sends ``cancel_only=1``: a job that finished in the meantime
+    is kept (it was charged), never deleted."""
     try:
         user, _ = await _get_mesh_user(request, db)
     except HTTPException as exc:
@@ -203,10 +207,13 @@ async def mesh_delete(mesh_id: str, request: Request, db: AsyncSession = Depends
     if not job:
         return _error(404, "Mesh not found")
     if job.status in crud.MESH_TERMINAL_STATUSES:
+        if cancel_only:
+            return job_to_dict(job)
         await crud.delete_mesh_job(db, job)
         return {"id": mesh_id, "deleted": True}
     await crud.request_cancel_mesh_job(db, job)
     await db.commit()
+    await crud.apply_pending_quota_redis(db)
     await db.refresh(job)
     return job_to_dict(job)
 

@@ -21,6 +21,14 @@ FAMILY_MODEL_IDS: Dict[str, str] = {
     "pixal3d": "tencentarc/pixal3d",
 }
 
+# What every mesh worker accepts (mesh-worker/config.py TEXTURE_SIZES and the
+# DEFAULT_FACES range); the gateway's limits are kept inside these.
+WORKER_TEXTURE_SIZES = (1024, 2048, 4096)
+WORKER_FACE_RANGE = (1_000, 1_000_000)
+
+# The worker's mock engine (CI and development): no license, no settings.
+MOCK_MODEL_ID = "mindrouter/mesh-mock"
+
 FAMILY_LABELS: Dict[str, str] = {
     "hunyuan3d21": "Hunyuan3D 2.1 (Tencent)",
     "trellis2": "TRELLIS.2 (Microsoft)",
@@ -137,14 +145,18 @@ LICENSES: Dict[str, Dict[str, Any]] = {
 
 def family_for_model(name: Optional[str]) -> Optional[str]:
     """The family a served model name belongs to (exact id first, then a
-    name hint for renamed deployments); None for unknown models."""
+    name hint for renamed deployments); "mock" for the worker's mock engine;
+    None for anything else. Unknown families are refused (fail closed): the
+    gateway could not apply their license gate or settings."""
     n = (name or "").strip().lower()
     for family, model_id in FAMILY_MODEL_IDS.items():
         if n == model_id:
             return family
-    if "hunyuan3d" in n:
+    if n == MOCK_MODEL_ID or "mesh-mock" in n:
+        return "mock"
+    if "hunyuan" in n or "hy3d" in n:
         return "hunyuan3d21"
-    if "pixal3d" in n:
+    if "pixal" in n:
         return "pixal3d"
     if "trellis" in n:
         return "trellis2"
@@ -154,6 +166,28 @@ def family_for_model(name: Optional[str]) -> Optional[str]:
 def license_for_model(name: Optional[str]) -> Optional[Dict[str, Any]]:
     family = family_for_model(name)
     return LICENSES.get(family) if family else None
+
+
+def model_gate(name: Optional[str], acceptance: Dict[str, Any]) -> Optional[str]:
+    """Why a model may not take jobs right now (None = it may): an unknown
+    family, or a license an admin has not accepted."""
+    family = family_for_model(name)
+    if family is None:
+        return (
+            f"{name} is not a 3D model family MindRouter knows how to run (Hunyuan3D 2.1, "
+            "TRELLIS.2, Pixal3D); keep the worker's default served name (MESH_WORKER_MODEL)"
+        )
+    lic = LICENSES.get(family)
+    if lic and lic.get("requires_acceptance") and family not in (acceptance or {}):
+        return f"{name} is not available yet: an administrator must accept its license terms first (Admin -> Meshes)"
+    return None
+
+
+def _as_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def clean_options(family: Optional[str], raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -197,16 +231,22 @@ def clean_options(family: Optional[str], raw: Dict[str, Any]) -> Dict[str, Any]:
 def model_limits(base: Dict[str, Any], settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Per-model limits: the service-wide ones narrowed by the model's own caps
     (Admin -> Meshes). The default face count is clamped into the range."""
-    settings = settings or {}
+    settings = settings if isinstance(settings, dict) else {}
     out = dict(base)
-    cap_faces = settings.get("max_faces")
+    cap_faces = _as_int(settings.get("max_faces"))
     if cap_faces:
-        out["max_faces"] = max(out["min_faces"], min(out["max_faces"], int(cap_faces)))
-    cap_tex = settings.get("max_texture_size")
+        out["max_faces"] = max(out["min_faces"], min(out["max_faces"], cap_faces))
+    cap_tex = _as_int(settings.get("max_texture_size"))
     if cap_tex:
-        sizes = [s for s in out["texture_sizes"] if s <= int(cap_tex)] or [min(out["texture_sizes"])]
+        sizes = [s for s in out["texture_sizes"] if s <= cap_tex] or [min(out["texture_sizes"])]
         out["texture_sizes"] = sizes
         if out["default_texture_size"] not in sizes:
             out["default_texture_size"] = max(sizes)
     out["default_faces"] = max(out["min_faces"], min(out["max_faces"], out["default_faces"]))
     return out
+
+
+def model_options(settings: Any) -> Dict[str, Any]:
+    """A model's saved settings ("options"), or {} if missing or malformed."""
+    opts = settings.get("options") if isinstance(settings, dict) else None
+    return dict(opts) if isinstance(opts, dict) else {}

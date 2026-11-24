@@ -293,8 +293,11 @@ class JobManager:
                 self._finish(job, "failed", {"code": "invalid_output", "message": f"engine wrote an invalid GLB: {exc}"[:500]})
                 return
             except Exception as exc:
+                # The traceback goes to the worker log; users get the exception
+                # type only (raw engine text can carry paths and internals).
                 log.exception("job %s failed", job.id)
-                self._finish(job, "failed", {"code": "generation_failed", "message": str(exc)[:500]})
+                self._finish(job, "failed", {"code": "generation_failed",
+                                             "message": f"3D generation failed ({type(exc).__name__})"})
                 return
             job.outputs = result["outputs"]
             job.faces = result["faces"]

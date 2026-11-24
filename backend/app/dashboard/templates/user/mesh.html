@@ -30,7 +30,7 @@
   {% if not service_enabled %}
   <div class="alert alert-warning" role="alert">3D generation is currently turned off by the administrators.</div>
   {% elif not mesh_models %}
-  <div class="alert alert-warning" role="alert">No 3D model server is online right now, so new models can't be started. Please try again later.</div>
+  <div class="alert alert-warning" role="alert">No 3D model is available right now, so new models can't be started. Please try again later.</div>
   {% endif %}
   {% if not has_api_key %}
   <div class="alert alert-warning" role="alert">
@@ -65,6 +65,9 @@
                 {% endfor %}
               </select>
             </div>
+            {% elif mesh_models %}
+            {# One model: still send it, so the server never falls back to a default the page did not offer. #}
+            <input type="hidden" name="model" value="{{ mesh_models[0] }}">
             {% endif %}
             <div class="col-12">
               <p id="mesh-license" class="small text-body-secondary mb-0 {% if not first_notice %}d-none{% endif %}">
@@ -114,7 +117,7 @@
           </div>
 
           <div class="d-flex gap-2 mt-4">
-            <button type="submit" class="btn btn-primary" id="mesh-submit" {% if not has_api_key %}disabled{% endif %}>
+            <button type="submit" class="btn btn-primary" id="mesh-submit" {% if not has_api_key or not mesh_models or not service_enabled %}disabled{% endif %}>
               <i class="bi bi-box" aria-hidden="true"></i> Generate 3D model
             </button>
             <button type="button" class="btn btn-outline-secondary d-none" id="mesh-cancel">Cancel</button>
@@ -285,7 +288,8 @@
 
   cancelBtn.addEventListener("click", async () => {
     if (!currentId) return;
-    await fetch("/3d/api/jobs/" + encodeURIComponent(currentId), { method: "DELETE" });
+    // cancel_only: if the job finished meanwhile, keep it (never delete a result).
+    await fetch("/3d/api/jobs/" + encodeURIComponent(currentId) + "?cancel_only=1", { method: "DELETE" });
     poll();
   });
 

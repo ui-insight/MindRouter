@@ -88,7 +88,7 @@ All endpoints take the usual `Authorization: Bearer <api key>` header.
 | `GET` | `/v1/meshes` | Your jobs, newest first (`status_filter`, `limit`, `offset`) |
 | `GET` | `/v1/meshes/{id}` | Poll one job (includes `queue_position` while queued) |
 | `GET` | `/v1/meshes/{id}/content` | Download the GLB; `?variant=preview` for the PNG preview |
-| `DELETE` | `/v1/meshes/{id}` | Cancel a running job (refunded), or delete a finished one and its files |
+| `DELETE` | `/v1/meshes/{id}` | Cancel a running job (refunded), or delete a finished one and its files. `?cancel_only=true` never deletes: if the job already finished, it is returned unchanged |
 
 ### Create
 
@@ -191,7 +191,13 @@ sent as `X-Worker-Key`; host `.env` only), `MESH_WORKER_FETCH_MAX_MB`,
 `MESH_MAX_RETRIES`.
 
 The runner is elected by a Redis lease (`mesh:runner:leader`), so one app
-worker drives jobs. It runs one job per model at a time (each model has its own
+worker drives jobs. It re-checks the service switch and each model's license
+before starting queued work: switching the service off, or withdrawing a
+license, holds queued jobs (they start when allowed again). Jobs still queued
+after `mesh.max_queue_hours` (default 24) are failed and refunded. Models of a
+family MindRouter does not know (a worker served under a custom name that is
+not recognizably Hunyuan3D, TRELLIS.2 or Pixal3D) are refused with `503`, so
+no model can slip past its license gate or settings. It runs one job per model at a time (each model has its own
 single-GPU worker), so jobs for different models run side by side while a
 model's own jobs wait their turn in the queue. If the gateway restarts mid-job, the reconcile loop asks
 the worker what happened (by `backend_job_id`) and finishes, resumes or

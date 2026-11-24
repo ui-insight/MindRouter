@@ -531,6 +531,9 @@ def test_engine_failures_surface_as_failed(tmp_path, monkeypatch, engine, code):
         final = poll_until(client, job_id)
         assert final["status"] == "failed"
         assert final["error"]["code"] == code and final["error"]["message"]
+        if code == "generation_failed":     # raw engine text stays in the worker log
+            assert "CUDA out of memory" not in final["error"]["message"]
+            assert "RuntimeError" in final["error"]["message"]
         assert final["outputs"] is None
         assert client.get(f"/v1/meshes/{job_id}/content").status_code == 409
         assert _files(tmp_path, job_id) == []
